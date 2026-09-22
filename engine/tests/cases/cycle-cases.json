@@ -1,0 +1,90 @@
+{
+  "_read": [
+    "Gold cases for the request cycle: the SAME event log, the SAME expected state.",
+    "",
+    "They exist because copies of a state machine drift without anyone noticing: a race guard",
+    "added to one of them and not to the others, and from then on two copies compute different",
+    "states for the same history.",
+    "",
+    "Whoever changes the cycle changes these too — and if a change here is not deliberate, it is",
+    "a regression."
+  ],
+  "cases": [
+    {
+      "name": "a reviewer request is born open",
+      "authorIsAdmin": false,
+      "events": [],
+      "expected": "open"
+    },
+    {
+      "name": "an admin request is born approved",
+      "authorIsAdmin": true,
+      "events": [],
+      "expected": "approved"
+    },
+    {
+      "name": "the last event wins",
+      "authorIsAdmin": false,
+      "events": [
+        { "state": "rejected", "from": "open" },
+        { "state": "approved", "from": "rejected" }
+      ],
+      "expected": "approved"
+    },
+    {
+      "name": "whoever lost the race is ignored",
+      "authorIsAdmin": false,
+      "events": [
+        { "state": "approved", "from": "open" },
+        { "state": "question", "from": "open" }
+      ],
+      "expected": "approved"
+    },
+    {
+      "name": "three at once: only the first counts",
+      "authorIsAdmin": false,
+      "events": [
+        { "state": "rejected", "from": "open" },
+        { "state": "approved", "from": "open" },
+        { "state": "question", "from": "open" }
+      ],
+      "expected": "rejected"
+    },
+    {
+      "name": "an old event with no from still counts",
+      "authorIsAdmin": false,
+      "events": [
+        { "state": "approved" }
+      ],
+      "expected": "approved"
+    },
+    {
+      "name": "a legitimate sequence through to applied",
+      "authorIsAdmin": false,
+      "events": [
+        { "state": "approved", "from": "open" },
+        { "state": "applying", "from": "approved" },
+        { "state": "applied", "from": "applying" }
+      ],
+      "expected": "applied"
+    },
+    {
+      "name": "a supplement sends a rejected request back to triage",
+      "authorIsAdmin": false,
+      "events": [
+        { "state": "rejected", "from": "open" },
+        { "supplement": true }
+      ],
+      "expected": "open"
+    },
+    {
+      "name": "a supplement does not touch an approved request",
+      "authorIsAdmin": false,
+      "events": [
+        { "state": "approved", "from": "open" },
+        { "supplement": true }
+      ],
+      "expected": "approved"
+    }
+  ]
+}

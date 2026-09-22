@@ -1,0 +1,74 @@
+{
+  "_read": [
+    "SINGLE SOURCE of the request cycle. A state machine written more than once — a server module,",
+    "browser scripts, a triage page — comes out similar, not equal: different labels in each copy,",
+    "seven transitions on one side and eleven on the other, one copy ignoring the rule that an admin's",
+    "request is born approved (the same request showing as 'Approved' in the panel and 'Awaiting",
+    "triage' in the triage). Changing the cycle would cost one commit per copy, and nothing would warn",
+    "you if you forgot one.",
+    "So the API and the agent's tool read THIS file, and the JavaScript computes no state at all —",
+    "it receives one from the API. Change it here, and it changes everywhere.",
+    "",
+    "The KEYS and the STATES are English (docs/GLOSSARY.md). `label` and `short` are what the CLI",
+    "prints next to a state, in the engine's default language; the reviewer's screen resolves",
+    "`cycle.<state>` from engine/locales/ instead."
+  ],
+  "initial": "open",
+  "initial_for_admin": "approved",
+  "_initial_for_admin": "Owner and admin do not triage themselves (design decision, 2026-09-17).",
+
+  "states": {
+    "open":     { "label": "Awaiting triage",            "short": "To triage",      "owned_by": "owner" },
+    "approved": { "label": "Approved",                   "short": "Approved",       "owned_by": "owner" },
+    "rejected": { "label": "Rejected",                   "short": "Rejected",       "owned_by": "owner" },
+    "question": { "label": "Question for the requester", "short": "Question",       "owned_by": "owner" },
+    "applying": { "label": "Being applied",              "short": "Applying",       "owned_by": "agent" },
+    "waiting":  { "label": "Being applied · query",      "short": "Applying·query", "owned_by": "agent" },
+    "applied":  { "label": "Applied",                    "short": "Applied",        "owned_by": "agent" }
+  },
+  "_states": "label and short are read by the CLI only; the core never reads them, and the browser reads engine/locales/.",
+
+  "transitions": {
+    "open":     ["approved", "rejected", "question"],
+    "rejected": ["approved"],
+    "question": ["approved", "rejected"],
+    "approved": ["applying", "waiting", "applied"],
+    "applying": ["waiting", "applied"],
+    "waiting":  ["applying", "applied"],
+    "applied":  []
+  },
+  "_transitions": "Approved NEVER goes back to rejected: to change something approved, a new request with data.related.",
+
+  "accepts_supplement": ["open", "rejected", "question"],
+  "_accepts_supplement": "A supplement on a rejected request, or on a question, sends the request back to 'open'.",
+
+  "agent_queue": ["approved", "applying", "waiting"],
+  "_agent_queue": "What `holdrim list` shows as 'to apply'.",
+
+  "requires_reason": ["rejected", "question"],
+  "requires_commit": ["applied"],
+
+  "request_categories": {
+    "text": "Adjust the text",
+    "term": "Replace a term",
+    "remove": "Remove",
+    "doubt": "Doubt",
+    "bug": "Report a bug",
+    "page": "Ask for a new page"
+  },
+  "_request_categories": [
+    "`doubt`, and not `question`, on purpose: `question` is already a STATE of the cycle (the owner",
+    "asks whoever requested). They are different concepts, and both travel as loose text — the same",
+    "name for the two would make a grep lie and let a bug through unnoticed.",
+    "",
+    "`bug` is a CATEGORY, not a system of its own (docs/BUGS.md): a bug is the documentation and the",
+    "behaviour disagreeing, and that is already a request against a block, with a snapshot, an author",
+    "and a cycle. The three outcomes of triage — the system is wrong, the doc is wrong, the doc has a",
+    "hole — do NOT exist yet: today a bug request walks the same cycle as every other.",
+    "",
+    "`page` asks for documentation that does not exist yet, in plain words: the request hangs on the",
+    "page it was asked from, and the agent that applies it writes a NEW page (see `brief` in",
+    "engine/cli/agent.ts). It walks the same cycle too: a text nobody approved is not a lock, whoever",
+    "or whatever wrote it."
+  ]
+}
