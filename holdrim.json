@@ -1,0 +1,55 @@
+{
+  "_read": [
+    "The configuration of the PROJECT that uses the method. It is the only file whoever adopts",
+    "Holdrim has to edit: the name, who approves, and where the content is.",
+    "The engine (engine/, served by the image) knows none of this — it asks here.",
+    "Environment variables beat this file, so one repository can serve more than one environment —",
+    "except `language`, where HOLDRIM_LANGUAGE counts only when the file names none.",
+    "",
+    "This one points at the example. For your documentation, copy examples/template/ and edit (examples/hello-world/ is the smallest start that works)."
+  ],
+
+  "name": "Holdrim",
+  "_name": "Shown in page titles and in the menu.",
+
+  "owner": "you@example.org",
+  "_owner": "ONE e-mail. It is their ✓ that becomes a lock in the repository. Zero or two do not bring the service up.",
+
+  "admins": [],
+  "_admins": "Can do everything the owner does, except be the owner. Empty is the normal case.",
+
+  "_theme": [
+    "HOW YOUR PROJECT DRESSES THE ENGINE — optional, in the Keycloak arrangement. Without it the",
+    "engine wears its own neutral look, which is nobody's brand. Example:",
+    "",
+    "  \"theme\": { \"brand\": \"#0B5FA5\", \"logo\": \"theme/logo.svg\", \"name\": \"Product · Handbook\" }",
+    "",
+    "brand: hex only, three or six digits. Anything else is refused and written to the log — the",
+    "       value ends up inside a stylesheet.",
+    "logo:  a path inside the project (svg, png, webp, jpg, gif, up to 64 KiB). The server reads",
+    "       the file and inlines it; with no logo, the name is shown.",
+    "name:  what the sign-in screen calls the product. By default, the `name` above.",
+    "",
+    "This repository sets no theme on purpose: the engine has to keep looking like the engine."
+  ],
+
+  "content": {
+    "folders": ["examples/hello-world/pages"],
+    "registry": "examples/hello-world/approvals.json",
+    "home": "/engine/home",
+    "trimPrefix": "pages/",
+    "pageExamples": "A01 or A02"
+  },
+  "_content": [
+    "WHERE YOUR DOCUMENTATION LIVES. The engine knows nothing of this.",
+    "folders: where the reviewable pages are. registry: the approvals file, which is the lock.",
+    "home: where the root of the site leads. trimPrefix: the part of the path not worth showing.",
+    "pageExamples: only appears in the invalid-page error message."
+  ],
+
+  "development": {
+    "port": 8095,
+    "actAs": "you@example.org"
+  },
+  "_development": "Who you pretend to be, and the port, when running locally: engine/run-local.sh, or NODE_ENV=development / HOLDRIM_ENVIRONMENT=Development."
+}
