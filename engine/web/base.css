@@ -1,0 +1,534 @@
+/* Holdrim — the engine's design system.
+ *
+ * ## Why this file exists
+ *
+ * Four custom properties declared inside a login page — ink, brand, line and background — cannot
+ * express a hierarchy, and a screen built on them has none: the heading weighs about as much as a
+ * field label, the subtitle breaks in the middle of a sentence because nothing caps its line
+ * length, there is no error colour at all, and the focus ring exists on inputs and nowhere else.
+ * And every screen the engine grows would start by inventing its own numbers again.
+ *
+ * So the tokens live in ONE file, and screens compose them. The rule for what belongs here: a
+ * value used by more than one screen, or a value a THEME should be able to move. Anything true of
+ * exactly one screen stays on that screen.
+ *
+ * ## Why the `--holdrim-` prefix
+ *
+ * A project adopting Holdrim writes its own document stylesheet, and that stylesheet is likely to
+ * declare its own ink, background and border tokens for its sheets. Unprefixed engine tokens would
+ * collide with a project's own on any page that loads both — and the collision would be silent,
+ * showing up as a component that changes colour depending on which page it is embedded in. The
+ * prefix is a few characters against a class of bug nobody can grep for.
+ *
+ * ## Why no downloaded font, and no dark mode
+ *
+ * No font: the login screen is the only page served without a session, and it inlines this file
+ * (see engine/api/login-page.ts). A webfont there is a second request on the one request that is
+ * always a cold start, and a flash of unstyled text on the screen where a stranger decides whether
+ * this looks finished. `system-ui` is already the reader's font.
+ *
+ * No dark mode, yet: the brand colour comes from the project (see `theme` in holdrim.json) and a
+ * colour handed to us cannot be safely inverted — a brand that reads well on white can vanish on
+ * near-black, and we would be shipping a broken version of somebody else's identity. Dark mode
+ * arrives when the theme can state its own dark brand, not before. The tokens below are named so
+ * that day is a second `:root` block and not a rewrite.
+ */
+
+/* ------------------------------------------------------------------ tokens */
+:root {
+  /* --- brand -------------------------------------------------------------
+   * ⚠️ The engine's default brand is NOT any customer's colour. One specific client's blue,
+   * hard-coded into a public engine that promises never to name a company, a client or a product,
+   * would have every stranger who clones this shipping that company's blue.
+   *
+   * `#3F4B57` is defensible as a default precisely because it is not a brand: it is the ink colour
+   * two steps lighter, a slate taken from this file's own neutral ramp. It says "no brand has been
+   * set" rather than "this brand has been set", which is the honest thing for a default to say.
+   * Measured 8.9:1 against white, so it carries white text on a button and passes WCAG 1.4.3 as
+   * body text too.
+   *
+   * A project overrides it in holdrim.json; engine/api/theme.ts validates it and writes a second
+   * `:root` after this one. Only these two lines move — everything else is derived. */
+  --holdrim-brand: #3F4B57;
+  /* What goes ON the brand. Derived, not chosen: engine/api/theme.ts measures the contrast of the
+   * project's brand and picks white or near-black. A light brand with hard-coded white text is the
+   * single most common way a themeable button becomes unreadable. */
+  --holdrim-brand-ink: #FFFFFF;
+
+  /* --- surfaces ----------------------------------------------------------
+   * Three, because a panel needs to sit on something and a disabled area needs to sit under it.
+   * Named by role rather than by lightness so a dark theme can swap them without the names lying. */
+  --holdrim-surface: #FFFFFF;
+  --holdrim-surface-sunken: #F4F7F9;  /* the page behind a panel */
+  --holdrim-surface-raised: #FAFCFD;  /* a block inside a panel: hover, an inert row */
+
+  /* --- ink ---------------------------------------------------------------
+   * Three weights, all measured on `--holdrim-surface`, because "grey text" without a floor is how an
+   * interface quietly stops being readable:
+   *   ink        #12263A  → 14.9:1   body and headings
+   *   ink-muted  #55697C  → 6.0:1    supporting sentences; still passes 1.4.3 as body text
+   *   ink-faint  #6B7E90  → 4.5:1    the floor. Anything lighter is decoration, not text.
+   * A single grey for both the subtitle and the language selector would be one number doing two
+   * jobs, and neither could be tuned. */
+  --holdrim-ink: #12263A;
+  --holdrim-ink-muted: #55697C;
+  --holdrim-ink-faint: #6B7E90;
+
+  /* --- lines -------------------------------------------------------------
+   * Two: the quiet one that only separates, and the one a control needs so that its edge is
+   * findable. With a single line colour, inputs look like grey rectangles rather than like
+   * something you type into. */
+  --holdrim-line: #D7E2EA;
+  --holdrim-line-strong: #B4C6D4;
+
+  /* --- state -------------------------------------------------------------
+   * Without these, a screen has one hard-coded red for errors and nothing for success or warning,
+   * so the change-password step can only ever report failure — it has no colour in which to say
+   * the change worked. Each state is a pair: a foreground measured to at least 4.5:1 on its own
+   * surface, and the surface to put it on. */
+  --holdrim-ok: #1A7443;        --holdrim-ok-surface: #F1F9F4;
+  --holdrim-warn: #8A5A12;      --holdrim-warn-surface: #FDF7EC;
+  --holdrim-danger: #A3231F;    --holdrim-danger-surface: #FDF3F2;
+
+  /* --- type --------------------------------------------------------------
+   * A scale with a ratio (1.2, minor third), not a bag of sizes. Sizes chosen one at a time —
+   * 20/16/15/14/13px — leave a 20px heading barely outweighing a 13px semibold field label: 1.5
+   * steps apart in a scale that has no steps.
+   *
+   * The step names say what the text IS, not how big it is, so a screen picks by role. */
+  --holdrim-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --holdrim-font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --holdrim-text-micro: 0.75rem;   /* 12px — a legal line, a unit next to a number */
+  --holdrim-text-small: 0.8125rem; /* 13px — labels, the language control */
+  --holdrim-text-body: 1rem;       /* 16px — the base. Also the iOS floor: any less and the phone
+                                *        zooms the page when a field takes focus. */
+  --holdrim-text-lede: 1.0625rem;  /* 17px — the one sentence that explains the screen */
+  --holdrim-text-title: 1.5rem;    /* 24px — the screen's title */
+  --holdrim-text-display: 1.875rem; /* 30px — a product name standing on its own */
+
+  --holdrim-leading-tight: 1.2;    /* headings: a title at 1.5 looks like two paragraphs */
+  --holdrim-leading-normal: 1.55;  /* running text */
+
+  /* READING WIDTH. Without it, a subtitle wraps in the middle of a phrase, because its only
+   * constraint is the width of its parent. Measured in `ch`, so it follows the font rather than a
+   * guess in pixels.
+   *   measure       prose
+   *   measure-short one or two sentences introducing a screen — deliberately narrower, because a
+   *                 short sentence set to full prose width breaks at a random word. */
+  --holdrim-measure: 65ch;
+  --holdrim-measure-short: 42ch;
+
+  /* --- space -------------------------------------------------------------
+   * A 4px-based rhythm. Every gap in the engine is one of these, so vertical spacing repeats
+   * instead of being re-decided; gaps chosen one at a time end up as 4, 6, 16, 24 and 32 with no
+   * relation between them. */
+  --holdrim-space-1: 0.25rem;  /* 4px  */
+  --holdrim-space-2: 0.5rem;   /* 8px  */
+  --holdrim-space-3: 0.75rem;  /* 12px */
+  --holdrim-space-4: 1rem;     /* 16px */
+  --holdrim-space-5: 1.5rem;   /* 24px */
+  --holdrim-space-6: 2rem;     /* 32px */
+  --holdrim-space-7: 3rem;     /* 48px */
+  --holdrim-space-8: 4rem;     /* 64px */
+
+  /* --- shape -------------------------------------------------------------
+   * Radii are nested: a control inside a panel has to be rounder-than-nothing but less round than
+   * the panel, or the corners read as sloppy. */
+  --holdrim-radius-sm: 6px;    /* a chip, a language button */
+  --holdrim-radius-md: 10px;   /* an input, a button */
+  --holdrim-radius-lg: 16px;   /* a panel */
+  --holdrim-radius-pill: 999px;
+
+  /* Shadows in the same hue as the ink rather than in black: a neutral-black shadow over a blue-
+   * grey background reads as dirt. */
+  --holdrim-shadow-sm: 0 1px 2px rgba(18, 38, 58, .06);
+  --holdrim-shadow-md: 0 2px 4px rgba(18, 38, 58, .05), 0 12px 28px rgba(18, 38, 58, .07);
+
+  /* --- focus -------------------------------------------------------------
+   * One ring, defined once, used by every focusable thing. If only `input` had a focus style,
+   * tabbing from the password field onto the language buttons would make the ring disappear — and
+   * a keyboard user loses their place the moment they cannot see where they are.
+   *
+   * A 3px halo PLUS a 2px outline, not one or the other: the outline guarantees the ring exists in
+   * forced-colours mode, and the halo is what makes it visible against a coloured button. */
+  --holdrim-focus-width: 2px;
+  --holdrim-focus-offset: 2px;
+  --holdrim-focus-halo: rgba(63, 75, 87, .34);
+
+  /* Minimum hit area. WCAG 2.5.5 asks 44px; so does Apple's guidance. It is a token because the
+   * login screen, the panel and anything after them have to agree on it. */
+  --holdrim-touch: 44px;
+}
+
+/* The halo follows the theme where the browser can mix colours, and falls back to the neutral
+ * above where it cannot. Declared through @supports rather than as two plain declarations because
+ * a custom property accepts ANY value: an unsupported `color-mix` would not fall back, it would
+ * become invalid at computed-value time and leave the ring unpainted. */
+@supports (color: color-mix(in srgb, red 50%, transparent)) {
+  :root { --holdrim-focus-halo: color-mix(in srgb, var(--holdrim-brand) 34%, transparent); }
+}
+
+/* BREAKPOINTS. There are two, and they cannot be custom properties — `@media` is resolved before
+ * custom properties exist, so `@media (min-width: var(--x))` silently never matches. They are
+ * written here so there is one place to read them, and repeated as literals below.
+ *
+ *   40rem (640px)  phone → small tablet. Where a full-bleed sheet becomes a card.
+ *   64rem (1024px) where a screen may use a second column.
+ *
+ * Everything in this file is mobile-first: the narrow layout is the unconditional one and the
+ * media queries only ADD. Written the other way round, a phone downloads and then overrides the
+ * desktop layout, and every mistake lands on the least capable device. */
+
+/* ------------------------------------------------------------------ reset */
+/* Only what earns its place. A full reset is a dependency nobody reads. */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--holdrim-surface-sunken);
+  color: var(--holdrim-ink);
+  font-family: var(--holdrim-font);
+  font-size: var(--holdrim-text-body);
+  line-height: var(--holdrim-leading-normal);
+  /* Without this, a long unbroken string — an e-mail address echoed back in an error — pushes the
+   * panel wider than the phone and the whole page starts scrolling sideways. */
+  overflow-wrap: break-word;
+}
+
+h1, h2, h3, p { margin: 0; }
+
+/* Honour the setting. Someone who turned animation off did it for a reason, often a medical one,
+ * and a transition that ignores it is not a detail to them. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important; scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------------------------------- focus, everywhere */
+/* `:focus-visible` and not `:focus`: the ring should appear for the keyboard and stay out of the
+ * way of the mouse. One selector covers every control, so a new screen cannot forget it. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: var(--holdrim-focus-width) solid var(--holdrim-brand);
+  outline-offset: var(--holdrim-focus-offset);
+  box-shadow: 0 0 0 4px var(--holdrim-focus-halo);
+}
+
+/* --------------------------------------------------------------- typography */
+.holdrim-title {
+  font-size: var(--holdrim-text-title);
+  line-height: var(--holdrim-leading-tight);
+  font-weight: 650;
+  letter-spacing: -.01em;   /* large type set at default tracking reads loose */
+  /* Evens out the lines of a title instead of leaving one orphaned word on the second line.
+   * Ignored by browsers that do not know it, which is the correct degradation. */
+  text-wrap: balance;
+}
+
+.holdrim-lede {
+  max-width: var(--holdrim-measure-short);
+  color: var(--holdrim-ink-muted);
+  font-size: var(--holdrim-text-lede);
+  /* This is what keeps the subtitle from breaking mid-phrase. `pretty` asks the browser to avoid a
+   * short last line; the measure above is what actually keeps the sentence in shape when `pretty`
+   * is not available. */
+  text-wrap: pretty;
+}
+
+.holdrim-prose { max-width: var(--holdrim-measure); }
+.holdrim-muted { color: var(--holdrim-ink-muted); }
+.holdrim-faint { color: var(--holdrim-ink-faint); }
+
+/* Visible to a screen reader, invisible on screen. For the label a control needs and the layout
+ * does not — the alternative is `aria-label`, which cannot be translated by the page and is lost
+ * to anyone using a translation tool. */
+.holdrim-visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* -------------------------------------------------------------------- stack */
+/* Vertical rhythm as a container property instead of a margin on every child: margins on children
+ * collapse, fight each other, and have to be reset the moment an element is reused somewhere with
+ * different spacing. `--holdrim-stack` lets one instance override the gap without a new class. */
+.holdrim-stack { display: flex; flex-direction: column; gap: var(--holdrim-stack, var(--holdrim-space-4)); }
+
+/* --------------------------------------------------------------------- card */
+.holdrim-card {
+  background: var(--holdrim-surface);
+  border: 1px solid var(--holdrim-line);
+  border-radius: var(--holdrim-radius-lg);
+  box-shadow: var(--holdrim-shadow-md);
+  padding: var(--holdrim-space-6);
+}
+
+/* ------------------------------------------------------------------- fields */
+.holdrim-field { display: flex; flex-direction: column; gap: var(--holdrim-space-2); }
+
+.holdrim-label {
+  font-size: var(--holdrim-text-small);
+  font-weight: 600;
+  color: var(--holdrim-ink);
+}
+
+.holdrim-input {
+  /* 1rem and not less: below 16px, iOS Safari zooms the page when the field takes focus, and the
+   * person has to pinch back out to see the button they were heading for. */
+  font: inherit;
+  font-size: var(--holdrim-text-body);
+  color: var(--holdrim-ink);
+  background: var(--holdrim-surface);
+  border: 1px solid var(--holdrim-line-strong);
+  border-radius: var(--holdrim-radius-md);
+  padding: var(--holdrim-space-3);
+  min-height: var(--holdrim-touch);
+  width: 100%;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+
+.holdrim-input::placeholder { color: var(--holdrim-ink-faint); }
+
+/* The border moves to the brand as well as the ring appearing: the ring says "focus is here", the
+ * border says "this is the field". On a small screen the ring can sit under a thumb. */
+.holdrim-input:focus-visible { border-color: var(--holdrim-brand); }
+
+/* ERROR, stated in three channels at once. `aria-invalid` is the attribute the screen reader
+ * announces, so styling from it means the visible state and the announced state cannot drift —
+ * which they do the moment the error is a CSS class somebody has to remember to add alongside. */
+.holdrim-input[aria-invalid="true"] {
+  border-color: var(--holdrim-danger);
+  background: var(--holdrim-danger-surface);
+}
+.holdrim-input[aria-invalid="true"]:focus-visible {
+  outline-color: var(--holdrim-danger);
+  box-shadow: 0 0 0 4px rgba(163, 35, 31, .22);
+}
+
+.holdrim-input:disabled { background: var(--holdrim-surface-sunken); color: var(--holdrim-ink-faint); cursor: not-allowed; }
+
+/* ------------------------------------------------------------------ buttons */
+.holdrim-button {
+  font: inherit;
+  font-weight: 650;
+  min-height: var(--holdrim-touch);
+  padding: var(--holdrim-space-3) var(--holdrim-space-5);
+  border-radius: var(--holdrim-radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: filter .12s ease, background-color .12s ease;
+}
+
+.holdrim-button--primary { background: var(--holdrim-brand); color: var(--holdrim-brand-ink); }
+/* `filter` rather than a second brand token: the brand is one value the project gives us, and
+ * asking a project for a hover shade as well would be asking it to design instead of to brand. */
+.holdrim-button--primary:hover:not(:disabled) { filter: brightness(1.08); }
+.holdrim-button--primary:active:not(:disabled) { filter: brightness(.94); }
+
+.holdrim-button--quiet {
+  background: transparent; color: var(--holdrim-ink-muted);
+  border-color: transparent; font-weight: 500;
+}
+.holdrim-button--quiet:hover { background: var(--holdrim-surface-sunken); color: var(--holdrim-ink); }
+
+/* `cursor: progress` and not `not-allowed`: the button is disabled because something is happening,
+ * not because the person did something wrong. */
+.holdrim-button:disabled { opacity: .55; cursor: progress; }
+
+.holdrim-button--block { width: 100%; }
+
+/* ------------------------------------------------------------------- alerts */
+/* One shape, three colours. `:empty` collapsing to nothing is what keeps a reserved error slot
+ * from leaving a gap in the layout before anything has gone wrong. */
+.holdrim-alert {
+  font-size: var(--holdrim-text-small);
+  border-radius: var(--holdrim-radius-md);
+  border: 1px solid;
+  padding: var(--holdrim-space-3);
+  display: flex; gap: var(--holdrim-space-2);
+}
+.holdrim-alert:empty { display: none; }
+/* `hidden` must win over the `display: flex` above: an author rule that sets `display` beats the
+ * browser's own `[hidden] { display: none }`, whatever its specificity. Without this a box that was
+ * filled once stays on screen after a script "hides" it — the people screen would keep an old error
+ * on top of the success that follows it. */
+.holdrim-alert[hidden] { display: none; }
+.holdrim-alert--danger { color: var(--holdrim-danger); background: var(--holdrim-danger-surface); border-color: #F0C9C7; }
+.holdrim-alert--warn { color: var(--holdrim-warn); background: var(--holdrim-warn-surface); border-color: #EFDCBC; }
+.holdrim-alert--ok { color: var(--holdrim-ok); background: var(--holdrim-ok-surface); border-color: #C3E2CF; }
+
+/* --------------------------------------------------------------- brandmark */
+/* The answer to "what place is this?". It is a token-level component because every engine screen
+ * served before a session — this one today, an expired-link or an error page tomorrow — has to
+ * answer that question the same way. */
+.holdrim-brandmark { display: flex; align-items: center; gap: var(--holdrim-space-3); min-width: 0; }
+/* Capped by HEIGHT and left free in width: a logo is any aspect ratio, and capping the width
+ * squashes a wide wordmark while leaving a tall one enormous. */
+.holdrim-brandmark__logo { height: 32px; width: auto; max-width: 100%; display: block; }
+.holdrim-brandmark__name {
+  font-size: var(--holdrim-text-lede);
+  font-weight: 650;
+  line-height: var(--holdrim-leading-tight);
+  letter-spacing: -.01em;
+  color: var(--holdrim-ink);
+}
+
+/* ------------------------------------------------- the language control */
+/* A row of small buttons with a shared outline: a segmented control, which is what it IS — a
+ * choice among a closed set, already made, changeable. Set under a horizontal rule at the bottom
+ * of the card, it would take the position and the styling of a legal footnote, and read as one.
+ *
+ * ⚠️ It stays a plain GET form with one submit button per language and no script. The reasoning is
+ * in engine/api/login.html: this is the one screen that must work with JavaScript off, and it is
+ * the screen someone reaches when they cannot read the language it is in. */
+.holdrim-langbar {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--holdrim-space-1);
+  padding: var(--holdrim-space-1);
+  border: 1px solid var(--holdrim-line);
+  border-radius: var(--holdrim-radius-pill);
+  background: var(--holdrim-surface);
+}
+.holdrim-langbar__icon { font-size: var(--holdrim-text-small); line-height: 1; padding-inline: var(--holdrim-space-2); }
+.holdrim-langbar .lang {
+  font: inherit;
+  font-size: var(--holdrim-text-small);
+  font-weight: 500;
+  color: var(--holdrim-ink-muted);
+  background: none;
+  border: 0;
+  border-radius: var(--holdrim-radius-pill);
+  padding: var(--holdrim-space-1) var(--holdrim-space-3);
+  min-height: 32px;
+  cursor: pointer;
+}
+.holdrim-langbar .lang:hover { color: var(--holdrim-ink); background: var(--holdrim-surface-sunken); }
+/* The language in force, said twice on purpose: filled background AND an underline. Colour alone
+ * would leave it invisible to someone who does not separate these two greys, and `aria-current`
+ * already carries the same fact to a screen reader. Three channels, one truth. */
+.holdrim-langbar .lang[aria-current] {
+  color: var(--holdrim-ink);
+  background: var(--holdrim-surface-sunken);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ------------------------------------------------------- the auth layout */
+/* MOBILE FIRST, and it reorganises rather than shrinks.
+ *
+ * On a phone the screen is a sheet: full bleed, no border, no radius, no shadow, and the content
+ * starts near the top. A 380px card floating in the middle of a 375px phone is a card with 0px of
+ * margin pretending to be a card — all of the cost of the border and none of the effect. Starting
+ * at the top also keeps the title above the keyboard when a field takes focus, which on a small
+ * phone is the difference between seeing what you are filling in and not.
+ *
+ * At 40rem it becomes what it was drawn to be: a centred card with room around it. */
+.holdrim-auth {
+  min-height: 100dvh;    /* dvh and not vh: on mobile Safari, 100vh is taller than the visible area,
+                          * so a centred page sits half a toolbar too low. */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
+  padding: var(--holdrim-space-5) var(--holdrim-space-4);
+  /* On a phone the page IS the sheet, so it takes the panel's colour. Left on the sunken grey, a
+   * white panel with no padding of its own reads as a card cut off at both edges. */
+  background: var(--holdrim-surface);
+}
+
+.holdrim-auth__panel {
+  width: 100%;
+  /* Not `max-width` alone: `min()` lets the panel be exactly the viewport minus the padding on a
+   * phone and exactly 27rem on anything wider, with no breakpoint needed for the width itself. */
+  max-width: min(100%, 27rem);
+  margin-inline: auto;
+  background: var(--holdrim-surface);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--holdrim-space-5);
+}
+
+/* The identity row: the brandmark on the left, the language control on the right. Wrapping, so on
+ * a narrow phone the control drops to its own line instead of squeezing the product name. */
+.holdrim-auth__identity {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: var(--holdrim-space-3);
+}
+
+/* Title and lede as one unit, tighter than the gap between sections: they are one thought. */
+.holdrim-auth__intro { display: flex; flex-direction: column; gap: var(--holdrim-space-2); }
+
+.holdrim-auth__form { display: flex; flex-direction: column; gap: var(--holdrim-space-4); }
+
+/* The submit stands slightly apart from the last field: it is the end of the form, not another
+ * row of it. */
+.holdrim-auth__submit { margin-top: var(--holdrim-space-1); }
+
+@media (min-width: 40rem) {
+  .holdrim-auth {
+    justify-content: center;         /* now there IS room to centre in */
+    padding: var(--holdrim-space-7) var(--holdrim-space-5);
+    background: var(--holdrim-surface-sunken);
+  }
+  .holdrim-auth__panel {
+    background: var(--holdrim-surface);
+    border: 1px solid var(--holdrim-line);
+    border-radius: var(--holdrim-radius-lg);
+    box-shadow: var(--holdrim-shadow-md);
+    padding: var(--holdrim-space-6);
+    gap: var(--holdrim-space-6);
+  }
+}
+
+/* ---------------------------------------------------------------- the engine's own screens
+ * The project home and the people screen: every screen the engine renders after sign-in. One
+ * layout here, so the second screen does not restate the first one's CSS and the two cannot drift
+ * into looking like two products. The sign-in page keeps `.holdrim-auth` above: it is the one screen
+ * seen before anything else, and it is laid out for that. */
+.holdrim-screen { margin: 0; min-height: 100vh; background: var(--holdrim-surface-sunken); color: var(--holdrim-ink); font-family: var(--holdrim-font); }
+.holdrim-screen__main { max-width: 72rem; margin: 0 auto; padding: var(--holdrim-space-6) var(--holdrim-space-5); }
+.holdrim-screen__head {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: var(--holdrim-space-4); margin-bottom: var(--holdrim-space-5);
+}
+.holdrim-screen__main > section { margin-top: var(--holdrim-space-6); }
+/* The heading and its sentence read as one unit, and what follows them starts a new one: without
+ * this the people table sits flush against the sentence that introduces it. The measure is the long
+ * one here — the short one would break a two-line sentence into three. */
+.holdrim-screen__main > .holdrim-title { margin: 0 0 var(--holdrim-space-2); }
+.holdrim-screen__main > .holdrim-lede { max-width: var(--holdrim-measure); margin: 0 0 var(--holdrim-space-5); }
+
+.holdrim-nav { display: flex; gap: var(--holdrim-space-4); }
+.holdrim-nav a { color: var(--holdrim-ink-muted); text-decoration: none; }
+.holdrim-nav a[aria-current="page"] { color: var(--holdrim-ink); font-weight: 600; }
+
+.holdrim-table {
+  width: 100%; border-collapse: collapse; background: var(--holdrim-surface-raised);
+  border: 1px solid var(--holdrim-line); border-radius: var(--holdrim-radius-md);
+}
+.holdrim-table th, .holdrim-table td {
+  text-align: left; padding: var(--holdrim-space-3); border-bottom: 1px solid var(--holdrim-line);
+  font-size: var(--holdrim-text-small); vertical-align: top;
+}
+.holdrim-table tr:last-child td { border-bottom: 0; }
+.holdrim-table a { color: var(--holdrim-brand); }
+.holdrim-table__num { text-align: right; white-space: nowrap; width: 4.5rem; }
+/* On a phone four fixed number columns would leave the page's name one word per line: they shrink
+ * to their content there, and the name gets the rest. */
+@media (max-width: 40rem) {
+  .holdrim-table__num { width: auto; padding-inline: var(--holdrim-space-1); }
+  /* A table of text and forms has nothing to shrink: five columns push the page sideways, and a
+   * request's words stand one per line. Stacked, each row reads as a card; the cells say enough on
+   * their own, so the header goes. */
+  .holdrim-table--stack thead { display: none; }
+  .holdrim-table--stack tr, .holdrim-table--stack td { display: block; }
+  .holdrim-table--stack td { border-bottom: 0; padding-block: var(--holdrim-space-1); }
+  .holdrim-table--stack tr { border-bottom: 1px solid var(--holdrim-line); padding-block: var(--holdrim-space-2); }
+}
+.holdrim-code { font-family: var(--holdrim-font-mono); color: var(--holdrim-ink-muted); }
