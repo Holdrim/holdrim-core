@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Rules for the commit message. Fast and with no judgement of content: what matters is that the
+# message still makes sense a year from now, when somebody is investigating a bug.
+#
+# This repository is the showcase of the method: the history IS documentation.
+set -uo pipefail
+FILE="$1"
+FIRST=$(head -1 "$FILE")
+FAILURES=0
+fail() { echo "  ✗ $1"; FAILURES=$((FAILURES+1)); }
+
+# merge, revert and fixup pass without ceremony
+case "$FIRST" in Merge*|Revert*|fixup!*|squash!*) exit 0 ;; esac
+
+[ ${#FIRST} -ge 15 ] || fail "the first line has ${#FIRST} characters: say what changed, not 'tweaks'"
+[ ${#FIRST} -le 72 ] || fail "the first line has ${#FIRST} characters (maximum 72): the rest goes in the body"
+
+case "$FIRST" in
+  *.) fail "the first line does not end in a period" ;;
+esac
+
+# Messages that say nothing. If the change really is trivial, the body explains why it exists.
+EMPTY='^(tweaks?|fix(es)?|wip|update|improvements?|changes?|test)s?\.?$'
+if echo "$FIRST" | grep -qiE "$EMPTY"; then
+  fail "\"$FIRST\" says neither what changed nor why"
+fi
+
+# The second line has to be empty (git uses the first as the subject).
+SECOND=$(sed -n '2p' "$FILE")
+[ -z "$SECOND" ] || fail "leave the second line blank, separating the subject from the body"
+
+if [ $FAILURES -gt 0 ]; then
+  echo ""
+  echo "  A good message here answers: what changed, and WHY that was needed."
+  echo "  If the answer is obvious a year from now, the first line is enough."
+  exit 1
+fi
+exit 0

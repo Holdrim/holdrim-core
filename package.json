@@ -1,0 +1,41 @@
+{
+  "name": "holdrim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Holdrim engine: reviewable documentation, with traceable approval.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --import ./engine/tests/hooks/console-to-stderr.js --test 'engine/tests/*.test.js' 'engine/tests/*.test.ts'",
+    "types": "tsc --noEmit",
+    "lint": "eslint engine examples",
+    "serve": "node engine/api/server.ts",
+    "contract": "bash engine/test-contract.sh",
+    "browser": "node engine/test-browser.js",
+    "cli": "node engine/cli/holdrim.ts",
+    "build:web": "esbuild engine/web/src/entry.jsx --bundle --format=esm --jsx=automatic --minify --target=es2022 --outfile=engine/web/panel-react.js --external:/engine/core/fingerprint.js"
+  },
+  "dependencies": {
+    "jose": "^6.0.0",
+    "linkedom": "^0.18.13",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "optionalDependencies": {
+    "@google-cloud/firestore": "^9.2.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.11.0",
+    "playwright-core": "1.56.1",
+    "typescript": "^5.7.0"
+  },
+  "bin": {
+    "holdrim": "engine/cli/holdrim.ts"
+  }
+}

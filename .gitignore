@@ -1,0 +1,13 @@
+# No trailing slash, on purpose: `node_modules/` matches a directory and NOT a symlink with the
+# same name, so with it `scripts/worktree.sh` — which links node_modules instead of copying it —
+# would leave every fresh worktree looking dirty, and `git worktree remove` would refuse to clean it.
+node_modules
+/data
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+secrets.json
+.DS_Store

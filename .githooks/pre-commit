@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Holdrim's pre-commit: DUMB AND FAST, on purpose.
+#
+# Only what is deterministic and runs in seconds gets in here. The contract test (which boots a
+# server) and agent review stay in CI: a slow hook is a hook people learn to skip with --no-verify,
+# and then it protects nothing.
+#
+# Install:  git config core.hooksPath .githooks
+# Skip once (and then say why in the commit):  git commit --no-verify
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+START=$(date +%s%N)
+FAILURES=0
+fail() { echo "  ✗ $1"; FAILURES=$((FAILURES+1)); }
+
+# Only what is staged: a small commit has to be fast.
+FILES=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$FILES" ] && exit 0
+js=$(echo "$FILES" | grep -E '\.(js|ts)$' || true)
+json=$(echo "$FILES" | grep -E '\.json$' || true)
+engine=$(echo "$FILES" | grep -E '^engine/(core|api|cli)/' || true)
+
+# ------------------------------------------------------------------ 1. is the code valid?
+for f in $js; do
+  [ -f "$f" ] || continue
+  node --check "$f" 2>/dev/null || { node --check "$f" 2>&1 | head -3; fail "$f is not valid JavaScript"; }
+done
+
+# ------------------------------------------------------------------ 2. lint, only the changed files
+# ~0.5 s. It catches a silent catch, an orphan variable, a call to a function that no longer
+# exists — one left behind by a rename would break the moment someone sent a request.
+if [ -n "$js" ]; then
+  npx --no-install eslint $js >/tmp/pre-commit-lint.log 2>&1 \
+    || { grep -E '^\s+[0-9]+:|error' /tmp/pre-commit-lint.log | head -8 | sed 's/^/      /'; fail "lint complained"; }
+fi
+
+# ------------------------------------------------------------------ 3. broken JSON takes the service down
+for f in $json; do
+  [ -f "$f" ] || continue
+  node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" 2>/dev/null || fail "$f is not valid JSON"
+done
+
+# ------------------------------------------------------------------ 4. a secret heading into history
+# A committed secret never leaves: rewriting public history is worse than the leak.
+PATTERN='(GOCSPX-|AIza[0-9A-Za-z_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[0-9A-Za-z]{30,}|xox[baprs]-[0-9A-Za-z-]{10,})'
+# The hook itself and the CI workflow CONTAIN these patterns (they are their definition), so they
+# stay out of the scan — otherwise the hook blocks itself.
+SUSPECTS=$(echo "$FILES" | grep -vE '^(\.githooks/|\.github/)' || true)
+if [ -n "$SUSPECTS" ] && git diff --cached -U0 -- $SUSPECTS | grep -nE "^\+.*$PATTERN" >/dev/null 2>&1; then
+  fail "there seems to be a SECRET in what you are committing"
+  git diff --cached -U0 -- $SUSPECTS | grep -nE "^\+.*$PATTERN" | sed 's/^/      /' | cut -c1-110 | head -3
+fi
+
+# ------------------------------------------------------------------ 5. is the core still correct?
+# Only when the engine changes — touching HTML does not need this. Costs ~0.4 s.
+if [ -n "$engine" ]; then
+  # The same --import as `npm test`: on Node 22 a test's console text can break the runner's own
+  # channel otherwise — see engine/tests/hooks/console-to-stderr.js.
+  node --import ./engine/tests/hooks/console-to-stderr.js --test 'engine/tests/*.test.js' \
+    >/tmp/pre-commit-tests.log 2>&1 \
+    || { tail -12 /tmp/pre-commit-tests.log | sed 's/^/      /'; fail "the core tests failed"; }
+fi
+
+# ------------------------------------------------------------------ 6. do the types agree?
+# Only when a .ts changes. ~3 s — the slowest step of the hook, and still cheaper than finding out
+# at deploy. Node runs .ts without checking a single type: without this, a type is decoration.
+ts=$(echo "$FILES" | grep -E '\.ts$' || true)
+if [ -n "$ts" ]; then
+  npx --no-install tsc --noEmit >/tmp/pre-commit-types.log 2>&1 \
+    || { grep 'error TS' /tmp/pre-commit-types.log | head -5 | sed 's/^/      /'; fail "the types do not agree"; }
+fi
+
+# ------------------------------------------------------------------ 7. the validation lock
+# Only when a sheet of an example changes. It is the heart of the method: an approved block does
+# not change without permission, and there is no approval mark without a trail.
+# Any page and any JSON under the project, not only `pages/`: the template keeps its sheets in ten
+# folders of its own, and a pattern written for the hello world would let every one of them
+# through unchecked. The JSON counts because the registry and the config can break the lock as
+# surely as a page can.
+sheets=$(echo "$FILES" | grep -E '^examples/[^/]+/.+\.(html|json)$' || true)
+if [ -n "$sheets" ]; then
+  for project in $(echo "$sheets" | sed -E 's#^(examples/[^/]+)/.*#\1#' | sort -u); do
+    node engine/cli/holdrim.ts check --root "$project" >/tmp/pre-commit-lock.log 2>&1 \
+      || { grep '✗' /tmp/pre-commit-lock.log | sed 's/^/      /' | head -5; \
+           fail "the validation lock complained in $project (if it was on purpose, the owner has to authorise it)"; }
+  done
+fi
+
+# ------------------------------------------------------------------ 8. the panel's bundle
+# The committed bundle is built from the panel's source, the core it imports, the English
+# dictionary and cycle.json. A key added to en.json changes it even when the panel never reads that
+# key, and without this CI's freshness check finds the stale file only after the push. ~0.3 s:
+# esbuild is fast. The inputs are named broadly on purpose — all of engine/core/, though today the
+# panel imports one file of it: a rebuild for nothing costs 0.3 s, an input left off the list is a
+# stale bundle reaching CI.
+INPUTS='^engine/(web/src/|core/|locales/en\.json$|cycle\.json$)|^package(-lock)?\.json$'
+# The bundle itself too: one staged alone, edited by hand or left by an old build, is checked the same.
+bundled=$(echo "$FILES" | grep -E "$INPUTS|^engine/web/panel-react\.js$" || true)
+# esbuild reads the working tree, not what is staged. With an input half staged, the rebuilt bundle
+# would carry the unstaged half into the commit while the source it came from stayed out, and pass.
+# So a commit that touches the bundle's inputs has to be the whole of them.
+unstaged=$( { git diff --name-only; git ls-files --others --exclude-standard; } | grep -E "$INPUTS" || true)
+if [ -n "$bundled" ] && [ -n "$unstaged" ]; then
+  fail "the panel's bundle is built from the working tree, and these have changes not staged: $(echo $unstaged) — stage them or stash them first"
+elif [ -n "$bundled" ]; then
+  if ! npm run --silent build:web >/tmp/pre-commit-bundle.log 2>&1; then
+    tail -5 /tmp/pre-commit-bundle.log | sed 's/^/      /'; fail "the panel's bundle does not build"
+  elif ! git diff --quiet -- engine/web/panel-react.js; then
+    fail "engine/web/panel-react.js was stale; it is rebuilt now — git add engine/web/panel-react.js"
+  fi
+fi
+
+MS=$(( ($(date +%s%N) - START) / 1000000 ))
+if [ $FAILURES -eq 0 ]; then
+  echo "✓ pre-commit ok (${MS}ms)"
+  exit 0
+fi
+echo ""
+echo "$FAILURES problem(s). Fix them, or use --no-verify and say why in the commit."
+exit 1

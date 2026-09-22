@@ -1,0 +1,30 @@
+{
+  "//": [
+    "Compiles NOTHING: Node runs .ts directly, no build, no dist. This file exists only to CHECK",
+    "the types. Before it existed, `tsc --noEmit` printed the compiler's help and exited 0 — a",
+    "green that never checked a single line.",
+    "allowImportingTsExtensions is required because the code imports './users.ts' with the",
+    "extension, which is how Node actually resolves it, and not how TypeScript usually writes it.",
+    "noUnusedLocals and noUnusedParameters are here because ESLint does not lint TypeScript in this",
+    "project: one tool per job, and the compiler already sees more than a linter would."
+  ],
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "allowImportingTsExtensions": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["engine/**/*.ts", "engine/core/*.js"],
+  "exclude": ["node_modules"]
+}
