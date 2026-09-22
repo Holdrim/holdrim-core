@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="{{#lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The page is drawn for a light background only; saying so stops the browser from painting form
+     controls in its own dark palette on top of a light card. -->
+<meta name="color-scheme" content="light">
+<title>{{login.title}}</title>
+<!--
+  The only page seen without a session, and that is why it is SELF-CONTAINED: no downloaded font,
+  no second request. Everything it needs arrives in these bytes.
+
+  ⚠️ Self-contained is NOT the same as owning its own design. Custom properties and one-off CSS of
+  its own, living here, are how an engine ends up shipping one customer's brand colour as a
+  default. The stylesheet comes from engine/web/base.css — the engine's design system, the same
+  file every other engine screen loads — and the server INLINES it here rather than linking to it.
+  The reason it is inlined and not linked: /engine/web/ sits behind the authentication guard in
+  server.ts, so a linked stylesheet on this page would be answered with a redirect back to this
+  page, and the login screen would arrive unstyled. Opening a route for it
+  would mean punching a second hole in the authentication wall in order to serve CSS.
+
+  The order of the three style blocks is the whole theming mechanism, and it is the Keycloak
+  arrangement: the engine's defaults first, the project's theme second, what belongs to this one
+  screen last. See engine/api/theme.ts.
+
+  ⚠️ NO sentence lives in this file. Every placeholder written in double braces is replaced by
+  engine/api/login-page.ts, before the bytes leave the server, with the text from engine/locales/
+  in the language the person asked for. The reasoning for rendering on the server instead of
+  fetching a dictionary from the browser is written there.
+-->
+<style nonce="{{#nonce}}">{{#baseCss}}</style>
+<style nonce="{{#nonce}}">{{#themeCss}}</style>
+<style nonce="{{#nonce}}">
+  /* Only what is true of THIS screen. Anything reusable belongs in base.css, or the next screen
+     starts by copying from here — which is exactly how a few one-off variables become a standard. */
+
+  /* The two field groups are swapped by the script, and both need the same rhythm. `[hidden]`
+     needs the `display: none` said out loud because the rule above it sets `display: flex`, and a
+     display declaration beats the hidden attribute. Without this the change-password fields sit on
+     the page throughout, which is how someone signs in by typing into the wrong pair of boxes. */
+  .fields { display: flex; flex-direction: column; gap: var(--holdrim-space-4); }
+  .fields[hidden] { display: none; }
+
+  /* The error slot keeps no space while it is empty — `.holdrim-alert:empty` in base.css — so the
+     button does not sit above a gap waiting for something to go wrong. */
+</style>
+</head>
+<body class="holdrim-auth">
+<main class="holdrim-auth__panel">
+
+  <!--
+    WHAT PLACE IS THIS. The first question a sign-in screen has to answer. A screen that opens with
+    the word "Sign in" and nothing else, on a 240px card floating in the middle of an empty field,
+    does not answer it at all: someone following a link has no way to tell whose documentation
+    they have arrived at.
+
+    The logo, or the name if there is no logo, or the project's own name if the theme sets neither.
+    Built in engine/api/login-page.ts.
+  -->
+  <div class="holdrim-auth__identity">
+    <div class="holdrim-brandmark">{{#brandmark}}</div>
+
+    <!--
+      The language selector, and it sits HERE — beside the identity, as a control — rather than
+      under a rule at the bottom of the card, where it would read like a legal footnote. It is one
+      of the two things a person can do on this screen; the footer is where you put the thing
+      nobody is meant to do.
+
+      A <form method="get"> with one submit button per language, and NOT a <select> that navigates
+      on change. This is the only screen a person sees before they know the tool at all, and it is
+      the one screen that has to work with JavaScript off: a <select> would need a script to react,
+      or an extra "Go" button to explain. Here the button IS the choice — the browser turns it into
+      `GET /language?lang=es&next=…` with nothing running on the page. A GET is right because
+      nothing is created: it stores a preference and hands back the same screen.
+
+      `next` carries this exact address, its own `next` and all, so switching language does not throw
+      away the page the person was trying to reach. engine/api/language.ts refuses anything in it
+      that points off this site.
+
+      ⚠️ No flags — the reasoning is written out in engine/api/login-page.ts, where the buttons are
+      built. Short version: a flag is a country, not a language.
+    -->
+    <form class="languages holdrim-langbar" method="get" action="{{#languageRoute}}" aria-label="{{language.label}}">
+      <input type="hidden" name="next" value="{{#here}}">
+      <span class="holdrim-langbar__icon" aria-hidden="true">🌐</span>
+      {{#languageButtons}}
+    </form>
+  </div>
+
+  <!-- Title and the one sentence that explains the screen, as one unit. The sentence has a reading
+       width (`.holdrim-lede` in base.css); without one it breaks in the middle of a phrase,
+       because its only constraint is the width of the card. -->
+  <div class="holdrim-auth__intro">
+    <h1 id="heading" class="holdrim-title">{{login.title}}</h1>
+    <p class="holdrim-lede" id="sub">{{login.subtitle}}</p>
+  </div>
+
+  <form id="form" class="holdrim-auth__form" autocomplete="on" aria-label="{{login.form.label}}">
+    <div class="fields" id="sign-in-fields">
+      <div class="holdrim-field">
+        <label class="holdrim-label" for="email">{{login.email.label}}</label>
+        <input class="holdrim-input" id="email" name="email" type="email" autocomplete="username"
+               placeholder="{{login.email.placeholder}}" required autofocus>
+      </div>
+      <div class="holdrim-field">
+        <label class="holdrim-label" for="password">{{login.password.label}}</label>
+        <input class="holdrim-input" id="password" name="password" type="password"
+               autocomplete="current-password" placeholder="{{login.password.placeholder}}" required>
+      </div>
+    </div>
+
+    <div class="fields" id="change-fields" hidden>
+      <div class="holdrim-field">
+        <label class="holdrim-label" for="new-password">{{login.change.new.label}}</label>
+        <input class="holdrim-input" id="new-password" name="new-password" type="password"
+               autocomplete="new-password" minlength="{{#minPassword}}">
+      </div>
+      <div class="holdrim-field">
+        <label class="holdrim-label" for="repeat-password">{{login.change.repeat.label}}</label>
+        <input class="holdrim-input" id="repeat-password" name="repeat-password" type="password"
+               autocomplete="new-password" minlength="{{#minPassword}}">
+      </div>
+    </div>
+
+    <!-- role=alert so the screen reader announces the error; without it, someone who cannot see
+         the screen presses Enter again with no idea what happened. The colour is the second
+         channel and the red border on the field is the third — see `aria-invalid` below. -->
+    <p id="warning" class="holdrim-alert holdrim-alert--danger" role="alert"></p>
+
+    <button id="button" class="holdrim-button holdrim-button--primary holdrim-button--block holdrim-auth__submit"
+            type="submit">{{login.submit}}</button>
+  </form>
+</main>
+
+<!-- The handful of sentences the script needs AFTER the page is open — the change-password step
+     and the error lines. Rendered here by the server, in the same pass as the rest, so the page
+     never fetches a dictionary and never shows a raw key while it waits. -->
+<script type="application/json" id="texts">{{#texts}}</script>
+
+<script nonce="{{#nonce}}">
+  const $ = (id) => document.getElementById(id);
+  const TEXTS = JSON.parse($('texts').textContent);
+  const say = (key) => TEXTS[key] ?? key;
+  let changing = false;
+
+  // The fields that can be wrong at each step. `aria-invalid` is what the screen reader announces
+  // AND what base.css paints red, so the visible state and the announced state cannot drift apart
+  // — which is what happens the moment the red border is a class somebody has to remember to add
+  // next to the attribute.
+  const SIGN_IN = ['email', 'password'];
+  const CHANGE = ['new-password', 'repeat-password'];
+
+  function clearMarks() {
+    for (const id of [...SIGN_IN, ...CHANGE]) $(id).removeAttribute('aria-invalid');
+  }
+
+  /** Says it once, marks the fields, and puts the cursor where the fixing happens. */
+  function warn(text, fields = []) {
+    $('warning').textContent = text;
+    clearMarks();
+    for (const id of fields) $(id).setAttribute('aria-invalid', 'true');
+    if (fields.length) $(fields[0]).focus();
+  }
+
+  async function ask(route, body) {
+    const r = await fetch(route, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    let data = {};
+    try { data = await r.json(); } catch { /* no body: the status alone is enough */ }
+    return { ok: r.ok, data };
+  }
+
+  // The second screen a person sees, and for a first access it is the second screen EVERYONE sees.
+  // It is the same page with the same identity, the same title style and the same fields — what
+  // changes is the sentence and which pair of boxes is on. The title of the tab moves too: a
+  // browser left on "Sign in" while the screen says "Change your password" is a small lie, and it
+  // is the one someone finds again in their history a week later.
+  function askForChange() {
+    changing = true;
+    document.title = say('login.change.title');
+    $('heading').textContent = say('login.change.title');
+    $('sub').textContent = say('login.change.subtitle');
+    $('sign-in-fields').hidden = true;
+    $('change-fields').hidden = false;
+    $('new-password').required = true;
+    $('repeat-password').required = true;
+    $('button').textContent = say('login.change.submit');
+    warn('');
+    $('new-password').focus();
+  }
+
+  // Every route answers `error` — one spelling of one field, so the screen never has to guess
+  // which name a given route uses.
+  $('form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    warn('');
+    $('button').disabled = true;
+    try {
+      if (!changing) {
+        const { ok, data } = await ask('/api/sign-in', { email: $('email').value, password: $('password').value });
+        // Both fields marked, and the cursor back on the password: the server will not say which
+        // of the two was wrong — saying so hands over who has an account — so neither can the
+        // screen. The password is where the correction almost always is.
+        if (!ok) return warn(data.error || say('login.error.signInFailed'), ['password', 'email']);
+        if (data.mustChangePassword) return askForChange();
+        return goToDestination();
+      }
+
+      if ($('new-password').value !== $('repeat-password').value) {
+        return warn(say('login.error.passwordsDiffer'), ['repeat-password', 'new-password']);
+      }
+      const { ok, data } = await ask('/api/change-password', { current: $('password').value, next: $('new-password').value });
+      if (!ok) return warn(data.error || say('login.error.changeFailed'), ['new-password']);
+      goToDestination();
+    } catch {
+      warn(say('login.error.noAnswer'));
+    } finally {
+      $('button').disabled = false;
+    }
+  });
+
+  // Typing is the person answering the complaint. Leaving the red border on while they fix it
+  // makes the screen argue with them.
+  for (const id of [...SIGN_IN, ...CHANGE]) {
+    $(id).addEventListener('input', () => $(id).removeAttribute('aria-invalid'));
+  }
+
+  // Back to the page the person tried to open. Internal paths only: a `next` coming from
+  // outside with http://another-site becomes an open redirect, which is phishing with our domain.
+  function goToDestination() {
+    const asked = new URLSearchParams(location.search).get('next') || '';
+    // ⚠️ Compared as a resolved URL, not by pattern. A pattern that blocks `//evil.example` and
+    // `\\evil.example` still lets an open redirect through: browsers STRIP tab, CR and LF from a
+    // URL before parsing it, so a value starting with a tab passes the test and then resolves to
+    // another host. Letting the browser resolve it and checking the origin leaves no
+    // spelling to outguess.
+    let target = '/';
+    try {
+      const resolved = new URL(asked, location.origin);
+      if (resolved.origin === location.origin) target = resolved.pathname + resolved.search;
+    } catch { /* not a URL at all: stay home */ }
+    location.href = target;
+  }
+</script>
+</body>
+</html>

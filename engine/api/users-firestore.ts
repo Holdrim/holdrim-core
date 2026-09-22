@@ -1,0 +1,126 @@
+import { Firestore, type DocumentData } from '@google-cloud/firestore';
+import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
+
+/**
+ * People and sessions in Firestore: collections `users` and `sessions`.
+ *
+ * This is the answer for Cloud Run, where the local disk is ephemeral and per instance — an access
+ * created on one instance disappears when the platform recycles it, with no error and no log. See
+ * `users.ts` for why that is the reason this whole seam exists.
+ *
+ * The document id is the e-mail, already normalised. That is what makes `create` able to use
+ * `create()` instead of `set()`: Firestore refuses a document that already exists, so two
+ * simultaneous first accesses cannot both win. With a generated id the duplicate would be legal
+ * and nobody would notice until two people shared an account.
+ *
+ * Unlike the event store next door, this collection is NOT insert-only: a password change is an
+ * update, and a logout is a delete. People are state, not facts.
+ *
+ * ⚠️ Proved by the conformance suite ONLY when the emulator is running. `npm test` on its own
+ * skips this implementation with a message instead of pretending. To prove it:
+ *
+ *   firebase emulators:start --only firestore --project holdrim-conformance
+ *   FIRESTORE_EMULATOR_HOST=127.0.0.1:8433 npm test
+ *
+ * Without that variable, do not read a green suite as evidence that this file works.
+ */
+export class UsersFirestore extends UserStoreBase {
+  #db: Firestore;
+
+  constructor(projectId: string) {
+    super();
+    this.#db = new Firestore({ projectId });
+  }
+
+  protected async insertUser(row: StoredUser): Promise<void> {
+    await this.#db.collection('users').doc(row.email).create({
+      email: row.email, name: row.name, salt: row.salt, hash: row.hash,
+      must_change: row.mustChangePassword, created_at: row.createdAt,
+      enabled: row.enabled,
+    });
+  }
+
+  protected async readUser(email: string): Promise<StoredUser | null> {
+    const doc = await this.#db.collection('users').doc(email).get();
+    const d = doc.data();
+    return d ? docToUser(d) : null;
+  }
+
+  protected async readAllUsers(): Promise<StoredUser[]> {
+    // Ordered by document id, which IS the normalised e-mail — the same ordering the other two
+    // stores produce, and it needs no extra index because Firestore always has this one.
+    const all = await this.#db.collection('users').orderBy('__name__').get();
+    return all.docs.map((doc) => docToUser(doc.data()));
+  }
+
+  protected async writeEnabled(email: string, enabled: boolean): Promise<void> {
+    await this.#db.collection('users').doc(email).update({ enabled });
+  }
+
+  protected async writeName(email: string, name: string): Promise<void> {
+    await this.#db.collection('users').doc(email).update({ name });
+  }
+
+  protected async writeCredential(
+    email: string, salt: Buffer, hash: Buffer, mustChange: boolean): Promise<void> {
+    await this.#db.collection('users').doc(email).update({ salt, hash, must_change: mustChange });
+  }
+
+  protected async countUsers(): Promise<number> {
+    // `isEmpty` is the only caller and it asks a yes/no question, so one document is enough to
+    // answer it. Counting the collection would bill a read per person to learn nothing more.
+    const r = await this.#db.collection('users').limit(1).get();
+    return r.size;
+  }
+
+  protected async insertSession(id: string, email: string, createdAt: string, expiresAt: string): Promise<void> {
+    await this.#db.collection('sessions').doc(id).create({
+      email, created_at: createdAt, expires_at: expiresAt,
+    });
+  }
+
+  protected async readSession(id: string): Promise<StoredSession | null> {
+    const d = (await this.#db.collection('sessions').doc(id).get()).data();
+    return d ? { email: d.email, expiresAt: d.expires_at } : null;
+  }
+
+  protected async deleteSession(id: string): Promise<void> {
+    await this.#db.collection('sessions').doc(id).delete();
+  }
+
+  protected async deleteSessionsExpiredBefore(instant: string): Promise<void> {
+    // Expiry is an ISO string, so `<` on it is chronological order. Batched because Firestore
+    // takes at most 500 writes per commit, and a service left running for a month accumulates
+    // more dead sessions than that.
+    const stale = await this.#db.collection('sessions')
+      .where('expires_at', '<', instant).limit(400).get();
+    if (stale.empty) return;
+    const batch = this.#db.batch();
+    for (const doc of stale.docs) batch.delete(doc.ref);
+    await batch.commit();
+  }
+
+  async close(): Promise<void> {
+    await this.#db.terminate();
+  }
+}
+
+/**
+ * One document of `users`, as the rest of the code expects it. Shared by the single read and the
+ * listing so the two can never drift — a listing that decoded `enabled` differently from the login
+ * path is a screen that shows someone as able to get in while the door says otherwise.
+ *
+ * ⚠️ `enabled` is read as `!== false`, not as `!!`: a document with no `enabled` field at all is
+ * somebody nobody ever disabled, and `undefined` is falsy. Firestore has no `ALTER TABLE`, so the
+ * default has to live at the read, or a field added later would lock a whole team out.
+ */
+function docToUser(d: DocumentData): StoredUser {
+  return {
+    email: d.email, name: d.name,
+    // Firestore hands bytes back as a Buffer already; the copy costs nothing and means the
+    // constant-time comparison never receives something that is merely Buffer-like.
+    salt: Buffer.from(d.salt), hash: Buffer.from(d.hash),
+    mustChangePassword: !!d.must_change, createdAt: d.created_at,
+    enabled: d.enabled !== false,
+  };
+}

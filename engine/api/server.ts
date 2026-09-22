@@ -1,0 +1,1047 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFile, stat } from 'node:fs/promises';
+import { join, extname, normalize, sep } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { createCycle } from '../core/cycle.js';
+import { readConfig } from '../core/config.js';
+import { createRoles } from '../core/roles.js';
+import { overLimit, validCommit } from '../core/limits.js';
+import { createI18n } from '../core/i18n.js';
+import { MemoryEventStore } from './store.ts';
+import { SqliteEventStore } from './store-sqlite.ts';
+import {
+  openUserStore, ephemeralUserStoreWarning, DEFAULT_SQLITE_PATH, UserInputError,
+  normalizeEmail, isEmailAddress, MAX_NAME_LENGTH, type UserStore,
+} from './users.ts';
+import { log } from './log.ts';
+import { renderLoginPage, signInPolicy, screenPolicy } from './login-page.ts';
+import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
+import { renderPeoplePage } from './people-page.ts';
+import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
+import { readBlocks } from '../cli/pages.ts';
+import { loadRegistry } from '../cli/validation.ts';
+import { loadTheme } from './theme.ts';
+import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
+import { PasswordIdentity } from './identity-password.ts';
+import { IapIdentity } from './identity-iap.ts';
+import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types.ts';
+
+/**
+ * The Holdrim service: serves the site and records review events.
+ *
+ * When an identity proxy guards the edge, the API still validates who the caller is — defence in
+ * depth. The business rules — cycle, roles, limits — come from `engine/core/`, the SAME code the
+ * browser imports.
+ */
+
+// The PROJECT's configuration comes from holdrim.json; environment variables beat the file. The
+// engine knows no product name, no e-mail and no cloud project — it asks.
+const projectRoot = process.env.HOLDRIM_SITE ?? join(import.meta.dirname, '..', '..');
+const project = readConfig(projectRoot, { readFile: (p: string) => readFileSync(p, 'utf8') }, process.env);
+
+// The sentences the reviewer reads. The core returns keys; here they become words, in the language
+// of whoever is reading. Logs and boot errors do NOT come through here, on purpose — a log is
+// evidence, and evidence that changes wording by locale cannot be grepped.
+//
+// ⚠️ Discovered, not listed. A hard-coded list would make the README lie — it promises that adding
+// a language is copying one file into engine/locales/, and with a list it would be copying a file
+// AND editing this line. It would also kill the server the day one dictionary moved out, and not
+// one unit test would notice, because none of them boot the server. Reading the folder avoids both.
+const localesFolder = new URL('../locales/', import.meta.url);
+const dictionaries = Object.fromEntries(
+  readdirSync(localesFolder).filter((f) => f.endsWith('.json')).map((f) =>
+    [f.slice(0, -5), JSON.parse(readFileSync(new URL(f, localesFolder), 'utf8'))]));
+const i18n = createI18n(dictionaries, 'en');
+// `person` is what makes a deliberate choice beat the browser header — see engine/api/language.ts.
+const languageOf = (req: IncomingMessage) =>
+  i18n.choose({
+    person: chosenLanguage(req.headers.cookie),
+    acceptLanguage: req.headers['accept-language'] as string, project: project.language,
+  });
+
+/**
+ * How the project dresses the engine. Read ONCE, at boot, for two reasons: the logo is a file on
+ * disk and re-reading it on every sign-in would put an I/O call on the one request that is always
+ * a cold start; and a theme that changes without a restart is a theme nobody can reason about when
+ * two instances disagree.
+ *
+ * ⚠️ Whatever was refused is logged, and logged LOUDLY. A theme that quietly does not apply is an
+ * afternoon of someone reloading the page wondering where their colour went — and if the reason it
+ * was refused is that the value looked like an injection attempt, that is the line an operator
+ * needs to find.
+ */
+const { theme: projectTheme, warnings: themeWarnings } = loadTheme(
+  projectRoot, project.theme, { readBinary: (p: string) => readFileSync(p) },
+);
+for (const warning of themeWarnings) log('WARNING', 'theme_rejected', { reason: warning });
+
+const cfg = {
+  port: Number(process.env.PORT ?? 8080),
+  site: projectRoot,
+  project: project.project,
+  owner: project.owner,
+  admins: project.admins,
+  mode: process.env.HOLDRIM_MODE,
+  environment: process.env.NODE_ENV === 'development' ? 'Development' : (process.env.HOLDRIM_ENVIRONMENT ?? 'Production'),
+};
+
+// ---------------------------------------------------------------- configuration that fails at boot
+/**
+ * How people get in.
+ *   password | user and password in the service itself. This is "start the image and use it".
+ *   iap      | Google Cloud IAP. Needs HOLDRIM_AUDIENCE.
+ *   dev      | the X-Dev-Email header, Development only. Open the browser and work, with no login.
+ *
+ * The default is never `dev` outside Development: a service that accepts "I am whoever I say I
+ * am" in production is not a small oversight. Outside Development it is the identity proxy when
+ * there is an audience, and password everywhere else — whoever starts the image configuring
+ * nothing lands on a login screen, which is the worst acceptable case.
+ */
+const identityKind = process.env.HOLDRIM_IDENTITY
+  ?? (cfg.environment === 'Development' ? 'dev' : process.env.HOLDRIM_AUDIENCE ? 'iap' : 'password');
+
+let roles: ReturnType<typeof createRoles>;
+let iap: IapIdentity | null = null;
+const cycle = createCycle(JSON.parse(readFileSync(new URL('../cycle.json', import.meta.url), 'utf8')));
+
+try {
+  // No default, on purpose: in a distributed package, an e-mail of ours here would make anyone who
+  // forgot to configure it start a service with OUR owner.
+  roles = createRoles(cfg.owner, cfg.admins);
+  // The proxy identity is only built when it is the one in charge: demanding its audience from
+  // someone logging in with a password would block the "start it and use it" case, which is the
+  // whole point of password identity.
+  if (identityKind === 'iap' || identityKind === 'dev') {
+    iap = new IapIdentity({
+      audience: process.env.HOLDRIM_AUDIENCE, mode: cfg.mode,
+      environment: cfg.environment, // an empty string is a choice — 'identify nobody' — which the
+                                    // contract test uses to exercise the 401
+      devEmail: process.env.HOLDRIM_DEV_EMAIL !== undefined ? process.env.HOLDRIM_DEV_EMAIL || undefined : (project.actAs ?? undefined),
+    });
+  } else if (identityKind !== 'password') {
+    throw new Error(`HOLDRIM_IDENTITY="${identityKind}" does not exist (use password, iap or dev)`);
+  }
+} catch (error) {
+  // ⚠️ English, hard-coded, and NOT through i18n. This prints before the server listens, so there
+  // is no request, no session and nobody whose language we could have chosen — the same reason the
+  // first-access banner below stays English. See the comment at the top of engine/core/i18n.js.
+  console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
+  process.exit(1);
+}
+
+/**
+ * Where events live. `sqlite` is the default for running the tool without a cloud: one file, no
+ * external dependency, and the database REFUSING update and delete — "nothing is erased" stops
+ * being a promise and becomes a guarantee.
+ *   memory    | gone when it stops. For developing and testing.
+ *   sqlite    | a file on disk, at HOLDRIM_EVENTS_PATH. The "start it and use it" mode.
+ *   firestore | Google Cloud. Needs HOLDRIM_PROJECT.
+ */
+const eventsKind = process.env.HOLDRIM_EVENTS ?? (cfg.mode === 'local' ? 'memory' : 'sqlite');
+const events: EventStore = await (async () => {
+  switch (eventsKind) {
+    case 'memory': return new MemoryEventStore();
+    case 'sqlite': return new SqliteEventStore(process.env.HOLDRIM_EVENTS_PATH ?? './data/events.db');
+    case 'firestore': {
+      if (!cfg.project) { console.error('invalid configuration: firestore needs HOLDRIM_PROJECT'); process.exit(1); }
+      // Imported here and only here — see the note at the top of store.ts. If the optional package
+      // was not installed, say which one, instead of a module-resolution stack at boot.
+      const { FirestoreEventStore } = await import('./store-firestore.ts').catch((error) => {
+        console.error('invalid configuration: HOLDRIM_EVENTS=firestore needs the optional package '
+          + `@google-cloud/firestore, which is not installed (${error.message})`);
+        process.exit(1);
+      });
+      return new FirestoreEventStore(cfg.project);
+    }
+    default:
+      console.error(`invalid configuration: HOLDRIM_EVENTS="${eventsKind}" (use memory, sqlite or firestore)`);
+      process.exit(1);
+  }
+})();
+
+/**
+ * Where the people and their sessions live. Same idea as Keycloak: a file to run it on a laptop, a
+ * real database for a deployment whose instances come and go.
+ *   (absent)      | SQLite, at HOLDRIM_USERS_PATH or ./data/users.db
+ *   sqlite:<path> | SQLite in that file
+ *   firestore     | Google Cloud. Needs HOLDRIM_PROJECT
+ *   postgres://…  | Postgres. `postgresql://…` works too
+ *
+ * ⚠️ SQLite on Cloud Run loses people. The disk there is ephemeral and per instance, so an access
+ * created today is gone when the platform recycles the instance — with no error and no log. That
+ * failure is the reason this variable exists; see engine/api/users.ts.
+ */
+/** The kind of store a URL names, with nothing secret left in it. Safe to log. */
+const userStoreKind = (url: string | undefined): string => {
+  const u = (url ?? '').trim();
+  if (u === '' || u.startsWith('sqlite')) return 'sqlite';
+  if (u === 'firestore') return 'firestore';
+  if (u.startsWith('postgres')) return 'postgres';
+  return 'unknown';
+};
+
+let byPassword: PasswordIdentity | null = null;
+if (identityKind === 'password') {
+  let users;
+  try {
+    users = await openUserStore(process.env.HOLDRIM_USERS, {
+      projectId: cfg.project,
+      sqlitePath: process.env.HOLDRIM_USERS_PATH ?? DEFAULT_SQLITE_PATH,
+    });
+  } catch (error) {
+    console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
+    process.exit(1);
+  }
+  byPassword = new PasswordIdentity(users, { secure: cfg.environment !== 'Development' });
+  await users.purgeExpiredSessions();
+
+  // ⚠️ It WARNS, it does not refuse. This configuration works — it just forgets people — and a
+  // service that refuses to start is a new way to be stuck at three in the morning over something
+  // that was never an emergency. The choice stays with whoever deploys; what they were missing is
+  // the information.
+  //
+  // One structured line at WARNING rather than a banner of '=': this fires only on a hosted
+  // runtime, where nobody is watching a terminal and the log collector is the only reader. A
+  // banner is loud on a screen; a severity is loud in a log.
+  const ephemeralWarning = ephemeralUserStoreWarning(process.env.HOLDRIM_USERS);
+  if (ephemeralWarning) log('WARNING', 'ephemeral_user_store', { warning: ephemeralWarning });
+
+  // First boot: creates the owner's access and shows the password ONCE. A fixed password like
+  // "admin" is an invitation, and an internal tool stays up for years with nobody looking.
+  //
+  // The display name comes from configuration because the alternative is everyone's first account
+  // being called "Owner" — and a review history where every approval is signed by a job title
+  // instead of a person is a history that answers "who said this?" with "the owner did".
+  //
+  // ⚠️ English, hard-coded, and NOT through i18n. This prints before anyone has a session, so
+  // there is no person and no chosen language yet — the same reason boot errors stay English. The
+  // comment at the top of engine/core/i18n.js is the long version.
+  const password = await byPassword.firstAccess(cfg.owner!, process.env.HOLDRIM_OWNER_NAME || 'Owner');
+  if (password) {
+    console.log('\n' + '='.repeat(72));
+    console.log('  FIRST ACCESS — write it down now, this password is not shown again:');
+    console.log(`     sign in with: ${cfg.owner}`);
+    console.log(`     password:     ${password}`);
+    console.log('  You will have to change it when you sign in.');
+    console.log('='.repeat(72) + '\n');
+  }
+}
+
+// ---------------------------------------------------------------- helpers
+const json = (res: ServerResponse, code: number, body: unknown) => {
+  const text = JSON.stringify(body);
+  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', ...API_HEADERS });
+  res.end(text);
+};
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.pdf': 'application/pdf', '.ico': 'image/x-icon',
+};
+
+async function rawBody(req: IncomingMessage): Promise<string> {
+  const parts: Buffer[] = [];
+  let size = 0;
+  for await (const p of req) {
+    size += p.length;
+    // A ceiling BEFORE parsing, and the message goes to the log, not to the person: the reply is
+    // the unhandled-error 500 below, which says only `api.internal` plus an id. Whoever operates
+    // greps this line by that id, so it is English like every other piece of evidence.
+    if (size > 1_000_000) throw new Error('request body larger than 1 MB');
+    parts.push(p);
+  }
+  return Buffer.concat(parts).toString('utf8');
+}
+
+/** Whether the request says its body is JSON — the media type alone, whatever the parameters. */
+function declaresJson(req: IncomingMessage): boolean {
+  return (req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase() === 'application/json';
+}
+
+/**
+ * The body as a JSON object, or a UserInputError the edge answers with a 400. A typo in a body is
+ * the caller's mistake: uncaught, `JSON.parse` would make it the 500 that says the service is
+ * broken, and `null` would get one step further and fail on `body.email`. Every route reads fields
+ * off the result, so anything that is not an object — `null`, an array, a number — is refused
+ * here, once.
+ */
+async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const text = await rawBody(req);
+  if (!text) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new UserInputError('request body is not a JSON object', 'api.body.notObject');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Why an event is refused before anything else about it is looked up, or null when it may go on.
+ *
+ * Called by `recordEvent` only, the one way into the event store for the API and both of the home's
+ * forms, so a request is held to the same rules whichever door it came in through. A second copy of
+ * these checks, written for a form, is how that form would one day accept the 500 KB text the API
+ * refuses.
+ */
+function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?: Record<string, string | number>) => string):
+  { status: number; body: Record<string, unknown> } | null {
+  if (!EVENT_TYPES.has(incoming.type)) {
+    return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
+  }
+  if (incoming.type === 'approval' && (!incoming.block || !incoming.fingerprint)) {
+    return { status: 400, body: { error: say('api.approval.needsBlockAndFingerprint') } };
+  }
+  // Approving belongs to owner and admin. Only the owner's ✓ becomes a lock in the repository —
+  // `holdrim sync` takes theirs alone — and an admin's is recorded, and stays an opinion.
+  if (incoming.type === 'approval' && !roles.canApprove(email)) {
+    return { status: 403, body: { error: say('api.approval.ownerOnly') } };
+  }
+  if (['request', 'comment', 'supplement'].includes(incoming.type) && !incoming.text?.trim()) {
+    return { status: 400, body: { error: say('api.text.required') } };
+  }
+  const limit = overLimit(incoming, project.pageExamples);
+  if (limit) return { status: 400, body: { error: say(limit.key, limit.params) } };
+  return null;
+}
+
+/**
+ * A request plus the state the server computed. The front end does not reimplement the cycle.
+ * `thread` is the request's own events (`cycle.threadsOf`), not the whole list: see there why.
+ */
+const withStatus = (e: Event, thread: Event[]) => ({
+  ...e,
+  status: cycle.status(cycle.currentState(e.id, thread, roles.isAdmin(e.author))),
+});
+
+/**
+ * An event as a reader gets it: a request with its state, and an approval saying whether it is the
+ * lock. Only the owner's ✓ is — `holdrim sync` and the home count theirs alone — and a panel that
+ * painted any ✓ green, an admin's included, would show an opinion as if it were the lock.
+ * Said here, where the roles are, so the panel reads the answer instead of learning who the owner is.
+ */
+const asRead = (e: Event, threads: Map<string, Event[]>) => {
+  if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? []);
+  if (e.type === 'approval') return { ...e, locks: roles.isOwner(e.author) };
+  return e;
+};
+
+// ---------------------------------------------------------------- the API routes
+/**
+ * Records one event for `email`, after every check the cycle demands — or says, as a status and a
+ * body, why not. The one door into the event store: the API, the home's "ask for a page" form and
+ * its triage form all come through here, so a rule added for one reaches the others.
+ *
+ * @param through  where it came from, for the log only
+ */
+async function recordEvent(
+  incoming: NewEvent, email: string, say: (key: string, params?: Record<string, string | number>) => string,
+  through = 'api',
+): Promise<{ status: number; body: Record<string, unknown>; event?: Event }> {
+  const canApprove = roles.canApprove(email);
+  const refusal = refusalOf(incoming, email, say);
+  if (refusal) return refusal;
+
+  if (incoming.type === 'request_state' || incoming.type === 'supplement') {
+    const requestId = incoming.data?.request;
+    if (!requestId) return { status: 400, body: { error: say('api.request.needsRequestId') } };
+    const ofPage = await events.list(incoming.page);
+    const request = ofPage.find((e) => e.id === requestId && e.type === 'request');
+    if (!request) return { status: 404, body: { error: say('api.request.notFound') } };
+    const current = cycle.currentState(requestId, ofPage, roles.isAdmin(request.author));
+
+    if (incoming.type === 'supplement') {
+      if (email !== request.author && !canApprove) {
+        return { status: 403, body: { error: say('api.supplement.ownerOrAuthor') } };
+      }
+      if (!cycle.acceptsSupplement(current)) {
+        // The state travels into the sentence as the contract value, untranslated, because it is
+        // also the `state` field next to it — one name for one thing, in both places.
+        return { status: 409, body: { error: say('api.supplement.tooLate', { state: current }), state: current } };
+      }
+    } else {
+      const target = incoming.data?.state as string | undefined;
+      if (!target) return { status: 400, body: { error: say('api.state.required') } };
+      if (!cycle.exists(target)) return { status: 400, body: { error: say('api.state.unknown') } };
+      const agentState = cycle.agentStates.includes(target);
+      if (!canApprove && !(iap?.localMode && agentState)) {
+        return { status: 403, body: { error: say('api.triage.ownerOnly') } };
+      }
+      if (cycle.requiresReason(target) && !incoming.text?.trim()) {
+        return { status: 400, body: { error: say('api.reason.required') } };
+      }
+      if (cycle.requiresCommit(target) && !validCommit(incoming.data)) {
+        return { status: 400, body: { error: say('api.commit.required') } };
+      }
+      if (!cycle.canGo(current, target)) {
+        return { status: 409, body: { error: say('api.state.cannotGo', { from: current, to: target }), state: current } };
+      }
+      // Race guard: recording where the change departed from makes the history itself the
+      // guard — see `currentState` in engine/core/cycle.js.
+      incoming.data = { ...incoming.data, from: current };
+    }
+  }
+
+  const e = await events.append(incoming, email);
+  log('INFO', 'event_recorded', {
+    id: e.id, type: e.type, page: e.page, block: e.block, author: e.author,
+    from: e.data?.from, to: e.data?.state, through,
+  });
+  return { status: 201, body: e as unknown as Record<string, unknown>, event: e };
+}
+
+async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: string) {
+  const route = url.pathname.replace(/^\/api/, '');
+
+  // ---------------------------------------------------------------- in and out (password identity)
+  if (byPassword && req.method === 'POST' && route === '/sign-out') {
+    await byPassword.users.closeSession(req.headers.cookie?.match(/holdrim_session=([^;]+)/)?.[1]);
+    res.setHeader('set-cookie', byPassword.signOutCookie());
+    return json(res, 200, { ok: true });
+  }
+
+  if (byPassword && req.method === 'POST' && route === '/change-password') {
+    const body = await jsonBody(req);
+    // Strings or nothing, as at sign-in: a number would reach `.normalize()` and answer 500.
+    const current = typeof body.current === 'string' ? body.current : '';
+    const next = typeof body.next === 'string' ? body.next : '';
+    const checked = await byPassword.checkCurrent(email, current);
+    if (!checked) return json(res, 403, { error: i18n.t(languageOf(req), 'api.password.currentWrong') });
+    try {
+      await byPassword.users.changePassword(email, next);
+    } catch (error) {
+      // Translated HERE, at the edge, and only here: the store throws a key, never a sentence.
+      const failure = UserInputError.from(error, 'api.password.invalid');
+      return json(res, 400, { error: i18n.t(languageOf(req), failure.key, failure.params) });
+    }
+    log('INFO', 'password_changed', { email });
+    return json(res, 200, { ok: true });
+  }
+
+  if (req.method === 'GET' && route === '/me') {
+    return json(res, 200, {
+      email,
+      role: roles.roleOf(email),
+      canApprove: roles.canApprove(email),
+      canTriage: roles.canTriage(email),
+      owner: roles.isOwner(email),
+      admins: roles.admins,
+      // The language this person reads in, decided here by the one rule the server's screens use —
+      // their own choice, then the browser, then the project — so the panel does not decide it a
+      // second way and speak Spanish on a page whose sign-in spoke Portuguese.
+      language: languageOf(req),
+      // Only exists with password login. Without it, reloading the page would forget the password
+      // is still the first-access one — and the change screen would only appear at login.
+      ...(byPassword ? { mustChangePassword: (await byPassword.fromRequest(req.headers))?.mustChangePassword ?? false } : {}),
+    });
+  }
+
+  // ---------------------------------------------------------------- people, and who may get in
+  //
+  // ⚠️ These routes exist ONLY with password identity, and the guard is `byPassword`. Behind an
+  // identity proxy there is no user store at all — who exists is the proxy's directory — so
+  // answering here would be inventing a second, empty source of truth for who works at the
+  // company. Without a store they fall through to the 405 at the bottom.
+  //
+  // ⚠️ Who may do this comes from `roles`, which reads HOLDRIM_OWNER and HOLDRIM_ADMINS — NOT from
+  // the user store. The two are different questions: the store answers "does this person have a
+  // way in", the configuration answers "what may they do". Putting the role in the row would
+  // create a second truth, and on the day they disagree nobody can say which one is the service.
+  if (byPassword && (await userRoutes(req, res, route, email, byPassword.users, languageOf(req)))) return;
+
+  if (req.method === 'GET' && route === '/events') {
+    const page = url.searchParams.get('page');
+    // ALL events of a request live on its own page (triage and the agent write with the request's
+    // page), so the filtered query is enough — no need to scan the whole collection.
+    const all = await events.list(page);
+    const threads = cycle.threadsOf(all);
+    return json(res, 200, all.map((e) => asRead(e, threads)));
+  }
+
+  const oneEvent = route.match(/^\/events\/([A-Za-z0-9_-]+)$/);
+  if (req.method === 'GET' && oneEvent) {
+    const all = await events.list(null);
+    const found = all.find((e) => e.id === oneEvent[1]);
+    return found
+      ? json(res, 200, asRead(found, cycle.threadsOf(all)))
+      : json(res, 404, { error: i18n.t(languageOf(req), 'api.event.notFound'), id: oneEvent[1] });
+  }
+
+  // The current fingerprint of blocks by id, read from the pages on disk. The panel computes the
+  // fingerprints of its own page in the browser; a block it depends on that lives on ANOTHER page is
+  // not in its DOM, and without this it would have to guess — and guessing "moved" paints every
+  // cross-page dependency red. Unknown ids are left out: a dependency that is gone is the panel's
+  // to judge, the same way the CLI does.
+  //
+  // No cap on how many ids: the answer holds only ids the site has, so it is never larger than the
+  // site, and the query is already bounded by the server's header limit. A cap would drop real ids
+  // silently, and the panel cannot tell a dropped id from a vanished one — it would paint red a
+  // dependency that never moved.
+  if (req.method === 'GET' && route === '/fingerprints') {
+    const ids = new Set((url.searchParams.get('ids') ?? '').split(',').filter(Boolean));
+    const blocks = await readBlocks(projectRoot);
+    return json(res, 200, Object.fromEntries([...ids].filter((id) => blocks.has(id))
+      .map((id) => [id, blocks.get(id)!.fingerprint])));
+  }
+
+  if (req.method === 'GET' && route === '/requests/open') {
+    const all = await events.list(null);
+    const threads = cycle.threadsOf(all);
+    const toTriage = all.filter((e) => e.type === 'request')
+      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.isAdmin(r.author)) === 'open').length;
+    return json(res, 200, { toTriage });
+  }
+
+  if (req.method === 'POST' && route === '/events') {
+    const incoming = (await jsonBody(req)) as NewEvent;
+    // The sentences on this path are for the person looking at the panel, so they come out of the
+    // dictionaries in the language they chose. `type` and the state values below do NOT: those are
+    // contract, and a value that changes with the reader's locale is a value nobody can match on.
+    const say = (key: string, params?: Record<string, string | number>) =>
+      i18n.t(languageOf(req), key, params);
+    const outcome = await recordEvent(incoming, email, say);
+    if (outcome.event) res.setHeader('location', `/api/events/${outcome.event.id}`);
+    return json(res, outcome.status, outcome.body);
+  }
+
+  return json(res, 405, { error: i18n.t(languageOf(req), 'api.route.notFound'), route });
+}
+
+/**
+ * Managing the people who may sign in. Returns true when it answered the request.
+ *
+ * Split out of `api()` because it is a self-contained subject with five routes and one rule that
+ * has to hold across all of them, and because a screen sits on top of it — the guards below are
+ * the whole contract that screen may rely on.
+ *
+ * ## What never leaves this function
+ *
+ * A generated password is returned EXACTLY ONCE, in the body of the request that generated it. It
+ * is never readable again, never in a `GET`, and never in a log line. That is not tidiness: this
+ * service writes one structured JSON line per fact, and on a hosted runtime those lines go to a
+ * collector that many more people can read than can ever sign in here. A password in a log is a
+ * password with a much wider audience than the account it opens.
+ */
+async function userRoutes(
+  req: IncomingMessage, res: ServerResponse, route: string, email: string,
+  users: UserStore, lang: string,
+): Promise<boolean> {
+  const say = (key: string, params?: Record<string, string | number>) => i18n.t(lang, key, params);
+  /** Owner and admin, and nobody else. `isAdmin` already counts the owner as one. */
+  const manages = () => roles.isAdmin(email);
+  const forbidden = () => (json(res, 403, { error: say('api.users.adminOnly') }), true);
+
+  // ---------------------------------------------------------------- the list
+  if (route === '/users' && req.method === 'GET') {
+    if (!manages()) return forbidden();
+    // `list()` hands back `User` objects: no salt, no hash, and no password — the plain one was
+    // never stored anywhere, so there is nothing here that could give one back.
+    json(res, 200, { users: await users.list() });
+    return true;
+  }
+
+  // ---------------------------------------------------------------- creating an access
+  if (route === '/users' && req.method === 'POST') {
+    if (!manages()) return forbidden();
+    const body = (await jsonBody(req)) as { email?: string; name?: string };
+    const address = normalizeEmail(String(body.email ?? ''));
+    if (!isEmailAddress(address)) {
+      // The bad value goes back in the message. "Invalid e-mail" next to a form with three fields
+      // is a message that makes the person guess which one, and guess what is wrong with it.
+      json(res, 400, { error: say('api.users.emailInvalid', { email: String(body.email ?? '') }) });
+      return true;
+    }
+    const name = String(body.name ?? '').trim();
+    if (!name) { json(res, 400, { error: say('api.name.empty') }); return true; }
+    if (name.length > MAX_NAME_LENGTH) {
+      json(res, 400, { error: say('api.name.tooLong', { max: MAX_NAME_LENGTH }) });
+      return true;
+    }
+    // ⚠️ Checked, AND caught below. The check is what produces a message worth reading; the catch
+    // is what covers two admins creating the same address at the same moment, where the check
+    // passes twice and the database is the only thing that can still say no.
+    // ⚠️ Nobody but the owner creates the OWNER's account, and this guard is the twin of the one
+    // on the reset route: guarding only that one would leave this door open, and a rule enforced
+    // on one path is not enforced.
+    //
+    // Being the owner is decided by HOLDRIM_OWNER, not by a column, so the account can legitimately
+    // not exist yet: `firstAccess` only runs while the store is EMPTY, so handing the role over —
+    // new address in the variable, store already full — leaves the owner's row missing. In that
+    // window any admin could create it, read the generated password from this very response, sign
+    // in, and from then on be the owner for every purpose: their ✓ locks, and nobody can disable
+    // them. They never needed the reset route at all.
+    if (roles.isOwner(address) && !roles.isOwner(email)) {
+      json(res, 409, { error: say('api.users.ownerIsProvisionedAtBoot', { email: address }) });
+      return true;
+    }
+    if (await users.find(address)) {
+      json(res, 400, { error: say('api.users.emailTaken', { email: address }) });
+      return true;
+    }
+    let password: string;
+    try {
+      password = await users.create(address, name);
+    } catch {
+      json(res, 400, { error: say('api.users.emailTaken', { email: address }) });
+      return true;
+    }
+    // The password is NOT in this line, and this is the line where it would be easiest to put it.
+    log('INFO', 'user_created', { email: address, by: email });
+    json(res, 201, { user: await users.find(address), password });
+    return true;
+  }
+
+  // ⚠️ `/users/me/name` is matched before the patterns below and cannot collide with them: `me` is
+  // not an address, and `isEmailAddress` is what every other route puts in that position.
+  if (route === '/users/me/name' && req.method === 'POST') {
+    // No role check, on purpose: this is the one route about the caller's OWN row. Anybody who got
+    // this far has a session, and correcting the spelling of your own name is not a privilege.
+    const body = (await jsonBody(req)) as { name?: string };
+    try {
+      await users.rename(email, String(body.name ?? ''));
+    } catch (error) {
+      const failure = UserInputError.from(error, 'api.name.invalid');
+      json(res, 400, { error: say(failure.key, failure.params) });
+      return true;
+    }
+    log('INFO', 'user_renamed', { email });
+    json(res, 200, { user: await users.find(email) });
+    return true;
+  }
+
+  // ---------------------------------------------------------------- a new password for somebody
+  const reset = route.match(/^\/users\/([^/]+)\/password$/);
+  if (reset && req.method === 'POST') {
+    if (!manages()) return forbidden();
+    const target = await found(reset[1]);
+    if (!target) return true;
+    // ⚠️ Nobody resets the OWNER's password but the owner. Without this an admin resets it, reads
+    // the new password from this very response, signs in as the owner — and from then on every ✓
+    // is signed with the owner's e-mail. In a method whose whole claim is "who approved this, and
+    // when", that is not privilege escalation in the abstract: it is the audit trail becoming a
+    // lie, with nothing in the record to show it happened.
+    //
+    // An owner who loses the password recovers it the way the invariant implies: whoever operates
+    // the service removes the account and restarts, and the first-access password is generated
+    // again. That is an operations act, on purpose — being the owner is configuration, not a
+    // button someone else can press.
+    if (roles.roleOf(target) === 'owner' && target !== email) {
+      return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
+    }
+    const password = await users.resetPassword(target);
+    // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
+    log('INFO', 'user_password_reset', { email: target, by: email });
+    json(res, 200, { user: await users.find(target), password });
+    return true;
+  }
+
+  // ---------------------------------------------------------------- taking the access away
+  const enabled = route.match(/^\/users\/([^/]+)\/enabled$/);
+  if (enabled && req.method === 'POST') {
+    if (!manages()) return forbidden();
+    const body = (await jsonBody(req)) as { enabled?: unknown };
+    // A missing field is not "false". Read as falsy, a body with a typo in the key would silently
+    // revoke somebody's access, which is the most expensive way to misread a request here.
+    if (typeof body.enabled !== 'boolean') {
+      json(res, 400, { error: say('api.users.enabledMissing') });
+      return true;
+    }
+    const target = await found(enabled[1]);
+    if (!target) return true;
+
+    // ⚠️ The owner cannot be disabled, not by an admin and not by themselves. `createRoles`
+    // refuses to start with anything other than exactly one owner, so a service whose owner cannot
+    // sign in is a service where nobody can approve and nobody can hand the role to anyone else —
+    // and the fix is a restart with a different environment variable, which is not something the
+    // person locked out can do from the screen they are looking at.
+    //
+    // 409 and not 403: 403 above means "you may not do this", and this is "this may not be done".
+    // Telling the two apart is the difference between asking an admin for help and understanding
+    // that the answer is in the configuration.
+    if (!body.enabled && roles.isOwner(target)) {
+      json(res, 409, { error: say('api.users.ownerCannotBeDisabled', { email: target }) });
+      return true;
+    }
+    await users.setEnabled(target, body.enabled);
+    log('INFO', 'user_enabled_changed', { email: target, enabled: body.enabled, by: email });
+    json(res, 200, { user: await users.find(target) });
+    return true;
+  }
+
+  return false;
+
+  /** The address in the path, if somebody is there. Answers 404 itself and returns null if not. */
+  async function found(segment: string): Promise<string | null> {
+    // ⚠️ `decodeURIComponent` THROWS on a half-written escape like `%zz`, and an uncaught throw
+    // here becomes a 500 with an incident id — the shape of an answer that says "the service is
+    // broken" about a request that was simply malformed. A path nobody can decode names nobody.
+    let target: string;
+    try {
+      target = normalizeEmail(decodeURIComponent(segment));
+    } catch {
+      json(res, 404, { error: say('api.users.notFound', { email: segment }) });
+      return null;
+    }
+    // ⚠️ `find` returns disabled people too, and it has to: giving an access back is a request
+    // about somebody who is, by definition, already disabled.
+    if (await users.find(target)) return target;
+    json(res, 404, { error: say('api.users.notFound', { email: target }) });
+    return null;
+  }
+}
+
+/** The only page served without a session. Self-contained on purpose: see engine/api/login.html. */
+const SIGN_IN_SCREEN = '/sign-in';
+
+
+
+/**
+ * Whoever is asking, or null. The one place identity is resolved: the API and the engine's screens
+ * both ask here, so a change to how people are identified cannot reach one and miss the other.
+ */
+async function viewerOf(req: IncomingMessage): Promise<string | null> {
+  return byPassword ? (await byPassword.fromRequest(req.headers))?.email ?? null : await iap!.email(req.headers);
+}
+
+/**
+ * Whether this viewer may manage people. One rule for the two places that ask: the route that
+ * serves the screen and the home that links to it — a link to a screen that then sends you away is
+ * a door painted on a wall. Password sign-in only: behind a proxy, people live in the proxy.
+ */
+const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.isAdmin(viewer));
+
+/** Headers for a screen the engine renders itself: never cached, framed by nobody, and its policy. */
+function screenHeaders(nonce: string, script: boolean) {
+  return {
+    'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
+    ...SECURITY_HEADERS, 'content-security-policy': screenPolicy(nonce, { script }),
+  };
+}
+
+async function servePeople(req: IncomingMessage, res: ServerResponse) {
+  const viewer = await viewerOf(req);
+  // Somebody who may not manage people is sent home rather than shown a refusal: the navigation
+  // never offered them this screen, so they got here by typing the address.
+  if (!byPassword || !managesPeople(viewer)) {
+    return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
+  }
+  const nonce = randomBytes(16).toString('base64');
+  res.writeHead(200, screenHeaders(nonce, true));
+  res.end(renderPeoplePage(i18n, languageOf(req), {
+    projectName: project.name, people: await byPassword.users.list(), roleOf: (e) => roles.roleOf(e),
+  }, projectTheme, nonce));
+}
+
+/**
+ * Whether a form post came from a page this server served.
+ *
+ * With password sign-in the session cookie is `SameSite=Strict`, so a form on another site arrives
+ * with no session and is refused at the guard anyway. Behind an identity proxy the cookie is the
+ * proxy's, and its rules are not ours to rely on — so the one screen that writes from a plain form
+ * checks where the post came from, and says no to anywhere else.
+ *
+ * A post that names no origin at all is refused too. Every current browser sends `Origin` on a
+ * POST, so the home's own form always has one; what arrives without it is a client that is not a
+ * browser, or something in between that stripped it — neither is the form this route exists for.
+ */
+function sameOrigin(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+}
+
+/**
+ * The home's two forms, posted back to it: "ask for a page" — a request with the `page` category,
+ * hanging on the page it was asked near — and, for whoever can approve, a triage decision on one
+ * request in progress. Both go through `recordEvent`, the same door the API uses, and both answer
+ * with a redirect back home, so a reload does not post twice. A refusal re-renders the home with
+ * the reason and the same status the API would have answered.
+ */
+async function homeForm(req: IncomingMessage, res: ServerResponse) {
+  const lang = languageOf(req);
+  const say = (key: string, params?: Record<string, string | number>) => i18n.t(lang, key, params);
+  const viewer = await viewerOf(req);
+  if (!viewer) return json(res, 401, { error: say('api.notAuthenticated') });
+  if (!sameOrigin(req)) return json(res, 403, { error: say('api.crossSite') });
+  const form = new URLSearchParams(await rawBody(req));
+
+  if (form.get('action') === 'triage') {
+    const incoming: NewEvent = {
+      type: 'request_state', page: form.get('page') ?? '', block: form.get('block') || null,
+      text: form.get('reason')?.trim() || null,
+      data: { request: form.get('request') ?? '', state: form.get('state') ?? '' },
+    };
+    const outcome = await recordEvent(incoming, viewer, say, 'home');
+    if (!outcome.event) {
+      return serveHome(req, res, { triage: { problem: String(outcome.body.error), request: form.get('request') ?? '',
+        reason: form.get('reason') ?? '' } }, outcome.status);
+    }
+    // The fragment lands the person on the confirmation. Without it the browser opens the home at
+    // the top, and on a phone the sentence saying it worked is a screen and a half below.
+    res.writeHead(303, { location: `${HOME_SCREEN}?decided=1#${HOME_SECTION.requests}` });
+    return res.end();
+  }
+
+  const incoming: NewEvent = {
+    type: 'request', page: form.get('page') ?? '', block: null, text: form.get('text') ?? '',
+    data: { category: 'page' },
+  };
+  const outcome = await recordEvent(incoming, viewer, say, 'home');
+  if (!outcome.event) {
+    return serveHome(req, res, { problem: String(outcome.body.error), draft: incoming.text ?? '', near: incoming.page },
+      outcome.status);
+  }
+  res.writeHead(303, { location: `${HOME_SCREEN}?asked=1#${HOME_SECTION.ask}` });
+  res.end();
+}
+
+async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOutcome = {}, status = 200) {
+  const lang = languageOf(req);
+  const all = await events.list(null);
+  // Only the owner's ✓ can become a lock, so only theirs is worth counting as waiting for one.
+  const ownerApprovals = all.filter((e) => e.type === 'approval' && roles.isOwner(e.author));
+  const pages = summarisePages(await readBlocks(projectRoot), loadRegistry(projectRoot), cfg.site, ownerApprovals,
+    (path) => readFileSync(path, 'utf8'));
+  const threads = cycle.threadsOf(all);
+  const requests = requestsInProgress(all,
+    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.isAdmin(r.author)),
+    new Map(pages.map((p) => [p.page, p.href])));
+  const viewer = await viewerOf(req);
+  // The decisions each request can take, for whoever may take them — the cycle's own list, the
+  // same one the panel draws its buttons from. Nobody else is offered a form the server refuses.
+  if (viewer && roles.canApprove(viewer)) {
+    for (const r of requests) {
+      const { triage, requiresReason } = cycle.status(r.state);
+      Object.assign(r, { triage, requiresReason });
+    }
+  }
+  const nonce = randomBytes(16).toString('base64');
+  res.writeHead(status, screenHeaders(nonce, false));
+  res.end(renderHomePage(i18n, lang, {
+    projectName: project.name, pages, requests,
+    canManagePeople: managesPeople(viewer), ask,
+  }, projectTheme, nonce));
+}
+
+// ---------------------------------------------------------------- static site
+// `lang` is carried in rather than read from the request because this function recurses on the
+// index page and never sees the headers again. Both answers it can give are read by a person.
+async function serveStatic(url: URL, res: ServerResponse, lang: string) {
+  const path = decodeURIComponent(url.pathname);
+  // Where the root leads comes from holdrim.json (`content.home`). Hard-coded here, it would be one
+  // project's home page, which is that project's, not the method's.
+  if (path === '/') return (res.writeHead(302, { location: project.home }), res.end());
+
+  // The review panel belongs to the ENGINE and lives next to the server — not inside the content.
+  // Without this route, pointing HOLDRIM_SITE at documentation mounted from outside would leave the
+  // panel without its own files: the page would load, and no review button would appear.
+  // `web` is the panel; `core` comes along because the panel imports `/engine/core/fingerprint.js`
+  // at run time rather than bundling it — the server and the browser must compute a fingerprint
+  // with the same file — so /engine/core/ has to answer or no fingerprint gets computed. `locales`
+  // because the panel speaks the reader's language with the dictionaries this server discovered:
+  // it fetches the one `/api/me` names, so a language added by copying one file reaches it too.
+  for (const folder of ['web', 'core', 'locales']) {
+    const prefix = `/engine/${folder}/`;
+    if (!path.startsWith(prefix)) continue;
+    const base = normalize(join(import.meta.dirname, '..', folder));
+    const safe = normalize(join(base, path.slice(prefix.length)));
+    if (!safe.startsWith(base + sep)) break;        // outside the engine folder
+    try {
+      await stat(safe);
+      return serveFile(safe, res);
+    } catch { break; /* not here: fall through to the site */ }
+  }
+
+  // normalize plus a prefix check: without it, `/../../etc/passwd` would escape the site folder.
+  const target = normalize(join(cfg.site, path));
+  if (!target.startsWith(normalize(cfg.site) + sep)) {
+    return json(res, 403, { error: i18n.t(lang, 'site.pathOutside') });
+  }
+  try {
+    const info = await stat(target);
+    if (info.isDirectory()) return serveStatic(new URL(url.href.replace(/\/?$/, '/index.html')), res, lang);
+    return serveFile(target, res, path);
+  } catch {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
+    res.end(i18n.t(lang, 'site.notFound'));
+  }
+}
+
+/**
+ * Headers that cost nothing and close two doors.
+ *
+ * They matter little while an identity proxy stands in front — nobody reaches a page without
+ * being let in first. The moment the service answers on the open internet with only a password,
+ * they stop being hygiene and start being the defence:
+ *
+ *   frame-ancestors 'none'   nobody can put the login screen, or the panel, inside an <iframe>.
+ *                            Without it, a hostile page can overlay an invisible "Approve" button
+ *                            on top of a real one — and an approval here is a lock in a repository.
+ *   nosniff                  the browser respects the content-type instead of guessing it. A file
+ *                            served as text does not get executed because it happened to look like
+ *                            a script.
+ *   referrer-policy          the address of an internal page does not leak to whatever is clicked.
+ */
+const SECURITY_HEADERS = {
+  'content-security-policy': "frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'same-origin',
+};
+
+/**
+ * What an API answer carries: the same, and a policy that runs nothing. JSON is data; a browser
+ * that ever renders one — opened directly, or sniffed despite `nosniff` by something old — has no
+ * reason to execute or load anything from it, so it is told so.
+ */
+const API_HEADERS = { ...SECURITY_HEADERS, 'content-security-policy': "default-src 'none'; frame-ancestors 'none'" };
+
+/** Serves a file from disk. Used both by the site and by the engine's own files. */
+async function serveFile(target: string, res: ServerResponse, urlPath = '') {
+  const ext = extname(target).toLowerCase();
+  // The theme (fonts and icons) does not change: cache it for real. With no-cache the browser
+  // would revalidate the menu icons on every navigation, and because they arrive through
+  // mask-image, the menu would flicker.
+  const cache = urlPath.includes('/theme/') ? 'public, max-age=31536000, immutable' : 'no-cache';
+  res.writeHead(200, {
+    'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
+    'cache-control': cache,
+    'x-robots-tag': 'noindex, nofollow',
+    ...SECURITY_HEADERS,
+  });
+  res.end(await readFile(target));
+}
+
+// ---------------------------------------------------------------- the server
+const server = createServer(async (req, res) => {
+  // A fixed base, not the Host header, and inside a guard. `http://${host}` from a request saying
+  // `Host: a b` would throw here, before the try below, and an async handler that throws is an
+  // unhandled rejection: one line from anyone who can reach the port, and the process is gone.
+  // Nothing reads the host back out of this URL — `sameOrigin` reads the header itself.
+  let url: URL;
+  try {
+    url = new URL(req.url ?? '/', 'http://localhost');
+  } catch {
+    return json(res, 404, { error: i18n.t(languageOf(req), 'api.route.notFound') });
+  }
+  try {
+    if (url.pathname === '/api/health') return json(res, 200, { ok: true });
+
+    // Before the authentication guard on purpose: the login screen is where most people change
+    // language, and it is the one page they can reach without a session.
+    if (url.pathname === LANGUAGE_ROUTE) {
+      const headers = languageSwitch(url, i18n.languages, cfg.environment !== 'Development');
+      return (res.writeHead(302, headers), res.end());
+    }
+
+    // Every write to the API says it is JSON, or it is refused before anything reads it. A form on
+    // another site can post `text/plain` without the browser asking first, and a body that happens
+    // to parse as JSON, taken as the real call, would be — behind an identity proxy, where the
+    // cookie is not ours to make `SameSite=Strict` — an approval cast in the owner's name by a page
+    // they merely visited. `application/json` cannot be sent cross-site without a CORS
+    // preflight, which this server never answers, so the browser stops the forgery itself.
+    if (url.pathname.startsWith('/api/') && req.method === 'POST' && !declaresJson(req)) {
+      return json(res, 415, { error: i18n.t(languageOf(req), 'api.jsonOnly') });
+    }
+
+    // /api/sign-in is the only API route without a session: it is the one that creates it.
+    if (byPassword && url.pathname === '/api/sign-in' && req.method === 'POST') {
+      const body = await jsonBody(req);
+      // Strings or nothing: `{"email": 1}` would reach `.trim()` and come back as a 500 and an
+      // ERROR line, from anyone, before any session exists. Refused the same way as a wrong
+      // password.
+      const email = typeof body.email === 'string' ? body.email : '';
+      const password = typeof body.password === 'string' ? body.password : '';
+      const r = await byPassword.signIn(email, password);
+      if (!r) {
+        // The same answer for an unknown e-mail and a wrong password: saying which of the two
+        // failed hands over who has an account. The response time matches too (see users.ts).
+        // The address as typed, but never more of it than an address can be: signIn refuses an
+        // oversized one before the throttle sees it, so unsliced, each such refusal would write up
+        // to a megabyte into the log, as often as anyone cared to ask.
+        log('WARNING', 'sign_in_refused', { email: email.slice(0, PasswordIdentity.MAX_EMAIL) });
+        return json(res, 401, { error: i18n.t(languageOf(req), 'api.credentials.invalid') });
+      }
+      res.setHeader('set-cookie', byPassword.sessionCookie(r.session));
+      log('INFO', 'signed_in', { email: r.user.email, mustChangePassword: r.user.mustChangePassword });
+      return json(res, 200, { email: r.user.email, name: r.user.name, mustChangePassword: r.user.mustChangePassword });
+    }
+
+    if (url.pathname.startsWith('/api/')) {
+      const email = await viewerOf(req);
+      if (!email) return json(res, 401, { error: i18n.t(languageOf(req), 'api.notAuthenticated') });
+      return await api(req, res, url, email);
+    }
+
+    // With an identity proxy, the edge blocks before anything reaches here. With password login
+    // there is no edge at all: without this guard the entire documentation would be open to anyone
+    // who can reach the port — and whoever started the image believing they had configured a login
+    // would have no way to suspect otherwise.
+    if (byPassword && !(await byPassword.fromRequest(req.headers))) {
+      if (url.pathname === SIGN_IN_SCREEN) {
+        // ⚠️ SECURITY_HEADERS here is not decoration: the login screen goes through neither json()
+        // nor serveFile(), so without it this would be the ONE page without `frame-ancestors
+        // 'none'` — the exact page the comment on those headers names as the clickjacking target.
+        // A rule applied everywhere except where it matters.
+        // A fresh nonce per response: it is what lets the page's own script and styles run under a
+        // policy that runs nothing else. See `signInPolicy` in engine/api/login-page.ts.
+        const nonce = randomBytes(16).toString('base64');
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
+          ...SECURITY_HEADERS, 'content-security-policy': signInPolicy(nonce),
+        });
+        // The text goes in before the bytes leave: no untranslated flash, no second request, and
+        // the labels are there with JavaScript off. See engine/api/login-page.ts.
+        return res.end(renderLoginPage(i18n, languageOf(req), url.pathname + url.search, projectTheme, nonce));
+      }
+      const next = encodeURIComponent(url.pathname + url.search);
+      return (res.writeHead(302, { location: `${SIGN_IN_SCREEN}?next=${next}` }), res.end());
+    }
+    // With a session already in hand, the login screen has nothing to do: send them to the site.
+    if (byPassword && url.pathname === SIGN_IN_SCREEN) {
+      return (res.writeHead(302, { location: '/' }), res.end());
+    }
+
+    if (url.pathname === HOME_SCREEN) {
+      return req.method === 'POST' ? await homeForm(req, res)
+        : await serveHome(req, res, { asked: url.searchParams.has('asked'), decided: url.searchParams.has('decided') });
+    }
+    if (url.pathname === PEOPLE_SCREEN) return await servePeople(req, res);
+
+    return await serveStatic(url, res, languageOf(req));
+  } catch (error) {
+    // Thrown by a reader of the request, not by the service: the person's to fix, so a 400 that
+    // says what, and nothing in the error log.
+    if (error instanceof UserInputError) {
+      return json(res, 400, { error: i18n.t(languageOf(req), error.key, error.params) });
+    }
+    const id = crypto.randomUUID().slice(0, 8);
+    log('ERROR', 'unhandled_error', {
+      id, path: url.pathname, reason: error instanceof Error ? error.message : String(error),
+    });
+    // The reason is in the log and NOT in the reply: a stack trace or a database message handed to
+    // whoever asked is free reconnaissance. The id is what ties the screen to the log line — the
+    // person quotes eight characters and whoever operates greps for them. So the id is inside the
+    // sentence too: every screen shows `error` and none shows `id`, and a person who cannot see the
+    // eight characters has nothing to quote.
+    json(res, 500, { error: i18n.t(languageOf(req), 'api.internal', { id }), id });
+  }
+});
+
+server.listen(cfg.port, () => {
+  log('INFO', 'server_listening', {
+    port: cfg.port, environment: cfg.environment, identity: identityKind, events: eventsKind,
+    // Which user store is in play, said out loud at boot. Whoever is losing accounts on Cloud Run
+    // needs one grep to find out they are on a disk that does not survive the instance.
+    // ⚠️ The KIND, never the URL: `postgres://user:password@host/db` in a log line is the database
+    // password in the log collector, readable by everyone who can read logs.
+    users: byPassword ? userStoreKind(process.env.HOLDRIM_USERS) : null,
+    localMode: iap?.localMode ?? false, site: cfg.site,
+  });
+});
