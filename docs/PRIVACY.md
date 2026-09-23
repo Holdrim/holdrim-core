@@ -29,20 +29,44 @@ and they live outside the trail, where they can be removed.
 ### 1. An event is signed by an id, not an e-mail
 
 Every event's `author` becomes an opaque id, random, one per person (`p_` and 24 hex characters).
-The id means something only through a registry of people — id, e-mail, name — kept next to the
-events in the same store, in every identity mode: with passwords, where people already have
-accounts, and behind a proxy, where a person is added the first time they are seen.
+The id means something only through the **people table**: the id and the e-mail, and nothing else.
+It lives next to the events, in the same store, because that is what every reader of events can
+reach — the CLI reads a local events file or the cloud directly, and never the accounts. It exists
+in every identity mode: behind a proxy a person is added the first time they are seen; with
+passwords, when their account is. Names stay where they already are, in the accounts of password
+sign-in; the people table does not copy them, so there is one place each fact can disagree with.
 
-Everything that reads events goes on reading e-mails: the store resolves ids on the way out, in the
-one function every reader uses — the server, `holdrim sync` reading a local file, and the CLI
-reading the cloud directly. The panel, the home and the CLI's output do not change.
+Readers go on getting e-mails. Today four places build an event from what is stored: the two stores
+the server uses, and the two readers of the CLI — the local events file and the cloud over REST
+(`engine/cli/remote.ts`). Each will hand its rows, and the people table's, to one resolver that
+all four import, so the rule of what an id means is written once. The panel, the home and the CLI's
+output do not change.
+
+The people table can lose an e-mail and can never gain another: the store refuses any change to a
+row but emptying it, by trigger where the database allows one. A person whose address changes is a
+new person, with a new id. Otherwise a row re-pointed at another address would make every event
+behind that id someone else's.
 
 **Why random, and not a hash of the e-mail.** A keyed hash can be recomputed by whoever holds the
 key: try an e-mail, compare, and the person is back. That is pseudonymisation, and the law treats
-pseudonymous data as personal data still. A random id whose registry row has been emptied points
-at nobody.
+pseudonymous data as personal data still. A random id whose row has been emptied points at nobody.
 
-### 2. Free text lives outside the trail
+### 2. What an event means is decided when it is written
+
+Today, whether a ✓ is a lock is worked out every time it is read, by asking whether its author is
+the owner **now** — the server does it for the panel, `holdrim sync` does it for the repository, and
+the cycle does the same for "an admin's request starts triaged". So a fact recorded years ago can
+change meaning without a single event changing: the owner hands over, and every ✓ of theirs not yet
+synced stops being a lock, with nothing in the trail to say so. An anonymised person would lose it
+the same way.
+
+So the role of the author — owner, admin or other — is written on the event when the server records
+it, from `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` at that moment, and every reader uses what is written.
+A ✓ given by the owner stays the owner's ✓ after they hand over, after they are removed, after
+anything. The owner is still named only by `HOLDRIM_OWNER`, and only the server writes a role:
+what changes is that a role, once written on a fact, is part of the fact.
+
+### 3. Free text lives outside the trail
 
 The text of a request, a comment, a reply or a supplement, and the `snapshot` of the block at the
 moment of an event, move out of the event into a table of texts, one row per event and field. The
@@ -51,20 +75,30 @@ event keeps a salted hash of each text; the salt lives with the text.
 - While the text is there, the hash proves it is the text that was recorded.
 - When the text is removed, the salt goes with it, so the hash can no longer be tested against a
   guess — a CPF has few enough possibilities that an unsalted hash of it would be the CPF.
-- The event stays, and readers are told the text was removed and when, instead of seeing nothing.
+- Every removal is itself an event. A reader is told a text was removed, when and by whom; a text
+  that is missing with no such event is shown as missing, which is what tampering looks like.
 
-The documentation's own text is not in here: it lives in the project's repository, and removing a
-sentence from it is a commit, with its own history.
+A `snapshot` is not the person's words: it is the block's text at that moment, the documentation's
+own. It is kept out of the event for the same reason — it can hold what the documentation should
+not have held — but it is removed only on its own account, never because the person who happened
+to act on it was removed. It is, with the fingerprint, what an approval vouches for.
 
-### 3. Removing a person: anonymised, never deleted
+The documentation's own text lives in the project's repository, and removing a sentence from it is a
+commit, with its own history.
+
+### 4. Removing a person: anonymised, never deleted
 
 "People are disabled, never deleted" stays. It gains one step, taken only by the **owner**, at the
 person's request:
 
-- the person's registry row keeps its id and loses its e-mail and name;
-- their password and open sessions are dropped, as disabling already does;
-- every text they wrote is removed, as above;
+- the person's row in the people table keeps its id and loses its e-mail;
+- their account, under password sign-in, loses its e-mail and name, its password and its open
+  sessions — disabling already drops the last two;
+- every `text` they wrote is removed, as above — the snapshots on their events stay;
 - an event records that a person was removed, by whom and when — with ids only.
+
+Nothing an approval stands on is touched: the event, its fingerprint, its snapshot and the role it
+was given with all stay, so a lock stays a lock and says what it locked.
 
 The owner cannot remove themselves: the owner comes from `HOLDRIM_OWNER`, and has to hand over
 before leaving. An admin can ask the owner; only the owner acts, for the same reason only the owner
@@ -72,11 +106,12 @@ resets the owner's account.
 
 Until the tool exists, the same steps are a documented procedure the operator runs on the database.
 
-### 4. What the engine writes elsewhere
+### 5. What the engine writes elsewhere
 
-- **Commits.** The brief `holdrim apply` hands the agent asks for a `Requested-by:` trailer with the
-  requester's e-mail, and a commit is forever in the project's history. The trailer becomes the
-  request's id alone; who asked is one lookup away, in the place where it can be removed.
+- **Commits.** The brief that `holdrim apply` hands the agent asks for two trailers, `Request:` with
+  the request's id and `Requested-by:` with the requester's e-mail — and a commit stays in the
+  project's history for good. `Requested-by:` goes. `Request:` already names the request, and who
+  asked is found from it, in the place where it can be removed.
 - **Logs.** Log lines carry the person's id instead of the e-mail wherever there is one. A refused
   sign-in still logs the address that was typed: that is the line an operator needs to see an
   attack, and there is no person behind it yet.
@@ -84,11 +119,20 @@ Until the tool exists, the same steps are a documented procedure the operator ru
   start of the block's own text and the event's id; the page's `data-validated` holds a date. Neither
   names anybody.
 
+### 6. What changes with it
+
+These describe today's format and move in the same change that replaces it, so no document goes on
+describing the old one: `docs/GLOSSARY.md` (the event fields `author`, `text` and `snapshot`, and
+**disabled**, which says a person cannot be removed), `docs/METHOD.md` (the commit trailers of the
+request cycle), `docs/BUGS.md` (why the trailer carries the person), and, in `AGENTS.md`, the
+invariants "Nothing is erased" and "Only the owner's ✓ becomes a lock" — the second to say a lock is
+the ✓ of whoever was the owner when it was given.
+
 ## What Holdrim cannot remove
 
 Said here so nobody promises it:
 
-- the project's git history — a commit made before the trailer changed keeps the e-mail;
+- the project's git history — a commit made before `Requested-by:` went keeps the e-mail;
 - an exported copy of the documentation, once published;
 - log lines already shipped to a collector, and backups of the database — the operator's retention;
 - anything in the documentation text itself, which is the project's content.
@@ -99,8 +143,9 @@ Said here so nobody promises it:
 |---|---|
 | Events never altered or deleted (SQLite by trigger) | ✅ built |
 | People disabled, never deleted | ✅ built |
-| `author` as an opaque id, registry of people in every mode | ⬜ 0.1.0 |
-| Free text and snapshot outside the event, salted hash inside | ⬜ 0.1.0 |
-| `Requested-by:` without an e-mail, ids in logs | ⬜ 0.1.0 |
+| `author` as an opaque id, a people table in every mode, one resolver | ⬜ 0.1.0 |
+| The author's role written on the event, never recomputed on read | ⬜ 0.1.0 |
+| Free text and snapshot outside the event, salted hash inside, removals as events | ⬜ 0.1.0 |
+| Commits without `Requested-by:`, ids in logs | ⬜ 0.1.0 |
 | Removing a person, documented procedure | ⬜ 0.1.0 |
 | Removing a person, from the people screen | ⬜ 0.2 |
