@@ -259,7 +259,7 @@ test('sync refuses two owners, or none, before it asks the cloud for a single ev
   assert.equal(asked, 0, 'the cloud is not asked while there is no single owner');
 });
 
-test('sync knows the owner however the address is typed in the configuration', async (t) => {
+test('sync knows the owner however the address is typed, in the configuration or on the event', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
   cpSync(EXAMPLE, tmp, { recursive: true });
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -267,9 +267,14 @@ test('sync knows the owner however the address is typed in the configuration', a
   const events = [
     { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
       author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: null },
+    { id: 'e2', type: 'approval', page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
+      author: ' OWNER@example.org ', when: '2026-09-22T10:01:00Z', data: null },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: '  Owner@Example.org ' });
-  assert.equal(r.added, 1, "the owner's ✓ locks with spaces and capitals around the configured address");
+  const registry = loadRegistry(tmp);
+  assert.ok(registry['A01.1.1'], "the owner's ✓ locks with spaces and capitals around the configured address");
+  assert.ok(registry['A02.1.1'], "and with spaces and capitals around the event's author");
+  assert.equal(r.added, 2);
 });
 
 test('the Source refuses a cloud with no project, instead of sending an invalid URL', async () => {
