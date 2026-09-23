@@ -212,9 +212,8 @@ export function renderLoginPage(
  * here or a `data:` URI, which is how `loadTheme` hands over the logo; requests only back to this
  * server; forms only to this server; no `<base>` to repoint relative URLs; no framing.
  *
- * The documentation pages do NOT get this policy, and that is not an oversight: they are the
- * adopter's HTML, with the adopter's scripts, and a policy the engine imposes on them would break
- * whoever wrote them an inline script. They keep `frame-ancestors 'none'`, which breaks nobody.
+ * The documentation pages get a policy of their own (content-policy.ts): the panel runs there and
+ * nothing else does, and they keep their own styles, which this one would refuse.
  *
  * `'unsafe-inline'` appears nowhere on purpose. A policy that allows inline script allows the
  * injected kind too, which is the only kind a policy exists to stop.

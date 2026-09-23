@@ -39,6 +39,10 @@ The first version. There is nothing before it to break.
   every page, so a page needs no link of its own that an exported copy would leave dead.
   Only the owner's ✓ turns a block green, as only theirs becomes a lock: an admin's is recorded,
   and the panel shows it as an admin's.
+- **A page runs the panel and nothing else.** Every documentation page is served with a
+  Content-Security-Policy whose nonce only the panel's tag carries, so a script written into the
+  content — by a person, or by an agent following an instruction hidden in a document — cannot act
+  with the reader's session. A page cannot bring scripts of its own.
 - **The CLI, `holdrim`**: `lights`, `if-i-touch`, `index`, `check`, `kinds`, `export`, and the request
   cycle, `list`, `show`, `impact`, `apply` and `state`. `apply` hands a request to the agent CLI the
   person already has. The engine calls no model and holds no key.

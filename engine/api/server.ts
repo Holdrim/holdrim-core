@@ -16,6 +16,7 @@ import {
 } from './users.ts';
 import { log } from './log.ts';
 import { renderLoginPage, signInPolicy, screenPolicy } from './login-page.ts';
+import { withPanelNonce, pagePolicy, FILE_POLICY } from './content-policy.ts';
 import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
 import { renderPeoplePage } from './people-page.ts';
 import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
@@ -867,7 +868,7 @@ async function serveStatic(url: URL, res: ServerResponse, lang: string) {
   try {
     const info = await stat(target);
     if (info.isDirectory()) return serveStatic(new URL(url.href.replace(/\/?$/, '/index.html')), res, lang);
-    return serveFile(target, res, path);
+    return serveFile(target, res, path, true);
   } catch {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
     res.end(i18n.t(lang, 'site.notFound'));
@@ -902,20 +903,29 @@ const SECURITY_HEADERS = {
  */
 const API_HEADERS = { ...SECURITY_HEADERS, 'content-security-policy': "default-src 'none'; frame-ancestors 'none'" };
 
-/** Serves a file from disk. Used both by the site and by the engine's own files. */
-async function serveFile(target: string, res: ServerResponse, urlPath = '') {
-  const ext = extname(target).toLowerCase();
+/**
+ * Serves a file from disk. Used both by the site and by the engine's own files; a file of the SITE
+ * also carries what it may run (see content-policy.ts).
+ */
+async function serveFile(target: string, res: ServerResponse, urlPath = '', fromSite = false) {
+  const type = MIME_TYPES[extname(target).toLowerCase()] ?? 'application/octet-stream';
   // The theme (fonts and icons) does not change: cache it for real. With no-cache the browser
   // would revalidate the menu icons on every navigation, and because they arrive through
   // mask-image, the menu would flicker.
   const cache = urlPath.includes('/theme/') ? 'public, max-age=31536000, immutable' : 'no-cache';
-  res.writeHead(200, {
-    'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
-    'cache-control': cache,
-    'x-robots-tag': 'noindex, nofollow',
-    ...SECURITY_HEADERS,
-  });
-  res.end(await readFile(target));
+  const headers: Record<string, string> = {
+    'content-type': type, 'cache-control': cache, 'x-robots-tag': 'noindex, nofollow', ...SECURITY_HEADERS,
+  };
+  let body = await readFile(target);
+  if (fromSite && type.startsWith('text/html')) {
+    const nonce = randomBytes(16).toString('base64');
+    body = Buffer.from(withPanelNonce(body.toString('utf8'), nonce));
+    headers['content-security-policy'] = pagePolicy(nonce);
+  } else if (fromSite) {
+    headers['content-security-policy'] = FILE_POLICY;
+  }
+  res.writeHead(200, headers);
+  res.end(body);
 }
 
 // ---------------------------------------------------------------- the server
