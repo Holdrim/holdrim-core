@@ -403,6 +403,11 @@ expect "and it links every page it tallies"   0 "$(grep -qF 'href="/pages/A01.ht
 # page — and, worse, the fingerprint the browser computes ends up matching text that has already
 # changed on disk.
 expect "HTML is not cached"            0 "$(curl -s -b $COOKIES -D- -o /dev/null $B/pages/A01.html | has -i 'cache-control: no-cache'; echo $?)"
+# Every file served from disk carries what it may run, the engine's own included: a page, only the
+# panel; anything else, nothing. Without the second, an HTML file shipped next to the panel one day
+# would run whatever it holds with the reader's session.
+expect "a page runs only what carries its nonce" 0 "$(curl -s -b $COOKIES -D- -o /dev/null $B/pages/A01.html | has "script-src 'nonce-"; echo $?)"
+expect "an engine file runs nothing"   0 "$(curl -s -b $COOKIES -D- -o /dev/null $B/engine/web/panel.css | has "script-src 'none'"; echo $?)"
 expect "and /sign-in no longer has anything to do" 302 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' $B/sign-in)"
 # A current password that is not a string would reach `.normalize()` and answer 500; it is a wrong one.
 expect "a current password that is a number → 403, like any wrong one" 403 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"current":1,"next":"a-long-enough-password"}' $B/api/change-password)"
