@@ -46,8 +46,10 @@ function project(t) {
   writeFileSync(join(root, 'data', 'dump.html'), '<p>an export of the events</p>');
   mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true });
   writeFileSync(join(root, 'node_modules', 'pkg', 'index.html'), '<p>a dependency</p>');
-  // Written by a tool that capitalises: still an image, still published.
-  writeFileSync(join(root, 'Logo.SVG'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  // Written by a tool that capitalises: still an image, still published. Its name differs from
+  // logo.svg by more than case: on a disk that folds case, macOS's default, the two would be one
+  // file, and the test would fail there for a reason no change to the export can fix.
+  writeFileSync(join(root, 'Banner.SVG'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
   return root;
 }
 
@@ -57,7 +59,7 @@ test('only what a browser renders goes out: never the config, the registry or an
   const counted = exportSite(root, out);
   const files = (dir, base = '') => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
     e.isDirectory() ? files(join(dir, e.name), `${base}${e.name}/`) : [`${base}${e.name}`]).sort();
-  assert.deepEqual(files(out), ['Logo.SVG', 'logo.svg', 'pages/A01.html', 'style/s.css'],
+  assert.deepEqual(files(out), ['Banner.SVG', 'logo.svg', 'pages/A01.html', 'style/s.css'],
     'an extension in capitals is the same extension; node_modules and data are never walked');
   assert.deepEqual(counted, { pages: 1, files: 3 });
 });
