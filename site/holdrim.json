@@ -1,0 +1,21 @@
+{
+  "_read": [
+    "Holdrim's own site, written as a Holdrim project: every sentence on it is a block the owner",
+    "approves, and a claim that stops being true turns yellow or red like anyone else's. It is served",
+    "by the engine itself.",
+    "",
+    "  HOLDRIM_OWNER=you@example.org HOLDRIM_SITE=$PWD/site docker compose up",
+    "",
+    "The owner is set where it is deployed, never here: this file travels in a public repository."
+  ],
+
+  "name": "Holdrim",
+
+  "content": {
+    "folders": ["pages"],
+    "registry": "approvals.json",
+    "home": "/pages/S01.html",
+    "trimPrefix": "pages/",
+    "pageExamples": "S01 or S02"
+  }
+}
