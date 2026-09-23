@@ -1,19 +1,25 @@
 # Holdrim — living documentation
 
-> Proposal · `2026-09-20` · nothing here is finished, and much of it has not been started.
+> Proposal · `2026-09-20`, mission and vision `2026-09-23` · nothing here is finished, and much of
+> it has not been started.
 
 ## Mission
 
-**A method, and a platform for it, with which anyone can build a complex system that lasts, scales
-and stays easy to maintain — because its business rules are understood through its documentation,
-and the documentation is the centre of the work, not a by-product of it.**
+**The approved document is the system's source of truth: the people who know the business
+write it and approve it, an AI agent facilitates the building, and the code stays in view of anyone
+who wants to validate it.**
 
 ## Vision
 
-**Building software is for everyone.** If you know what you want, you explain it to the computer,
-and that explanation is the program. What changes is the language: not the symbols few people could
-read, but plain text, written until no second reading is possible — every term defined, every rule
-proved, every dependency declared. Holdrim is where that text is kept honest.
+**Technical and non-technical people alike create, maintain and refactor complex systems
+starting from their business rules.** The reviewed and approved documentation comes before any line of
+code or any screen, so nobody redoes work for want of a rule — neither the people nor an agent
+spending tokens on a guess.
+
+The language is plain text, written until no second reading is possible — every term defined, every
+rule proved, every dependency declared. Holdrim is where that text is kept honest. The agent is a
+facilitator: it writes what was asked and applies what was approved, and the approving stays with
+people.
 
 Systems built this way are not islands. A cash register built on Holdrim and the sales system of its
 supplier, built on Holdrim too, describe their contracts in the same shape, so connecting them is

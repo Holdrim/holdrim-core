@@ -19,8 +19,9 @@ it belongs in their config instead.
 **1. Nothing in Portuguese.** Not an identifier, a comment, a string, a test name, a column or a
 commit message. The repository is public, and someone who opens it and sees another language closes
 the tab. `scripts/check-language.sh` enforces comments in CI.
-*The one exception:* the translated values in `engine/locales/pt-BR.json` and `es.json`. Everything
-that is contract — event vocabulary, `data-*` attributes, `HOLDRIM_*` variables, the keys of
+*The two exceptions:* the translated values in `engine/locales/pt-BR.json` and `es.json`, and the
+README's translations, `README.pt-BR.md` and `README.es.md`, which `engine/tests/docs.test.js` keeps
+in step with the English they translate. Everything that is contract — event vocabulary, `data-*` attributes, `HOLDRIM_*` variables, the keys of
 `holdrim.json` — is English, and there is no layer that translates any of it on read.
 
 **2. Green is not proof.** A passing suite is not the same claim as "it works". A suite stays green

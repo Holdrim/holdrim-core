@@ -2,20 +2,38 @@
 
 Documentation that tells you when it stopped being true.
 
-You write documentation in HTML. Reviewers approve it block by block in the browser. Every approval
-records who approved, when — and **which exact text** they approved. Change one letter and the
-approval stops holding, because nobody approved the new text.
+[Português](README.pt-BR.md) · [Español](README.es.md)
 
-That last part is the whole point. Most documentation does not die from neglect; it dies because
-**nothing tells you it went stale**. The document does not know the code changed. The use case does
-not know the rule changed. The diagram does not know the screen changed.
+**Mission.** The approved document is the system's source of truth: the people who know the business
+write it and approve it, an AI agent facilitates the building, and the code stays in view of anyone
+who wants to validate it.
 
-Holdrim is the engine only: your documentation keeps its own repository and mounts into the image.
+**Vision.** Technical and non-technical people alike create, maintain and refactor complex systems
+starting from their business rules. The reviewed and approved documentation comes before any line of
+code or any screen, so nobody redoes work for want of a rule — neither the people nor an agent
+spending tokens on a guess.
 
-**Why it exists:** so that anyone who knows what they want can build a system that lasts, by writing
-down its rules until nobody can read them two ways, and keeping that text true. The mission and the
-vision are in [`docs/VISION.md`](docs/VISION.md); what is being built next, in
-[`ROADMAP.md`](ROADMAP.md).
+## How it works
+
+1. **Say what the product must do, in plain words.** Ask for a page from the project's home, or for
+   a change to any block of one; once the request is accepted, your own AI agent writes it. Every
+   rule of the product lives in the documentation before it lives anywhere else.
+2. **Approve it, block by block.** An approval records who approved, when, and **which exact text**.
+   Change one letter and it stops holding, because nobody approved the new text. Only the owner's ✓
+   becomes a lock; an agent may apply a change, and never approve one.
+3. **Build from what was approved.** The approved pages — screens, data model, use cases, contracts —
+   are what your agent and your engineers build from, and the code sits in its repository for anyone
+   to read against them.
+4. **Know when it stopped being true.** When a rule changes, every block that rested on it turns 🔴,
+   on its own page, without a letter of it changing.
+
+The agent is whichever one you already use — Claude Code, Codex, Gemini — on your machine and your
+account. The engine calls no model and holds no API key.
+
+Holdrim is the engine, the way Keycloak is the engine behind a sign-in: a Docker image your project
+runs and configures, while your documentation keeps its own repository and mounts into it. More of
+the vision, and what the agent does and never does, in [`docs/VISION.md`](docs/VISION.md); what is
+being built next, in [`ROADMAP.md`](ROADMAP.md).
 
 ## In two minutes
 
@@ -60,6 +78,8 @@ while reading the page — because **on the page, nothing changed**.
 **Red is a question, not an error.** The engine does not know the block became wrong; it knows it
 became suspect. Treating it as an error would make people switch the check off at the first false
 positive, and then the whole lock is pointless.
+
+<!-- translated: everything above this line is also in README.pt-BR.md and README.es.md -->
 
 ## See it turn red
 
