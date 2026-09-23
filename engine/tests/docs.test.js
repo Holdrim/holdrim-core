@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { normalize } from '../core/fingerprint.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const read = (path) => readFileSync(join(ROOT, path), 'utf8');
@@ -95,8 +96,11 @@ test('the glossary names every request category the cycle has, and no other', ()
   assert.deepEqual(listed, Object.keys(cycle.request_categories).sort());
 });
 
-/** Text a reader sees, whatever wrote it: no tags, no bold marks, one space between words. */
-const words = (s) => s.replace(/<[^>]+>/g, ' ').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+/** Text a reader sees, whatever wrote it: no tags, no bold marks, and the fingerprint's own spacing. */
+const words = (s) => normalize(s.replace(/<[^>]+>/g, ' ').replace(/\*\*/g, ''));
+
+/** The paragraph that starts right after `start`, up to the next blank line; empty when absent. */
+const paragraphAfter = (text, start) => (text.split(start)[1] ?? '').trim().split(/\n\s*\n/)[0];
 
 /**
  * The mission and the vision are written in three places a visitor meets them — the README, the
@@ -105,15 +109,17 @@ const words = (s) => s.replace(/<[^>]+>/g, ' ').replace(/\*\*/g, '').replace(/\s
  */
 test('the mission and the vision say the same thing wherever they are written', () => {
   const vision = read('docs/VISION.md');
-  const section = (title) => words(vision.split(`## ${title}\n`)[1].trim().split('\n\n')[0]);
+  const section = (title) => words(paragraphAfter(vision, `## ${title}\n`));
   const mission = section('Mission');
   // The vision section goes on after its first paragraph; the statement is that paragraph.
   const statement = section('Vision');
   assert.ok(mission.length > 40 && statement.length > 40, 'the mission or the vision was not found in docs/VISION.md');
 
-  const readme = words(read('README.md'));
-  assert.ok(readme.includes(`Mission. ${mission}`), 'README.md does not carry the mission of docs/VISION.md');
-  assert.ok(readme.includes(`Vision. ${statement}`), 'README.md does not carry the vision of docs/VISION.md');
+  // The paragraph a reader meets, not the words anywhere in the file: a copy further down would
+  // otherwise vouch for a first paragraph that says something else.
+  const readme = read('README.md');
+  assert.equal(words(paragraphAfter(readme, '**Mission.**')), mission, 'README.md\'s mission is not the one in docs/VISION.md');
+  assert.equal(words(paragraphAfter(readme, '**Vision.**')), statement, 'README.md\'s vision is not the one in docs/VISION.md');
 
   const site = read('site/pages/S01.html');
   const block = (id) => words(site.split(`data-id="${id}"`)[1].split('</div>')[0].replace(/^[^>]*>/, ''));

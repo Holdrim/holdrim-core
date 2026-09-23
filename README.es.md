@@ -4,7 +4,7 @@ Documentación que avisa cuando dejó de ser verdad.
 
 [English](README.md) · [Português](README.pt-BR.md)
 
-<!-- source: README.md up to the translated marker, sha256 2ac801fd30c302fb016fcd2498cafffc48f96888b1b09c19e64b6ee7efcf51ec -->
+<!-- source: README.md up to the translated marker, sha256 e9ce59647bc7d753c00f9a1a52956bbb57872a3d830116b87f2015d8e27df2dd -->
 
 **Misión.** El documento aprobado es la fuente de verdad del sistema: quien conoce el negocio lo
 escribe y lo aprueba, un agente de IA facilita la construcción, y el código queda a la vista de
@@ -30,8 +30,8 @@ ni un agente gastando tokens para adivinar.
 4. **Sabe cuándo dejó de ser verdad.** Cuando una regla cambia, todo bloque que se apoyaba en ella
    se pone 🔴, en su propia página, sin que cambie una letra de él.
 
-El agente es el que ya usas — Claude Code, Codex, Gemini — en tu máquina y con tu cuenta. Holdrim no
-llama a ningún modelo ni guarda ninguna clave.
+El agente es el que ya usas — Claude Code, Codex, Gemini — en tu máquina y con tu cuenta. El motor no
+llama a ningún modelo ni guarda ninguna clave de API.
 
 Holdrim es el motor, como Keycloak es el motor detrás de un inicio de sesión: una imagen Docker que
 tu proyecto ejecuta y configura, mientras tu documentación sigue en su propio repositorio y se

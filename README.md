@@ -28,7 +28,7 @@ spending tokens on a guess.
    on its own page, without a letter of it changing.
 
 The agent is whichever one you already use — Claude Code, Codex, Gemini — on your machine and your
-account. Holdrim calls no model and holds no key.
+account. The engine calls no model and holds no API key.
 
 Holdrim is the engine, the way Keycloak is the engine behind a sign-in: a Docker image your project
 runs and configures, while your documentation keeps its own repository and mounts into it. More of
