@@ -1,0 +1,7 @@
+# No blank issues: the two forms below ask for what makes a report actionable, and a vulnerability
+# must never be reported in public at all.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/holdrim/holdrim-core/security/advisories/new
+    about: Privately, through GitHub's security advisories. Please never open a public issue for something exploitable — see SECURITY.md.

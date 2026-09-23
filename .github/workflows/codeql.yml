@@ -1,0 +1,55 @@
+# Static analysis of the engine's own code, by GitHub's CodeQL.
+#
+# Why it earns a workflow: the tests prove what someone thought to test. CodeQL looks for the shapes
+# nobody thought of — a path built from a request that reaches the filesystem, a value from a header
+# that reaches HTML, a regular expression that backtracks forever on a crafted string. This engine
+# serves files from a folder the adopter mounts and renders a theme the adopter writes, so those
+# shapes are exactly its risk.
+#
+# Findings land in the repository's Security tab, not in the PR as a failed check, until the first
+# run's baseline is read by a person: failing on day one on findings nobody has triaged would teach
+# everyone to ignore it.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'    # weekly, so a new query catches old code even when nothing changes
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    # GitHub accepts code-scanning results from a PRIVATE repository only with Advanced Security,
+    # which is paid; from a public one, for free. While this repository is private the job would
+    # analyse everything and then fail on the upload, red on every pull request for a reason no
+    # change can fix. So it waits for the repository to be public, and starts on its own then.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read            # CodeQL reads its own workflow run; without it, init fails with
+                               # "Resource not accessible by integration" before analysing anything
+      security-events: write   # to upload the results; nothing else is granted
+    steps:
+      # Pinned to commits for the reason written in tests.yml.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          # The committed React bundle is generated code; its findings belong to React, and they
+          # would bury the engine's own.
+          config: |
+            paths-ignore:
+              - engine/web/panel-react.js
+              - node_modules
+
+      - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1

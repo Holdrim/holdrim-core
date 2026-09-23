@@ -1,0 +1,44 @@
+name: Something does not work
+description: The engine did something other than what its docs or its tests say it does.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. The most useful report is one somebody can reproduce in a minute — the smallest page,
+        command or request that shows it. If it is a security problem, stop here and use
+        "Report a vulnerability" instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The image tag or the commit you ran (`git rev-parse --short HEAD`).
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options: [the panel in the browser, the API, the CLI (holdrim …), the sign-in screen, the Docker image, the docs]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to see it
+      description: Steps, a page, a command — whatever makes it happen again.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The server writes one JSON line per event. Remove anything private before pasting.
+      render: text

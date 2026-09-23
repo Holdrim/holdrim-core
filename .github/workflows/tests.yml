@@ -1,0 +1,189 @@
+# Runs on every push and every pull request.
+#
+# Why it exists, and why the list below is the list: each step here catches a class of failure that
+# the others are blind to. Dropping one is not saving time — it is choosing which bug ships.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # The release workflow calls this one, so a tag is published only after the same proofs that
+  # guard every pull request ran again on exactly the tagged commit.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Actions are pinned to a commit, not a tag. A tag is a pointer its owner can move, and a
+      # moved tag runs somebody else's code inside this job with this repository checked out —
+      # the shape of every CI supply-chain compromise so far. The comment names the version the
+      # commit was when it was pinned; Dependabot proposes the next one as a reviewable diff.
+      # `persist-credentials: false`: nothing here pushes, so the token has no business staying
+      # in .git/config for every later step, and every dependency's install script, to read.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # The version contributors run, the one the image ships and the one this job proves are the
+      # same file, so they cannot drift apart one edit at a time.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # What the image ships (`--omit=dev`) with a known high or critical advisory stops here. The
+      # bar is `high` and not `moderate` on purpose: a gate that fails on every moderate advisory in
+      # a transitive dependency gets switched off within a month, and then it catches nothing.
+      - name: No known high-severity advisory in what ships
+        run: npm audit --omit=dev --audit-level=high
+
+      # `examples` too: the template ships a script to adopters, and a lint that only read engine/
+      # would let it break for them without CI noticing.
+      - name: Lint
+        run: npx eslint engine examples
+
+      # Node runs TypeScript without checking a single type. Without this step, every type in the
+      # project is decoration.
+      - name: Types
+        run: npx tsc --noEmit
+
+      # The authority on language, and the reason it is here and not only in a hook: a hook lives on
+      # one machine and is skipped with --no-verify. A contributor who has never read CONTRIBUTING
+      # gets told here, once, by a machine — which is kinder than being told in review, a week later,
+      # after they wrote the whole thing.
+      - name: English
+        run: bash scripts/check-language.sh --comments=en $(git ls-files '*.ts' '*.js' '*.sh')
+
+      - name: Unit
+        run: npm test
+
+      # The React panel is bundled and COMMITTED, so the image and a fresh clone need no build step.
+      # The price is that the bundle can fall behind its source without anyone noticing: the page
+      # would run yesterday's panel. Rebuilding here and diffing is what notices.
+      - name: The panel bundle is up to date
+        run: |
+          npm run build:web
+          if ! git diff --quiet engine/web/panel-react.js; then
+            echo "✗ engine/web/panel-react.js is stale."
+            echo "  Run and commit:  npm run build:web"
+            exit 1
+          fi
+
+      # Starts a real server and speaks HTTP to it. Unit tests never catch a route that stopped
+      # existing, a cookie that lost its flags, or a guard that silently stopped guarding.
+      - name: HTTP contract
+        run: bash engine/test-contract.sh
+
+      # The panel in a real browser, against a real server: the one place where a script the server
+      # does not serve, an import that 404s or a field the API refuses shows up before a person
+      # finds it. The runner already has Chrome, so the channel is used and nothing is downloaded.
+      - name: The panel in a browser
+        run: npm run browser
+        env:
+          HOLDRIM_BROWSER_CHANNEL: chrome
+
+      # The image is how people actually run this. A build that only works on the author's machine
+      # is the oldest failure in the trade.
+      - name: The image builds and answers
+        run: |
+          docker build -q -t holdrim:ci .
+          docker run -d --name ci -p 8080:8080 -v ci:/data \
+            -e HOLDRIM_OWNER=ci@example.org holdrim:ci
+          for _ in $(seq 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health || true)" = 200 ] && break
+            sleep 1
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health)
+          [ "$code" = 200 ] || { echo "✗ the image did not answer (HTTP $code)"; docker logs ci; exit 1; }
+          echo "✓ the image builds, starts and answers"
+          docker rm -f ci
+
+  # `engines` in package.json is a promise to everyone who installs on an older Node than ours, and
+  # it was false once: it said 22.6, where Node still refuses a `.ts` file without a flag, so the
+  # server and the CLI died on start for anyone who believed it. A floor nobody runs is a guess.
+  # This job runs the proofs that exercise the runtime — unit and the HTTP contract — on exactly the
+  # version the promise names; engine/tests/workflows.test.js keeps the two numbers equal.
+  floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22.18.0'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Unit, on the oldest Node the engine promises
+        run: npm test
+
+      - name: HTTP contract, on the oldest Node the engine promises
+        run: bash engine/test-contract.sh
+
+  # Three user stores are supported, and "supported" means engine/tests/users-conformance.test.js
+  # passed against each one. Everywhere else — a laptop, the `test` job above — Postgres and
+  # Firestore are not running, so their half of that suite skips, and for a long time a skip was
+  # all they ever got. Here both run for real, and HOLDRIM_TEST_REQUIRE turns a skip into a failure:
+  # a job that started a database and then quietly tested without it would be green for nothing.
+  # Both images are pinned by digest for the same reason the actions are pinned by commit.
+  # Dependabot does not read images named inside a workflow, so moving these is a person's edit.
+  stores:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ['55432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      HOLDRIM_TEST_REQUIRE: postgres,firestore
+      FIRESTORE_EMULATOR_HOST: 127.0.0.1:8433
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # A service container cannot be given a command, and the emulator needs one, so it is started
+      # here instead. It answers "Ok" on its root once it takes requests.
+      - name: The Firestore emulator
+        run: |
+          docker run -d --name firestore -p 8433:8433 \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators@sha256:7617d937e9360d769de4ef66266a8caae503c1dbbd050c93404d3f30045c5125 \
+            gcloud emulators firestore start --host-port=0.0.0.0:8433
+          for _ in $(seq 90); do
+            [ "$(curl -s http://127.0.0.1:8433 || true)" = "Ok" ] && exit 0
+            sleep 1
+          done
+          echo "✗ the Firestore emulator did not come up"; docker logs firestore; exit 1
+
+      - name: Every user store passes the same suite
+        run: node --test engine/tests/users-conformance.test.js
+
+      # The events are the product's premise — the trail nobody erases — and Firestore's store was
+      # proved by reading its code until this ran it against the same suite as the other two.
+      - name: Every event store passes the same suite
+        run: node --test engine/tests/events-conformance.test.js

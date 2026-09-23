@@ -1,0 +1,47 @@
+# Keeps the pinned versions moving, one reviewable pull request at a time.
+#
+# `target-branch: main` on every entry: Dependabot otherwise aims at the repository's DEFAULT branch,
+# and a working branch that happens to be the default for a while would collect every pull request.
+#
+# Pinning without this is how a repository ends up safe from a moved tag and wide open to a known
+# advisory: the pin never changes again. Every update still goes through CI and a person — nothing
+# here merges on its own.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: main
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /
+    target-branch: main
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # The types follow the Node the engine runs on, not the newest Node there is. A major bump
+      # here is a decision to move the engine to that Node, taken on purpose, not proposed weekly.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+    groups:
+      # Minor and patch bumps travel together; a major version arrives alone, because it is the
+      # one that changes behaviour and deserves its own proof.
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # The base image is pinned by digest in the Dockerfile; this is what moves the digest. Within the
+  # same Node major only: otherwise it proposes the newest major, which may not be a long-term-support
+  # line, and changing the runtime's major is a release decision, not a weekly bump.
+  - package-ecosystem: docker
+    directory: /
+    target-branch: main
+    ignore:
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
+    schedule:
+      interval: weekly

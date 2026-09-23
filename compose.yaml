@@ -1,0 +1,30 @@
+# Brings Holdrim up on your machine.
+#
+#   HOLDRIM_OWNER=you@example.org docker compose up
+#
+# The first-access password appears ONCE in the log. The first sign-in forces a change.
+# Without HOLDRIM_SITE, it comes up with the example (examples/hello-world).
+services:
+  holdrim:
+    build: .
+    ports:
+      - "${HOLDRIM_PORT:-8080}:8080"
+    environment:
+      HOLDRIM_OWNER: "${HOLDRIM_OWNER:?set HOLDRIM_OWNER to the e-mail of whoever approves}"
+      HOLDRIM_ENVIRONMENT: Production
+      # Point it at your mounted documentation (see the commented volume below).
+      HOLDRIM_SITE: "${HOLDRIM_SITE:-/app/examples/hello-world}"
+    volumes:
+      # Where the events and the people live.
+      #
+      # A NAMED volume, not a host folder, on purpose: the process runs as `node` (uid 1000) and a
+      # host folder arrives with the host's owner — the image chown does not reach a bind mount,
+      # and SQLite dies with "unable to open database file". The named volume inherits the image's
+      # owner. If you really want the folder next to you:  mkdir -p data && sudo chown 1000:1000 data
+      - data:/data
+      # YOUR documentation. Uncomment, adjust the path, and set HOLDRIM_SITE=/content in the
+      # environment above.
+      # - ./my-docs:/content:ro
+
+volumes:
+  data:

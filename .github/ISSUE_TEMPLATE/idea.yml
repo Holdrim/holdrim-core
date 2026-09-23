@@ -1,0 +1,25 @@
+name: An idea or a missing piece
+description: Something the engine should do, or should stop doing.
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What goes wrong today, for whom, and when. The problem first, not the solution — a
+        good problem statement survives three different solutions.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would do about it
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Before opening
+      options:
+        - label: I read "What does not work yet" in the README, and this is not already listed there.
+          required: true
+        - label: This keeps the engine free of any one adopter's names, colours or content (AGENTS.md, "An engine, not a project").
+          required: true
