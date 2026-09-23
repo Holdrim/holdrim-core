@@ -316,6 +316,7 @@ The design behind the engine, not repeated here:
 | `docs/BUGS.md` | a bug report treated as documentation catching up with behaviour, not a ticket |
 | `docs/PRIOR-ART.md` | the field this belongs to — DOORS, Jama, Polarion, Swimm — and what is actually new here |
 | `docs/LAYERS.md` | the Fundamental and the Application, and why one lock covers both |
+| `docs/PRIVACY.md` | what is kept about people, and how a person is removed without breaking the trail |
 
 Each opens with a design date and closes with an honest built / not-built table — read those before
 assuming a section describes running code.

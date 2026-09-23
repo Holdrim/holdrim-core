@@ -14,7 +14,9 @@ Worth knowing before you run it:
 
 - **It stores approvals, and approvals are evidence.** The database refuses `UPDATE` and `DELETE`
   through triggers, so nothing is erased even by someone opening the file with another program.
-  People are disabled, never deleted, so every ✓ keeps the name of whoever gave it.
+  People are disabled, never deleted, so every ✓ keeps the name of whoever gave it. What that
+  means for personal data, and how a person is removed without breaking the trail:
+  [`docs/PRIVACY.md`](docs/PRIVACY.md).
 - **It serves your documentation over HTTP.** With password identity there is no edge protecting
   it: the guard is in the application. Without a session, every static page redirects to the login
   screen. That guard has a test in the HTTP contract suite, because its absence would be silent:
