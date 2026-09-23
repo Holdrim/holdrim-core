@@ -138,7 +138,9 @@ test('every translation of the README carries the fingerprint of the English it 
   const MARKER = '<!-- translated: everything above this line is also in README.pt-BR.md and README.es.md -->';
   const english = read('README.md');
   assert.ok(english.includes(MARKER), 'README.md has lost the marker that ends its translated part');
-  const now = createHash('sha256').update(english.split(MARKER)[0]).digest('hex');
+  // Line endings are the checkout's, not the text's: Git on Windows hands out CRLF, and a translation
+  // would read as stale on a fresh clone with nothing changed.
+  const now = createHash('sha256').update(english.split(MARKER)[0].replace(/\r\n/g, '\n')).digest('hex');
   for (const file of ['README.pt-BR.md', 'README.es.md']) {
     const recorded = read(file).match(/<!-- source: README\.md up to the translated marker, sha256 ([0-9a-f]{64}) -->/)?.[1];
     assert.equal(recorded, now, `${file} translates an older README.md: bring it up to date and record sha256 ${now}`);
