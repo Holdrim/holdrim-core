@@ -33,7 +33,7 @@
     "esbuild": "^0.28.2",
     "eslint": "^10.11.0",
     "playwright-core": "1.63.0",
-    "typescript": "^5.7.0"
+    "typescript": "^7.0.2"
   },
   "bin": {
     "holdrim": "engine/cli/holdrim.ts"
