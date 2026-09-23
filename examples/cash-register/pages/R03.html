@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R03 · Closing the day</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">R03</span> Closing the day</h1>
+
+  <p class="lead" data-id="R03.1.1" data-validated="2026-09-20" data-code="1.1" data-validated-fingerprint="9647c5686c675619">
+    At the end of the day the owner closes the till. Closing is what turns the day's sales into
+    numbers the shop can trust.
+  </p>
+
+  <h2><span class="n">1</span> What closing does</h2>
+
+  <div class="block" data-id="R03.1.2" data-validated="2026-09-20" data-code="1.2" data-depends="R02.1.3" data-validated-fingerprint="c340988f7ee9242b" data-depended-on="{&quot;R02.1.3&quot;:&quot;828bb50f9281d5dd&quot;}">
+    <p>Only closed sales count (<code>R02</code>, rule 1.3). The day's total is the sum of what
+    was paid, minus what was returned.</p>
+  </div>
+
+  <div class="block" data-id="R03.1.3" data-validated="2026-09-20" data-code="1.3" data-depends="R02.2.1" data-validated-fingerprint="19594a3c6756fa2c" data-depended-on="{&quot;R02.2.1&quot;:&quot;abbc9f11dda4888c&quot;}">
+    <p>Returns are counted on the day they happen, not on the day of the sale — which is why the
+    return period decides how far back a day's total can still move.</p>
+  </div>
+
+  <div class="block" data-id="R03.1.4" data-validated="2026-09-20" data-code="1.4" data-validated-fingerprint="720b339f8d517f0d">
+    <p>After closing, the till sends the day's sold quantities to the supplier as the next order
+    (<code>R04</code>, section 2).</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

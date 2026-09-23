@@ -1,0 +1,50 @@
+{
+  "_read": [
+    "THE TEMPLATE. Copy this folder into your project, swap the owner, and start writing.",
+    "",
+    "After 00-kinds, the catalogue of what a block can be, the ten sections are the order in which",
+    "product documentation usually gets on its feet:",
+    "why it exists → who can do what → what it looks like → what the person sees → what is still open →",
+    "what it is built from → how the data connects → the flow end to end → the architecture → the edges.",
+    "",
+    "Each page carries, in its own reviewable text, what to write there and what NOT to write.",
+    "Delete whatever does not serve you. A template that forces turns into paperwork.",
+    "",
+    "checks/ holds the test that Y01's rule names in data-proof. Run it with: node --test 'checks/*.test.js'"
+  ],
+  "name": "Template",
+  "owner": "you@example.org",
+
+  "theme": {
+    "brand": "#2E6E5B",
+    "name": "Template · Handbook"
+  },
+  "_theme": [
+    "HOW YOUR PROJECT DRESSES THE ENGINE. All three keys are optional; with no theme at all the",
+    "engine wears its own neutral look, which is nobody's brand.",
+    "brand: the brand colour. Hex only, three or six digits — anything else is refused and logged.",
+    "logo:  a path inside this folder (svg, png, webp, jpg, gif, up to 64 KiB). The server reads it",
+    "       and inlines it; without a logo, the name is shown. Not set here because the template",
+    "       ships no image, and a broken logo is worse than none.",
+    "name:  what the sign-in screen calls the product. Defaults to `name` above."
+  ],
+  "content": {
+    "folders": [
+      "00-kinds",
+      "01-discovery",
+      "02-roles",
+      "03-design-system",
+      "04-screens",
+      "05-decisions",
+      "06-stack",
+      "07-modeling",
+      "08-use-cases",
+      "09-architecture",
+      "10-contracts"
+    ],
+    "registry": "approvals.json",
+    "home": "/engine/home",
+    "trimPrefix": "",
+    "pageExamples": "D01, P01, S01, T01, X01, K01, M01, U01, C01 or I01"
+  }
+}

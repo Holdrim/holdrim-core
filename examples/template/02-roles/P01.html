@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P01 · Who can do what</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">P01</span> Who can do what</h1>
+
+  <p class="lead" data-id="P01.0.1" data-code="0.1">A role is not a job title: it is a set of capabilities. Write it in terms of <b>what the person can do</b>, not what they are called on the org chart.</p>
+
+  <h2><span class="n">1</span> The roles</h2>
+  <p class="section-lead">Few of them, with a clear border.</p>
+
+  <div class="block" data-id="P01.1.1" data-code="1.1">
+    <p>One paragraph per role: what it can do that the others cannot. If two roles have the same list, they are one role.</p>
+  </div>
+
+  <div class="block" data-id="P01.1.2" data-code="1.2">
+    <p>⚠️ Every product ends up with a role that "can do everything". Name it here, and say how many people hold it. If the answer is "everyone on the team", you do not have roles.</p>
+  </div>
+
+  <h2><span class="n">2</span> The capability table</h2>
+  <p class="section-lead">Who can read, create, approve and delete each thing.</p>
+
+  <div class="block" data-id="P01.2.1" data-code="2.1">
+    <p>One row per object in the system, one column per role. It is dull to write and it is the sheet that spares the most argument later.</p>
+  </div>
+
+  <div class="block" data-id="P01.2.2" data-code="2.2">
+    <p>Mark what <b>nobody</b> can do: delete an audit record, edit someone else's approval. What nobody can do is a rule, and a rule becomes code.</p>
+  </div>
+
+  <h2><span class="n">3</span> Who approves</h2>
+  <p class="section-lead">The decision that is not delegated.</p>
+
+  <div class="block" data-id="P01.3.1" data-code="3.1">
+    <p>Say who has the final word on each kind of content, by role name. An approval with no named owner is an approval that never happens.</p>
+  </div>
+
+</main>
+
+<!-- The review panel: one module. -->
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

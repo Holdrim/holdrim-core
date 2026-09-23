@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I01 · What comes in and what goes out</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">I01</span> What comes in and what goes out</h1>
+
+  <p class="lead" data-id="I01.0.1" data-code="0.1">The edges of the system: APIs, events, files. A contract is a promise — and a promise broken here breaks somebody else's system, which is the worst way to find out.</p>
+
+  <h2><span class="n">1</span> The routes</h2>
+  <p class="section-lead">Method, path, what it takes and what it returns.</p>
+
+  <div class="block" data-id="I01.1.1" data-code="1.1">
+    <p>For each one: what it does, who may call it, and the error codes <b>with the reason</b>. "400 when the body is invalid" does not help; "400 when the tax ID is missing" does.</p>
+  </div>
+
+  <h2><span class="n">2</span> The events</h2>
+  <p class="section-lead">What the system publishes, and who depends on it.</p>
+
+  <div class="block" data-id="I01.2.1" data-code="2.1">
+    <p>Name, when it fires, and what it carries. And — the field everybody forgets — <b>whether it can arrive twice</b>.</p>
+  </div>
+
+  <h2><span class="n">3</span> What does not change without warning</h2>
+  <p class="section-lead">The part of the contract that is a public promise.</p>
+
+  <div class="block" data-id="I01.3.1" data-code="3.1">
+    <p>List what other systems already depend on. Changing that takes a new version, not a deploy. ⚠️ If the list is empty, either the system is new or somebody did not ask.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

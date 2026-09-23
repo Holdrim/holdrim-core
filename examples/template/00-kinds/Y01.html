@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Y01 · The kinds of content</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">Y01</span> The kinds of content</h1>
+
+  <p class="lead" data-id="Y01.0.1" data-code="0.1" data-kind="text">
+    This sheet is the catalogue, and every block in it is an example of itself. To find out what a
+    kind is, look at the block that carries that kind — it is written the way the kind asks for.
+  </p>
+
+  <h2><span class="n">1</span> Why label the kind</h2>
+  <p class="section-lead">Because "is this any good?" is not the same question for a heading and for a diagram.</p>
+
+  <div class="block" data-id="Y01.1.1" data-code="1.1" data-kind="text">
+    <p>With no kind, every quality rule turns into spoken convention — and spoken convention dies on
+    the third person who joins the project. With a kind, the rule belongs to the <b>kind</b>, not to
+    somebody's memory.</p>
+  </div>
+
+  <div class="block box--info" data-id="Y01.1.2" data-code="1.2" data-kind="box" data-box="info">
+    <p><b>Information callout.</b> Every callout says which sort it is — <code>info</code>,
+    <code>warning</code>, <code>ok</code> or <code>forbidden</code>. Without that it is just a
+    paragraph with a border, and the colour means nothing.</p>
+  </div>
+
+  <div class="block" data-id="Y01.1.3" data-code="1.3" data-kind="list">
+    <p>What a kind changes, and what it does not:</p>
+    <ul>
+      <li><b>It changes</b> what is demanded before approval — an image needs a description, a
+      decision needs an owner.</li>
+      <li><b>It does not change</b> who approves, nor how the fingerprint is computed. There is
+      still one lock.</li>
+    </ul>
+  </div>
+
+  <h2><span class="n">2</span> The kinds that ask something of you</h2>
+  <p class="section-lead">Most ask for nothing. These ask, and the engine collects.</p>
+
+  <div class="block" data-id="Y01.2.1" data-code="2.1" data-kind="table">
+    <table>
+      <tr><th>Kind</th><th>What it demands</th><th>Why</th></tr>
+      <tr><td><code>image</code></td><td>an <code>alt</code></td>
+          <td>what is inside the image never enters the fingerprint; the description is the only reviewable part</td></tr>
+      <tr><td><code>diagram</code></td><td>to be text, not a picture</td>
+          <td>a PNG has no useful fingerprint: recompressing changes the bytes without changing the meaning</td></tr>
+      <tr><td><code>table</code></td><td>a header row</td>
+          <td>with no <code>&lt;th&gt;</code>, nobody on a screen reader knows what each cell is</td></tr>
+      <tr><td><code>decision</code></td><td>an owner and a deadline</td>
+          <td>an open question with no owner is not open — it is lost</td></tr>
+      <tr><td><code>colors</code></td><td>the value of the colour</td>
+          <td>"primary blue" is not a value; <code>#2E6E5B</code> is</td></tr>
+      <tr><td><code>list</code></td><td>two items</td>
+          <td>a one-item list is a paragraph in a bad costume</td></tr>
+      <tr><td><code>rule</code></td><td>the test that defends it</td>
+          <td>a rule nobody proved is a rule nobody can check — and nothing tells you when it stops being true</td></tr>
+    </table>
+  </div>
+
+  <div class="block" data-id="Y01.2.2" data-code="2.2" data-kind="diagram">
+    <p>A diagram is text, and so it falls under the lock like any paragraph:</p>
+    <pre><code class="mermaid">flowchart LR
+  E[the text changed] --> D{did the fingerprint change}
+  D -->|yes| A[turns yellow]
+  D -->|no, but what it rests on changed| V[turns red]</code></pre>
+  </div>
+
+  <div class="block" data-id="Y01.2.3" data-code="2.3" data-kind="colors">
+    <p>The palette, with the value alongside: <code>#2E6E5B</code> for the brand,
+    <code>#C94A4A</code> for what needs attention, <code>#16212E</code> for the ink.</p>
+  </div>
+
+  <div class="block" data-id="Y01.2.4" data-code="2.4" data-kind="rule"
+       data-proof="checks/one-code-per-page.test.js::a block code appears once per page">
+    <p><b>Domain rule.</b> A block code appears once per page. Two blocks sharing
+    <code>data-code</code> are not two blocks to the engine — the second one silently replaces the
+    first, and an approval given to one text ends up filed against another.</p>
+    <p>This block carries <code>data-proof</code>, and that is the whole difference between a rule
+    and a strong opinion: it names the test that defends it. A rule is not a
+    <code>contract</code> — nobody outside promised anything — and not a <code>model</code>: it
+    holds whatever shape the data is stored in.</p>
+  </div>
+
+  <h2><span class="n">3</span> Dependency, and what it unlocks</h2>
+  <p class="section-lead">Declaring what a block rests on is what wires up the red light.</p>
+
+  <div class="block" data-id="Y01.3.1" data-code="3.1" data-kind="text" data-depends="Y01.1.1">
+    <p>This block declares <code>data-depends="Y01.1.1"</code>. If that one changes, this one turns
+    🔴 — not because it became wrong, but because it became <b>suspect</b>, and somebody has to
+    check whether it is still true.</p>
+  </div>
+
+  <div class="block box--open" data-id="Y01.3.2" data-code="3.2" data-kind="decision"
+       data-owner="whoever writes the documentation" data-deadline="before adopting the method">
+    <p><b>Open decision, with owner and deadline.</b> How much of the dependency can the tool
+    propose on its own, instead of waiting for somebody to declare it? Two blocks that talk about
+    the same term probably depend on each other — but "probably" is not enough to hold back an
+    approval.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

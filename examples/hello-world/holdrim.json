@@ -1,0 +1,23 @@
+{
+  "_read": [
+    "The smallest working example of Holdrim. Copy this folder, swap the owner for your e-mail,",
+    "and you have reviewable documentation running.",
+    "",
+    "  docker run -p 8080:8080 -v data:/data \\",
+    "    -v $PWD/examples/hello-world:/content -e HOLDRIM_SITE=/content \\",
+    "    -e HOLDRIM_OWNER=you@example.org holdrim",
+    "",
+    "  Without Docker, from the repository root:  bash engine/run-local.sh examples/hello-world"
+  ],
+
+  "name": "Hello world",
+  "owner": "you@example.org",
+
+  "content": {
+    "folders": ["pages"],
+    "registry": "approvals.json",
+    "home": "/engine/home",
+    "trimPrefix": "pages/",
+    "pageExamples": "A01 or A02"
+  }
+}

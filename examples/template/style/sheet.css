@@ -1,0 +1,28 @@
+/* The minimum for the page to be readable and the review panel to work.
+   This is not design: it is the contract written as CSS. */
+
+body.doc { font: 16px/1.6 system-ui, sans-serif; color: #222; margin: 0; background: #f7f7f8; }
+.doc-page { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; background: #fff;
+            min-height: 100vh; box-shadow: 0 0 2rem rgba(0,0,0,.06); }
+.doc-title { font-size: 1.6rem; line-height: 1.25; margin: 0 0 1.5rem; }
+.doc-title__code { display: inline-block; background: #2E6E5B; color: #fff; border-radius: .3rem;
+                   padding: .1em .45em; margin-right: .4em; font-size: .8em; }
+h2 { font-size: 1.15rem; margin: 2.5rem 0 .75rem; }
+h2 .n { color: #2E6E5B; margin-right: .3em; }
+code { background: #eef1f4; border-radius: .2rem; padding: .1em .35em; font-size: .9em; }
+
+/* ⚠️ position: relative is a REQUIREMENT of the engine, not a matter of taste. The review button
+   is placed inside the block; without this it escapes to the corner of the page. */
+.lead, .block { position: relative; margin: 0 0 1rem; padding: .85rem 1rem;
+                border: 1px solid #e3e6ea; border-radius: .4rem; background: #fff; }
+.lead { border-left: 3px solid #2E6E5B; }
+.block p { margin: 0; }
+
+/* The block's stamp, for when the panel is NOT on (no server, file opened straight from disk).
+   Once the panel turns on, panel.css drops it and the button takes its place. The drop is not
+   repeated here: a copy would hang on a class only the panel decides; one rule in one place is
+   enough. */
+.lead[data-code]::after, .block[data-code]::after {
+  content: attr(data-code); position: absolute; top: -.6rem; right: .6rem; font-size: .7rem;
+  color: #6b7280; background: #f7f7f8; padding: 0 .35rem; border-radius: .2rem;
+}

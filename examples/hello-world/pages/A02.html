@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A02 · A second page, to prove navigation works</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">A02</span> A second page</h1>
+
+  <p class="lead" data-id="A02.1.1" data-code="1.1">
+    It exists to prove the engine handles more than one sheet, and that the codes do not collide.
+  </p>
+
+  <div class="block" data-id="A02.1.2" data-code="1.2">
+    <p>Every block code starts with the code of its page. That is how the engine knows which sheet
+    an event belongs to without having to store the file path.</p>
+  </div>
+
+</main>
+
+<!-- The review panel, one module. Without a session or without the API it switches itself off,
+     and the page is simply the page. -->
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

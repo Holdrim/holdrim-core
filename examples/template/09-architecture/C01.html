@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C01 · The architecture at four zoom levels (C4)</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">C01</span> The architecture at four zoom levels (C4)</h1>
+
+  <p class="lead" data-id="C01.0.1" data-code="0.1">Four levels, from farthest to closest. The rule is simple: <b>each level answers a different question</b>, and mixing two of them into one picture is how most architecture diagrams end up a wall of little boxes.</p>
+
+  <h2><span class="n">1</span> Context — the system in the world</h2>
+  <p class="section-lead">Who uses it, and what it talks to.</p>
+
+  <div class="block" data-id="C01.1.1" data-code="1.1">
+    <p>The diagram, as text — so it falls under the traffic light like any other block:</p>
+    <pre><code class="mermaid">flowchart LR
+  P([the person]) --> S[your system]
+  S --> E1[external system]
+  S --> E2[another external one]</code></pre>
+  </div>
+
+  <div class="block" data-id="C01.1.2" data-code="1.2">
+    <p>This level is for people who will not write code. If a director does not follow it, it is wrong.</p>
+  </div>
+
+  <h2><span class="n">2</span> Containers — the parts that run</h2>
+  <p class="section-lead">Everything that starts up on its own.</p>
+
+  <div class="block" data-id="C01.2.1" data-code="2.1">
+    <p>The diagram, as text — so it falls under the traffic light like any other block:</p>
+    <pre><code class="mermaid">flowchart TD
+  W[browser] --> A[API]
+  A --> B[(database)]
+  A --> F[queue]</code></pre>
+  </div>
+
+  <div class="block" data-id="C01.2.2" data-code="2.2">
+    <p>One box per process: app, API, database, queue, job. Say what each one is written in and how the others talk to it.</p>
+  </div>
+
+  <h2><span class="n">3</span> Components and code</h2>
+  <p class="section-lead">Only where it pays off.</p>
+
+  <div class="block" data-id="C01.3.1" data-code="3.1">
+    <p>Draw the third level only for the complicated parts. The fourth — the code — almost never pays: it ages in days, and the code is already there to be read.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

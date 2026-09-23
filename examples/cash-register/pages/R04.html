@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R04 · The contract with the supplier</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">R04</span> The contract with the supplier</h1>
+
+  <p class="lead" data-id="R04.1.1" data-validated="2026-09-20" data-code="1.1" data-validated-fingerprint="77406fac0696e4e4">
+    The till and the supplier's sales system are two systems, written by two different people.
+    They connect by agreeing on this page — and the supplier keeps the same page on their side.
+  </p>
+
+  <h2><span class="n">1</span> The catalogue the till reads</h2>
+
+  <div class="block" data-id="R04.1.2" data-validated="2026-09-20" data-code="1.2" data-validated-fingerprint="3b374866d1fec5d0">
+    <p>Every morning the till asks the supplier for the catalogue. Each product comes with its
+    <code>sku</code> (the supplier's code), its <code>name</code>, its <code>price</code> in cents
+    and the <code>date</code> the price starts.</p>
+  </div>
+
+  <div class="block" data-id="R04.1.3" data-validated="2026-09-20" data-code="1.3" data-depends="R04.1.2 R02.1.2" data-validated-fingerprint="0ca4c371dbcdf5bc" data-depended-on="{&quot;R04.1.2&quot;:&quot;3b374866d1fec5d0&quot;,&quot;R02.1.2&quot;:&quot;51944bd38bab2c48&quot;}">
+    <p>If the catalogue cannot be read, the till keeps yesterday's prices and says so on screen.
+    It never invents one.</p>
+  </div>
+
+  <h2><span class="n">2</span> The order the till sends</h2>
+
+  <div class="block" data-id="R04.2.1" data-validated="2026-09-20" data-code="2.1" data-validated-fingerprint="bf69a9748c5e017e">
+    <p>After closing the day, the till sends one order: a list of <code>sku</code> and
+    <code>quantity</code>, the quantities sold that day. The supplier answers with the order's
+    number, which the till prints on the closing report.</p>
+  </div>
+
+  <div class="block" data-id="R04.2.2" data-validated="2026-09-20" data-code="2.2" data-validated-fingerprint="99d903e24636fbbc">
+    <p>Because both sides keep this page, a change to it on one side turns the other side's copy
+    red until someone there checks it. That is the whole integration: two documents that already
+    agree.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

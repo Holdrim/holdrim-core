@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>U01 · One use case, end to end</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">U01</span> One use case, end to end</h1>
+
+  <p class="lead" data-id="U01.0.1" data-code="0.1">One sheet per case. The use case is where the other sheets meet: it uses the roles, passes through the screens, moves the entities. It is also the sheet that <b>turns red most often</b> — and that is the method working.</p>
+
+  <h2><span class="n">1</span> The situation</h2>
+  <p class="section-lead">Who, wanting what, and why now.</p>
+
+  <div class="block" data-id="U01.1.1" data-code="1.1">
+    <p>Start with the person and the moment. "The nurse gets an alert at 7 in the morning" says more than "the system notifies the user".</p>
+  </div>
+
+  <h2><span class="n">2</span> The flow</h2>
+  <p class="section-lead">Step by step, with what travels in each one.</p>
+
+  <div class="block" data-id="U01.2.1" data-code="2.1">
+    <p>The diagram, as text — so it falls under the traffic light like any other block:</p>
+    <pre><code class="mermaid">flowchart TD
+  A[the person does something] --> B{the system decides}
+  B -->|happy path| C[what was expected happens]
+  B -->|and when it does not| D[what happens instead]</code></pre>
+  </div>
+
+  <div class="block" data-id="U01.2.2" data-code="2.2">
+    <p>Number the steps and say, at each one, <b>what leaves where</b>. The step nobody writes down is always the one that breaks at integration.</p>
+  </div>
+
+  <h2><span class="n">3</span> When it goes wrong</h2>
+  <p class="section-lead">The unhappy paths, which are most of the code.</p>
+
+  <div class="block" data-id="U01.3.1" data-code="3.1">
+    <p>One per line: what fails, what the person sees, what the system does. The happy path is the least work; these are what set the deadline.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

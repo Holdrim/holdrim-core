@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A01 · What Holdrim demands of a page</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+
+<!-- The review panel only turns on if it finds ALL of this. It switches itself off in silence when
+     something is missing, so each requirement is commented at the spot where it shows up. -->
+<main class="doc-page">
+
+  <!-- 1. A .doc-title__code element carrying the page code. It is the key that ties recorded
+          events to this sheet. Without it the panel does not turn on. -->
+  <h1 class="doc-title"><span class="doc-title__code">A01</span> What Holdrim demands of a page</h1>
+
+  <!-- 2. Every reviewable block carries data-id AND data-code, both of them.
+       3. data-code has to read "section.number". "1.title" gets no button.
+       4. data-id is the block's global key: it is what travels to the approval record. -->
+  <p class="lead" data-id="A01.1.1" data-code="1.1">
+    This page is the smallest working example. If it works in your Holdrim, your documentation will too.
+  </p>
+
+  <h2><span class="n">1</span> The rules a page has to follow</h2>
+
+  <div class="block" data-id="A01.1.2" data-code="1.2">
+    <p>Everything that can be approved lives inside <code>&lt;main&gt;</code>. What sits outside is
+    not reviewable — not the header, not the footer, not the menu.</p>
+  </div>
+
+  <div class="block" data-id="A01.1.3" data-code="1.3">
+    <p>Approval covers <b>the text</b>, not the block. Holdrim keeps a fingerprint of the text taken
+    at the moment of the ✓. Change one letter and the approval stops counting — on purpose, because
+    nobody approved the new text.</p>
+  </div>
+
+  <div class="block" data-id="A01.1.4" data-code="1.4">
+    <p>Hence the rule that is easiest to forget: <b>anything JavaScript injects inside
+    <code>&lt;main&gt;</code> needs the <code>data-review-ui</code> attribute</b>. Without it, the
+    injected text counts toward the fingerprint and drops every approval on the page at once.</p>
+  </div>
+
+  <h2><span class="n">2</span> What happens when you approve</h2>
+
+  <div class="block" data-id="A01.2.1" data-code="2.1">
+    <p>Nothing is erased. Every ✓, every request and every refusal becomes a new event, with author
+    and time. The database refuses updates and deletes — not out of discipline, by trigger.</p>
+  </div>
+
+  <div class="block" data-id="A01.2.2" data-code="2.2">
+    <p>One person approves: the <code>owner</code> in <code>holdrim.json</code>. An approval from
+    anyone else is recorded, but never becomes a lock in the repository.</p>
+  </div>
+
+</main>
+
+<!-- The review panel, one module. Without a session or without the API it switches itself off,
+     and the page is simply the page. -->
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

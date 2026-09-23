@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T01 · One screen, explained</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">T01</span> One screen, explained</h1>
+
+  <p class="lead" data-id="T01.0.1" data-code="0.1">One sheet per screen. The prototype can be HTML, React, Figma or a sketch — what this sheet holds is <b>what the screen does</b>, which survives any change of tool.</p>
+
+  <h2><span class="n">1</span> What the person came here to do</h2>
+  <p class="section-lead">One sentence. If it takes two, it is two screens.</p>
+
+  <div class="block" data-id="T01.1.1" data-code="1.1">
+    <p>Say the end, not the means: "check whether the payment can be released", not "see the list".</p>
+  </div>
+
+  <h2><span class="n">2</span> What they see</h2>
+  <p class="section-lead">The elements, and where each piece of data comes from.</p>
+
+  <div class="block" data-id="T01.2.1" data-code="2.1">
+    <p>List what appears and the origin of every piece of information. A field with no declared origin becomes, later, a question for the backend on the eve of delivery.</p>
+  </div>
+
+  <h2><span class="n">3</span> What they can do</h2>
+  <p class="section-lead">The actions, each with what happens next.</p>
+
+  <div class="block" data-id="T01.3.1" data-code="3.1">
+    <p>One line per action: what the person clicks, what the system does, where they land.</p>
+  </div>
+
+  <div class="block" data-id="T01.3.2" data-code="3.2">
+    <p>⚠️ Include the ugly states: empty, loading, error, not allowed. The happy screen is the least work; the other four are what set the deadline.</p>
+  </div>
+
+  <h2><span class="n">4</span> The prototype</h2>
+  <p class="section-lead">The link, and which parts of it are fake.</p>
+
+  <div class="block" data-id="T01.4.1" data-code="4.1">
+    <p>Point at the prototype and say, explicitly, what is mocked. A prototype without that note always turns into a promise somebody comes to collect.</p>
+  </div>
+
+</main>
+
+<!-- The review panel: one module. -->
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

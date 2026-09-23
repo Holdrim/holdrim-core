@@ -1,0 +1,23 @@
+{
+  "_read": [
+    "A small shop's cash register, documented the Holdrim way: the example to show someone who has",
+    "never seen the method. Four pages — why the till exists, the rules of a sale, closing the day,",
+    "and the contract with the supplier's system — every block approved by the owner. Then the shop",
+    "extended the return period from 7 to 14 days, and the owner approved the new sentence. Two",
+    "rules written on top of the old one turned red (🔴) without a letter of them changing — one on",
+    "another page. That red is the whole point: open the home and follow it.",
+    "",
+    "  bash engine/run-local.sh examples/cash-register      (from the repository root)"
+  ],
+
+  "name": "Cash register",
+  "owner": "owner@example.org",
+
+  "content": {
+    "folders": ["pages"],
+    "registry": "approvals.json",
+    "home": "/engine/home",
+    "trimPrefix": "pages/",
+    "pageExamples": "R01 or R02"
+  }
+}

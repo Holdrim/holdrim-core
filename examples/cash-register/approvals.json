@@ -1,0 +1,134 @@
+{
+ "R01.1.1": {
+  "file": "R01.html",
+  "date": "2026-09-20",
+  "fingerprint": "6aee3cf1824e87d4",
+  "source": "example",
+  "text": "A corner shop sells a few hundred products from one supplier. The till exists so that every sale is charged at the right"
+ },
+ "R01.1.2": {
+  "file": "R01.html",
+  "date": "2026-09-20",
+  "fingerprint": "69a98612fddb0915",
+  "source": "example",
+  "text": "The cashier rings up a sale, takes the payment and hands over the receipt. They are not technical, and the till must nev"
+ },
+ "R01.1.3": {
+  "file": "R01.html",
+  "date": "2026-09-20",
+  "fingerprint": "01ff92047394a0b1",
+  "source": "example",
+  "text": "The owner of the shop closes the day, reads what was sold and orders from the supplier. They are also the owner of this "
+ },
+ "R02.1.1": {
+  "file": "R02.html",
+  "date": "2026-09-20",
+  "fingerprint": "2844293ccb00f3c2",
+  "source": "example",
+  "text": "Every rule here is one sentence that can only be read one way. When a rule changes, everything that depends on it turns "
+ },
+ "R02.1.2": {
+  "file": "R02.html",
+  "date": "2026-09-20",
+  "fingerprint": "51944bd38bab2c48",
+  "source": "example",
+  "text": "The price of a product is the one in the supplier's catalogue on the day of the sale (R04). The cashier never types a pr"
+ },
+ "R02.1.3": {
+  "file": "R02.html",
+  "date": "2026-09-20",
+  "fingerprint": "828bb50f9281d5dd",
+  "source": "example",
+  "text": "A sale is closed only when it is paid in full. An unpaid sale does not reduce the stock and does not appear in the day's"
+ },
+ "R02.2.1": {
+  "file": "R02.html",
+  "date": "2026-09-22",
+  "fingerprint": "6bdaa47c0b630c07",
+  "source": "example",
+  "text": "A customer may return a product within 14 days of the sale, with the receipt, and gets the money back in the way they pa"
+ },
+ "R02.2.2": {
+  "file": "R02.html",
+  "date": "2026-09-20",
+  "fingerprint": "fdb63879263c959e",
+  "source": "example",
+  "text": "When a receipt is older than the return period, the till refuses the return and says why, so the cashier never has to ar",
+  "dependsOn": {
+   "R02.2.1": "abbc9f11dda4888c"
+  }
+ },
+ "R03.1.1": {
+  "file": "R03.html",
+  "date": "2026-09-20",
+  "fingerprint": "9647c5686c675619",
+  "source": "example",
+  "text": "At the end of the day the owner closes the till. Closing is what turns the day's sales into numbers the shop can trust."
+ },
+ "R03.1.2": {
+  "file": "R03.html",
+  "date": "2026-09-20",
+  "fingerprint": "c340988f7ee9242b",
+  "source": "example",
+  "text": "Only closed sales count (R02, rule 1.3). The day's total is the sum of what was paid, minus what was returned.",
+  "dependsOn": {
+   "R02.1.3": "828bb50f9281d5dd"
+  }
+ },
+ "R03.1.3": {
+  "file": "R03.html",
+  "date": "2026-09-20",
+  "fingerprint": "19594a3c6756fa2c",
+  "source": "example",
+  "text": "Returns are counted on the day they happen, not on the day of the sale — which is why the return period decides how far ",
+  "dependsOn": {
+   "R02.2.1": "abbc9f11dda4888c"
+  }
+ },
+ "R03.1.4": {
+  "file": "R03.html",
+  "date": "2026-09-20",
+  "fingerprint": "720b339f8d517f0d",
+  "source": "example",
+  "text": "After closing, the till sends the day's sold quantities to the supplier as the next order (R04, section 2)."
+ },
+ "R04.1.1": {
+  "file": "R04.html",
+  "date": "2026-09-20",
+  "fingerprint": "77406fac0696e4e4",
+  "source": "example",
+  "text": "The till and the supplier's sales system are two systems, written by two different people. They connect by agreeing on t"
+ },
+ "R04.1.2": {
+  "file": "R04.html",
+  "date": "2026-09-20",
+  "fingerprint": "3b374866d1fec5d0",
+  "source": "example",
+  "text": "Every morning the till asks the supplier for the catalogue. Each product comes with its sku (the supplier's code), its n"
+ },
+ "R04.1.3": {
+  "file": "R04.html",
+  "date": "2026-09-20",
+  "fingerprint": "0ca4c371dbcdf5bc",
+  "source": "example",
+  "text": "If the catalogue cannot be read, the till keeps yesterday's prices and says so on screen. It never invents one.",
+  "dependsOn": {
+   "R04.1.2": "3b374866d1fec5d0",
+   "R02.1.2": "51944bd38bab2c48"
+  }
+ },
+ "R04.2.1": {
+  "file": "R04.html",
+  "date": "2026-09-20",
+  "fingerprint": "bf69a9748c5e017e",
+  "source": "example",
+  "text": "After closing the day, the till sends one order: a list of sku and quantity, the quantities sold that day. The supplier "
+ },
+ "R04.2.2": {
+  "file": "R04.html",
+  "date": "2026-09-20",
+  "fingerprint": "99d903e24636fbbc",
+  "source": "example",
+  "text": "Because both sides keep this page, a change to it on one side turns the other side's copy red until someone there checks"
+ }
+}

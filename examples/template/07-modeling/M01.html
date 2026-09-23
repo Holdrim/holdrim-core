@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M01 · The entities and how they connect</title>
+<link rel="stylesheet" href="../style/sheet.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+
+  <h1 class="doc-title"><span class="doc-title__code">M01</span> The entities and how they connect</h1>
+
+  <p class="lead" data-id="M01.0.1" data-code="0.1">The data model in the shape of <b>meaning</b>, not of tables. Column names change; what an entity stands for in the business does not.</p>
+
+  <h2><span class="n">1</span> The entities</h2>
+  <p class="section-lead">What each one IS, in a sentence the business understands.</p>
+
+  <div class="block" data-id="M01.1.1" data-code="1.1">
+    <p>One line per entity: the name, what it stands for in the real world, and who owns it. "Order" is not a table — it is somebody's intent to buy.</p>
+  </div>
+
+  <div class="block" data-id="M01.1.2" data-code="1.2">
+    <p>⚠️ If you cannot explain the entity without using database words, it is not a business entity yet.</p>
+  </div>
+
+  <h2><span class="n">2</span> How they connect</h2>
+  <p class="section-lead">The diagram, and the rule behind every arrow.</p>
+
+  <div class="block" data-id="M01.2.1" data-code="2.1">
+    <p>The diagram, as text — so it falls under the traffic light like any other block:</p>
+    <pre><code class="mermaid">erDiagram
+  CUSTOMER ||--o{ ORDER : places
+  ORDER ||--|{ LINE_ITEM : contains
+  PRODUCT ||--o{ LINE_ITEM : appears_in</code></pre>
+  </div>
+
+  <div class="block" data-id="M01.2.2" data-code="2.2">
+    <p>For each relation, the rule in words: "a customer may have no order at all", "an order has at least one item". The cardinality in the diagram and the sentence have to agree.</p>
+  </div>
+
+  <h2><span class="n">3</span> The dictionary</h2>
+  <p class="section-lead">Field by field, what it is and what it cannot be.</p>
+
+  <div class="block" data-id="M01.3.1" data-code="3.1">
+    <p>Name, type, required, and <b>the rule</b>. "Tax ID: text, 11 digits" is the type; "Tax ID: of whoever pays, not of whoever is paid" is the meaning — and that is what most models are missing.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

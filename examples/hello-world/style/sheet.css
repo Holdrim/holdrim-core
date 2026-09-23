@@ -1,0 +1,23 @@
+/* The example's own look. It belongs to the CONTENT, not to the engine: a project adopting Holdrim
+ * writes its own sheet, and the engine's panel stylesheet stays out of its way. */
+body.doc { margin: 0; font-family: system-ui, sans-serif; color: #12263A; background: #F4F7F9; }
+.doc-page { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 4rem; background: #fff; }
+.doc-title { font-size: 1.6rem; line-height: 1.2; margin: 0 0 1.5rem; }
+.doc-title__code { color: #55697C; font-weight: 500; margin-right: .5rem; }
+h2 { font-size: 1.15rem; margin: 2rem 0 .75rem; }
+h2 .n { color: #55697C; margin-right: .5rem; }
+.lead { font-size: 1.05rem; color: #55697C; }
+.block { margin: .75rem 0; padding: .75rem 1rem; border-left: 3px solid #D7E2EA; }
+code { background: #F4F7F9; padding: 0 .25rem; border-radius: 3px; }
+
+/* ⚠️ position: relative is a REQUIREMENT of the engine, not a matter of taste. The review button
+   is placed inside the block; without this it escapes to the corner of the page. It is the line a
+   new sheet most easily leaves out, which is the best argument for writing it down here. */
+.lead[data-code], .block[data-code] { position: relative; }
+
+/* The block's number, for when the panel is NOT on (no server, file opened straight from disk).
+   Once the panel turns on, panel.css drops this and the button takes its place. */
+.lead[data-code]::after, .block[data-code]::after {
+  content: attr(data-code); position: absolute; top: -.6rem; right: .6rem; font-size: .7rem;
+  color: #55697C; background: #F4F7F9; padding: 0 .35rem; border-radius: .2rem;
+}
