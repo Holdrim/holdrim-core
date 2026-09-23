@@ -26,7 +26,7 @@ and they live outside the trail, where they can be removed.
 
 ## What changes
 
-### 1. An event is signed by an id, not an e-mail
+### 1. An event names its author by an id, not an e-mail
 
 Every event's `author` becomes an opaque id, random, one per person (`p_` and 24 hex characters).
 The id means something only through the **people table**: the id and the e-mail, and nothing else.
@@ -63,10 +63,30 @@ the same way.
 So the role of the author — owner, admin or other — is written on the event when the server records
 it, from `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` at that moment, and every reader uses what is written.
 A ✓ given by the owner stays the owner's ✓ after they hand over, after they are removed, after
-anything. The owner is still named only by `HOLDRIM_OWNER`, and only the server writes a role:
-what changes is that a role, once written on a fact, is part of the fact.
+anything. The owner is still named only by `HOLDRIM_OWNER`, and the server writes the role from it:
+what changes is that a role, once written on a fact, is part of the fact. What that rests on, and
+what it does not, is the next section.
 
-### 3. Free text lives outside the trail
+### 3. Who can write the store
+
+Every guarantee here — an event never altered, a people row never re-pointed, a role written by the
+server from `HOLDRIM_OWNER` — holds against the people who use Holdrim. Against someone who can
+write the database directly, it holds only as far as the database is made to hold it:
+
+- **SQLite**, by trigger, and by the file belonging to the server's user.
+- **Firestore**, by the code alone. Whoever the project's IAM lets write can write anything, events
+  included — the gap events already have there, now shared by the people table.
+- **The CLI's own path to the cloud** (`engine/cli/remote.ts`) writes events around the server, the
+  one sanctioned door that does. It goes when the agent writes through the API with an identity of
+  its own.
+
+A role on the event does not widen this: a direct writer can forge the owner's ✓ today by writing the
+owner's e-mail as its author, and the owner's e-mail is no secret. What closes it is a **signature**:
+the server signs each event with a key only it holds, and every reader — `holdrim sync` included —
+trusts a role only on a fact the server signed. Not built; see the table at the end. Until then,
+the store is part of what a deployment has to guard, like the machine the server runs on.
+
+### 4. Free text lives outside the trail
 
 The text of a request, a comment, a reply or a supplement, and the `snapshot` of the block at the
 moment of an event, move out of the event into a table of texts, one row per event and field. The
@@ -86,7 +106,7 @@ to act on it was removed. It is, with the fingerprint, what an approval vouches 
 The documentation's own text lives in the project's repository, and removing a sentence from it is a
 commit, with its own history.
 
-### 4. Removing a person: anonymised, never deleted
+### 5. Removing a person: anonymised, never deleted
 
 "People are disabled, never deleted" stays. It gains one step, taken only by the **owner**, at the
 person's request:
@@ -106,7 +126,7 @@ resets the owner's account.
 
 Until the tool exists, the same steps are a documented procedure the operator runs on the database.
 
-### 5. What the engine writes elsewhere
+### 6. What the engine writes elsewhere
 
 - **Commits.** The brief that `holdrim apply` hands the agent asks for two trailers, `Request:` with
   the request's id and `Requested-by:` with the requester's e-mail — and a commit stays in the
@@ -119,7 +139,7 @@ Until the tool exists, the same steps are a documented procedure the operator ru
   start of the block's own text and the event's id; the page's `data-validated` holds a date. Neither
   names anybody.
 
-### 6. What changes with it
+### 7. What changes with it
 
 These describe today's format and move in the same change that replaces it, so no document goes on
 describing the old one: `docs/GLOSSARY.md` (the event fields `author`, `text` and `snapshot`, and
@@ -149,3 +169,5 @@ Said here so nobody promises it:
 | Commits without `Requested-by:`, ids in logs | ⬜ 0.1.0 |
 | Removing a person, documented procedure | ⬜ 0.1.0 |
 | Removing a person, from the people screen | ⬜ 0.2 |
+| Events signed by the server, and readers that trust only signed roles | ⬜ not scheduled |
+| The agent writing through the API, and no direct write to the cloud | ⬜ not scheduled |
