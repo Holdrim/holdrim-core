@@ -1,0 +1,7 @@
+{
+  "name": "holdrim",
+  "version": "0.1.0",
+  "description": "Reviewable documentation with traceable approval: each block has a fingerprint, the approval drops if the text changes, and only the agent makes changes — from a request, with impact analysis.",
+  "author": "Alessandro Garbiati",
+  "keywords": ["documentation", "review", "approval", "traceability"]
+}

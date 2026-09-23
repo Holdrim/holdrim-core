@@ -1,0 +1,11 @@
+{
+  "name": "holdrim",
+  "owner": { "name": "Alessandro Garbiati" },
+  "plugins": [
+    {
+      "name": "holdrim",
+      "source": "./plugins/holdrim",
+      "description": "The Holdrim method: reviewable documentation, with approval tied to the text and a trail that never gets erased."
+    }
+  ]
+}
