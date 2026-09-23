@@ -916,10 +916,10 @@ async function serveFile(target: string, res: ServerResponse, urlPath = '', from
   const headers: Record<string, string> = {
     'content-type': type, 'cache-control': cache, 'x-robots-tag': 'noindex, nofollow', ...SECURITY_HEADERS,
   };
-  let body = await readFile(target);
+  let body: Buffer = await readFile(target);
   if (fromSite && type.startsWith('text/html')) {
     const nonce = randomBytes(16).toString('base64');
-    body = Buffer.from(withPanelNonce(body.toString('utf8'), nonce));
+    body = withPanelNonce(body, nonce);
     headers['content-security-policy'] = pagePolicy(nonce);
   } else if (fromSite) {
     headers['content-security-policy'] = FILE_POLICY;

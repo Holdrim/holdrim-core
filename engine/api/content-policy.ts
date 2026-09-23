@@ -18,18 +18,38 @@
  * @module
  */
 
-/**
- * A `<script` tag whose one `src` is exactly the panel. Exactly: a suffix would let
- * `/engine/web/panel-react.js/../../x.js` borrow the nonce for a file the site controls. And one:
- * a tag naming the panel AND another file runs the first `src` it was given, which is the other one.
- * A browser that follows the HTML standard refuses a nonce on a tag with a repeated attribute by
- * itself — Chrome does, which is why only the unit test feels this half — and this does not rely on it.
- */
-const PANEL_TAG = /<script\b(?![^>]*\ssrc\s*=[^>]*\ssrc\s*=)(?=[^>]*\ssrc\s*=\s*(["'])\/engine\/web\/panel-react\.js\1)/gi;
+const PANEL = '/engine/web/panel-react.js';
+const SCRIPT_TAG = /<script\b([^>]*)>/gi;
+/** One attribute of a tag: its name, and its value however it is quoted. */
+const ATTRIBUTE = /([^\s=/>"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/g;
 
-/** The page, with this response's nonce on the panel's tag. */
-export function withPanelNonce(html: string, nonce: string): string {
-  return html.replace(PANEL_TAG, `<script nonce="${nonce}"`);
+/**
+ * Whether a `<script>` tag's attributes name exactly one `src`, and it is exactly the panel.
+ *
+ * Exactly the panel: a suffix would let `/engine/web/panel-react.js/../../x.js` borrow the nonce
+ * for a file the site controls. Exactly one: a tag naming the panel AND another file runs the first
+ * `src` it was given, which is the other one — a browser that follows the HTML standard refuses a
+ * nonce on a tag with a repeated attribute by itself, Chrome among them, and this does not rely on
+ * it. Attributes are read as attributes, so ` src=` inside another attribute's value is text.
+ */
+function isPanelTag(attributes: string): boolean {
+  const sources = [...attributes.matchAll(ATTRIBUTE)]
+    .filter(([, name]) => name!.toLowerCase() === 'src')
+    .map(([, , double, single, bare]) => double ?? single ?? bare);
+  return sources.length === 1 && sources[0] === PANEL;
+}
+
+/**
+ * The page, with this response's nonce on the panel's tag and not a byte changed elsewhere.
+ *
+ * Read as latin1, which maps each byte to one character and back: a page in any encoding — UTF-8,
+ * or the Windows-1252 of a document pasted from a word processor — comes out as it went in. Read
+ * as UTF-8, every byte that is not valid UTF-8 would be replaced, and the text silently mangled.
+ */
+export function withPanelNonce(page: Buffer, nonce: string): Buffer {
+  const text = page.toString('latin1').replace(SCRIPT_TAG, (tag, attributes: string) =>
+    isPanelTag(attributes) ? `<script nonce="${nonce}"${attributes}>` : tag);
+  return Buffer.from(text, 'latin1');
 }
 
 /**

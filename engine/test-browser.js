@@ -86,8 +86,8 @@ writeFileSync(join(site, 'pages', 'X01.html'), crossPage('a-text-it-no-longer-ha
   .replace('FP1', `data-validated-fingerprint="${own.get('X01.1.1').fingerprint}"`)
   .replace('FP2', `data-validated-fingerprint="${own.get('X01.1.2').fingerprint}"`));
 
-// A page whose content tries to approve, in the name of whoever opens it, three blocks of ANOTHER
-// page with their current fingerprints — the ✓ `holdrim sync` would turn into locks. Content is
+// A page whose content tries to approve, in the name of whoever opens it, blocks of ANOTHER page
+// with their current fingerprints — the ✓ `holdrim sync` would turn into locks. Content is
 // written by people and by agents; an agent that obeyed an instruction hidden in a document could
 // write exactly this. One block per way in, so a failure names the one that got through: a script
 // in the page, a handler on an element, a script file sitting in the site itself, that same file

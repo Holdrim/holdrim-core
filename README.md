@@ -119,6 +119,12 @@ Number 6 is the one that hurts when forgotten: injected text enters the fingerpr
 **every** approval on the page at once, with no error at all.
 `examples/hello-world/pages/A01.html` has it commented at the exact place it happens.
 
+**A page runs the panel and nothing else.** It is served with a Content-Security-Policy whose
+nonce only the tag in row 7 carries, so any other `<script>`, an `onclick=`, a `<base>` — whatever
+a person or an agent writes into the content — is refused by the browser. A script in a page would
+run with the reader's session, and for the owner that is an approval in their name. See
+[`SECURITY.md`](SECURITY.md).
+
 ## Kinds of content
 
 Every reviewable piece is of one kind, and each kind knows what it demands of itself.
