@@ -241,6 +241,42 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
   assert.match(readFileSync(join(tmp, 'pages', 'A01.html'), 'utf8'), /data-id="A01\.1\.1" data-validated="2026-09-22"/);
 });
 
+/**
+ * `sync` asks the server's rule who the owner is. Two addresses read as one owner nobody matches
+ * would sync nothing and say nothing, and the session would go on believing no ✓ was ever given.
+ * The refusal has to come before the cloud is asked: the count proves it did.
+ */
+test('sync refuses two owners, or none, before it asks the cloud for a single event', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  let asked = 0;
+  const source = { events: async () => { asked++; return []; } };
+
+  await assert.rejects(sync(tmp, source, { owner: 'a@example.org,b@example.org' }),
+    /HOLDRIM_OWNER needs exactly one e-mail \(got 2\)/);
+  await assert.rejects(sync(tmp, source, { owner: ' ' }), /HOLDRIM_OWNER needs exactly one e-mail \(got 0\)/);
+  assert.equal(asked, 0, 'the cloud is not asked while there is no single owner');
+});
+
+test('sync knows the owner however the address is typed, in the configuration or on the event', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const events = [
+    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: null },
+    { id: 'e2', type: 'approval', page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
+      author: ' OWNER@example.org ', when: '2026-09-22T10:01:00Z', data: null },
+  ];
+  const r = await sync(tmp, { events: async () => events }, { owner: '  Owner@Example.org ' });
+  const registry = loadRegistry(tmp);
+  assert.ok(registry['A01.1.1'], "the owner's ✓ locks with spaces and capitals around the configured address");
+  assert.ok(registry['A02.1.1'], "and with spaces and capitals around the event's author");
+  assert.equal(r.added, 2);
+});
+
 test('the Source refuses a cloud with no project, instead of sending an invalid URL', async () => {
   const { Source } = await import('../cli/remote.ts');
   await assert.rejects(() => new Source({}).events(), /cloud\.project|HOLDRIM_PROJECT/);

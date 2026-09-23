@@ -5,6 +5,7 @@ import { fingerprintOfText } from '../core/fingerprint.js';
 import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, type Block } from './pages.ts';
 import { trafficLight, dependentsOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
+import { createRoles } from '../core/roles.js';
 import { Source } from './remote.ts';
 
 /**
@@ -246,8 +247,11 @@ export async function mark(root: string, registry: Registry, id: string, when: s
 
 /** Brings into the repository the ✓ the owner gave on the site. Only theirs: a reviewer's approval does not lock. */
 export async function sync(root: string, source: Pick<Source, 'events'>, options: { owner?: string } = {}) {
-  const owner = (options.owner ?? process.env.HOLDRIM_OWNER ?? '').toLowerCase();
-  if (!owner) throw new Error('set HOLDRIM_OWNER: it is THEIR ✓ that becomes a lock.');
+  // The server's own rule, not a second copy of it: one e-mail, compared the way the server
+  // compares it, and zero or two refused before the cloud is even asked. A comparison written here
+  // would drift from it — a space around the address, and the owner's ✓ would lock nothing; two
+  // addresses, and they would be read as one owner nobody matches, with no error either way.
+  const roles = createRoles(options.owner ?? process.env.HOLDRIM_OWNER, '');
 
   // The cloud being down must not take the whole session down with it. The registry in the repository
   // is the source of what is already validated; the cloud only adds what came from the site. Without
@@ -263,7 +267,7 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
     return { added: 0, unchanged: 0, expired: 0, offline: true };
   }
   const approvals = events.filter((e) => e.type === 'approval');
-  const theOwners = approvals.filter((e) => (e.author ?? '').toLowerCase() === owner);
+  const theOwners = approvals.filter((e) => roles.isOwner(e.author));
   if (approvals.length !== theOwners.length) {
     console.log(`  · ${approvals.length - theOwners.length} approval(s) by somebody else ignored: only the owner's ✓ locks`);
   }
