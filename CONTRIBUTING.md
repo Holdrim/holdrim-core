@@ -105,8 +105,10 @@ names, column names and commit messages. `scripts/check-language.sh` enforces th
 Messages a reviewer reads go through `engine/core/i18n.js` and live in `engine/locales/`. Logs stay
 English always — a log is evidence, and evidence that changes wording by locale cannot be grepped.
 
-The one exception is the translated values in `engine/locales/pt-BR.json` and
-`engine/locales/es.json`. Their keys are English, and so is every variable, attribute and command.
+The two exceptions are the translated values in `engine/locales/pt-BR.json` and
+`engine/locales/es.json` — their keys are English, and so is every variable, attribute and command —
+and the README's translations, `README.pt-BR.md` and `README.es.md`, which a test keeps in step with
+the English they translate.
 
 ## Commit messages
 

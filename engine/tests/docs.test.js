@@ -94,3 +94,47 @@ test('the glossary names every request category the cycle has, and no other', ()
   const listed = [...table.matchAll(/^\| `([a-z]+)` \|/gm)].map(([, c]) => c).sort();
   assert.deepEqual(listed, Object.keys(cycle.request_categories).sort());
 });
+
+/** Text a reader sees, whatever wrote it: no tags, no bold marks, one space between words. */
+const words = (s) => s.replace(/<[^>]+>/g, ' ').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+
+/**
+ * The mission and the vision are written in three places a visitor meets them — the README, the
+ * vision document and the site's first page — and a sentence kept in three places is three
+ * sentences the day one of them is edited. docs/VISION.md is the one they are read from.
+ */
+test('the mission and the vision say the same thing wherever they are written', () => {
+  const vision = read('docs/VISION.md');
+  const section = (title) => words(vision.split(`## ${title}\n`)[1].trim().split('\n\n')[0]);
+  const mission = section('Mission');
+  // The vision section goes on after its first paragraph; the statement is that paragraph.
+  const statement = section('Vision');
+  assert.ok(mission.length > 40 && statement.length > 40, 'the mission or the vision was not found in docs/VISION.md');
+
+  const readme = words(read('README.md'));
+  assert.ok(readme.includes(`Mission. ${mission}`), 'README.md does not carry the mission of docs/VISION.md');
+  assert.ok(readme.includes(`Vision. ${statement}`), 'README.md does not carry the vision of docs/VISION.md');
+
+  const site = read('site/pages/S01.html');
+  const block = (id) => words(site.split(`data-id="${id}"`)[1].split('</div>')[0].replace(/^[^>]*>/, ''));
+  assert.equal(block('S01.2.1'), mission, 'the site\'s mission (S01.2.1) is not the one in docs/VISION.md');
+  assert.equal(block('S01.3.1'), statement, 'the site\'s vision (S01.3.1) is not the one in docs/VISION.md');
+});
+
+/**
+ * A translation is a second copy, and a second copy drifts without anyone noticing: the English
+ * gains a step, and the Portuguese goes on promising the old ones. So the part of README.md that is
+ * translated ends at a marker, and each translation carries the fingerprint of that part as it was
+ * when it was translated — the method's own lock, on its own front page.
+ */
+test('every translation of the README carries the fingerprint of the English it translates', async () => {
+  const { createHash } = await import('node:crypto');
+  const MARKER = '<!-- translated: everything above this line is also in README.pt-BR.md and README.es.md -->';
+  const english = read('README.md');
+  assert.ok(english.includes(MARKER), 'README.md has lost the marker that ends its translated part');
+  const now = createHash('sha256').update(english.split(MARKER)[0]).digest('hex');
+  for (const file of ['README.pt-BR.md', 'README.es.md']) {
+    const recorded = read(file).match(/<!-- source: README\.md up to the translated marker, sha256 ([0-9a-f]{64}) -->/)?.[1];
+    assert.equal(recorded, now, `${file} translates an older README.md: bring it up to date and record sha256 ${now}`);
+  }
+});

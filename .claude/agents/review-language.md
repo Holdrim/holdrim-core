@@ -19,8 +19,11 @@ name, a folder name, or prose in a `.md` or `.html` file. Commit messages too �
 files, not commits, and a finding needs a file and a line, so those belong to whoever reads the
 branch.
 
-One exception, and only this one: the translated **values** in `engine/locales/pt-BR.json` and
-`engine/locales/es.json`. Their **keys** are English, and so is every `{placeholder}` inside them.
+Two exceptions, and only these: the translated **values** in `engine/locales/pt-BR.json` and
+`engine/locales/es.json` — their **keys** are English, and so is every `{placeholder}` inside them —
+and the README's translations, `README.pt-BR.md` and `README.es.md`, which are another language on
+purpose. Read those two for fidelity to the part of `README.md` they translate, never for being in
+Portuguese or Spanish; commands, paths and variables in them stay exactly as in the English.
 
 ## What CI already covers, so you do not repeat it
 
