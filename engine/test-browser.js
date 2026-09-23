@@ -13,7 +13,7 @@
  * HOLDRIM_BROWSER_CHANNEL (CI uses the runner's own `chrome`, so nothing is downloaded).
  */
 import { spawn } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
@@ -85,6 +85,40 @@ const own = await readBlocks(site);
 writeFileSync(join(site, 'pages', 'X01.html'), crossPage('a-text-it-no-longer-has')
   .replace('FP1', `data-validated-fingerprint="${own.get('X01.1.1').fingerprint}"`)
   .replace('FP2', `data-validated-fingerprint="${own.get('X01.1.2').fingerprint}"`));
+
+// A page whose content tries to approve, in the name of whoever opens it, blocks of ANOTHER page
+// with their current fingerprints — the ✓ `holdrim sync` would turn into locks. Content is
+// written by people and by agents; an agent that obeyed an instruction hidden in a document could
+// write exactly this. One block per way in, so a failure names the one that got through: a script
+// in the page, a handler on an element, a script file sitting in the site itself, that same file
+// named by a tag that also names the panel — the tag the server gives the nonce to —, a `<base>`
+// that moves the panel's tag to another host, an SVG of the site opened on its own, and a script
+// carrying the nonce an earlier response gave out (written below, once one has been seen).
+// Outside `content.folders`, so the pages and lights counted elsewhere in this run stay as they are.
+const forge = (id) => `fetch(location.origin + '/api/events', { method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ type: 'approval', page: '${id.split('.')[0]}', block: '${id}', fingerprint: '${own.get(id).fingerprint}' }) })`;
+const FORGED = [['a script in the page', 'A01.1.1'], ['a handler on an element', 'A01.1.3'],
+  ['a script file in the site', 'A01.1.4'], ['a script file dressed as the panel', 'A01.2.1'],
+  ['a <base> moving the panel to another host', 'A01.2.2'], ['an SVG of the site opened on its own', 'A01.1.2'],
+  ['a script carrying a nonce seen before', 'A02.1.1']];
+const hostilePage = (code, head, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>${code}</title>${head}<link rel="stylesheet" href="/engine/web/panel.css"></head><body><main>
+<h1 class="doc-title"><span class="doc-title__code">${code}</span> An ordinary-looking page</h1>
+<p data-id="${code}.1.1" data-code="1.1">Nothing to see here.</p>${body}
+</main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
+mkdirSync(join(site, 'hostile'));
+writeFileSync(join(site, 'hostile', 'forge.js'), `${forge('A01.1.4')};\n`);
+writeFileSync(join(site, 'hostile', 'dressed.js'), `${forge('A01.2.1')};\n`);
+writeFileSync(join(site, 'hostile', 'replayed.js'), `${forge('A02.1.1')};\n`);
+writeFileSync(join(site, 'hostile', 'forge.svg'),
+  `<svg xmlns="http://www.w3.org/2000/svg"><script>${forge('A01.1.2')}</script></svg>`);
+writeFileSync(join(site, 'hostile', 'Z01.html'), hostilePage('Z01', '', `
+<script>${forge('A01.1.1')}</script>
+<img src="/hostile/missing.png" alt="" onerror="${forge('A01.1.3')}">
+<script src="/hostile/forge.js"></script>
+<script src="/hostile/dressed.js" src="/engine/web/panel-react.js"></script>`));
+writeFileSync(join(site, 'hostile', 'Z02.html'), hostilePage('Z02', '<base href="https://evil.example/">', ''));
 
 /** The pages to drive, and how many buttons each should get: its blocks numbered "section.n". */
 const PAGES = [
@@ -510,6 +544,47 @@ try {
   await must('and changing it lets the person in, to the page they asked for',
     () => page.waitForURL(`${SIGN_IN}/pages/A01.html`));
   expect('and nothing was refused on the way', '', problems.join(' | '));
+
+  // The owner, signed in for real, opens a page whose content tries to approve in their name. Here
+  // and not on the development server: this one has the session cookie and the same-origin check a
+  // deployment has, and the forgery passes both — it IS the same origin. Only what the page is
+  // allowed to run stands between its content and the owner's ✓. Its own tab, and no problem
+  // listener: the refusals this provokes are the point, not a failure.
+  console.log('a page whose content tries to approve in the reader\'s name:');
+  const hostile = await context.newPage();
+  await hostile.goto(`${SIGN_IN}/hostile/Z01.html`);
+  await must('the panel still builds its buttons on it', () => hostile.locator('.rv-num').first().waitFor());
+  await hostile.waitForLoadState('networkidle');
+  // What a `<base>` would reach: another host serving a module that forges, with the CORS header a
+  // module from elsewhere needs. Stubbed, so the test depends on no network.
+  await context.route(/^https:\/\/evil\.example\//, (r) => r.fulfill({
+    contentType: 'text/javascript', headers: { 'access-control-allow-origin': '*' }, body: forge('A01.2.2'),
+  }));
+  await hostile.goto(`${SIGN_IN}/hostile/Z02.html`);
+  await hostile.waitForLoadState('networkidle');
+  await context.unroute(/^https:\/\/evil\.example\//);
+  // A link in any page can lead here; a `<meta http-equiv="refresh">` can lead here with no click.
+  await hostile.goto(`${SIGN_IN}/hostile/forge.svg`);
+  await hostile.waitForLoadState('networkidle');
+  // Anyone who can read a page can read the nonce it was served with, and content is written
+  // after pages have been read. A nonce that came back on a later response would be a password
+  // printed on every page.
+  const seen = (await context.request.get(`${SIGN_IN}/hostile/Z01.html`)).headers()['content-security-policy']
+    ?.match(/'nonce-([^']+)'/)?.[1];
+  expect('a page is served with a nonce', true, Boolean(seen));
+  writeFileSync(join(site, 'hostile', 'Z03.html'),
+    hostilePage('Z03', '', `<script nonce="${seen}" src="/hostile/replayed.js"></script>`));
+  await hostile.goto(`${SIGN_IN}/hostile/Z03.html`);
+  await hostile.waitForLoadState('networkidle');
+  const recorded = [];
+  for (const page of ['A01', 'A02']) {
+    recorded.push(...await context.request.get(`${SIGN_IN}/api/events?page=${page}`).then((r) => r.json()));
+  }
+  for (const [how, id] of FORGED) {
+    expect(`${how} did not approve ${id} in the owner's name`, undefined,
+      recorded.find((e) => e.type === 'approval' && e.block === id)?.author);
+  }
+  await hostile.close();
 
   // Where a person lands after signing in is decided by the screen's own script, from `next` in the
   // address, and only here does that script run. Without this, its origin check could be removed

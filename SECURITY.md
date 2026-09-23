@@ -29,9 +29,15 @@ Worth knowing before you run it:
   only as hex and anything else is refused and logged.
 - **The sign-in screen runs only what the server wrote into it.** Its Content-Security-Policy
   allows no script and no style without that response's nonce, new on every response, and no
-  `unsafe-inline` anywhere. API answers carry a policy that runs nothing. The documentation pages
-  keep only `frame-ancestors 'none'`: they are your HTML, with your scripts, and the engine does not
-  impose a policy that would break them. Tighten it at your own edge if your pages allow it.
+  `unsafe-inline` anywhere. API answers carry a policy that runs nothing.
+- **A documentation page runs the panel and nothing else.** The pages are served from the same
+  origin as the API, so a script in one would run with the reader's session — for the owner, an
+  approval in their name, and a lock after `holdrim sync`. Content is written by people and by
+  agents, and an agent can be steered by text hidden in the documents it edits. So every page gets a
+  nonce, new on every response, written into the panel's own tag and no other: an inline script, an
+  `onerror=`, a script file added to the site, a `<base>` pointing elsewhere are all refused by the
+  browser, and every other file of the site runs no script at all. The price: a page cannot bring
+  scripts of its own.
 - **The build is guarded against its own supply chain.** CI actions are pinned to commits, not
   tags; every checkout drops its token; no workflow can write to the repository or run on
   `pull_request_target`; `npm audit` blocks a known high-severity advisory in what ships; CodeQL
