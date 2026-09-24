@@ -627,6 +627,11 @@ expect "re-enabling is logged the same way: the member's id" "$MEMBER_ID" \
 expect "and by the owner again"        "$OWNER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed by)"
 expect "and the same password works again → 200" 200 "$(mlogin "$MEMBER_PASSWORD")"
+# Every other `signed_in` assertion above expects `null`: the member's FIRST sign-in, before they had
+# ever acted on anything reviewable. A hard-coded `person: null` at the call site would pass every one
+# of those and still be wrong — this is the one that needs a real id, from someone who by now has one.
+expect "and a sign-in by someone who has acted logs their own id" "$MEMBER_ID" \
+  "$(log_field $WORK/password.log signed_in person)"
 
 RESET=$(as_owner -X POST $B/api/users/$MEMBER/password)
 NEW_PASSWORD=$(echo "$RESET" | jfield password)
