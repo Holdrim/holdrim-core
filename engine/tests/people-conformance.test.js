@@ -157,6 +157,35 @@ forEachStore('an address with a slash is one person, and a new one once forgotte
   assert.deepEqual(await s.person(odd), { id: odd, email: null });
 });
 
+forEachStore('personOf never creates: an address nobody has yet stays nobody\'s', async (s) => {
+  assert.equal(await s.personOf('ana@example.org'), null);
+  assert.equal(await s.personOf('ana@example.org'), null, 'asking twice made no row either');
+  const ana = await s.personFor('ana@example.org');
+  assert.deepEqual(await s.person(ana), { id: ana, email: 'ana@example.org' });
+});
+
+forEachStore('personOf finds exactly what personFor already made, and makes nothing of its own',
+  async (s) => {
+    const ana = await s.personFor('ana@example.org');
+    assert.equal(await s.personOf('ana@example.org'), ana);
+    assert.equal(await s.personOf('  Ana@Example.org '), ana, 'the accounts\' rule of the same address');
+  });
+
+forEachStore('once forgotten, personOf answers null again — it never re-inserts the erased row',
+  async (s) => {
+    const ana = await s.personFor('ana@example.org');
+    await s.forget(ana);
+    assert.equal(await s.personOf('ana@example.org'), null);
+    // Asked TWICE, as "personOf never creates" above asks a never-seen address twice: a lookup that
+    // quietly re-inserted the pointer on its first call would still answer null on THAT call, and
+    // only a second ask would find the row it had just made and answer something other than null.
+    assert.equal(await s.personOf('ana@example.org'), null, 'asking twice made no row either');
+    // The forgotten row itself is untouched by asking: still there, still empty, same id — a
+    // read-only lookup must not hand a freshly-forgotten address a person of its own again, which
+    // is exactly what the very next admin action on that address needs (docs/PRIVACY.md, section 5).
+    assert.deepEqual(await s.person(ana), { id: ana, email: null });
+  });
+
 // ===================================================================== SQLite, around the code
 // The trigger is what holds the rule against anyone who opens the file with another program, so
 // it is asked with SQL written here, not through the store.

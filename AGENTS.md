@@ -98,7 +98,12 @@ Each has a test. If you change the code around one, run the contract test and re
   together with a `text_removed` event recording who and when (`texts_no_update`, `texts_no_replace`,
   `texts_no_delete`, `engine/api/store-sqlite.ts`). No route writes a `text_removed` event — `POST
   /events` refuses the type. A hash with no row that matches it, and no valid removal (later than
-  its target) naming it, or with two removals, reads as tampered, not as erased.
+  its target) naming it, or with two removals, reads as tampered, not as erased. A person's row in
+  the people table takes the same shape: `people_only_lose_email`, `people_no_delete` and
+  `people_no_replace` (`engine/api/store-sqlite.ts`) let `EventStore.forget` empty its e-mail and
+  never its id or the row itself, so a forgotten person's id still names every event and lock they
+  ever gave (`docs/PRIVACY.md`, section 5, is the procedure for both, run by hand until there is a
+  screen for it).
 - **Only the owner's ✓ becomes a lock.** An agent may *close* an impact — "this change did not reach
   here" — and never *approve* — "this text is correct".
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a

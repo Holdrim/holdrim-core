@@ -145,7 +145,7 @@ export async function brief(root: string, source: Pick<Source, 'events'>, prefix
   lines.push('1. Change only what the request asks. Anything else is a new request.');
   lines.push('2. A VALIDATED block does not change without the owner: say so and stop.');
   lines.push('3. Do not touch data-validated, data-validated-fingerprint or data-depended-on attributes.');
-  lines.push(`4. Commit with the trailers  Request: ${r.id}  and  Requested-by: ${r.author}`);
+  lines.push(`4. Commit with the trailer  Request: ${r.id}`);
   lines.push(`5. Then close it:  holdrim state ${r.id.slice(0, 8)} applied "what you did" --commit <sha>`);
   lines.push('6. If anything is ambiguous, ask instead of guessing. A misread request becomes two.');
   lines.push('');

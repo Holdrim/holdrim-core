@@ -136,6 +136,11 @@ export class FirestoreEventStore implements EventStore {
     });
   }
 
+  async personOf(email: string): Promise<string | null> {
+    const pointer = await this.#db.collection(LAYOUT.pointers).doc(LAYOUT.pointerId(personEmail(email))).get();
+    return pointer.exists ? (pointer.data()![LAYOUT.id] as string) : null;
+  }
+
   async person(id: string): Promise<Person | null> {
     const doc = await this.#db.collection(LAYOUT.rows).doc(id).get();
     return doc.exists ? { id: doc.id, email: doc.data()![LAYOUT.email] ?? null } : null;

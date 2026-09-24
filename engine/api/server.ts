@@ -26,6 +26,7 @@ import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { IapIdentity } from './identity-iap.ts';
 import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types.ts';
+import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -168,6 +169,10 @@ const events: EventStore = await (async () => {
       process.exit(1);
   }
 })();
+
+/** Wraps `idForLog`/`actedOn` (engine/api/people.ts) around this server's own store. */
+const idForLog = (email: string) => peopleIdForLog(events, email);
+const actedOn = (subject: string, actor: string) => peopleActedOn(events, subject, actor);
 
 /**
  * Where the people and their sessions live. Same idea as Keycloak: a file to run it on a laptop, a
@@ -398,9 +403,15 @@ async function recordEvent(
     }
   }
 
-  const e = await events.append(incoming, email);
+  // Resolved BEFORE the write, not after: an event's author is never null — the row has to exist
+  // for the event to mean anything — so this is the one log id that must still find-OR-CREATE.
+  // `recordAuthored` (engine/api/people.ts) is why the order can't drift back: it takes the store as
+  // a parameter precisely so a stub can prove the resolve-then-append order without a running server.
+  // `append` resolves the same address again to store the event, and finds the row this just made —
+  // one person, one insert.
+  const { author, event: e } = await recordAuthored(events, incoming, email);
   log('INFO', 'event_recorded', {
-    id: e.id, type: e.type, page: e.page, block: e.block, author: e.author,
+    id: e.id, type: e.type, page: e.page, block: e.block, author,
     from: e.data?.from, to: e.data?.state, through,
   });
   return { status: 201, body: e as unknown as Record<string, unknown>, event: e };
@@ -430,7 +441,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       const failure = UserInputError.from(error, 'api.password.invalid');
       return json(res, 400, { error: i18n.t(languageOf(req), failure.key, failure.params) });
     }
-    log('INFO', 'password_changed', { email });
+    log('INFO', 'password_changed', { person: await idForLog(email) });
     return json(res, 200, { ok: true });
   }
 
@@ -602,7 +613,7 @@ async function userRoutes(
       return true;
     }
     // The password is NOT in this line, and this is the line where it would be easiest to put it.
-    log('INFO', 'user_created', { email: address, by: email });
+    log('INFO', 'user_created', await actedOn(address, email));
     json(res, 201, { user: await users.find(address), password });
     return true;
   }
@@ -620,7 +631,7 @@ async function userRoutes(
       json(res, 400, { error: say(failure.key, failure.params) });
       return true;
     }
-    log('INFO', 'user_renamed', { email });
+    log('INFO', 'user_renamed', { person: await idForLog(email) });
     json(res, 200, { user: await users.find(email) });
     return true;
   }
@@ -646,7 +657,7 @@ async function userRoutes(
     }
     const password = await users.resetPassword(target);
     // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
-    log('INFO', 'user_password_reset', { email: target, by: email });
+    log('INFO', 'user_password_reset', await actedOn(target, email));
     json(res, 200, { user: await users.find(target), password });
     return true;
   }
@@ -679,7 +690,7 @@ async function userRoutes(
       return true;
     }
     await users.setEnabled(target, body.enabled);
-    log('INFO', 'user_enabled_changed', { email: target, enabled: body.enabled, by: email });
+    log('INFO', 'user_enabled_changed', { ...await actedOn(target, email), enabled: body.enabled });
     json(res, 200, { user: await users.find(target) });
     return true;
   }
@@ -984,11 +995,21 @@ const server = createServer(async (req, res) => {
         // The address as typed, but never more of it than an address can be: signIn refuses an
         // oversized one before the throttle sees it, so unsliced, each such refusal would write up
         // to a megabyte into the log, as often as anyone cared to ask.
+        //
+        // The raw address, never an id: a refusal never reaches `personFor`, so this line names
+        // nobody's row in the people table — a wrong guess against the owner's e-mail must not
+        // create a person, and an attacker trying a thousand addresses must not create a thousand
+        // of them. This is the one log line an operator needs to see an attack, and there is no
+        // person behind it yet to protect (`docs/PRIVACY.md`, section 6).
         log('WARNING', 'sign_in_refused', { email: email.slice(0, PasswordIdentity.MAX_EMAIL) });
         return json(res, 401, { error: i18n.t(languageOf(req), 'api.credentials.invalid') });
       }
       res.setHeader('set-cookie', byPassword.sessionCookie(r.session));
-      log('INFO', 'signed_in', { email: r.user.email, mustChangePassword: r.user.mustChangePassword });
+      // Read-only, like every other account action: signing in does not itself make this address a
+      // person — filing a request, a comment or a ✓ does — so a brand-new account's first sign-in
+      // logs `person: null`, honestly, rather than minting a row for an address that has not acted
+      // on anything reviewable yet.
+      log('INFO', 'signed_in', { person: await idForLog(r.user.email), mustChangePassword: r.user.mustChangePassword });
       return json(res, 200, { email: r.user.email, name: r.user.name, mustChangePassword: r.user.mustChangePassword });
     }
 

@@ -20,7 +20,7 @@ Write (agent + owner)  →  Publish when the owner says so  →  Review (people,
 | **Write** | the agent, with the owner | HTML pages, one `data-id` per block, in the standard of whoever adopts the method |
 | **Publish** | the owner decides when | outside the engine: the content is a repository, and publishing it is that repository's business |
 | **Review** | whoever has access | in the browser, block by block: **Approve · Ask for a change · Comment** |
-| **Apply** | **the agent only**, with the owner | reads the request, measures the impact, asks about anything ambiguous, applies it, commits with `Request:` and `Requested-by:`, closes the request |
+| **Apply** | **the agent only**, with the owner | reads the request, measures the impact, asks about anything ambiguous, applies it, commits with `Request:`, closes the request |
 | **Learn** | the agent | a repeated correction becomes a written lesson in the adopting project |
 
 ## The six rules
@@ -168,11 +168,13 @@ node engine/cli/holdrim.ts <command>    # --local to talk to the local server
    `state <id> waiting "question"`.
 5. **Apply** it, then run `check` (a validated block changes only with the owner's ok) and
    `index`.
-6. **Commit** with trailers:
+6. **Commit** with the trailer:
    ```
    Request: <full id>
-   Requested-by: <e-mail of whoever asked>
    ```
+   Who asked is not in the commit any more: `Request:` already names the request, and the person
+   behind it is found from there, in the people table, the one place it can be removed
+   (`docs/PRIVACY.md`, section 6).
 7. **Close** — `state <id> applied "what changed" --commit <sha> --blocks A01.2.1,A01.2.2`.
 
 `holdrim apply <id>` writes the brief for one request — the request, its impact, these steps — and

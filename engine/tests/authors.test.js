@@ -15,7 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { authorOf, withAuthors, PERSON_ID } from '../api/people.ts';
+import { authorOf, withAuthors, PERSON_ID, idForLog, actedOn, recordAuthored } from '../api/people.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { Source } from '../cli/remote.ts';
 import { stub } from './helpers/stub.js';
@@ -258,4 +258,85 @@ test('[firestore] a person that cannot be looked up stops the write before anyth
       assert.deepEqual(commits, [], 'a read that failed was taken for "nobody yet", and a person was made');
     });
   assert.equal((await db.collection('events').get()).size, 0);
+});
+
+// ============================================================ idForLog / actedOn, for the server's own log lines
+// These take the store as a parameter precisely so a lookup that throws can be tested here, in a
+// microsecond, instead of trying to break a real database under a running server.
+
+test('idForLog answers whatever a working lookup answers', async () => {
+  const found = { personOf: async (e) => (e === 'ana@example.org' ? 'p_aaaaaaaaaaaaaaaaaaaaaaaa' : null) };
+  assert.equal(await idForLog(found, 'ana@example.org'), 'p_aaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.equal(await idForLog(found, 'nobody@example.org'), null);
+});
+
+test('idForLog answers null, never throws, when the lookup itself fails', async () => {
+  const broken = { personOf: async () => { throw new Error('the database is down'); } };
+  await assert.doesNotReject(idForLog(broken, 'ana@example.org'));
+  assert.equal(await idForLog(broken, 'ana@example.org'), null);
+});
+
+test('actedOn resolves both sides on their own: one failing does not lose the other', async () => {
+  const store = {
+    personOf: async (e) => {
+      if (e === 'owner@example.org') return 'p_owner00000000000000000a';
+      throw new Error('no row, and asking failed outright');
+    },
+  };
+  assert.deepEqual(await actedOn(store, 'somebody@example.org', 'owner@example.org'),
+    { person: null, by: 'p_owner00000000000000000a' });
+  assert.deepEqual(await actedOn(store, 'owner@example.org', 'somebody@example.org'),
+    { person: 'p_owner00000000000000000a', by: null });
+});
+
+test('idForLog logs a distinct warning when the lookup itself fails, naming no e-mail', async () => {
+  const lines = [];
+  const real = console.log;
+  console.log = (line) => lines.push(line);
+  try {
+    assert.equal(await idForLog({ personOf: async () => { throw new Error('down'); } }, 'ana@example.org'), null);
+  } finally {
+    console.log = real;
+  }
+  assert.equal(lines.length, 1);
+  const logged = JSON.parse(lines[0]);
+  assert.equal(logged.event, 'person_lookup_failed');
+  assert.ok(!JSON.stringify(logged).includes('ana@example.org'), 'the e-mail leaked into the very log this PR removes it from');
+});
+
+test('idForLog logs nothing when the lookup simply answers null', async () => {
+  const lines = [];
+  const real = console.log;
+  console.log = (line) => lines.push(line);
+  try {
+    assert.equal(await idForLog({ personOf: async () => null }, 'nobody@example.org'), null);
+    assert.deepEqual(lines, [], 'the ordinary "nobody yet" answer is not a failure, and must not read as one');
+  } finally {
+    console.log = real;
+  }
+});
+
+// ============================================================ recordAuthored, for the API's own write path
+test('recordAuthored resolves the author before writing, and hands both back', async () => {
+  const calls = [];
+  const store = {
+    personFor: async (e) => { calls.push(['personFor', e]); return 'p_aaaaaaaaaaaaaaaaaaaaaaaa'; },
+    append: async (incoming, e) => { calls.push(['append', e]); return { ...incoming, id: 'e1', author: 'p_aaaaaaaaaaaaaaaaaaaaaaaa' }; },
+  };
+  const result = await recordAuthored(store, { type: 'comment', page: 'A01', text: 'x' }, 'ana@example.org');
+  assert.deepEqual(calls, [['personFor', 'ana@example.org'], ['append', 'ana@example.org']],
+    'the author must be resolved before the event is written, not after');
+  assert.equal(result.author, 'p_aaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.equal(result.event.id, 'e1');
+});
+
+test('an author that cannot be resolved writes no event', async () => {
+  let appended = false;
+  const store = {
+    personFor: async () => { throw new Error('the people table is down'); },
+    append: async (incoming, e) => { appended = true; return { ...incoming, id: 'e1', author: e }; },
+  };
+  await assert.rejects(recordAuthored(store, { type: 'comment', page: 'A01', text: 'x' }, 'ana@example.org'),
+    /the people table is down/);
+  assert.equal(appended, false, 'append ran even though the author it would have credited was never resolved');
 });

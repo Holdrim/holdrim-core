@@ -109,12 +109,12 @@ commit, with its own history.
 
 ### 5. Removing a person: anonymised, never deleted
 
-"People are disabled, never deleted" stays. It gains one step, taken only by the **owner**, at the
-person's request:
+"People are disabled, never deleted" stays. Once there is a screen for it ("Removing a person, from
+the people screen" below), the owner gains one step, at the person's request:
 
 - the person's row in the people table keeps its id and loses its e-mail;
 - their account, under password sign-in, loses its e-mail and name, its password and its open
-  sessions — disabling already drops the last two;
+  sessions;
 - every `text` they wrote is removed, as above — the snapshots on their events stay;
 - an event records that a person was removed, by whom and when — with ids only.
 
@@ -125,17 +125,52 @@ The owner cannot remove themselves: the owner comes from `HOLDRIM_OWNER`, and ha
 before leaving. An admin can ask the owner; only the owner acts, for the same reason only the owner
 resets the owner's account.
 
-Until the tool exists, the same steps are a documented procedure the operator runs on the database.
+**Until then**, the owner reaches bullets 1 and 3 above in full, by hand, with what already exists.
+Of bullet 2 the owner reaches only the sign-in/session half — disabling; erasing the account's own
+e-mail, name and password, like the `person_removed` event of bullet 4, is a capability only the
+people screen adds:
+
+1. **Find the person's id.** Look them up by e-mail in the people table next to the events —
+   `SELECT id FROM people WHERE email = ?` in SQLite, or the `people_by_email/{encoded e-mail}`
+   pointer document in Firestore (`engine/api/people.ts`, `FIRESTORE_PEOPLE`).
+2. **Cut off access first**, before whichever of the two ways in is theirs finds out and makes the
+   row fresh again:
+   - **Password sign-in:** `POST /api/users/<e-mail>/enabled` with `{"enabled": false}`, in the
+     owner's own session — the same route an admin already has, and everything disabling does today
+     (`docs/GLOSSARY.md`, **disabled**).
+   - **IAP sign-in:** remove the address from the IAP, or whatever Cloud access policy, in front of
+     Holdrim — outside Holdrim, since it holds no list of who that policy admits. Do this before the
+     forget step below, not after.
+
+   Either way, first: any identity that can still reach `POST /api/events` makes a new person the
+   moment it next acts — `recordEvent`'s call to `personFor` re-creates exactly the row this
+   procedure is about to empty — so nothing they do between this step and the next two, sign in,
+   write another comment, has to be removed all over again.
+3. **Remove every `text` they wrote.** For each of the person's events that still holds one, call
+   `EventStore.removeText(event, 'text', by)` — `by` is the owner's own e-mail, the same call
+   section 4 describes, reached directly instead of through a route. Snapshots are left alone: they
+   are the documentation's own text, not the person's.
+4. **Forget the person.** `EventStore.forget(id)` empties their row. The id stays on every event
+   they ever touched, so a lock they were given keeps saying whose it was.
+5. **Write down that it happened.** There is no `person_removed` event type yet — recording one,
+   with ids only, is the people screen's own step. Until then, the owner's own comment naming the
+   id and the date is the trail.
+
+What none of this reaches is listed once, in "What Holdrim cannot remove" below — not repeated here
+so the two lists cannot drift apart.
 
 ### 6. What the engine writes elsewhere
 
-- **Commits.** The brief that `holdrim apply` hands the agent asks for two trailers, `Request:` with
-  the request's id and `Requested-by:` with the requester's e-mail — and a commit stays in the
-  project's history for good. `Requested-by:` goes. `Request:` already names the request, and who
-  asked is found from it, in the place where it can be removed.
-- **Logs.** Log lines carry the person's id instead of the e-mail wherever there is one. A refused
-  sign-in still logs the address that was typed: that is the line an operator needs to see an
-  attack, and there is no person behind it yet.
+- **Commits.** The brief that `holdrim apply` hands the agent asks for one trailer, `Request:` with
+  the request's id — a commit stays in the project's history for good, and who asked is found from
+  the request instead, in the place where it can be removed. A commit made before this change still
+  carries a `Requested-by:` with the e-mail; that is in "What Holdrim cannot remove", below.
+- **Logs.** Log lines carry the person's id instead of the e-mail wherever there is one. Two
+  addresses are the deliberate exceptions: a refused sign-in still logs the address that was typed,
+  since that is the line an operator needs to see an attack and there is no person behind it yet;
+  and the first-access banner at boot still names the owner, since it is the one line that tells
+  whoever is standing at the terminal which address to sign in with — configuration, not a user's
+  personal data.
 - **The repository.** The registry of approvals holds the file, the date, the fingerprint, the
   start of the block's own text and the event's id; the page's `data-validated` holds a date. Neither
   names anybody.
@@ -167,8 +202,8 @@ Said here so nobody promises it:
 | `author` as an opaque id, a people table in every mode, one resolver | ✅ built — a person gets their row the first time they act |
 | The author's role, and on a ✓ whether it is a lock, written on the event, never recomputed | ⬜ 0.1.0 |
 | Free text and snapshot outside the event, salted hash inside, removals as events | ✅ built — `EventStore.removeText`, not reachable through `POST /events` yet |
-| Commits without `Requested-by:`, ids in logs | ⬜ 0.1.0 |
-| Removing a person, documented procedure | ⬜ 0.1.0 |
+| Commits without `Requested-by:`, ids in logs | ✅ built |
+| Removing a person, documented procedure | ✅ built — section 5, run by hand |
 | Removing a person, from the people screen | ⬜ 0.1.0 |
 | Events signed by the server, and readers that trust only signed roles | ⬜ 0.1.0 (phase E) |
 | The agent writing through the API with its own credential, and no direct write to the cloud | ⬜ 0.1.0 (`docs/ROLES.md` §4) |

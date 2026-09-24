@@ -38,8 +38,8 @@ Things that fall out of that for free:
 
 - the report keeps the **snapshot** of the block it contradicted — the same snapshot machinery every
   request already uses
-- the fix's commit carries `Request:` and `Requested-by:`, so the change, the reason and the person
-  are one object
+- the fix's commit carries `Request:`, so the change and the reason are one object; who asked is
+  found from the request, in the people table, where it can be removed (`docs/PRIVACY.md`, section 6)
 - *"did this come back?"* is answerable: the block turned 🟡, somebody re-approved it, and the event
   log says who and when
 - the same bug reported twice lands on the **same block**, visibly
