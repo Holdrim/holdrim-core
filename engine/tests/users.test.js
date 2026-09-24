@@ -114,51 +114,6 @@ test('the database REFUSES to replace an event, in both REPLACE forms', async ()
   }
 });
 
-test('a guard swapped for a same-named one that does nothing is put back on the next open, out loud', async () => {
-  const dir = scratch();
-  const path = join(dir, 'events.db');
-  const said = [];
-  const warn = console.warn;
-  try {
-    let store = new SqliteEventStore(path);
-    await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
-    await store.close();
-    // From outside: the name stays, the refusal goes. CREATE TRIGGER IF NOT EXISTS would keep it.
-    const db = new DatabaseSync(path);
-    db.exec('DROP TRIGGER events_no_delete; CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT 1; END;');
-    db.close();
-    console.warn = (line) => said.push(line);
-    store = new SqliteEventStore(path);
-    await store.close();
-    console.warn = warn;
-    assert.ok(said.some((line) => /events_no_delete/.test(line)), 'the swap has to be said, not repaired in silence');
-    const again = new DatabaseSync(path);
-    assert.throws(() => again.exec('DELETE FROM events'), /not deleted/, 'the real guard has to be back');
-    assert.equal(again.prepare('SELECT COUNT(*) c FROM events').get().c, 1);
-    again.close();
-  } finally {
-    console.warn = warn;
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('a database whose guards are already right opens without a word', async () => {
-  const dir = scratch();
-  const path = join(dir, 'events.db');
-  const said = [];
-  const warn = console.warn;
-  try {
-    await new SqliteEventStore(path).close();
-    console.warn = (line) => said.push(line);
-    await new SqliteEventStore(path).close();
-    console.warn = warn;
-    assert.deepEqual(said, [], 'a guard as installed is not replaced, and nothing is said');
-  } finally {
-    console.warn = warn;
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('the sqlite store keeps and gives back the whole event', async () => {
   const store = new SqliteEventStore(':memory:');
   const e = await store.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'x',

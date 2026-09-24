@@ -19,7 +19,7 @@ import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
  * The triggers "Nothing is erased" rests on, by name. The database refuses, even for someone opening
  * the file with another program, so the rule stops depending on this code never calling UPDATE.
  */
-const GUARDS: Record<string, string> = {
+export const GUARDS: Record<string, string> = {
   events_no_update: `BEFORE UPDATE ON events
     BEGIN SELECT RAISE(ABORT, 'an event is not altered: the trail is the product'); END`,
   events_no_delete: `BEFORE DELETE ON events
@@ -35,9 +35,11 @@ const GUARDS: Record<string, string> = {
     BEGIN SELECT RAISE(ABORT, 'an event is not replaced: the trail is the product'); END`,
   // A row may only lose its e-mail, as an event may not change at all: an UPDATE that does anything
   // but empty the address is refused, and so is every DELETE. A re-pointed row would hand every
-  // event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3).
+  // event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3). The rowid may not move
+  // either: `UPDATE OR REPLACE` onto another person's rowid drops that person's row, and REPLACE
+  // fires no delete trigger.
   people_only_lose_email: `BEFORE UPDATE ON people
-    WHEN NEW.id IS NOT OLD.id OR NEW.email IS NOT NULL
+    WHEN NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.email IS NOT NULL
     BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
   people_no_delete: `BEFORE DELETE ON people
     BEGIN SELECT RAISE(ABORT, 'a person is not deleted: forgetting empties the e-mail and keeps the id'); END`,
@@ -49,6 +51,59 @@ const GUARDS: Record<string, string> = {
                  OR (NEW.email IS NOT NULL AND email = NEW.email))
     BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
 };
+
+/**
+ * Puts the guards in place, exactly as written in `guards`, and nothing else on the two tables.
+ * `CREATE TRIGGER IF NOT EXISTS` alone looks only at the name: a guard swapped for a same-named one
+ * that does nothing, or a second trigger that answers RAISE(IGNORE) to every ✓, would stay in place
+ * on every boot and the lock would be off without a word. So every trigger on `events` and `people`
+ * is compared with this list: one that differs is replaced, one that is not on it is dropped, and
+ * both are said out loud. The same path carries a guard whose text changed between versions onto a
+ * database an older version made.
+ *
+ * The repair runs in one IMMEDIATE transaction: between a DROP and its CREATE the table would have
+ * no guard, and another process with the file open could REPLACE a ✓ in that gap. A failure halfway
+ * rolls everything back rather than leave a guard dropped. When nothing needs repair — every boot
+ * but the first after an upgrade or a tampering — no write lock is taken at all.
+ */
+export function installGuards(db: DatabaseSync, guards: Record<string, string> = GUARDS,
+                              warn: (line: string) => void = console.warn): void {
+  // SQLite compares trigger names without case, and keeps the text as written, spacing included.
+  const key = (name: string) => name.toLowerCase();
+  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+  const want = new Map(Object.entries(guards).map(([name, body]) => [key(name), `CREATE TRIGGER ${name} ${body}`]));
+  const held = () => db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people')"
+  ).all() as { name: string; sql: string }[];
+  const inPlace = (rows: { name: string; sql: string }[]) =>
+    rows.length === want.size &&
+    rows.every((r) => want.has(key(r.name)) && flat(r.sql) === flat(want.get(key(r.name))!));
+  if (inPlace(held())) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // Read again under the lock: another process may have repaired it while this one waited.
+    const rows = held();
+    const byName = new Map(rows.map((r) => [key(r.name), r]));
+    for (const r of rows) {
+      if (want.has(key(r.name))) continue;
+      warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
+      db.exec(`DROP TRIGGER IF EXISTS "${r.name.replace(/"/g, '""')}"`);
+    }
+    for (const [k, sql] of want) {
+      const r = byName.get(k);
+      if (r && flat(r.sql) === flat(sql)) continue;
+      if (r) {
+        warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);
+        db.exec(`DROP TRIGGER IF EXISTS "${r.name.replace(/"/g, '""')}"`);
+      }
+      db.exec(sql);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
 
 export class SqliteEventStore implements EventStore {
   #db: DatabaseSync;
@@ -108,27 +163,7 @@ export class SqliteEventStore implements EventStore {
       CREATE UNIQUE INDEX IF NOT EXISTS people_by_email ON people (email) WHERE email IS NOT NULL;
     `);
 
-    for (const [name, body] of Object.entries(GUARDS)) this.#guard(name, body);
-  }
-
-  /**
-   * Puts one guard in place, as written here. `CREATE TRIGGER IF NOT EXISTS` alone looks only at the
-   * name: a trigger swapped for a same-named one that does nothing would stay in place on every boot,
-   * and the lock would stay off without a word. So the stored text is compared with this one, and a
-   * trigger that differs is replaced, and said out loud. The same path carries a guard whose text
-   * changed between versions onto a database an older version made.
-   */
-  #guard(name: string, body: string): void {
-    const want = `CREATE TRIGGER ${name} ${body}`;
-    const row = this.#db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name) as
-      { sql: string } | undefined;
-    const same = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim();
-    if (row && same(row.sql, want)) return;
-    if (row) {
-      console.warn(`holdrim: the database's guard ${name} was not the one this version installs; replacing it`);
-      this.#db.exec(`DROP TRIGGER ${name}`);
-    }
-    this.#db.exec(want);
+    installGuards(this.#db);
   }
 
   async personFor(email: string): Promise<string> {
@@ -141,7 +176,8 @@ export class SqliteEventStore implements EventStore {
     if (found) return found;
     const id = newPersonId();
     try {
-      this.#db.prepare('INSERT INTO people (id, email) VALUES (?, ?)').run(id, e);
+      const r = this.#db.prepare('INSERT INTO people (id, email) VALUES (?, ?)').run(id, e);
+      if (r.changes !== 1) throw new Error('the person was not recorded: the database dropped the insert');
     } catch (err) {
       const winner = this.#heldBy(e);
       if (winner) return winner;
@@ -169,11 +205,14 @@ export class SqliteEventStore implements EventStore {
 
   async append(event: NewEvent, author: string): Promise<Event> {
     const e = stored(event, crypto.randomUUID().replace(/-/g, ''), author, new Date().toISOString());
-    this.#db.prepare(
+    const r = this.#db.prepare(
       `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, author, happened_at, data)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(e.id, e.type, e.page, e.block ?? null, e.fingerprint ?? null, e.text ?? null,
           e.snapshot ?? null, e.author, e.when, e.data ? JSON.stringify(e.data) : null);
+    // A trigger that answers RAISE(IGNORE) drops the row and reports no error: without this, an
+    // approval that was never written would be handed back as recorded.
+    if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
     return e;
   }
 

@@ -236,6 +236,17 @@ test('[sqlite] REPLACE cannot erase a row by its rowid under a new id and addres
   assert.deepEqual(await s.person(ana), { id: ana, email: 'ana@example.org' });
 }));
 
+test('[sqlite] UPDATE OR REPLACE cannot move a row onto another person\'s rowid, written as SQL around the code', withSqliteFile(async (s, db) => {
+  // Emptying the address is the one change allowed, so the move rides on it: the id stays, the
+  // e-mail goes to NULL, and the rowid conflict drops the other row with no delete trigger.
+  const ana = await s.personFor('ana@example.org');
+  const bia = await s.personFor('bia@example.org');
+  assert.throws(() => db.prepare('UPDATE OR REPLACE people SET rowid = (SELECT rowid FROM people WHERE id = ?), email = NULL WHERE id = ?').run(bia, ana),
+    /can only lose their e-mail/);
+  assert.deepEqual(await s.person(bia), { id: bia, email: 'bia@example.org' });
+  assert.deepEqual(await s.person(ana), { id: ana, email: 'ana@example.org' });
+}));
+
 test('[sqlite] REPLACE cannot take another person\'s address and drop their row, written as SQL around the code', withSqliteFile(async (s, db) => {
   const ana = await s.personFor('ana@example.org');
   assert.throws(() => db.prepare('INSERT OR REPLACE INTO people (id, email) VALUES (?, ?)').run('p_111111111111111111111111', 'ana@example.org'),
