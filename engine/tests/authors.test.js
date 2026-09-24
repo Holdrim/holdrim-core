@@ -157,3 +157,51 @@ test('[firestore] first writes by one account at once are one person', cloud, as
   assert.equal(authors.size, 1, `one account became ${authors.size} people`);
   assert.equal((await db.collection('people').get()).size, 1);
 });
+
+/**
+ * Runs `body` with `fetch` passing through to the emulator, except that `answer` may take a call
+ * over — it gets the URL and the parsed body and returns a Response, or nothing to pass it on —
+ * and every commit is recorded, so a test can say which writes were attempted.
+ */
+async function withFetch(answer, body) {
+  const real = globalThis.fetch;
+  const commits = [];
+  globalThis.fetch = async (url, init) => {
+    const sent = init?.body ? JSON.parse(String(init.body)) : null;
+    if (String(url).endsWith(':commit')) commits.push(sent);
+    return (await answer(String(url), sent)) ?? real(url, init);
+  };
+  try { return await body(commits); } finally { globalThis.fetch = real; }
+}
+
+const writesPeople = (commit) => commit.writes.some((w) => /\/people(_by_email)?\//.test(w.update.name));
+
+test('[firestore] a person the cloud refuses to make, with nobody else\'s to take, writes no event', cloud, async (t) => {
+  const { project, db } = await cloudProject(t);
+  await withFetch(
+    (url) => (url.endsWith(':commit') ? new globalThis.Response('{"error":{"message":"refused on purpose"}}', { status: 500 }) : null),
+    async () => {
+      await assert.rejects(new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }),
+        /error 500 writing to Firestore: refused on purpose/);
+    });
+  assert.equal((await db.collection('events').get()).size, 0, 'an event naming a person who does not exist');
+  assert.equal((await db.collection('people').get()).size, 0);
+});
+
+test('[firestore] a second write by the same account finds its person and makes none', cloud, async (t) => {
+  const { project, db } = await cloudProject(t);
+  await new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'first' });
+  await withFetch(() => null, async (commits) => {
+    await new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'second' });
+    assert.equal(commits.filter(writesPeople).length, 0, 'the second write tried to make the person again');
+    assert.equal(commits.length, 1, 'the event, and nothing else');
+  });
+  assert.equal((await db.collection('events').get()).size, 2);
+});
+
+test('the cloud tests ran when this run was told to expect Firestore', () => {
+  // CI's `stores` job starts the emulator and promises it: without this, an emulator that failed to
+  // come up would turn every [firestore] test above into a skip and the job green.
+  const required = (process.env.HOLDRIM_TEST_REQUIRE ?? '').split(',').map((s) => s.trim());
+  if (required.includes('firestore')) assert.ok(process.env.FIRESTORE_EMULATOR_HOST, 'promised Firestore and none was set');
+});

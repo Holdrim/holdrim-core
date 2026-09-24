@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
-import { withAuthors, personEmail, newPersonId } from '../api/people.ts';
+import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
 
 const exec = promisify(execFile);
 
@@ -210,22 +210,24 @@ export class Source {
       return r.json() as Promise<Event[]>;
     }
 
-    const base = this.#documents();
+    // The project before the token: with none, gcloud would be asked for a credential to send to
+    // an address that does not exist.
+    this.#requireProject();
     const headers = { Authorization: `Bearer ${await this.#gcloudToken()}` };
-    const out = (await this.#collection(base, headers, 'events')).map((d) => this.#fromFirestore(d));
+    const out = (await this.#collection(headers, 'events')).map((d) => this.#fromFirestore(d));
     // The people after the events, as the server's Firestore store reads them and for its reason:
     // a person is made before their first event, so every author read above is in this read.
-    const people = new Map((await this.#collection(base, headers, 'people')).map((d) =>
-      [String(d.name).split('/').pop()!, (d.fields?.email?.stringValue as string | undefined) ?? null]));
+    const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
+      [String(d.name).split('/').pop()!, (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null]));
     return withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
   }
 
   /** Every document of one collection, over as many pages as the cloud answers in. */
-  async #collection(base: string, headers: Record<string, string>, name: string): Promise<Record<string, any>[]> {
+  async #collection(headers: Record<string, string>, name: string): Promise<Record<string, any>[]> {
     const out: Record<string, any>[] = [];
     let page: string | undefined;
     do {
-      const url = `${base}/${name}?pageSize=300${page ? `&pageToken=${page}` : ''}`;
+      const url = `${this.#database()}/documents/${name}?pageSize=300${page ? `&pageToken=${page}` : ''}`;
       const r = await fetch(url, { headers });
       if (!r.ok) throw await this.#cloudError(r, 'reading');
       const body = (await r.json()) as { documents?: Record<string, any>[]; nextPageToken?: string };
@@ -235,49 +237,58 @@ export class Source {
     return out;
   }
 
-  /** The documents root of the project, in the cloud or in the emulator the variable names. */
-  #documents(): string {
+  /** The project's database over REST, in the cloud or in the emulator the variable names. */
+  #database(): string {
     const host = emulator();
     return `${host ? `http://${host}` : 'https://firestore.googleapis.com'}/v1/projects/${this.#requireProject()}`
-      + '/databases/(default)/documents';
+      + '/databases/(default)';
+  }
+
+  /** A document's full name, as a write names it: `path` is `collection/id`. */
+  #documentName(path: string): string {
+    return `projects/${this.#requireProject()}/databases/(default)/documents/${path}`;
+  }
+
+  /** One atomic commit of `writes`: all of them land, or none. The response is the caller's to read. */
+  #commit(headers: Record<string, string>, writes: unknown[]): Promise<Response> {
+    return fetch(`${this.#database()}/documents:commit`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ writes }),
+    });
   }
 
   /**
    * The id of the person with this address in the cloud's people table, made on first sight —
-   * the same rows, under the same document ids, as the server's Firestore store makes
-   * (engine/api/store-firestore.ts, `personFor`), so a person the CLI makes is the one the server
-   * finds, and the other way round. The pointer is created only if absent; when another writer
-   * made it first, theirs is the person.
+   * the same rows, under the same document ids, as the server's Firestore store makes, from the
+   * one layout both read (FIRESTORE_PEOPLE), so a person the CLI makes is the one the server finds,
+   * and the other way round. The pointer is created only if absent; when another writer made it
+   * first, theirs is the person.
    */
-  async #cloudPersonFor(author: string, base: string, headers: Record<string, string>): Promise<string> {
+  async #cloudPersonFor(author: string, headers: Record<string, string>): Promise<string> {
     const email = personEmail(author);
-    const key = encodeURIComponent(email);
-    // Encoded twice in the URL: once is the document's own id, as the server's store names it, and
-    // the second is undone by the path itself — without it `%40` would arrive as `@`, another id.
-    const pointer = `${base}/people_by_email/${encodeURIComponent(key)}`;
+    const key = LAYOUT.pointerId(email);
+    // Encoded again in the URL: `key` is the document's own id, and the path undoes one encoding —
+    // without the second, `%40` would arrive as `@`, another id.
+    const pointer = `${this.#database()}/documents/${LAYOUT.pointers}/${encodeURIComponent(key)}`;
     const read = async (): Promise<string | null> => {
       const r = await fetch(pointer, { headers });
       if (r.status === 404) return null;
       if (!r.ok) throw await this.#cloudError(r, 'reading');
-      return ((await r.json()) as Record<string, any>).fields?.id?.stringValue ?? null;
+      return ((await r.json()) as Record<string, any>).fields?.[LAYOUT.id]?.stringValue ?? null;
     };
     const found = await read();
     if (found) return found;
     const id = newPersonId();
-    const name = (path: string) => `projects/${this.#project}/databases/(default)/documents/${path}`;
-    const r = await fetch(`${base.replace('/documents', '')}/documents:commit`, {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        writes: [
-          { update: { name: name(`people/${id}`), fields: { email: { stringValue: email } } },
-            currentDocument: { exists: false } },
-          { update: { name: name(`people_by_email/${key}`), fields: { id: { stringValue: id } } },
-            currentDocument: { exists: false } },
-        ],
-      }),
-    });
+    const r = await this.#commit(headers, [
+      { update: { name: this.#documentName(`${LAYOUT.rows}/${id}`), fields: { [LAYOUT.email]: { stringValue: email } } },
+        currentDocument: { exists: false } },
+      { update: { name: this.#documentName(`${LAYOUT.pointers}/${key}`), fields: { [LAYOUT.id]: { stringValue: id } } },
+        currentDocument: { exists: false } },
+    ]);
     if (r.ok) return id;
+    // Refused with no winner to take: the event is not written, since it would name a person who
+    // does not exist.
     const winner = await read();
     if (winner) return winner;
     throw await this.#cloudError(r, 'writing to');
@@ -304,11 +315,11 @@ export class Source {
       return ((await r.json()) as { id: string }).id;
     }
 
-    const base = this.#documents();
+    this.#requireProject();
     const token = { Authorization: `Bearer ${await this.#gcloudToken()}` };
     // An id, as the server writes it: the address stays in the people table, where forgetting
     // the person can empty it (docs/PRIVACY.md, section 1).
-    const fields: Record<string, unknown> = { author: { stringValue: await this.#cloudPersonFor(author, base, token) } };
+    const fields: Record<string, unknown> = { author: { stringValue: await this.#cloudPersonFor(author, token) } };
     for (const [k, v] of Object.entries(event)) {
       if (v == null) continue;
       fields[k] = typeof v === 'object'
@@ -316,17 +327,11 @@ export class Source {
         : { stringValue: String(v) };
     }
     const id = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
-    const r = await fetch(`${base.replace('/documents', '')}/documents:commit`, {
-      method: 'POST',
-      headers: { ...token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        writes: [{
-          update: { name: `projects/${this.#project}/databases/(default)/documents/events/${id}`, fields },
-          currentDocument: { exists: false },                     // insert only, never overwrite
-          updateTransforms: [{ fieldPath: 'when', setToServerValue: 'REQUEST_TIME' }],
-        }],
-      }),
-    });
+    const r = await this.#commit(token, [{
+      update: { name: this.#documentName(`events/${id}`), fields },
+      currentDocument: { exists: false },                     // insert only, never overwrite
+      updateTransforms: [{ fieldPath: 'when', setToServerValue: 'REQUEST_TIME' }],
+    }]);
     if (!r.ok) throw await this.#cloudError(r, 'writing to');
     return id;
   }

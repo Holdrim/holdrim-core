@@ -1,6 +1,6 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
 
 /**
  * Firestore, `events` collection. INSERT ONLY: `create` fails if the document already exists, so
@@ -34,17 +34,18 @@ export class FirestoreEventStore implements EventStore {
     // so every author a read of the events can see is already in a read of the people that starts
     // after it. Side by side, the people could be read first, and a new person's first event would
     // come back naming their id.
-    const people = await this.#db.collection('people').get();
+    const people = await this.#db.collection(LAYOUT.rows).get();
     // By the server's timestamp itself, to the nanosecond: `when` is kept to the millisecond, and
     // two events inside one would otherwise come back in document-id order, which is random.
     const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
     return withAuthors([...r.docs]
       .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
       .map((d) => this.#fromFirestore(d.id, d.data())),
-    new Map(people.docs.map((p) => [p.id, (p.data().email as string | null) ?? null])));
+    new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null])));
   }
 
-  // The people table: `people/{id}` holds the row, and `people_by_email/{address}` points an
+  // The people table, laid out as FIRESTORE_PEOPLE says: `people/{id}` holds the row, and
+  // `people_by_email/{address}` points an
   // address that is still held at its row. The pointer is what makes find-or-create safe: `create`
   // fails when the document exists, so two first sightings of one address inside a transaction
   // cannot both make a person — a query for the address could not promise that. Forgetting deletes
@@ -54,33 +55,33 @@ export class FirestoreEventStore implements EventStore {
 
   async personFor(email: string): Promise<string> {
     const e = personEmail(email);
-    const pointer = this.#db.collection('people_by_email').doc(encodeURIComponent(e));
+    const pointer = this.#db.collection(LAYOUT.pointers).doc(LAYOUT.pointerId(e));
     return this.#db.runTransaction(async (tx) => {
       const found = await tx.get(pointer);
-      if (found.exists) return found.data()!.id as string;
+      if (found.exists) return found.data()![LAYOUT.id] as string;
       const id = newPersonId();
-      tx.create(this.#db.collection('people').doc(id), { email: e });
-      tx.create(pointer, { id });
+      tx.create(this.#db.collection(LAYOUT.rows).doc(id), { [LAYOUT.email]: e });
+      tx.create(pointer, { [LAYOUT.id]: id });
       return id;
     });
   }
 
   async person(id: string): Promise<Person | null> {
-    const doc = await this.#db.collection('people').doc(id).get();
-    return doc.exists ? { id: doc.id, email: doc.data()!.email ?? null } : null;
+    const doc = await this.#db.collection(LAYOUT.rows).doc(id).get();
+    return doc.exists ? { id: doc.id, email: doc.data()![LAYOUT.email] ?? null } : null;
   }
 
   async setEmail(id: string, email: string | null): Promise<void> {
-    const row = this.#db.collection('people').doc(id);
+    const row = this.#db.collection(LAYOUT.rows).doc(id);
     await this.#db.runTransaction(async (tx) => {
       const current = await tx.get(row);
       // Existence first, as the other stores answer: an unknown id is "no person" whatever it
       // was asked to hold, not a lecture about e-mails for a row that is not there.
       if (!current.exists) throw noPerson(id);
       if (email !== null) throw new Error(ONLY_LOSES);
-      const held = current.data()!.email as string | null;
-      if (held != null) tx.delete(this.#db.collection('people_by_email').doc(encodeURIComponent(held)));
-      tx.update(row, { email: null });
+      const held = current.data()![LAYOUT.email] as string | null;
+      if (held != null) tx.delete(this.#db.collection(LAYOUT.pointers).doc(LAYOUT.pointerId(held)));
+      tx.update(row, { [LAYOUT.email]: null });
     });
   }
 

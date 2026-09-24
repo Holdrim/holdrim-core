@@ -122,3 +122,16 @@ test('CI runs the store suites against real Postgres and Firestore, and a skip t
   assert.match(job, /run:\s*node --test engine\/tests\/users-conformance\.test\.js/, 'the user stores\' suite does not run');
   assert.match(job, /run:\s*node --test engine\/tests\/events-conformance\.test\.js/, 'the event stores\' suite does not run');
 });
+
+test('every test file that runs against the Firestore emulator is run by the job that starts it', () => {
+  // The other jobs have no emulator, so a file's [firestore] tests skip there; a file this job does
+  // not name is one whose Firestore half runs nowhere, and CI stays green over it.
+  const tests = WORKFLOWS.find((w) => w.name === 'tests.yml').text;
+  const job = /^ {2}stores:\n([\s\S]*?)(?=^ {2}\S|(?![\s\S]))/m.exec(tests)?.[1] ?? '';
+  const dir = join(ROOT, 'engine', 'tests');
+  const needing = readdirSync(dir).filter((f) => f.endsWith('.test.js'))
+    .filter((f) => /process\.env\.FIRESTORE_EMULATOR_HOST/.test(readFileSync(join(dir, f), 'utf8')));
+  assert.ok(needing.includes('authors.test.js'), `the search found too little: ${needing.join(', ')}`);
+  const missing = needing.filter((f) => !new RegExp(`run:\\s*node --test engine/tests/${f.replace(/\./g, '\\.')}`).test(job));
+  assert.deepEqual(missing, [], `run against the emulator by nobody: ${missing.join(', ')}`);
+});

@@ -18,6 +18,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { randomBytes } from 'node:crypto';
 import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
@@ -31,19 +32,12 @@ const skipped = [];
 
 if (process.env.FIRESTORE_EMULATOR_HOST) {
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const project = process.env.HOLDRIM_PROJECT ?? 'holdrim-conformance';
   stores.push({
     name: 'firestore',
-    // Empty on every open: the emulator keeps what the previous test wrote, and a leftover event
-    // would make an ordering or a count pass or fail for the wrong reason.
-    open: async () => {
-      const { Firestore } = await import('@google-cloud/firestore');
-      const db = new Firestore({ projectId: project });
-      const docs = await db.collection('events').get();
-      await Promise.all(docs.docs.map((d) => d.ref.delete()));
-      await db.terminate();
-      return new FirestoreEventStore(project);
-    },
+    // A project of its own on every open: the emulator keeps what earlier tests and runs wrote, and
+    // a leftover event — or one written by another run against the same emulator at the same
+    // time — would make an ordering or a count pass or fail for the wrong reason.
+    open: async () => new FirestoreEventStore(`holdrim-conformance-${randomBytes(6).toString('hex')}`),
   });
 } else {
   skipped.push({
@@ -135,8 +129,7 @@ forEachStore('appending the same event twice records it twice: nothing is overwr
 
 // ===================================================================== who, as an id
 // An event names its author by the person's id, and every reader gets the address back through one
-// resolver (docs/PRIVACY.md, section 1). The addresses below are this block's own: the Firestore
-// emulator keeps its people between opens, and a person another test forgot must not be met here.
+// resolver (docs/PRIVACY.md, section 1).
 
 forEachStore('the author is kept as the person\'s id: forgotten, the events name the id and no address', async (s) => {
   await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, 'kept-as-id@example.org');
@@ -208,7 +201,6 @@ test('[sqlite] an event written before authors were ids still reads as the addre
 if (process.env.FIRESTORE_EMULATOR_HOST) {
   const { Firestore } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const { randomBytes } = await import('node:crypto');
 
   test('[firestore] no e-mail is in the events collection, only ids of the people collection', async () => {
     const project = `holdrim-authors-${randomBytes(6).toString('hex')}`;

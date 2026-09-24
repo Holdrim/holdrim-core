@@ -187,3 +187,11 @@ jobs:
       # proved by reading its code until this ran it against the same suite as the other two.
       - name: Every event store passes the same suite
         run: node --test engine/tests/events-conformance.test.js
+
+      # The people table, and the one rule of what an event's author means — including the CLI's
+      # direct path to the cloud, which only the emulator can prove agrees with the server's store.
+      - name: Every people table passes the same suite
+        run: node --test engine/tests/people-conformance.test.js
+
+      - name: Every reader of events names authors the same way
+        run: node --test engine/tests/authors.test.js

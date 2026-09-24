@@ -29,6 +29,22 @@ export function personEmail(email: string): string {
   return e;
 }
 
+/**
+ * How the people table is laid out in Firestore, for the two writers that reach it: the server's
+ * store (engine/api/store-firestore.ts) and the CLI's direct path over REST (engine/cli/remote.ts).
+ * `rows/{id}` holds `{ email }`, and `pointers/{pointerId(email)}` holds `{ id }` for an address still
+ * held. Written once because the two must agree to the character: a person the CLI made under a
+ * pointer the server spells another way is a second person for one address.
+ */
+export const FIRESTORE_PEOPLE = {
+  rows: 'people',
+  pointers: 'people_by_email',
+  email: 'email',
+  id: 'id',
+  /** The pointer's document id. Encoded, since a raw `/` in an address would name a sub-collection. */
+  pointerId: (email: string): string => encodeURIComponent(email),
+} as const;
+
 /** The message every store refuses a re-pointed row with, so a caller sees one reason. */
 export const ONLY_LOSES = 'a person keeps their id and can only lose their e-mail: a new address is a new person';
 
