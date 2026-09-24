@@ -98,7 +98,9 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   `AGENTS.md` already says of the owner's.
 - **A lock comes from a session, and it fails closed.** A ✓ is a lock only when the latest
   credential issued or reset for that account by anyone but the person was issued by the owner, and
-  the session was opened after it. The test reads the account's whole credential history, never
+  the session was opened after it with a credential the person set themselves after that issuance —
+  the password the owner hands out opens a session, never a lock, since it passed through other
+  hands. The test reads the account's whole credential history, never
   only the current credential: a password the person changes afterwards cannot wash out an admin's
   reset, because the server cannot tell the person from someone holding their password. The store
   records who issued, reset or set each credential; an account with no owner issuance on record —
