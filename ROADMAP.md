@@ -9,7 +9,7 @@ date: it is the order, and the reason for the order.
 
 ## Now — 0.1.0, the first version worth pinning
 
-One release, and it ships only when it is usable end to end and the owner has homologated it: an
+One release, and it ships only when it is usable end to end and the owner has accepted it: an
 adopter who pins it builds on it, so it has to deliver the whole method, not a start of one. Fixes
 after that are 0.1.x. The plan is tracked in issue #12, one issue per pull request.
 
@@ -25,8 +25,8 @@ flowchart TB
   C["<b>C · See the whole</b> #15<br/>▸ the documentation graph<br/>▸ impact radius, filters<br/>▸ graph export · Mermaid"]
   D["<b>D · Create</b> #16<br/>▸ voice (the browser's own)<br/>▸ sketch canvas, as text<br/>▸ sketch → screen, by your agent<br/>▸ Figma links"]
   E["<b>E · Ready for a company</b> #17<br/>▸ events signed by the server<br/>▸ OIDC · two-step sign-in<br/>▸ hardening · audit export"]
-  G["<b>G · Homologation &amp; launch</b> #18<br/>▸ reference project: expense reimbursement #60<br/>▸ site in pt-BR and es<br/>▸ the owner homologates<br/>🚀 0.1.0 tagged"]
-  F["<b>After 0.1.0</b><br/>▸ first case study: an internal pilot #61<br/>❌ protocol between systems<br/>❌ plugins<br/>❌ many projects per instance"]
+  G["<b>G · Acceptance &amp; launch</b> #18<br/>▸ reference project: expense reimbursement #60<br/>▸ site in pt-BR and es<br/>▸ the owner signs off<br/>🚀 0.1.0 tagged"]
+  Later["<b>After 0.1.0</b><br/>▸ first case study: an internal pilot #61<br/>❌ protocol between systems<br/>❌ plugins<br/>❌ many projects per instance"]
 
   A --> B
   B --> C
@@ -35,24 +35,24 @@ flowchart TB
   C --> G
   D --> G
   E --> G
-  G -.-> F
+  G -.-> Later
 
   classDef later stroke-dasharray: 6 4,opacity:0.7
-  class F later
+  class Later later
 ```
 
 An arrow means "built after". **B** goes first because it changes the event format: nothing should
 write new kinds of event before that. **C**, **D** and **E** only read or extend what B leaves, in any
-order. Nothing is released before **G**.
+order. Nothing is released before **G**. The letter **F** is the platform, after 0.1.0.
 
 | Phase | What it delivers | Design |
 |---|---|---|
-| **A · Foundations** | the Firestore tests outside CI; agents that work unattended; the public surface locked in CI; one owner, the same for the CLI and the server | — |
+| **A · Foundations** | the Firestore tests outside CI; the agents that build Holdrim itself working unattended; the public surface locked in CI; one owner, the same for the CLI and the server | — |
 | **B · People, roles, privacy** | a person named by an id, never an e-mail; roles as sets of capabilities, granted per page or per item; only the owner grants `lock`; a lock written when it is given; a settings screen; feature toggles; removing a person without losing the trail | [`docs/ROLES.md`](docs/ROLES.md), [`docs/PRIVACY.md`](docs/PRIVACY.md) |
 | **C · See the whole** | the documentation as a graph, coloured by the traffic light; the impact of touching a block; the graph exported from the CLI; proposed dependencies; diagrams drawn | [`docs/IMPACT.md`](docs/IMPACT.md) |
 | **D · Create** | dictating a request by voice (the browser's own recognition); a sketch canvas saved as text, under the traffic light; a sketch turned into a screen by the person's own agent; design links | [`docs/VISION.md`](docs/VISION.md) |
 | **E · Ready for a company** | events signed by the server; OIDC and two-step sign-in; hardening; an audit export | [`docs/PRIVACY.md`](docs/PRIVACY.md) §3 |
-| **G · Homologation & launch** | a reference project anyone can copy (expense reimbursement); the site in Portuguese and Spanish; the owner's homologation; the release | — |
+| **G · Acceptance & launch** | a reference project anyone can copy (expense reimbursement); the site in Portuguese and Spanish; the owner's acceptance; the release | — |
 
 ### Already built
 
@@ -86,7 +86,7 @@ order. Nothing is released before **G**.
 ## After 0.1.0
 
 - **The first case study**: an internal system at an adopting company, documented in a pinned
-  0.1.0, homologated item by item, and written up with numbers — anonymously.
+  0.1.0, accepted item by item, and written up with numbers — anonymously.
 - **A protocol between systems built on Holdrim**: contracts described in one shape, so a cash
   register and its supplier's system connect by reading two documents that already agree — a
   plugin, not a project. The design, and what of it exists: `docs/PROTOCOL.md`.
