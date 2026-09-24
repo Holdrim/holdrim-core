@@ -125,18 +125,27 @@ The owner cannot remove themselves: the owner comes from `HOLDRIM_OWNER`, and ha
 before leaving. An admin can ask the owner; only the owner acts, for the same reason only the owner
 resets the owner's account.
 
-**Until then**, the owner reaches only the first three of those by hand, with what already exists —
-a `person_removed` event and erasing the account's own e-mail, name and password are capabilities
-only the people screen adds:
+**Until then**, the owner reaches bullets 1 and 3 above in full, by hand, with what already exists.
+Of bullet 2 the owner reaches only the sign-in/session half — disabling; erasing the account's own
+e-mail, name and password, like the `person_removed` event of bullet 4, is a capability only the
+people screen adds:
 
 1. **Find the person's id.** Look them up by e-mail in the people table next to the events —
    `SELECT id FROM people WHERE email = ?` in SQLite, or the `people_by_email/{encoded e-mail}`
    pointer document in Firestore (`engine/api/people.ts`, `FIRESTORE_PEOPLE`).
-2. **Disable their account first**, if they sign in with a password: `POST
-   /api/users/<e-mail>/enabled` with `{"enabled": false}`, in the owner's own session — the same
-   route an admin already has, and everything disabling does today (`docs/GLOSSARY.md`,
-   **disabled**). First, so nothing they do between this step and the next two — sign in, write
-   another comment — has to be removed all over again.
+2. **Cut off access first**, before whichever of the two ways in is theirs finds out and makes the
+   row fresh again:
+   - **Password sign-in:** `POST /api/users/<e-mail>/enabled` with `{"enabled": false}`, in the
+     owner's own session — the same route an admin already has, and everything disabling does today
+     (`docs/GLOSSARY.md`, **disabled**).
+   - **IAP sign-in:** remove the address from the IAP, or whatever Cloud access policy, in front of
+     Holdrim — outside Holdrim, since it holds no list of who that policy admits. Do this before the
+     forget step below, not after.
+
+   Either way, first: any identity that can still reach `POST /api/events` makes a new person the
+   moment it next acts — `recordEvent`'s call to `personFor` re-creates exactly the row this
+   procedure is about to empty — so nothing they do between this step and the next two, sign in,
+   write another comment, has to be removed all over again.
 3. **Remove every `text` they wrote.** For each of the person's events that still holds one, call
    `EventStore.removeText(event, 'text', by)` — `by` is the owner's own e-mail, the same call
    section 4 describes, reached directly instead of through a route. Snapshots are left alone: they
