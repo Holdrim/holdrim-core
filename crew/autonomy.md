@@ -88,8 +88,8 @@ still determine the required lenses.
 
 ## Stalls, backlog, and dependencies
 
-The owner must choose the stalled-claim time limit and queue-size limit before any unattended
-monitor is enabled; neither has a default here. The orchestrator reports a `working:<agent>` claim
+The owner chose the limits on 2026-09-24: a claim is **stalled after 24 hours** with no push, and a
+queue is **backed up at 10 items** waiting for one agent. Only the owner changes them, here. The orchestrator reports a `working:<agent>` claim
 older than the chosen limit **with no push**. After confirming that no run is still active, it
 releases its stale claim, restores the authorised `needs:<agent>` queue state, and reports the
 requeue; it does not take the item as a developer. It also reports a queue above the chosen size,
