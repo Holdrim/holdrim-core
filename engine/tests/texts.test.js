@@ -86,16 +86,27 @@ test('a hash, and a row that no longer hashes to it: tampered, even though the r
   assert.equal(out.textTampered, true);
 });
 
-test('a removal event naming the wrong field, or a target that is not a string, names no removal', () => {
+test('a removal event whose target is not a string names no removal, even one that would print as the right id', () => {
   const salt = newSalt();
-  const badField = { id: 'r1', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-02T00:00:00.000Z',
-    data: { event: 'e1', field: 'nonsense' } };
-  const badTarget = { id: 'r2', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-02T00:00:00.000Z',
-    data: { event: 42, field: 'text' } };
-  const [out] = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', salt) }, badField, badTarget], new Map());
-  assert.equal(out.textRemoved, null, 'neither malformed event counts as the removal it does not correctly name');
+  // `['e1']` stringifies to exactly `'e1'` wherever a template literal reads it — `textKey` does —
+  // so this is the one input that actually exercises `typeof target === 'string'`: a version of
+  // `removalsOf` missing that check would still build the same key from this array, and count it as
+  // the removal it never validly named. A target like `42` would too, incidentally, but proves
+  // nothing: nothing here can tell "coerced by accident" from "correct by construction".
+  const notActuallyAString = { id: 'r1', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-02T00:00:00.000Z',
+    data: { event: ['e1'], field: 'text' } };
+  const [out] = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', salt) }, notActuallyAString], new Map());
+  assert.equal(out.textRemoved, null, 'a non-string target names no removal, however it would print');
   assert.equal(out.textTampered, true, 'so the missing field still reads as tampering');
 });
+
+// The other half of the same guard, `field === 'text' || field === 'snapshot'`, has no
+// runtime-observable effect of its own to test here: a removal event with any other `field` value
+// builds a key (`textKey`) that no lookup ever asks for — `text` and `snapshot` are the only two
+// this file ever looks up — so it matches nothing whether or not the check is there. What the check
+// is for is TypeScript: `field` comes off `data` as `unknown`, and `textKey` demands a `TextField`;
+// removing the check fails `tsc`, not a test — the honest proof for this half of `removalsOf`, per
+// AGENTS.md: "when there is no logic to mutate ... say so instead of inventing one".
 
 test('text and snapshot are resolved independently, and a list is resolved without mutating what it was given', () => {
   const salt = newSalt();
