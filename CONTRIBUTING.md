@@ -92,6 +92,32 @@ request.
 If you have no agent at all, read the six files yourself. They are six checklists, and a person
 with the diff open can work them.
 
+## Contributing from a fork
+
+Read access is enough to contribute: the proposed change lives in your fork and reaches the
+project through a pull request, so you do not need write access to the original repository.
+Create a fork of `Holdrim/holdrim-core` in your own GitHub account, then clone that fork. Keep
+`Holdrim/holdrim-core` as the read-only `upstream` remote; do your work on a local branch or
+worktree, and push only to your fork (`origin`). For example, replace `YOUR-LOGIN` with your GitHub
+login:
+
+```bash
+git clone https://github.com/YOUR-LOGIN/holdrim-core.git
+cd holdrim-core
+git remote add upstream https://github.com/Holdrim/holdrim-core.git
+git config remote.upstream.pushurl disabled://upstream-is-read-only
+git fetch upstream
+git switch -c YOUR-LOGIN/short-change-name upstream/main
+# Commit after the five proofs, then review before publishing, as the sections above require.
+git push -u origin HEAD
+```
+
+Open a pull request from your fork's branch to `Holdrim/holdrim-core`'s `main`. The push URL guard
+makes an accidental push to `upstream` fail; keep pushing explicitly to `origin` after the existing
+proofs and the review for your tier are complete. Follow [What a change needs](#what-a-change-needs)
+and [And the six lenses](#and-the-six-lenses), then fill
+[the pull request template](.github/PULL_REQUEST_TEMPLATE.md) with the evidence from your run.
+
 ## Working unattended
 
 `.claude/settings.json` allows, without a prompt, the commands a session needs to get through the
