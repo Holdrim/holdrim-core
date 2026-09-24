@@ -59,6 +59,18 @@ fi
 # test runs this file.
 
 echo "Holdrim local → http://localhost:$PORT   (you are acting as: $ACTING_AS · owner: $OWNER, from $OWNER_FROM · test data, disappears when you stop)"
-exec env HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER="$OWNER" \
-  HOLDRIM_DEV_EMAIL="$ACTING_AS" HOLDRIM_SITE="$SITE" PORT="$PORT" \
+# This runner's one promise is "test data, disappears when you stop" — a shell that already has
+# HOLDRIM_EVENTS=sqlite or =firestore, or HOLDRIM_IDENTITY=password, set for some OTHER project
+# would otherwise carry straight through to server.ts, which prefers the environment over this
+# runner's own defaults (the local default only applies when the variable is absent at all). Then
+# the placeholder owner above — a real e-mail nobody chose on purpose — would get first-access on a
+# store that outlives this process: a permanent account, made by a runner whose README entry says
+# "no login". Pinning here, in the exec, beats anything already exported: `env NAME=value` always
+# wins for the child, regardless of what the caller's shell had set. HOLDRIM_EVENTS_PATH,
+# HOLDRIM_USERS and HOLDRIM_USERS_PATH are unset too, on the same reasoning, even though memory and
+# dev identity alone already keep them from being read — a value already sitting there is a lie
+# about where this runner keeps data, worth removing rather than merely outvoting.
+exec env -u HOLDRIM_EVENTS_PATH -u HOLDRIM_USERS -u HOLDRIM_USERS_PATH \
+  HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_EVENTS=memory HOLDRIM_IDENTITY=dev \
+  HOLDRIM_OWNER="$OWNER" HOLDRIM_DEV_EMAIL="$ACTING_AS" HOLDRIM_SITE="$SITE" PORT="$PORT" \
   node engine/api/server.ts
