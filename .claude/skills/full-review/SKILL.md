@@ -155,6 +155,9 @@ into six copies that disagree. Give every agent the same prompt, built from thes
 >
 > Two things inside the worktree are not isolated. `node_modules` is a **symlink into the person's
 > own tree** — never install, never write under it, or the isolation this whole step buys is gone.
+> The same holds for a script the change touches that installs or configures — `npm ci`,
+> `git config`, a hook: run it only with those commands stubbed on the `PATH`, the way
+> `engine/tests/session-start.test.js` runs the session hook, never as it stands.
 > And a server binds a fixed port shared with everything else on the machine: do not run
 > `engine/test-contract.sh`, `npm run browser` or `engine/run-local.sh`. One lens owns those; the
 > rest read their assertions. Two runs on one port means the second drives the first one's server
@@ -232,3 +235,25 @@ The second line is always the finding's `evidence`. Then, in this order:
 5. **The tree**, one line: clean, or what a reviewer left behind.
 
 Then stop. Do not fix anything unless asked: this reports.
+
+## 6. Learn, when the change is done
+
+A review that only reports repeats its misses on the next change. So once the pull request is
+merged, go back over every CRITICAL and MAJOR that was confirmed, in every round and from every
+source — a lens, CI, a person on the pull request — and ask one question of each: **which lens
+should have seen it, and did it, the first time?**
+
+- **It saw it first time:** nothing to learn.
+- **It missed it**, and a later round, another lens, CI or a person found it: that lens's file gets
+  the general rule, with this case as its example. Not a list of pull requests, which nobody reads
+  twice: a bullet under "What you look for", worded so it would have caught this one.
+- **You had to tell a lens in its prompt** something it should have known — where not to run a
+  command, what to look at — that sentence belongs in its file, or in the shared contract above
+  when all six need it.
+- **Fixing a finding produced a new one:** the fix is a change like any other. Rerun the lenses
+  that read what the fix touched, not only the lens that reported.
+
+The lessons go in a pull request of their own, through the same gate, and the report of the
+review that taught them says, in one line each, what was added and to which lens. When nothing was
+missed, say that instead: it is how the lenses are known to be getting better and not just
+longer.

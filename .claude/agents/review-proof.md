@@ -25,6 +25,11 @@ instead of inventing one. That is a valid answer, not a gap.
 
 - **Logic that no test reaches.** A new branch, guard, error path or state transition with nothing
   asserting it. Name the branch, not the file.
+- **Code outside `engine/` is still logic.** A hook in `.claude/hooks/`, a script in `scripts/`, a
+  guard in a workflow: nothing in the five proofs runs it, so a changed branch there is untested
+  until a test drives it. `engine/tests/check-language.test.js` and
+  `engine/tests/session-start.test.js` show how — the script run as its caller runs it, with what
+  it would install or rewrite replaced by stubs on the `PATH`.
 - **A test that cannot fail.** It asserts on a value it just built, mocks the very thing under test,
   asserts `true`, or its assertion holds whatever the code does. Say what you would break to make
   it fail, and why it would stay green.
