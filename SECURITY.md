@@ -12,8 +12,12 @@ an SLA.
 
 Worth knowing before you run it:
 
-- **It stores approvals, and approvals are evidence.** The database refuses `UPDATE` and `DELETE`
-  through triggers, so nothing is erased even by someone opening the file with another program.
+- **It stores approvals, and approvals are evidence.** The database refuses `UPDATE`, `REPLACE` and
+  `DELETE` through triggers, even for someone opening the file with another program — but not
+  `INSERT`: that same person can still add a row, including a forged event. For a request's own
+  text, moved out of the event into its own table, a forged removal dated and ordered after the
+  text it targets can still pass as a genuine one; a backdated one cannot (docs/PRIVACY.md, section
+  4). Closing this for every kind of forgery needs the events themselves signed — not built yet.
   People are disabled, never deleted, so every ✓ keeps the name of whoever gave it. What that
   means for personal data, and how a person is removed without breaking the trail:
   [`docs/PRIVACY.md`](docs/PRIVACY.md).

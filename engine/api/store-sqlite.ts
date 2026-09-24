@@ -69,6 +69,12 @@ export const GUARDS: Record<string, string> = {
   // transaction — already sees it. Without this, a bare DELETE FROM texts (from outside this code,
   // or another program with the file open) would leave the row gone and no event to say why: exactly
   // the shape withTexts calls tampering, but reached by deleting the proof instead of forging it.
+  //
+  // ⚠️ This clause has no way to refuse an INSERT — none of the guards here do — so a direct writer
+  // can still insert a text_removed event of their own and then satisfy this WHEN clause with a
+  // forgery. `removalsOf` (engine/api/texts.ts) refuses one dated, or placed, no later than the
+  // event it names, which closes the easy version of this; a forgery dated and ordered correctly is
+  // not caught here and needs signed events (docs/PRIVACY.md, phase E) to close for good.
   texts_no_delete: `BEFORE DELETE ON texts
     WHEN NOT EXISTS (
       SELECT 1 FROM events WHERE type = '${TEXT_REMOVED}'

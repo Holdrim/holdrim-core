@@ -209,22 +209,115 @@ test('a text is not replaced: INSERT OR REPLACE for the same event and field goe
   db.close();
 }));
 
-test('a text is not deleted without a text_removed event naming it, whatever deletes it', withFile(async (path) => {
+test("a text is not replaced by rowid either: freeing one row's slot cannot be used to swap another out from under it", withFile(async (path) => {
   const store = new SqliteEventStore(path);
-  const written = await store.append({ ...approval, text: 'first', snapshot: null }, 'owner@example.org');
+  const a = await store.append({ ...approval, block: 'A01.1.1', text: 'first', snapshot: null }, 'owner@example.org');
+  const b = await store.append({ ...approval, block: 'A01.1.2', text: 'second', snapshot: null }, 'owner@example.org');
+  await store.removeText(a.id, 'text', 'owner@example.org'); // frees a's (event, field), not any rowid
   await store.close();
   const db = new DatabaseSync(path);
-  assert.throws(() => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(written.id, 'text'),
-    /not deleted without a text_removed event/, 'a bare DELETE, with nothing to account for it, is refused');
-  // The legitimate path: a text_removed event naming this event and field, in the same transaction,
-  // before the DELETE — exactly the order removeText itself now writes in.
+  const bRow = db.prepare('SELECT rowid FROM texts WHERE event = ? AND field = ?').get(b.id, 'text');
+  // Round 2, finding E: the (event, field) half of the WHEN clause alone would not catch this — the
+  // key here, ('forged-event', 'text'), collides with no EXISTING row. Only reusing b's own rowid
+  // does, which is exactly what a REPLACE conflicting on rowid, rather than on the declared key,
+  // does under the hood: it would delete b's row and insert this one in its place, no delete trigger
+  // fired, the same hole `texts_no_replace`'s first half exists to close for the declared key.
+  assert.throws(() => db.prepare(
+    "INSERT OR REPLACE INTO texts (rowid, event, field, value, salt) VALUES (?, 'forged-event', 'text', 'forged', 'saltsaltsaltsalt')"
+  ).run(bRow.rowid), /not replaced/, "reusing another row's rowid under an unrelated key is refused the same as reusing its own key");
+  const stillB = db.prepare('SELECT value FROM texts WHERE event = ? AND field = ?').get(b.id, 'text');
+  assert.equal(stillB?.value, 'second', "b's own text is exactly as it was — never deleted to make room");
+  db.close();
+}));
+
+test('a text is not deleted without a text_removed event naming THIS exact event and field, whatever deletes it', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const first = await store.append({ ...approval, text: 'first', snapshot: 'snap-first' }, 'owner@example.org');
+  const second = await store.append({ ...approval, block: 'A01.1.2', text: 'second', snapshot: null }, 'owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  const insertEvent = (id, type, data) => db.prepare(
+    'INSERT INTO events (id, type, page, author, happened_at, data) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(id, type, 'A01', 'p_000000000000000000000000', '2026-01-01T00:00:00.000Z', JSON.stringify(data));
+  const refused = (event, field, why) => assert.throws(
+    () => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(event, field),
+    /not deleted without a text_removed event/, why);
+
+  refused(first.id, 'text', 'a bare DELETE, with nothing to account for it, is refused');
+
+  // Round 2, finding B: the WHEN clause has three conditions, and each has to be its own proof —
+  // a removal naming ALMOST this row, in one way or another, is not a removal of this row.
   db.exec('BEGIN IMMEDIATE');
-  db.prepare("INSERT INTO events (id, type, page, author, happened_at, data) VALUES ('rm1', 'text_removed', 'A01', 'p_000000000000000000000000', '2026-01-01T00:00:00.000Z', ?)")
-    .run(JSON.stringify({ event: written.id, field: 'text' }));
-  assert.doesNotThrow(() => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(written.id, 'text'),
+  insertEvent('rm-snap', 'text_removed', { event: first.id, field: 'snapshot' }); // (1) right event, wrong field
+  db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(first.id, 'snapshot'); // its own delete is legitimate
+  db.exec('COMMIT');
+  refused(first.id, 'text', "(1) a removal naming this event's OTHER field does not excuse this one — the $.field half");
+
+  db.exec('BEGIN IMMEDIATE');
+  insertEvent('rm-second', 'text_removed', { event: second.id, field: 'text' }); // (2) right field, wrong event
+  db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(second.id, 'text'); // its own delete is legitimate
+  db.exec('COMMIT');
+  refused(first.id, 'text', "(2) a removal naming a DIFFERENT event does not excuse this one — the $.event half");
+
+  insertEvent('c1', 'comment', { event: first.id, field: 'text' }); // (3) right event and field, wrong type
+  refused(first.id, 'text', "(3) naming this row from an event that is not itself a removal does not excuse it — the type = 'text_removed' half");
+
+  // The legitimate path still works: a text_removed event naming THIS event and field, in the same
+  // transaction, before the DELETE — exactly the order removeText itself now writes in.
+  db.exec('BEGIN IMMEDIATE');
+  insertEvent('rm-first', 'text_removed', { event: first.id, field: 'text' });
+  assert.doesNotThrow(() => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(first.id, 'text'),
     'once the removal event is there — even uncommitted, in the same transaction — the delete is legitimate');
   db.exec('COMMIT');
   db.close();
+}));
+
+test('a forged text_removed dated before its target reads as tampered, not as the removal it claims', withFile(async (path) => {
+  // Round 2, finding F(c): the SQL guards refuse UPDATE, REPLACE and a bare DELETE, but nothing
+  // here can refuse an INSERT — a direct writer can forge a text_removed event and then delete the
+  // real row it names. Dated BEFORE the event it claims to remove text from, `removalsOf` (finding
+  // F(a)) will not credit it: the field reads as tampered, exactly as a text erased with no
+  // accounting for it at all would.
+  const store = new SqliteEventStore(path);
+  const early = await store.append({ ...approval, text: 'a real comment' }, 'r@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  db.exec('BEGIN IMMEDIATE');
+  db.prepare("INSERT INTO events (id, type, page, author, happened_at, data) VALUES ('forged-early', 'text_removed', 'A01', 'p_000000000000000000000000', '2000-01-01T00:00:00.000Z', ?)")
+    .run(JSON.stringify({ event: early.id, field: 'text' }));
+  db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(early.id, 'text');
+  db.exec('COMMIT');
+  db.close();
+
+  const s = new SqliteEventStore(path);
+  const read = (await s.list('A01')).find((e) => e.id === early.id);
+  assert.equal(read.textRemoved, null, 'a removal dated before its target is not credited');
+  assert.equal(read.textTampered, true,
+    'a real text erased behind a backdated forgery still reads as tampering, not as a clean removal');
+  await s.close();
+}));
+
+test('a forged text_removed dated and ordered after its target is not caught: the gap that remains until events are signed', withFile(async (path) => {
+  // The other half of finding F(c), documented rather than fixed: a forgery dated and ordered
+  // correctly — after the event it names, exactly as a genuine removal would be — passes as one.
+  // Closing this needs the events themselves signed (docs/PRIVACY.md, "not built", phase E), so a
+  // reader can tell the server wrote an event from one anybody holding the file could insert.
+  const store = new SqliteEventStore(path);
+  const late = await store.append({ ...approval, text: 'another real comment' }, 'r@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  db.exec('BEGIN IMMEDIATE');
+  db.prepare("INSERT INTO events (id, type, page, author, happened_at, data) VALUES ('forged-late', 'text_removed', 'A01', 'p_000000000000000000000000', '2099-01-01T00:00:00.000Z', ?)")
+    .run(JSON.stringify({ event: late.id, field: 'text' }));
+  db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(late.id, 'text');
+  db.exec('COMMIT');
+  db.close();
+
+  const s = new SqliteEventStore(path);
+  const read = (await s.list('A01')).find((e) => e.id === late.id);
+  assert.equal(read.textTampered, false, 'a correctly dated and ordered forgery is NOT caught by this check — the documented gap');
+  assert.ok(read.textRemoved, 'it reads as a legitimate removal, by whoever the forger named as the remover');
+  await s.close();
 }));
 
 test('list reads events, people and texts from one snapshot: a removal mid-read never looks like tampering', withFile(async (path) => {
