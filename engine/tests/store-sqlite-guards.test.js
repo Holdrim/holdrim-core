@@ -118,10 +118,42 @@ test('a database whose guards are already right opens without a word', withFile(
   assert.deepEqual(said, [], 'a guard as installed is not replaced, and nothing is said');
 }));
 
-test('a database the previous version made: the changed guards are replaced once, the rest left alone', withFile(async (path, said) => {
+test('a brand-new database installs every guard on its first boot without a word', withFile(async (path, said) => {
+  // Isolated from the "already right" test above on purpose: that one only proves the SECOND open
+  // of an already-guarded file is quiet. This is the first open of a file that has never held a
+  // guard at all — the one case installGuards must not mistake for a guard gone missing, or the
+  // very first boot anyone ever runs would open with a wall of "missing" warnings about guards that
+  // were simply never installed yet (holdrim#89's fix, read backwards).
+  await reopen(path);
+  assert.deepEqual(said, [], 'installing a guard for the first time is not the same as one going missing');
+}));
+
+test('a guard dropped from outside the store is put back on the next open, naming each one that was gone', withFile(async (path, said) => {
+  const store = new SqliteEventStore(path); // first boot: installs every current guard
+  const written = await store.append({ ...approval, text: 'a comment', snapshot: null }, 'owner@example.org');
+  await store.close();
+  // From a second connection, the way anyone holding the file could: drop the guard "nothing is
+  // erased" rests on, and the one that keeps a text's removal honest — leaving the rest in place,
+  // so this is a guard gone missing, not a fresh database.
+  outside(path, 'DROP TRIGGER events_no_delete; DROP TRIGGER texts_no_delete;');
+  await reopen(path);
+  const named = (line) => line.match(/guard (\w+)/)?.[1];
+  assert.deepEqual(said.map(named).sort(), ['events_no_delete', 'texts_no_delete'],
+    'each dropped guard has to be named, not recreated in silence — holdrim#89');
+  const db = new DatabaseSync(path);
+  assert.throws(() => db.exec('DELETE FROM events'), /not deleted/, 'the real guard has to be back');
+  assert.throws(() => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(written.id, 'text'),
+    /not deleted without a text_removed event/, 'the text guard has to be back too');
+  db.close();
+}));
+
+test('a database the previous version made: the changed guards are replaced, the missing ones installed, the rest left alone', withFile(async (path, said) => {
   // The schema and the triggers exactly as the version before this one wrote them, spacing
   // included: SQLite keeps the text as written, so a comparison that minds spacing would replace
-  // all five, and one that ignores the text would replace none.
+  // all five, and one that ignores the text would replace none. This fixture also predates
+  // events_no_replace and the whole texts table — the guard set an older release shipped with,
+  // not tampering — so those four are said as missing, the same as any other guard this open
+  // does not find, rather than staying the silent case (holdrim#89).
   outside(path, `
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT, fingerprint TEXT,
@@ -142,8 +174,9 @@ test('a database the previous version made: the changed guards are replaced once
   `);
   await reopen(path);
   const named = (line) => line.match(/guard (\w+)/)?.[1];
-  assert.deepEqual(said.map(named).sort(), ['people_no_replace', 'people_only_lose_email'],
-    'only the guards whose text changed are replaced, and each is said once');
+  assert.deepEqual(said.map(named).sort(),
+    ['events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
+    'the guards whose text changed are replaced, the ones this fixture never had are installed, and each is said once');
   const store = new SqliteEventStore(path);
   const ana = await store.personFor('ana@example.org');
   await store.close();

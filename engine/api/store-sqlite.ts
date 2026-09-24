@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED, type TextField } from './texts.ts';
+import { log } from './log.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -96,6 +97,14 @@ export const GUARDS: Record<string, string> = {
  * both are said out loud. The same path carries a guard whose text changed between versions onto a
  * database an older version made.
  *
+ * A guard from `guards` that is not held at all is put back the same way — but only said out loud
+ * once at least one guard is already there. On the very first boot against an empty or pre-guard
+ * database there is nothing to compare against yet, and warning about every guard being "missing"
+ * would just be first install dressed up as an incident; the moment one guard exists and another
+ * does not, that gap is exactly what `DROP TRIGGER events_no_delete` from outside this process would
+ * leave, and staying silent about it is the bug (holdrim#89) — recreating it without a word looked
+ * the same either way.
+ *
  * The repair runs in one IMMEDIATE transaction: between a DROP and its CREATE the table would have
  * no guard, and another process with the file open could REPLACE a ✓ in that gap. A failure halfway
  * rolls everything back rather than leave a guard dropped. When nothing needs repair — every boot
@@ -122,6 +131,12 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
     // Read again under the lock: another process may have repaired it while this one waited.
     const rows = held();
     const byName = new Map(rows.map((r) => [r.name, r]));
+    // Nothing held at all means there is nothing yet to have lost: a brand-new database and one
+    // from before any of these guards existed both look like this, and both are a first install,
+    // not a guard gone missing. The instant one guard is there, a second one being absent is no
+    // longer "not yet installed" — it is either an older version's guard set (the "replaced once"
+    // case below already speaks up for that) or one somebody dropped, and either way it is said.
+    const firstInstall = rows.length === 0;
     for (const r of rows) {
       if (want.has(r.name)) continue;
       warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
@@ -133,6 +148,11 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
       if (r) {
         warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);
         drop(r.name);
+      } else if (!firstInstall) {
+        // Only the name goes out — never a row's contents — so this line is safe wherever the log
+        // ends up, unlike an event's own text or a person's e-mail (docs/PRIVACY.md).
+        warn(`holdrim: the database's guard ${name} is missing; installing it`);
+        log('WARNING', 'sqlite_guard_missing', { guard: name });
       }
       db.exec(sql);
     }
