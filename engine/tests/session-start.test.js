@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,10 +24,13 @@ function stub(dir, name, body) {
 
 /**
  * Runs the hook in a throwaway project whose package.json asks for `engines`, with `node` reporting
- * `nodeVersion` (null: not installed) and the Chromium download succeeding or not. Hands back what
- * a person would see and every command the stubs saw.
+ * `nodeVersion` (null: not installed), the Chromium download and the Firestore emulator succeeding
+ * or not, and Claude Code's CLAUDE_ENV_FILE given or not. Hands back what a person would see, every
+ * command the stubs saw, and what reached the session's environment.
  */
-function run(t, { remote = 'true', nodeVersion = '22.18.0', chromium = true, engines = '>=22.18' } = {}) {
+function run(t, {
+  remote = 'true', nodeVersion = '22.18.0', chromium = true, engines = '>=22.18', emulator = true, envFile = true,
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-hook-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // The test owns its floor: with the repository's own package.json, bumping engines.node would
@@ -42,9 +45,20 @@ function run(t, { remote = 'true', nodeVersion = '22.18.0', chromium = true, eng
     `if [ "$1" = -v ]; then echo v${nodeVersion}; exit 0; fi`,
     `exec '${process.execPath}' -e "Object.defineProperty(process.versions, 'node', { value: '${nodeVersion}' });$2"`,
   ].join('\n'));
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_REMOTE: remote };
+  // The real script downloads a jar and starts Java; its own test is firestore-emulator.test.js.
+  mkdirSync(join(dir, 'scripts'));
+  writeFileSync(join(dir, 'scripts', 'firestore-emulator.sh'),
+    emulator ? 'echo "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8433"\n' : 'echo "no Java" >&2; exit 1\n');
+  const sessionEnv = join(dir, 'session.env');
+  writeFileSync(sessionEnv, '');
+  const env = {
+    ...process.env, PATH: `${dir}:${process.env.PATH}`, CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_REMOTE: remote,
+    CLAUDE_ENV_FILE: envFile ? sessionEnv : '',
+  };
   const r = spawnSync('bash', [HOOK], { env, encoding: 'utf8' });
-  return { code: r.status, out: r.stderr, calls: readFileSync(log, 'utf8') };
+  return {
+    code: r.status, out: r.stderr, calls: readFileSync(log, 'utf8'), sessionEnv: readFileSync(sessionEnv, 'utf8'),
+  };
 }
 
 test('on a developer machine it does nothing at all', (t) => {
@@ -96,4 +110,22 @@ test('a Chromium download that fails is said out loud, and the session still sta
 
 test('a Chromium download that works says nothing', (t) => {
   assert.equal(run(t).out, '');
+});
+
+test('a running emulator reaches the session through CLAUDE_ENV_FILE', (t) => {
+  const { out, sessionEnv } = run(t);
+  assert.equal(sessionEnv, 'export FIRESTORE_EMULATOR_HOST=127.0.0.1:8433\n');
+  assert.doesNotMatch(out, /Firestore/);
+});
+
+test('no emulator is said out loud, names the tests that will skip, and the session still starts', (t) => {
+  const { code, out, sessionEnv } = run(t, { emulator: false });
+  assert.equal(code, 0);
+  assert.equal(sessionEnv, '');
+  assert.match(out, /WARNING: no Firestore emulator in this session\. Its tests will SKIP here/);
+});
+
+test('an emulator with nowhere to send its variable says how to use it by hand', (t) => {
+  const { out } = run(t, { envFile: false });
+  assert.match(out, /WARNING: the Firestore emulator is running.*Run: export FIRESTORE_EMULATOR_HOST=127\.0\.0\.1:8433/);
 });

@@ -29,3 +29,15 @@ git config core.hooksPath .githooks
 if ! npx --no-install playwright-core install chromium >/dev/null 2>&1; then
   echo "WARNING: could not install Chromium for Playwright (no network?). 'npm run browser' will not run in this session." >&2
 fi
+
+# Without the emulator every Firestore test skips here and the store is proved only by CI, after
+# the push. The variable reaches the session through CLAUDE_ENV_FILE; a failure is said out loud.
+if line=$(bash scripts/firestore-emulator.sh); then
+  if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+    echo "$line" >> "$CLAUDE_ENV_FILE"
+  else
+    echo "WARNING: the Firestore emulator is running, but nothing carries its variable into the session. Run: $line" >&2
+  fi
+else
+  echo "WARNING: no Firestore emulator in this session. Its tests will SKIP here; CI still runs them." >&2
+fi
