@@ -75,9 +75,9 @@ export const GUARDS: Record<string, string> = {
   // can still insert a text_removed event of their own and then satisfy this WHEN clause with a
   // forgery; the same writer could also just `DROP TRIGGER texts_no_delete` first and skip the
   // forgery entirely. A dropped trigger is reinstalled on the next boot, and that boot now names it
-  // in a warning (holdrim#89) — it does not stop the drop itself, and it cannot catch someone who
-  // drops every guard and also empties every table, since that file is indistinguishable from a
-  // first install. `removalsOf` (engine/api/texts.ts)
+  // in a warning (holdrim#89) — that catches a guard left dropped, not a person who puts it back:
+  // dropping this guard, deleting the row and recreating the trigger by its exact text leaves
+  // nothing this check can see, and neither does emptying every table. `removalsOf` (engine/api/texts.ts)
   // refuses a forged event dated, or placed, no later than the event it names, which closes the
   // easy version of the forgery path; one dated and ordered correctly, or a trigger dropped
   // outright, is not caught here and needs signed events (docs/PRIVACY.md, phase E) to close for
@@ -109,9 +109,11 @@ export const GUARDS: Record<string, string> = {
  * at all — no event, no person, no text. A file with data in it, whatever the reason, is not being
  * installed for the first time, and a guard missing from it is said, naming it, whether that is
  * `DROP TRIGGER events_no_delete` from outside this process (holdrim#89) or an old database that
- * never had this guard to begin with. The one case this still cannot see is someone who drops every
- * guard AND empties every table in the same sitting — that file is indistinguishable from a real
- * first install, because there is nothing left in it this check could have found protected.
+ * never had this guard to begin with. That catches a guard left dropped, not a person who puts it
+ * back: dropping a guard, changing the rows it protected and recreating the trigger by its exact
+ * text leaves nothing this check can see, and neither does emptying every table in the same
+ * sitting — both leave a file indistinguishable from a real first install. Only signed events
+ * (docs/PRIVACY.md, phase E) close that.
  *
  * The repair runs in one IMMEDIATE transaction: between a DROP and its CREATE the table would have
  * no guard, and another process with the file open could REPLACE a ✓ in that gap. A failure halfway
