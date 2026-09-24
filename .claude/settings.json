@@ -10,5 +10,26 @@
         ]
       }
     ]
+  },
+  "outputStyle": "concise",
+  "permissions": {
+    "allow": [
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(git *)",
+      "Bash(bash scripts/*)",
+      "Bash(bash engine/*)",
+      "Agent",
+      "Workflow",
+      "Read",
+      "Edit",
+      "Write"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(rm -rf /*)"
+    ]
   }
 }
