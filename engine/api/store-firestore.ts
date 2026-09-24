@@ -1,6 +1,6 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, ONLY_LOSES } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
 
 /**
  * Firestore, `events` collection. INSERT ONLY: `create` fails if the document already exists, so
@@ -63,11 +63,13 @@ export class FirestoreEventStore implements EventStore {
   }
 
   async setEmail(id: string, email: string | null): Promise<void> {
-    if (email !== null) throw new Error(ONLY_LOSES);
     const row = this.#db.collection('people').doc(id);
     await this.#db.runTransaction(async (tx) => {
       const current = await tx.get(row);
-      if (!current.exists) throw new Error(`no person ${id}`);
+      // Existence first, as the other stores answer: an unknown id is "no person" whatever it
+      // was asked to hold, not a lecture about e-mails for a row that is not there.
+      if (!current.exists) throw noPerson(id);
+      if (email !== null) throw new Error(ONLY_LOSES);
       const held = current.data()!.email as string | null;
       if (held != null) tx.delete(this.#db.collection('people_by_email').doc(encodeURIComponent(held)));
       tx.update(row, { email: null });

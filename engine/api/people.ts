@@ -31,3 +31,11 @@ export function personEmail(email: string): string {
 
 /** The message every store refuses a re-pointed row with, so a caller sees one reason. */
 export const ONLY_LOSES = 'a person keeps their id and can only lose their e-mail: a new address is a new person';
+
+/**
+ * The one error every store gives for an id with no row, so a caller — and a test — matches one
+ * text whichever store answered.
+ */
+export function noPerson(id: string): Error {
+  return new Error(`no person ${id}`);
+}

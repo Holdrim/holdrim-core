@@ -1,5 +1,5 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, ONLY_LOSES } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
 
 /*
  * The Firestore store lives in store-firestore.ts, loaded only when HOLDRIM_EVENTS=firestore.
@@ -44,7 +44,7 @@ export class MemoryEventStore implements EventStore {
 
   async setEmail(id: string, email: string | null): Promise<void> {
     const p = this.#people.get(id);
-    if (!p) throw new Error(`no person ${id}`);
+    if (!p) throw noPerson(id);
     if (email !== null) throw new Error(ONLY_LOSES);
     p.email = null;
   }
