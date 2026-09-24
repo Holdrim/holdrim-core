@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hashText, newSalt, textKey, withTexts, noText, TEXT_REMOVED } from '../api/texts.ts';
+import { hashText, newSalt, textKey, withTexts, withTextsRetrying, noText, TEXT_REMOVED } from '../api/texts.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { Source } from '../cli/remote.ts';
 import { freshFirestoreProject } from './helpers/firestore.js';
@@ -103,6 +103,23 @@ test('a removal naming an event that is not in the list at all does not count', 
   assert.equal(out.textTampered, true);
 });
 
+test('a second text_removed for the same field does not silently re-credit who removed it', () => {
+  // Round 3, finding 6: removeText deletes the row it names, so it can never itself produce a
+  // second valid removal of one field — a second, however correctly dated and ordered, is proof
+  // someone forged it. The first one found keeps its credit, so a forgery arriving second cannot
+  // swap who reads as the remover — but the field itself still reads as tampered: a duplicate is
+  // the same suspicion as a missing one, from the other direction.
+  const salt = newSalt();
+  const tampered = { ...AN_EVENT, text: null, textHash: hashText('gone', salt) };
+  const firstRemoval = { id: 'r1', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-02T00:00:00.000Z',
+    data: { event: 'e1', field: 'text' } };
+  const secondRemoval = { id: 'r2', type: TEXT_REMOVED, author: 'forger@example.org', when: '2026-01-03T00:00:00.000Z',
+    data: { event: 'e1', field: 'text' } };
+  const [out] = withTexts([tampered, firstRemoval, secondRemoval], new Map());
+  assert.equal(out.textRemoved?.by, 'owner@example.org', 'the first valid removal keeps its credit');
+  assert.equal(out.textTampered, true, 'a second removal of the same field is proof of forgery');
+});
+
 test('a hash, no matching row, and no removal event: tampered — the "Done when" of issue #28', () => {
   const [out] = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', newSalt()) }], new Map());
   assert.equal(out.text, null);
@@ -154,6 +171,45 @@ test('text and snapshot are resolved independently, and a list is resolved witho
 test('removeText refuses a field with no row, whether it was never given or already removed', () => {
   const err = noText('e1', 'text');
   assert.match(err.message, /no text to remove/);
+});
+
+// ===================================================================== withTextsRetrying's own contract
+// Round 3, finding 2: the ordinary-path early return had no test of its own.
+
+test('withTextsRetrying never asks for more when nothing looks tampered', async () => {
+  const plain = { id: 'e1', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:00.000Z',
+    data: null, text: 'fine', textHash: null };
+  const out = await withTextsRetrying([plain], new Map(),
+    async () => { throw new Error('fetchRemovals must never run on the ordinary path'); });
+  assert.equal(out[0].text, 'fine');
+});
+
+test('withTextsRetrying asks exactly once when something looks tampered', async () => {
+  const salt = newSalt();
+  const tampered = { id: 'e1', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:00.000Z',
+    data: null, text: null, textHash: hashText('gone', salt) };
+  let calls = 0;
+  await withTextsRetrying([tampered], new Map(), async () => { calls++; return []; });
+  assert.equal(calls, 1);
+});
+
+// Round 3, finding 1: a whole-project re-read (finding A) can turn up a removal that belongs to a
+// different page entirely, and calling this twice must not duplicate one it already has.
+
+test('withTextsRetrying returns exactly the events it was given, never the extra removals it borrowed to resolve them', async () => {
+  const salt = newSalt();
+  const e1 = { id: 'e1', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:00.000Z',
+    data: null, text: null, textHash: hashText('gone', salt) }; // tampered on a first pass
+  const e2 = { id: 'e2', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:01.000Z', data: null };
+  // A real, valid removal of e2 — standing in for "whatever a whole-project re-read can turn up
+  // that has nothing to do with e1's own page", which round 3, finding 1 says must not leak in.
+  const removal = { id: 'r1', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-01T00:00:02.000Z',
+    data: { event: 'e2', field: 'text' } };
+  let calls = 0;
+  const out = await withTextsRetrying([e1, e2], new Map(), async () => { calls++; return [removal]; });
+  assert.equal(calls, 1);
+  assert.deepEqual(out.map((e) => e.id), ['e1', 'e2'],
+    'exactly the events given, same order, same length — never the fetched removal itself');
 });
 
 // ===================================================================== the events file
@@ -327,4 +383,25 @@ test('[firestore] the CLI pages through more documents than one page holds, and 
   }
   assert.deepEqual([...events.map((e) => e.id)].sort(), written.map((e) => e.id).sort(),
     'every document comes back exactly once, however many pages it took');
+});
+
+test('[firestore] list(page) never leaks another page\'s removal event into its answer', cloud, async (t) => {
+  // Round 3, finding 1: withTextsRetrying's fetchRemovals reads the WHOLE project — a torn read
+  // cannot know which page a removal belongs to any better than list(page) itself can — so a
+  // removal that genuinely happened on a DIFFERENT page must still not show up in this page's list.
+  const project = freshFirestoreProject('holdrim-texts');
+  const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+  const { Firestore } = await import('@google-cloud/firestore');
+  const store = new FirestoreEventStore(project);
+  const db = new Firestore({ projectId: project });
+  t.after(async () => { await store.close(); await db.terminate(); });
+  const tampered = await store.append({ type: 'comment', page: 'A01', text: 'tampered one' }, 'r@example.org');
+  const other = await store.append({ type: 'comment', page: 'A02', text: 'other page' }, 'r@example.org');
+  await store.removeText(other.id, 'text', 'owner@example.org'); // a real removal, on a different page
+  await db.collection('texts').doc(`${tampered.id}:text`).delete(); // force A01's own field to look tampered
+
+  const a01 = await store.list('A01');
+  assert.deepEqual(a01.map((e) => e.page), ['A01'], 'only A01\'s own events come back, whatever the re-read had to fetch');
+  const read = a01.find((e) => e.id === tampered.id);
+  assert.equal(read.textTampered, true, 'still correctly tampered: nothing here should quietly fix that up');
 });

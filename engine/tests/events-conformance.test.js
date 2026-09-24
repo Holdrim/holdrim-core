@@ -229,6 +229,46 @@ forEachStore('removing the text leaves the snapshot untouched, and the other way
   assert.equal(listed.textRemoved, null);
 });
 
+// ===================================================================== a clock that steps back
+// Round 3, finding 3: SQLite and Memory stamp `when` from the process wall clock. A clock that
+// steps back between an append and the removeText that follows it (NTP, a VM resuming from an
+// earlier snapshot) would otherwise date the removal before its own target, and removalsOf's
+// ordering check (round 2, finding F, which has to stay exactly as strict as it is) would then
+// refuse a genuine removal forever — events are immutable, so there is no later moment to fix it
+// in. Firestore needs none of this: FieldValue.serverTimestamp() is the server's own clock, already
+// monotonic regardless of clock skew on any one caller's machine.
+
+/** Runs `fn` with `Date` patched so `new Date()` (no arguments) always answers `iso`. */
+async function withClockAt(iso, fn) {
+  const RealDate = Date;
+  class SteppedBack extends RealDate {
+    constructor(...args) { super(...(args.length ? args : [iso])); }
+    static now() { return new RealDate(iso).getTime(); }
+  }
+  globalThis.Date = SteppedBack;
+  try {
+    return await fn();
+  } finally {
+    globalThis.Date = RealDate;
+  }
+}
+
+for (const store of stores.filter((s) => s.name !== 'firestore')) {
+  test(`[${store.name}] removeText never dates a removal before the text it removes, even if the clock steps back`, async () => {
+    const s = await store.open();
+    try {
+      const written = await s.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+      const removal = await withClockAt('2000-01-01T00:00:00.000Z',
+        () => s.removeText(written.id, 'text', 'owner@example.org'));
+      assert.ok(removal.when >= written.when, 'the removal is never dated before its target');
+      const [read] = await s.list('A01');
+      assert.equal(read.textRemoved?.by, 'owner@example.org',
+        'it still reads as the removal it was, not as tampering, however far back the clock had stepped');
+      assert.equal(read.textTampered, false);
+    } finally { await s.close(); }
+  });
+}
+
 // ===================================================================== the stored rows, around the code
 // Asked with SQL written here, not through the store: the claim is about what the file holds.
 test('[sqlite] no e-mail is in the events table, only ids of the people table', async () => {

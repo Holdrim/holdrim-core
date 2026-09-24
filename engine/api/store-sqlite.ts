@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { noText, saltFields, textKey, withTexts, TEXT_REMOVED, type TextField } from './texts.ts';
+import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED, type TextField } from './texts.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -72,9 +72,13 @@ export const GUARDS: Record<string, string> = {
   //
   // ⚠️ This clause has no way to refuse an INSERT — none of the guards here do — so a direct writer
   // can still insert a text_removed event of their own and then satisfy this WHEN clause with a
-  // forgery. `removalsOf` (engine/api/texts.ts) refuses one dated, or placed, no later than the
-  // event it names, which closes the easy version of this; a forgery dated and ordered correctly is
-  // not caught here and needs signed events (docs/PRIVACY.md, phase E) to close for good.
+  // forgery; the same writer could also just `DROP TRIGGER texts_no_delete` first and skip the
+  // forgery entirely. A dropped trigger is reinstalled, but only silently, on the next boot — a
+  // pre-existing gap, holdrim#89, this change does not close. `removalsOf` (engine/api/texts.ts)
+  // refuses a forged event dated, or placed, no later than the event it names, which closes the
+  // easy version of the forgery path; one dated and ordered correctly, or a trigger dropped
+  // outright, is not caught here and needs signed events (docs/PRIVACY.md, phase E) to close for
+  // good.
   texts_no_delete: `BEFORE DELETE ON texts
     WHEN NOT EXISTS (
       SELECT 1 FROM events WHERE type = '${TEXT_REMOVED}'
@@ -308,12 +312,16 @@ export class SqliteEventStore implements EventStore {
   }
 
   async removeText(event: string, field: TextField, by: string): Promise<Event> {
-    const original = this.#db.prepare('SELECT page, block FROM events WHERE id = ?').get(event) as
-      { page: string; block: string | null } | undefined;
+    const original = this.#db.prepare('SELECT page, block, happened_at FROM events WHERE id = ?').get(event) as
+      { page: string; block: string | null; happened_at: string } | undefined;
     if (!original) throw new Error(`no event ${event}`);
     const personId = await this.personFor(by);
     const id = crypto.randomUUID().replace(/-/g, '');
-    const when = new Date().toISOString();
+    // Never before the text it removes (round 3, finding 3): a wall clock that steps back between
+    // the append and this removeText would otherwise date — and so, by removalsOf's own ordering
+    // check, permanently misfile — a genuine removal as tampering. A tie still sorts after its
+    // target: `list` orders by `(happened_at, rowid)`, and this row's rowid is always the later one.
+    const when = notBefore(new Date().toISOString(), original.happened_at);
     const data = { event, field };
     this.#db.exec('BEGIN IMMEDIATE');
     try {

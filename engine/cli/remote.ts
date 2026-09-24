@@ -255,6 +255,7 @@ export class Source {
     // (engine/api/texts.ts) is the one rule both readers now share: for a field a first pass calls
     // tampered, ask once more, later, for the removal events that first pass could not have seen.
     return withTextsRetrying(events, texts, async () => {
+      // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
       const removed = await this.#collection(headers, 'events',
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
       return withAuthors(removed.map((d) => this.#fromFirestore(d)), people);

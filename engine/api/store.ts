@@ -1,6 +1,6 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { noText, saltFields, textKey, withTexts, TEXT_REMOVED,
+import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED,
   type RawEvent, type TextField, type TextRow } from './texts.ts';
 
 /*
@@ -22,10 +22,20 @@ export class MemoryEventStore implements EventStore {
   // The author goes in as the person's id and comes out as their address, as in every store:
   // what is kept names nobody once the person is forgotten (docs/PRIVACY.md, section 1).
   async append(event: NewEvent, author: string): Promise<Event> {
+    return this.#record(event, author, new Date().toISOString());
+  }
+
+  /**
+   * `append`'s own body, with `when` taken from the caller rather than always the wall clock now —
+   * `removeText` needs to clamp its own event's `when` (round 3, finding 3, `notBefore` in
+   * engine/api/texts.ts), and a second copy of this logic would be one more place for the hash on
+   * an event and its row in `#texts` to stop agreeing with each other.
+   */
+  async #record(event: NewEvent, author: string, when: string): Promise<Event> {
     const id = crypto.randomUUID().replace(/-/g, '');
     const { hashes, rows } = saltFields(event);
     for (const r of rows) this.#texts.set(textKey(id, r.field), { value: r.value, salt: r.salt });
-    const e = stored({ ...event, text: null, snapshot: null }, id, await this.personFor(author), new Date().toISOString());
+    const e = stored({ ...event, text: null, snapshot: null }, id, await this.personFor(author), when);
     this.#events.push({ ...e, textHash: hashes.text, snapshotHash: hashes.snapshot });
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
@@ -51,8 +61,9 @@ export class MemoryEventStore implements EventStore {
     // no crash for the two to disagree across — the gap a real database closes with a transaction
     // (store-sqlite.ts, store-firestore.ts) is one this store cannot have in the first place.
     this.#texts.delete(key);
-    return this.append({ type: TEXT_REMOVED, page: original.page, block: original.block ?? null,
-      data: { event, field } }, by);
+    const when = notBefore(new Date().toISOString(), original.when);
+    return this.#record({ type: TEXT_REMOVED, page: original.page, block: original.block ?? null,
+      data: { event, field } }, by, when);
   }
 
   // The people table. No database to hold the rule here, so `setEmail` is the only code that

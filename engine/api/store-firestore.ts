@@ -108,9 +108,7 @@ export class FirestoreEventStore implements EventStore {
       return [textKey(data.event as string, data.field as TextField), { value: data.value as string, salt: data.salt as string }];
     }));
     return withTextsRetrying(events, texts, async () => {
-      // Not narrowed to the suspect ids: `type == text_removed` alone needs no composite index, and
-      // removals are a small, bounded subset of an ever-growing events collection — bounded by how
-      // many texts have ever been let go, not by how many events there have ever been.
+      // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
       const removed = await this.#db.collection('events').where('type', '==', TEXT_REMOVED).get();
       return withAuthors(removed.docs.map((d) => this.#fromFirestore(d.id, d.data())), peopleMap);
     });

@@ -17,15 +17,19 @@ import { createHash, randomBytes } from 'node:crypto';
  *
  * ⚠️ That is the API's protection, not the file's. SQLite's guards (`texts_no_update`,
  * `texts_no_replace`, `texts_no_delete` in store-sqlite.ts) refuse an UPDATE, a REPLACE and a bare
- * DELETE, but none of them can refuse an INSERT: someone who can write the file directly can still
- * insert a `text_removed` event of their own and then delete the row it names, and `texts_no_delete`
- * lets that DELETE through — the event it demands is there, forged or not. `removalsOf` below closes
- * part of this, by dating (round 2, finding F): a removal only counts once it is later, in time and
- * in the list, than the event it names, so it cannot be backdated ahead of a text that, by its own
- * clock, did not exist yet. It does not close the rest — a removal dated and ordered after its
- * target, forged by the same direct writer, still reads as genuine. Closing that needs the events
- * themselves signed, so a reader can tell the server wrote one from one anybody with the file could
- * insert (docs/PRIVACY.md, section 3, "not built"; SECURITY.md says the same of the file as a whole).
+ * DELETE from any program that does not first drop them — they stop mistakes and ordinary tools, not
+ * someone with write access to the file, who can `DROP TRIGGER` before touching a row, or simply
+ * `INSERT` a forged `text_removed` event and let `texts_no_delete` find it there: the event it
+ * demands is there, forged or not, so the DELETE it then allows removes a real row on a forged
+ * say-so. (A dropped trigger is reinstalled, but only silently, on the next boot — a pre-existing
+ * gap, holdrim#89, that this file does not close either.) `removalsOf` below closes part of the
+ * forged-event path, by dating (round 2, finding F): a removal only counts once it is later, in time
+ * and in the list, than the event it names, so it cannot be backdated ahead of a text that, by its
+ * own clock, did not exist yet. It does not close the rest — a removal dated and ordered after its
+ * target, forged by the same direct writer, still reads as genuine, and dropping a trigger outright
+ * is not dated at all. Closing either needs the events themselves signed, so a reader can tell the
+ * server wrote one from one anybody with the file could insert (docs/PRIVACY.md, section 3, "not
+ * built"; SECURITY.md says the same of the file as a whole).
  */
 export const TEXT_REMOVED = 'text_removed';
 
@@ -101,6 +105,25 @@ export function noText(event: string, field: TextField): Error {
 }
 
 /**
+ * `when`, unless it would date a removal before the text it removes — every store's `removeText`
+ * clamps to this before writing the removal event (round 3, finding 3). SQLite and Memory stamp
+ * `when` from the process wall clock; a clock that steps back between an `append` and the
+ * `removeText` that follows it (NTP, a VM resuming from an earlier snapshot) would otherwise date
+ * the removal before its own target, and `removalsOf`'s ordering check (round 2, finding F) — which
+ * has to stay exactly as strict as it is — would then refuse a genuine removal forever: events are
+ * immutable, so there is no later moment to fix it in. A clamped tie still sorts after its target,
+ * by insertion — SQLite's `ORDER BY happened_at, rowid`, Memory's stable sort on equal keys — since
+ * a removal is always INSERTED after the event it names, whatever the clock says.
+ *
+ * Firestore needs none of this: `FieldValue.serverTimestamp()` is the server's own clock, already
+ * monotonic across everything one project writes, torn reads and clock skew on any one caller's
+ * machine included.
+ */
+export function notBefore(when: string, target: string): string {
+  return when < target ? target : when;
+}
+
+/**
  * What a removed field is told as, once resolved: who removed it and when — never the text itself,
  * which left with its salt the moment the row did.
  */
@@ -153,12 +176,20 @@ export function withTexts<E extends { id: string; type: string; author: string; 
   return events.map((e) => resolveOne(e, rows, removed));
 }
 
+/** What `removalsOf` found: the valid removals, and which keys had more than one. */
+interface Removals {
+  valid: Map<string, Removed>;
+  /** A key with a second valid removal — `removeText` can never produce one, so this is forgery. */
+  duplicated: Set<string>;
+}
+
 function removalsOf<E extends { id: string; type: string; author: string; when: string;
                                 data?: { [k: string]: unknown } | null }>(
   events: E[],
-): Map<string, Removed> {
+): Removals {
   const positionOf = new Map(events.map((e, i) => [e.id, i] as const));
-  const out = new Map<string, Removed>();
+  const valid = new Map<string, Removed>();
+  const duplicated = new Set<string>();
   for (const [i, e] of events.entries()) {
     if (e.type !== TEXT_REMOVED) continue;
     const target = e.data?.event;
@@ -175,12 +206,19 @@ function removalsOf<E extends { id: string; type: string; author: string; when: 
     if (targetIndex == null) continue;
     const targetEvent = events[targetIndex];
     if (i <= targetIndex || e.when < targetEvent.when) continue;
-    out.set(textKey(target, field), { by: e.author, when: e.when });
+    const key = textKey(target, field);
+    // `removeText` deletes the row it names, so it can never itself produce a second valid removal
+    // of one field — the second call finds no row and refuses (`noText`). A second one here, however
+    // correctly dated and ordered, is proof someone forged it: the first one found (round 3, finding
+    // 6) keeps its credit — a forgery arriving second cannot silently swap who reads as the remover
+    // — but the field itself now reads as tampered regardless, in `resolveOne` below.
+    if (valid.has(key)) { duplicated.add(key); continue; }
+    valid.set(key, { by: e.author, when: e.when });
   }
-  return out;
+  return { valid, duplicated };
 }
 
-function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, removed: Map<string, Removed>): E {
+function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, removed: Removals): E {
   const e = event as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = { ...e };
   for (const field of TEXT_FIELDS) {
@@ -202,9 +240,12 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
       continue;
     }
     out[field] = null;
-    const gone = removed.get(textKey(e.id as string, field)) ?? null;
+    const key = textKey(e.id as string, field);
+    const gone = removed.valid.get(key) ?? null;
     out[`${field}Removed`] = gone;
-    out[`${field}Tampered`] = gone == null;
+    // Tampered when nothing accounts for it at all, or when TWO removals do — a duplicate is not a
+    // cleaner story than a missing one, it is the same suspicion from the other direction.
+    out[`${field}Tampered`] = gone == null || removed.duplicated.has(key);
   }
   return out as unknown as E;
 }
@@ -249,6 +290,14 @@ function suspectsOf<E extends { id: string; textTampered?: boolean; snapshotTamp
  * runs, the removal's event is there to find, wherever the texts read landed. It runs at most once,
  * and only for the fields the first pass could not otherwise account for — never on the ordinary
  * path, where nothing is tampered and nothing more is asked.
+ *
+ * `suspects` names which fields looked tampered, for a `fetchRemovals` that wants to narrow its own
+ * query by them; both callers here (`FirestoreEventStore.list`, `Source.events` in engine/cli/remote.ts)
+ * ignore it and just ask for every `text_removed` event in the project instead — `type == text_removed`
+ * alone needs no composite index, and removals are a small, bounded subset of an ever-growing events
+ * collection, bounded by how many texts have ever been let go, not by how many events there have
+ * ever been. `withTextsRetrying` itself only ever keeps the caller's own `events.length` results
+ * (round 3, finding 1), so an unnarrowed, whole-project answer costs a wider fetch, never a wrong one.
  */
 export async function withTextsRetrying<E extends { id: string; type: string; author: string; when: string;
                                         data?: { [k: string]: unknown } | null }>(
@@ -265,5 +314,12 @@ export async function withTextsRetrying<E extends { id: string; type: string; au
   // target here is already somewhere in `events`, so putting every freshly-fetched removal after
   // all of them keeps `removalsOf`'s own ordering check (finding F) exactly as true as it was.
   const known = new Set(events.map((e) => e.id));
-  return withTexts(events.concat(more.filter((m) => !known.has(m.id))), rows);
+  const resolved = withTexts(events.concat(more.filter((m) => !known.has(m.id))), rows);
+  // `fetchRemovals` reads the WHOLE project — a torn read cannot know which page a removal from
+  // years ago belonged to any better than list(page) itself can — so `resolved` holds more events
+  // than this caller asked for. Only the first `events.length` of them are the caller's own,
+  // resolved with the extra removals borrowed to see correctly; the rest go no further; without
+  // this, a removal from another page would leak into list(page)'s answer, and calling this twice
+  // would duplicate it a second time (round 3, finding 1).
+  return resolved.slice(0, events.length);
 }
