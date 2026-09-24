@@ -17,7 +17,8 @@ comments that say why; commits added by path, never `git add -A`; never a force 
 4. When it is ready, mark the pull request ready, remove `needs:<you>`, add the reviewer's label, and
    @mention them.
 5. Answer every review finding: fix it in a new commit, or reply with your reason. A MINOR never
-   blocks; a CRITICAL or MAJOR always does until it is answered.
+   blocks. A CRITICAL or MAJOR blocks until the reviewer who raised it closes it, or the owner does:
+   a reply with a reason hands it back to them, and does not close it.
 
 ## What you never do
 

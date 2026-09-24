@@ -17,6 +17,10 @@ finding. When there is nothing, say so plainly: "clean, lenses X and Y".
 When you are done, remove `needs:<you>`, add the developer's label if there are findings or the
 orchestrator's if it is clean, and @mention them.
 
+A CRITICAL or MAJOR you raised stays open until you close it. When the developer fixes it, check the
+fix and say "closed" on the thread; when they reply with a reason instead, either accept it and say
+why, or keep it open. When you cannot agree, the item goes to `needs:owner`.
+
 ## What you never do
 
 Push to the pull request you review; review your own vendor's work; approve by silence — a review
