@@ -93,6 +93,22 @@ test('an events file from before the people table reads as the addresses it hold
 });
 
 // ===================================================================== the cloud, over REST
+test('the CLI refuses to write to a cloud with no project before it asks gcloud for anything', async () => {
+  // Without the emulator, which needs no token: the question is whether gcloud is asked first, and
+  // on a machine without it that would answer "no gcloud account issues a token" instead.
+  const host = process.env.FIRESTORE_EMULATOR_HOST;
+  const project = process.env.HOLDRIM_PROJECT;
+  delete process.env.FIRESTORE_EMULATOR_HOST;
+  delete process.env.HOLDRIM_PROJECT;
+  try {
+    await assert.rejects(new Source({ account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }),
+      /cloud\.project|HOLDRIM_PROJECT/);
+  } finally {
+    if (host !== undefined) process.env.FIRESTORE_EMULATOR_HOST = host;
+    if (project !== undefined) process.env.HOLDRIM_PROJECT = project;
+  }
+});
+
 const cloud = process.env.FIRESTORE_EMULATOR_HOST
   ? {}
   : { skip: 'FIRESTORE_EMULATOR_HOST is not set, so nothing ran against Firestore. Start the emulator '
@@ -179,7 +195,10 @@ const writesPeople = (commit) => commit.writes.some((w) => /\/people(_by_email)?
 test('[firestore] a person the cloud refuses to make, with nobody else\'s to take, writes no event', cloud, async (t) => {
   const { project, db } = await cloudProject(t);
   await withFetch(
-    (url) => (url.endsWith(':commit') ? new globalThis.Response('{"error":{"message":"refused on purpose"}}', { status: 500 }) : null),
+    // Only the commit that makes the person: the event's own commit goes through, so an event
+    // written for a person who was never made would be there to count.
+    (url, sent) => (url.endsWith(':commit') && writesPeople(sent)
+      ? new globalThis.Response('{"error":{"message":"refused on purpose"}}', { status: 500 }) : null),
     async () => {
       await assert.rejects(new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }),
         /error 500 writing to Firestore: refused on purpose/);
