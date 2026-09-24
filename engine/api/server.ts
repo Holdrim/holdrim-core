@@ -26,6 +26,7 @@ import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { IapIdentity } from './identity-iap.ts';
 import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types.ts';
+import { idForLog as peopleIdForLog, actedOn as peopleActedOn } from './people.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -168,6 +169,10 @@ const events: EventStore = await (async () => {
       process.exit(1);
   }
 })();
+
+/** Wraps `idForLog`/`actedOn` (engine/api/people.ts) around this server's own store. */
+const idForLog = (email: string) => peopleIdForLog(events, email);
+const actedOn = (subject: string, actor: string) => peopleActedOn(events, subject, actor);
 
 /**
  * Where the people and their sessions live. Same idea as Keycloak: a file to run it on a laptop, a
@@ -398,13 +403,16 @@ async function recordEvent(
     }
   }
 
+  // Resolved BEFORE the write, not after: an event's author is never null — the row has to exist
+  // for the event to mean anything — so this is the one log id that must still find-OR-CREATE.
+  // Doing it here, ahead of `append`, means a failure here writes nothing at all; done after, as
+  // it was, it would leave a committed event unanswered by a 500, and a retry would write it
+  // twice, since no idempotency key ties this call to that request. `append` resolves the same
+  // address again to store the event, and finds the row this just made — one person, one insert.
+  const author = await events.personFor(email);
   const e = await events.append(incoming, email);
-  // `e.author` is the e-mail again: `append` hands a fresh event back with the plain value it was
-  // given, not a round trip through the people table (engine/api/store.ts, `#record`). The log is
-  // evidence and keeps the id, so it asks the people table directly — `personFor` on the same
-  // address returns the id `append` just wrote, never a new one.
   log('INFO', 'event_recorded', {
-    id: e.id, type: e.type, page: e.page, block: e.block, author: await events.personFor(email),
+    id: e.id, type: e.type, page: e.page, block: e.block, author,
     from: e.data?.from, to: e.data?.state, through,
   });
   return { status: 201, body: e as unknown as Record<string, unknown>, event: e };
@@ -434,7 +442,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       const failure = UserInputError.from(error, 'api.password.invalid');
       return json(res, 400, { error: i18n.t(languageOf(req), failure.key, failure.params) });
     }
-    log('INFO', 'password_changed', { person: await events.personFor(email) });
+    log('INFO', 'password_changed', { person: await idForLog(email) });
     return json(res, 200, { ok: true });
   }
 
@@ -606,7 +614,7 @@ async function userRoutes(
       return true;
     }
     // The password is NOT in this line, and this is the line where it would be easiest to put it.
-    log('INFO', 'user_created', { person: await events.personFor(address), by: await events.personFor(email) });
+    log('INFO', 'user_created', await actedOn(address, email));
     json(res, 201, { user: await users.find(address), password });
     return true;
   }
@@ -624,7 +632,7 @@ async function userRoutes(
       json(res, 400, { error: say(failure.key, failure.params) });
       return true;
     }
-    log('INFO', 'user_renamed', { person: await events.personFor(email) });
+    log('INFO', 'user_renamed', { person: await idForLog(email) });
     json(res, 200, { user: await users.find(email) });
     return true;
   }
@@ -650,7 +658,7 @@ async function userRoutes(
     }
     const password = await users.resetPassword(target);
     // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
-    log('INFO', 'user_password_reset', { person: await events.personFor(target), by: await events.personFor(email) });
+    log('INFO', 'user_password_reset', await actedOn(target, email));
     json(res, 200, { user: await users.find(target), password });
     return true;
   }
@@ -683,8 +691,7 @@ async function userRoutes(
       return true;
     }
     await users.setEnabled(target, body.enabled);
-    log('INFO', 'user_enabled_changed',
-      { person: await events.personFor(target), enabled: body.enabled, by: await events.personFor(email) });
+    log('INFO', 'user_enabled_changed', { ...await actedOn(target, email), enabled: body.enabled });
     json(res, 200, { user: await users.find(target) });
     return true;
   }
@@ -999,9 +1006,11 @@ const server = createServer(async (req, res) => {
         return json(res, 401, { error: i18n.t(languageOf(req), 'api.credentials.invalid') });
       }
       res.setHeader('set-cookie', byPassword.sessionCookie(r.session));
-      // Unlike the refusal above, this address DID become a person the moment `signIn` found their
-      // row — so the log gets the id, the same as any other event.
-      log('INFO', 'signed_in', { person: await events.personFor(r.user.email), mustChangePassword: r.user.mustChangePassword });
+      // Read-only, like every other account action: signing in does not itself make this address a
+      // person — filing a request, a comment or a ✓ does — so a brand-new account's first sign-in
+      // logs `person: null`, honestly, rather than minting a row for an address that has not acted
+      // on anything reviewable yet.
+      log('INFO', 'signed_in', { person: await idForLog(r.user.email), mustChangePassword: r.user.mustChangePassword });
       return json(res, 200, { email: r.user.email, name: r.user.name, mustChangePassword: r.user.mustChangePassword });
     }
 
