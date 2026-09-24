@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { hashText, newSalt, noText, textKey, withTexts, TEXT_FIELDS, TEXT_REMOVED, type TextField } from './texts.ts';
+import { noText, saltFields, textKey, withTexts, TEXT_REMOVED, type TextField } from './texts.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -58,6 +58,23 @@ export const GUARDS: Record<string, string> = {
   // that refuses the edit outright is one less way for that to depend on the hash comparing right.
   texts_no_update: `BEFORE UPDATE ON texts
     BEGIN SELECT RAISE(ABORT, 'a text is not edited: removeText deletes it, and records why'); END`,
+  // REPLACE again, the same hole the events and people guards close: `INSERT OR REPLACE` deletes
+  // the row it conflicts with and inserts the new one WITHOUT firing a delete trigger, so a value —
+  // salt included — could be swapped this way even with texts_no_delete below in place.
+  texts_no_replace: `BEFORE INSERT ON texts
+    WHEN EXISTS (SELECT 1 FROM texts WHERE (event = NEW.event AND field = NEW.field) OR rowid = NEW.rowid)
+    BEGIN SELECT RAISE(ABORT, 'a text is not replaced: removeText deletes it, and records why'); END`,
+  // A row goes only when a text_removed event already names it: `removeText` writes that event
+  // BEFORE the DELETE, in the same transaction, precisely so this WHEN clause — run inside that same
+  // transaction — already sees it. Without this, a bare DELETE FROM texts (from outside this code,
+  // or another program with the file open) would leave the row gone and no event to say why: exactly
+  // the shape withTexts calls tampering, but reached by deleting the proof instead of forging it.
+  texts_no_delete: `BEFORE DELETE ON texts
+    WHEN NOT EXISTS (
+      SELECT 1 FROM events WHERE type = '${TEXT_REMOVED}'
+        AND json_extract(data, '$.event') = OLD.event AND json_extract(data, '$.field') = OLD.field
+    )
+    BEGIN SELECT RAISE(ABORT, 'a text is not deleted without a text_removed event naming it'); END`,
 };
 
 /**
@@ -259,15 +276,7 @@ export class SqliteEventStore implements EventStore {
     const personId = await this.personFor(author);
     const id = crypto.randomUUID().replace(/-/g, '');
     const when = new Date().toISOString();
-    const hashes: Record<TextField, string | null> = { text: null, snapshot: null };
-    const rows: { field: TextField; value: string; salt: string }[] = [];
-    for (const field of TEXT_FIELDS) {
-      const value = event[field];
-      if (value == null) continue;
-      const salt = newSalt();
-      hashes[field] = hashText(value, salt);
-      rows.push({ field, value, salt });
-    }
+    const { hashes, rows } = saltFields(event);
     const e = stored({ ...event, text: null, snapshot: null }, id, personId, when);
     this.#db.exec('BEGIN IMMEDIATE');
     try {
@@ -302,15 +311,18 @@ export class SqliteEventStore implements EventStore {
     const data = { event, field };
     this.#db.exec('BEGIN IMMEDIATE');
     try {
-      // The delete and the removal event in one transaction, for the reason `append` gives: a crash
-      // between the two must not leave one without the other.
-      const del = this.#db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(event, field);
-      if (del.changes !== 1) throw noText(event, field);
+      // The removal event before the delete, in the same transaction: `texts_no_delete` only lets
+      // a row go once an event naming it already exists, and writing the event first is what lets
+      // that guard, run inside this same transaction, already see it. The one transaction also
+      // closes the crash gap `append`'s own comment explains — a hash with no row and no event
+      // naming why is exactly what `withTexts` cannot tell from tampering.
       const r = this.#db.prepare(
         `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash, author, happened_at, data)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(id, TEXT_REMOVED, original.page, original.block ?? null, null, null, null, null, null, personId, when, JSON.stringify(data));
       if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
+      const del = this.#db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(event, field);
+      if (del.changes !== 1) throw noText(event, field);
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');
@@ -323,29 +335,43 @@ export class SqliteEventStore implements EventStore {
     };
   }
 
+  /**
+   * The three SELECTs — events, people, texts — inside one read transaction, so a write from
+   * ANOTHER connection on this file (a second process; `append` and `removeText` on this one never
+   * interleave with `list`, since `node:sqlite` is synchronous) cannot land between them. Without
+   * it, another process's `removeText` landing between the events SELECT and the texts SELECT is
+   * not what either alone shows — the same torn read `FirestoreEventStore.list` closes with a
+   * transaction of its own — and a legitimate removal would read back as tampering.
+   */
   async list(page?: string | null): Promise<Event[]> {
-    const rows = page == null
-      // `rowid` breaks a tie inside one millisecond: recorded order, not whatever the planner picks.
-      // Today's SQLite already hands ties back in rowid order, so dropping it changes nothing a
-      // test can see; naming it turns that accident into a promise. `rowid DESC` fails the suite.
-      ? this.#db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all()
-      : this.#db.prepare('SELECT * FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
-    // After the events, as the Firestore store explains: every author those rows name was made
-    // before its event was written, so a read of the people that starts now holds it.
-    const people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
-      .map((p) => [p.id, p.email]));
+    this.#db.exec('BEGIN DEFERRED');
+    let rows: unknown[];
+    let people: Map<string, string | null>;
+    let texts: Map<string, { value: string; salt: string }>;
+    try {
+      rows = page == null
+        // `rowid` breaks a tie inside one millisecond: recorded order, not whatever the planner
+        // picks. Today's SQLite already hands ties back in rowid order, so dropping it changes
+        // nothing a test can see; naming it turns that accident into a promise. `rowid DESC` fails
+        // the suite.
+        ? this.#db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all()
+        : this.#db.prepare('SELECT * FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
+      people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
+        .map((p) => [p.id, p.email]));
+      texts = new Map((this.#db.prepare('SELECT event, field, value, salt FROM texts').all() as
+        { event: string; field: TextField; value: string; salt: string }[])
+        .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt }]));
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
     const events = withAuthors((rows as Record<string, string | null>[]).map((r) => ({
       id: r.id!, type: r.type!, page: r.page!, block: r.block, fingerprint: r.fingerprint,
       text: r.text, snapshot: r.snapshot, textHash: r.text_hash, snapshotHash: r.snapshot_hash,
       author: r.author!, when: r.happened_at!, data: r.data ? JSON.parse(r.data) : null,
       textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
     })), people);
-    // The texts after the events, for the same reason the people are: `append` writes an event's
-    // texts rows in the same transaction as the event itself, so every hash a read of the events
-    // can see already has its row in a read of the texts that starts after it.
-    const texts = new Map((this.#db.prepare('SELECT event, field, value, salt FROM texts').all() as
-      { event: string; field: TextField; value: string; salt: string }[])
-      .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt }]));
     return withTexts(events, texts);
   }
 

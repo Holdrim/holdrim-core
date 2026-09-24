@@ -23,7 +23,7 @@ import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
 import { createRoles } from '../core/roles.js';
-import { newSalt, TEXT_REMOVED } from '../api/texts.ts';
+import { hashText, newSalt, TEXT_REMOVED } from '../api/texts.ts';
 
 const stores = [
   { name: 'memory', open: async () => new MemoryEventStore() },
@@ -182,12 +182,15 @@ forEachStore('text and snapshot come back exactly as given, and removeText refus
 });
 
 forEachStore('removeText deletes the row and records who and when, as an event beside the others', async (s) => {
-  const answered = await s.append({ type: 'comment', page: 'A01', text: 'a remark to redact' }, 'r@example.org');
+  const answered = await s.append({ type: 'comment', page: 'A01', block: 'A01.1.2', text: 'a remark to redact' }, 'r@example.org');
   await tick();
   const removal = await s.removeText(answered.id, 'text', 'owner@example.org');
   assert.equal(removal.type, TEXT_REMOVED);
   assert.deepEqual(removal.data, { event: answered.id, field: 'text' });
   assert.equal(removal.author, 'owner@example.org');
+  // The removal names the same block as the text it removed: a reader filtering one block's events
+  // (the panel does) has to see why its text went missing, not just that some text somewhere did.
+  assert.equal(removal.block, 'A01.1.2', 'the removal event carries the block it removed a text from');
 
   const all = await s.list('A01');
   assert.equal(all.length, 2, 'the removal is a new event, not a rewrite of the first');
@@ -197,6 +200,7 @@ forEachStore('removeText deletes the row and records who and when, as an event b
   assert.deepEqual(original.textRemoved, { by: 'owner@example.org', when: removal.when });
   assert.equal(original.textTampered, false, 'removed on purpose is not tampering');
   assert.equal(removedEvent.id, removal.id);
+  assert.equal(removedEvent.block, 'A01.1.2', 'and the same block still reads back from the store, not only from removeText\'s own answer');
 });
 
 forEachStore('removeText refuses a field already removed: nothing to remove twice', async (s) => {
@@ -204,8 +208,12 @@ forEachStore('removeText refuses a field already removed: nothing to remove twic
   await s.removeText(answered.id, 'text', 'owner@example.org');
   await assert.rejects(s.removeText(answered.id, 'text', 'owner@example.org'), /no text to remove/);
   // The refusal has to mean it: a second, silently recorded removal would be a duplicate fact for
-  // one field let go once, and the transaction that refuses it (store-sqlite.ts, store-firestore.ts)
-  // has to have rolled all the way back, not left the removal event behind on its own.
+  // one field let go once. `removeText` writes the removal event BEFORE the delete (so the SQLite
+  // guard that requires one already sees it — store-sqlite.ts, `texts_no_delete`), so this second
+  // call's own event INSERT genuinely lands before its DELETE finds nothing and throws — a real
+  // write for the transaction's ROLLBACK to undo, which is what this assertion actually proves
+  // (store-sqlite-guards.test.js has the other half: an INSERT that fails first, with nothing
+  // written yet, leaves the same nothing behind either way).
   assert.equal((await s.list('A01')).filter((e) => e.type === TEXT_REMOVED).length, 1,
     'a refused removal writes no event of its own');
 });
@@ -279,34 +287,41 @@ test('[sqlite] no text or snapshot is in the events table, only the hash of each
   } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('[sqlite] a text deleted straight in the store, with no removal event, reads as tampered — not as absence', async () => {
+test('[sqlite] an event whose texts row was never written, with a hash but no removal event, reads as tampered — not as absence', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
   const s = new SqliteEventStore(path);
   try {
-    const written = await s.append({ type: 'comment', page: 'A01', text: 'a comment' }, 'r@example.org');
     const db = new DatabaseSync(path);
-    db.prepare('DELETE FROM texts WHERE event = ?').run(written.id); // straight in the store, no event
+    // `texts_no_delete` (round 1, finding 5) now refuses a plain DELETE with nothing to account for
+    // it, so this can no longer be reached by appending for real and then deleting the row — the
+    // one shape left for "an attacker with the file, not this code" (docs/PRIVACY.md, section 3) is
+    // an event inserted directly, hash and all, whose texts row was never written in the first place.
+    const hash = hashText('a comment that never made it into texts', newSalt());
+    db.prepare("INSERT INTO events (id, type, page, author, happened_at, text_hash) VALUES " +
+      "('e1', 'comment', 'A01', 'r@example.org', '2026-01-01T00:00:00.000Z', ?)").run(hash);
     db.close();
     const [read] = await s.list('A01');
-    assert.equal(read.text, null, 'the value cannot be shown: it is gone');
+    assert.equal(read.text, null, 'the value cannot be shown: there is no row for it');
     assert.equal(read.textRemoved, null, 'no event says it was let go on purpose');
     assert.equal(read.textTampered, true, 'so it reads as tampering, exactly what issue #28 asks for');
   } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('[sqlite] a text kept but edited straight in the store reads as tampered too: the hash no longer matches', async () => {
+test('[sqlite] an event and a texts row crafted directly, whose hash does not match, reads as tampered', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
   const s = new SqliteEventStore(path);
   try {
-    const written = await s.append({ type: 'comment', page: 'A01', text: 'the real text' }, 'r@example.org');
     const db = new DatabaseSync(path);
-    // The trigger refuses UPDATE; forging a row means going around it with DELETE + INSERT — the
-    // one thing an attacker with the file, and not this code, could still do.
-    db.prepare("DELETE FROM texts WHERE event = ? AND field = 'text'").run(written.id);
-    db.prepare("INSERT INTO texts (event, field, value, salt) VALUES (?, 'text', 'a forged text', ?)")
-      .run(written.id, newSalt());
+    // Both rows inserted fresh, never through `append` or `removeText`: `texts_no_update` refuses
+    // an edit to an existing row, and `texts_no_replace`/`texts_no_delete` (round 1, finding 5)
+    // refuse a swap or a bare delete of one — so this is the one shape a direct writer still has,
+    // an event whose hash is of a text its own texts row does not hold.
+    const hash = hashText('the real text', newSalt());
+    db.prepare("INSERT INTO events (id, type, page, author, happened_at, text_hash) VALUES " +
+      "('e1', 'comment', 'A01', 'r@example.org', '2026-01-01T00:00:00.000Z', ?)").run(hash);
+    db.prepare("INSERT INTO texts (event, field, value, salt) VALUES ('e1', 'text', 'a forged text', ?)").run(newSalt());
     db.close();
     const [read] = await s.list('A01');
     assert.equal(read.text, null, 'a value that does not match its own hash is not handed out as the text');

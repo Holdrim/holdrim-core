@@ -51,6 +51,39 @@ export function hashText(value: string, salt: string): string {
   return createHash('sha256').update(salt, 'utf8').update('\u0000').update(value, 'utf8').digest('hex');
 }
 
+/** One freshly-salted row of the texts table, ready to write, for one field an event was given. */
+export interface SaltedRow {
+  field: TextField;
+  value: string;
+  salt: string;
+}
+
+/** What `append` needs to write, for `text` and `snapshot` together: the event's own hashes, and the texts rows. */
+export interface SaltedFields {
+  /** What the event's own row keeps — `null` for a field the event was not given. */
+  hashes: Record<TextField, string | null>;
+  /** One entry per field the event WAS given, ready to insert into the texts table. */
+  rows: SaltedRow[];
+}
+
+/**
+ * Salts and hashes each of `text`/`snapshot` a fresh event carries, in the one place this pairing
+ * is built — every store's `append` used to write this same loop out by hand, three chances for
+ * the hash on the event and the row in the texts table to quietly stop agreeing with each other.
+ */
+export function saltFields(event: { text?: string | null; snapshot?: string | null }): SaltedFields {
+  const hashes: Record<TextField, string | null> = { text: null, snapshot: null };
+  const rows: SaltedRow[] = [];
+  for (const field of TEXT_FIELDS) {
+    const value = event[field];
+    if (value == null) continue;
+    const salt = newSalt();
+    hashes[field] = hashText(value, salt);
+    rows.push({ field, value, salt });
+  }
+  return { hashes, rows };
+}
+
 /** The one error every store gives for a field with nothing to remove, so a caller matches one text. */
 export function noText(event: string, field: TextField): Error {
   return new Error(`no ${field} to remove on event ${event}: it was never given, or is already gone`);

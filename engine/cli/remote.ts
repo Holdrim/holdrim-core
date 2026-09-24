@@ -231,14 +231,21 @@ export class Source {
     // an address that does not exist.
     this.#requireProject();
     const headers = { Authorization: `Bearer ${await this.#gcloudToken()}` };
-    const out = (await this.#collection(headers, 'events')).map((d) => this.#fromFirestore(d));
+    // One transaction for all three, the CLI's twin of the server's own `runTransaction`
+    // (store-firestore.ts, `list`): a `removeText` that commits between separate, untransacted
+    // reads of `events` and `texts` could make a legitimate removal look like tampering — the
+    // events read missing the new `text_removed` event, the texts read already missing its row.
+    // The first read opens the transaction; the other two are asked inside the same one.
+    const first = await this.#collection(headers, 'events');
+    const txn = first.transaction;
+    const out = first.docs.map((d) => this.#fromFirestore(d));
     // The people after the events, as the server's Firestore store reads them and for its reason:
     // a person is made before their first event, so every author read above is in this read.
-    const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
+    const people = new Map((await this.#collection(headers, LAYOUT.rows, txn)).docs.map((d) =>
       [String(d.name).split('/').pop()!, (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null]));
     const events = withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
     // The texts after the events, as the server's Firestore store reads them, for the same reason.
-    const texts = new Map((await this.#collection(headers, 'texts')).map((d) => {
+    const texts = new Map((await this.#collection(headers, 'texts', txn)).docs.map((d) => {
       const f = d.fields ?? {};
       return [textKey(f.event?.stringValue, f.field?.stringValue),
         { value: f.value?.stringValue, salt: f.salt?.stringValue } as TextRow];
@@ -246,19 +253,44 @@ export class Source {
     return withTexts(events, texts);
   }
 
-  /** Every document of one collection, over as many pages as the cloud answers in. */
-  async #collection(headers: Record<string, string>, name: string): Promise<Record<string, any>[]> {
-    const out: Record<string, any>[] = [];
-    let page: string | undefined;
-    do {
-      const url = `${this.#database()}/documents/${name}?pageSize=300${page ? `&pageToken=${page}` : ''}`;
-      const r = await fetch(url, { headers });
+  /**
+   * Every document of one collection, over as many pages as the cloud answers in — and, when a
+   * transaction id is given or one comes back from the first page, all of it read at that one
+   * snapshot. `documents.list` (the plain REST read) takes no `transaction`; `documents:runQuery`
+   * does, ordered by document name so a cursor (`startAt` on the last name seen) still paginates.
+   * Without a `transaction`, the first page opens a read-only one (`newTransaction`) and hands its
+   * id back, so a caller reading several collections for one consistent view passes it to the rest.
+   */
+  async #collection(headers: Record<string, string>, name: string, transaction?: string):
+    Promise<{ docs: Record<string, any>[]; transaction: string }> {
+    const docs: Record<string, any>[] = [];
+    let after: string | undefined;
+    let txn = transaction;
+    for (;;) {
+      const structuredQuery: Record<string, unknown> = {
+        from: [{ collectionId: name }],
+        orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+        limit: 300,
+      };
+      if (after) structuredQuery.startAt = { values: [{ referenceValue: after }], before: false };
+      const r = await fetch(`${this.#database()}/documents:runQuery`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify(txn ? { structuredQuery, transaction: txn } : { structuredQuery, newTransaction: { readOnly: {} } }),
+      });
       if (!r.ok) throw await this.#cloudError(r, 'reading');
-      const body = (await r.json()) as { documents?: Record<string, any>[]; nextPageToken?: string };
-      out.push(...(body.documents ?? []));
-      page = body.nextPageToken;
-    } while (page);
-    return out;
+      const rows = (await r.json()) as { transaction?: string; document?: Record<string, any> }[];
+      let onThisPage = 0;
+      for (const row of rows) {
+        if (row.transaction) txn = row.transaction;
+        if (row.document) { docs.push(row.document); after = row.document.name as string; onThisPage++; }
+      }
+      if (onThisPage < 300) break; // fewer than the limit: nothing left to page for
+    }
+    // `newTransaction` only actually opens one once a query runs; an empty collection's single
+    // response still carries it, so this is reachable only if the cloud changed shape underneath.
+    if (!txn) throw new Error(`no transaction came back reading ${name}`);
+    return { docs, transaction: txn };
   }
 
   /** The project's database over REST, in the cloud or in the emulator the variable names. */

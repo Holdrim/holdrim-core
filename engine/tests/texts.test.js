@@ -153,6 +153,47 @@ test('an events file from before texts were extracted reads its own plain text, 
   assert.equal(read.textTampered, false);
 });
 
+// ===================================================================== one snapshot, not three reads
+// Round 1, finding 6: FirestoreEventStore.list() read events, people and texts as three separate,
+// untransacted calls. A removeText committing between the events read and the texts read is not
+// what either one alone shows — the events read misses the new text_removed event, the texts read
+// already misses its row — and a legitimate removal read back as tampering.
+
+test('[firestore] list reads events and texts from one snapshot: a removal mid-read never looks like tampering',
+  process.env.FIRESTORE_EMULATOR_HOST ? {} : { skip: 'needs the Firestore emulator, as above' }, async (t) => {
+  const project = freshFirestoreProject('holdrim-texts');
+  const { Transaction } = await import('@google-cloud/firestore');
+  const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+  const store = new FirestoreEventStore(project);
+  t.after(async () => { await store.close(); });
+  const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+
+  // Between list()'s own reads, remove the text for real, through a second store on the same
+  // project. The hook fires on the transaction's FIRST internal read, whichever of the three that
+  // is — so it also catches a partial fix that leaves only one of the three outside the transaction:
+  // that one runs as an ordinary read, ahead of the removal, while the other two — still `tx.get`,
+  // and so pinned to the transaction's own snapshot, taken only once ITS first read runs — end up
+  // pinned to a moment already after it.
+  const originalGet = Transaction.prototype.get;
+  let fired = false;
+  Transaction.prototype.get = async function (...args) {
+    if (!fired) {
+      fired = true;
+      const other = new FirestoreEventStore(project);
+      await other.removeText(written.id, 'text', 'owner@example.org');
+      await other.close();
+    }
+    return originalGet.apply(this, args);
+  };
+  try {
+    const [read] = await store.list('A01');
+    assert.equal(read.textTampered, false, 'a removal mid-read must never look like tampering');
+    assert.equal(read.textRemoved?.by, 'owner@example.org', 'and it has to read as the removal it was');
+  } finally {
+    Transaction.prototype.get = originalGet;
+  }
+});
+
 // ===================================================================== the cloud, over REST
 const cloud = process.env.FIRESTORE_EMULATOR_HOST
   ? {}

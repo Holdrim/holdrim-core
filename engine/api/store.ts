@@ -1,6 +1,6 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { hashText, newSalt, noText, textKey, withTexts, TEXT_FIELDS, TEXT_REMOVED,
+import { noText, saltFields, textKey, withTexts, TEXT_REMOVED,
   type RawEvent, type TextField, type TextRow } from './texts.ts';
 
 /*
@@ -23,25 +23,13 @@ export class MemoryEventStore implements EventStore {
   // what is kept names nobody once the person is forgotten (docs/PRIVACY.md, section 1).
   async append(event: NewEvent, author: string): Promise<Event> {
     const id = crypto.randomUUID().replace(/-/g, '');
-    const hashes = this.#putTexts(id, event);
+    const { hashes, rows } = saltFields(event);
+    for (const r of rows) this.#texts.set(textKey(id, r.field), { value: r.value, salt: r.salt });
     const e = stored({ ...event, text: null, snapshot: null }, id, await this.personFor(author), new Date().toISOString());
     this.#events.push({ ...e, textHash: hashes.text, snapshotHash: hashes.snapshot });
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
     return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
-  }
-
-  /** Salts and hashes each field the event was given, writes its row, and returns the hashes. */
-  #putTexts(event: string, fields: { text?: string | null; snapshot?: string | null }): Record<TextField, string | null> {
-    const hashes: Record<TextField, string | null> = { text: null, snapshot: null };
-    for (const field of TEXT_FIELDS) {
-      const value = fields[field];
-      if (value == null) continue;
-      const salt = newSalt();
-      hashes[field] = hashText(value, salt);
-      this.#texts.set(textKey(event, field), { value, salt });
-    }
-    return hashes;
   }
 
   async list(page?: string | null): Promise<Event[]> {

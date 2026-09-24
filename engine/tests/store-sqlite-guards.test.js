@@ -79,6 +79,39 @@ test('an insert the database drops in silence is an error, never an event handed
   await store.close();
 }));
 
+test('append is one transaction: a texts INSERT that fails leaves no hash-only event behind', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  // From a second connection, so the check on open has not seen it — a texts INSERT that always
+  // aborts, standing in for a real failure (a full disk, a constraint this version does not know
+  // about yet) between the event's own row landing and its texts row landing.
+  outside(path, "CREATE TRIGGER fail_text BEFORE INSERT ON texts BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
+  await assert.rejects(store.append({ ...approval, text: 'a comment', snapshot: null }, 'owner@example.org'), /disk full/);
+  // Not rolling back here is exactly what would leave an event with a hash and no row behind —
+  // the one shape `withTexts` cannot tell from tampering, and the reason `append` is one
+  // transaction at all.
+  assert.deepEqual(await store.list('A01'), [], 'the event never landed either: one transaction, or none of it');
+  await store.close();
+}));
+
+test('removeText is one transaction: a removal event that fails to record leaves the text untouched', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const written = await store.append({ ...approval, text: 'a comment', snapshot: null }, 'owner@example.org');
+  // From a second connection, opened AFTER the store's own boot has already installed its guards
+  // (`installGuards` only inspects triggers on open, so one made afterwards is invisible to it) —
+  // a trigger that drops a text_removed insert in silence, standing in for a real failure between
+  // recording why a text goes and actually deleting it.
+  outside(path, "CREATE TRIGGER drop_removal BEFORE INSERT ON events WHEN NEW.type = 'text_removed' BEGIN SELECT RAISE(IGNORE); END;");
+  await assert.rejects(store.removeText(written.id, 'text', 'owner@example.org'), /not recorded/);
+  // Not rolling back here is exactly what would leave the row deleted with no event to say why —
+  // the one shape `withTexts` reads as tampering, reached by a failure instead of an attacker.
+  const [read] = await store.list('A01');
+  assert.equal(read.text, 'a comment', 'the text is exactly as it was: the delete never ran either');
+  assert.equal(read.textTampered, false);
+  assert.equal((await store.list('A01')).filter((e) => e.type === 'text_removed').length, 0,
+    'no removal event either: dropped in silence is still a failure, and this store does not hand one back as recorded');
+  await store.close();
+}));
+
 test('a database whose guards are already right opens without a word', withFile(async (path, said) => {
   await reopen(path);
   await reopen(path);
@@ -161,6 +194,77 @@ test('a text is written once: no UPDATE on the texts table goes through, from ou
   assert.throws(() => db.prepare('UPDATE texts SET value = ? WHERE event = ? AND field = ?').run('forged', written.id, 'text'),
     /not edited/, 'the guard has to refuse an edit in place, salt and all');
   db.close();
+}));
+
+test('a text is not replaced: INSERT OR REPLACE for the same event and field goes through no more than a plain UPDATE would', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const written = await store.append({ ...approval, text: 'first', snapshot: null }, 'owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  // REPLACE deletes the row it conflicts with and inserts the new one WITHOUT firing a delete
+  // trigger (the same hole events_no_replace and people_no_replace already close) — so texts_no_delete
+  // alone, which only guards a plain DELETE, would not have stopped this.
+  assert.throws(() => db.prepare("INSERT OR REPLACE INTO texts (event, field, value, salt) VALUES (?, 'text', 'forged', 'saltsaltsaltsalt')").run(written.id),
+    /not replaced/, 'REPLACE is refused the same as an UPDATE would be');
+  db.close();
+}));
+
+test('a text is not deleted without a text_removed event naming it, whatever deletes it', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const written = await store.append({ ...approval, text: 'first', snapshot: null }, 'owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  assert.throws(() => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(written.id, 'text'),
+    /not deleted without a text_removed event/, 'a bare DELETE, with nothing to account for it, is refused');
+  // The legitimate path: a text_removed event naming this event and field, in the same transaction,
+  // before the DELETE — exactly the order removeText itself now writes in.
+  db.exec('BEGIN IMMEDIATE');
+  db.prepare("INSERT INTO events (id, type, page, author, happened_at, data) VALUES ('rm1', 'text_removed', 'A01', 'p_000000000000000000000000', '2026-01-01T00:00:00.000Z', ?)")
+    .run(JSON.stringify({ event: written.id, field: 'text' }));
+  assert.doesNotThrow(() => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(written.id, 'text'),
+    'once the removal event is there — even uncommitted, in the same transaction — the delete is legitimate');
+  db.exec('COMMIT');
+  db.close();
+}));
+
+test('list reads events, people and texts from one snapshot: a removal mid-read never looks like tampering', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+  const ownerId = await store.personFor('owner@example.org');
+
+  // Between list()'s own SELECTs, remove the text for real, through a second connection to the same
+  // file — the exact interleaving a read transaction closes off (round 1, finding 7; the same gap
+  // as FirestoreEventStore.list, finding 6). `DatabaseSync.prototype.prepare` is shared by every
+  // connection, list's own included, so patching it here reaches its calls with no need to touch the
+  // store's private connection — the same technique the "two boots" test below uses for a write race.
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  let calls = 0;
+  DatabaseSync.prototype.prepare = function (sql, ...rest) {
+    calls++;
+    if (calls === 2) { // right after list()'s events SELECT, before its people and texts SELECTs
+      const other = new DatabaseSync(path);
+      other.exec('BEGIN IMMEDIATE');
+      other.prepare("INSERT INTO events (id, type, page, block, author, happened_at, data) VALUES ('rm1', 'text_removed', 'A01', NULL, ?, ?, ?)")
+        .run(ownerId, new Date().toISOString(), JSON.stringify({ event: written.id, field: 'text' }));
+      other.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(written.id, 'text');
+      other.exec('COMMIT');
+      other.close();
+    }
+    return originalPrepare.call(this, sql, ...rest);
+  };
+  try {
+    const [read] = await store.list('A01');
+    // The removal committed strictly after list's own read transaction opened (on its first
+    // SELECT), so WAL's snapshot — pinned right there — still shows the text exactly as it was:
+    // stale by the wall clock, but never a torn mix of an old events row and a new, row-less texts
+    // table, which is what would read back as tampered.
+    assert.equal(read.text, 'a remark', 'the read transaction\'s own snapshot, taken before the removal, still holds');
+    assert.equal(read.textRemoved, null);
+    assert.equal(read.textTampered, false, 'a removal mid-read must never look like tampering');
+  } finally {
+    DatabaseSync.prototype.prepare = originalPrepare;
+    await store.close();
+  }
 }));
 
 test('a repair that fails halfway leaves the database as it found it, never with a guard dropped', withFile(async (path) => {

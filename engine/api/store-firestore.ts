@@ -1,7 +1,7 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
-import { hashText, newSalt, noText, textKey, withTexts, TEXT_FIELDS, TEXT_REMOVED,
+import { noText, saltFields, textKey, withTexts, TEXT_REMOVED,
   type RawEvent, type TextField } from './texts.ts';
 
 /**
@@ -23,15 +23,7 @@ export class FirestoreEventStore implements EventStore {
   async append(event: NewEvent, author: string): Promise<Event> {
     const personId = await this.personFor(author);
     const doc = this.#db.collection('events').doc();
-    const hashes: Record<TextField, string | null> = { text: null, snapshot: null };
-    const rows: { field: TextField; value: string; salt: string }[] = [];
-    for (const field of TEXT_FIELDS) {
-      const value = event[field];
-      if (value == null) continue;
-      const salt = newSalt();
-      hashes[field] = hashText(value, salt);
-      rows.push({ field, value, salt });
-    }
+    const { hashes, rows } = saltFields(event);
     // The shape every store answers, from the one function that decides it; the id is the
     // document's own and the time is the server's, so neither is written as a field. The author is
     // written as the person's id and answered as the address, as a list names it a moment later
@@ -85,31 +77,35 @@ export class FirestoreEventStore implements EventStore {
     return { ...withoutHashes, author: personEmail(by) };
   }
 
+  /**
+   * The three reads — events, people, texts — from one Firestore transaction, so the three answer
+   * as of the same instant. Separate, untransacted reads leave a window: a `removeText` that
+   * commits between the events read and the texts read is not what either one alone shows —
+   * the events read misses the new `text_removed` event, the texts read already misses its row —
+   * and a legitimate removal would come back as `textTampered` instead. A transaction with no
+   * writes never conflicts and never retries; it only pins every `tx.get` inside it to one snapshot,
+   * which is all this needs.
+   */
   async list(page?: string | null): Promise<Event[]> {
-    let q: FirebaseFirestore.Query = this.#db.collection('events');
-    if (page != null) q = q.where('page', '==', page);
-    const r = await q.get();
-    // The people after the events, never beside them: an append makes the person before the event,
-    // so every author a read of the events can see is already in a read of the people that starts
-    // after it. Side by side, the people could be read first, and a new person's first event would
-    // come back naming their id.
-    const people = await this.#db.collection(LAYOUT.rows).get();
-    // By the server's timestamp itself, to the nanosecond: `when` is kept to the millisecond, and
-    // two events inside one would otherwise come back in document-id order, which is random.
-    const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
-    const events = withAuthors([...r.docs]
-      .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
-      .map((d) => this.#fromFirestore(d.id, d.data())),
-    new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null])));
-    // The texts after the events, for the reason the people are: `append` writes an event's texts
-    // rows in the same transaction as the event itself, so every hash a read of the events can see
-    // already has its row in a read of the texts that starts after it.
-    const textDocs = await this.#db.collection('texts').get();
-    const texts = new Map(textDocs.docs.map((t) => {
-      const data = t.data();
-      return [textKey(data.event as string, data.field as TextField), { value: data.value as string, salt: data.salt as string }];
-    }));
-    return withTexts(events, texts);
+    return this.#db.runTransaction(async (tx) => {
+      let q: FirebaseFirestore.Query = this.#db.collection('events');
+      if (page != null) q = q.where('page', '==', page);
+      const r = await tx.get(q);
+      const people = await tx.get(this.#db.collection(LAYOUT.rows));
+      const textDocs = await tx.get(this.#db.collection('texts'));
+      // By the server's timestamp itself, to the nanosecond: `when` is kept to the millisecond, and
+      // two events inside one would otherwise come back in document-id order, which is random.
+      const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
+      const events = withAuthors([...r.docs]
+        .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
+        .map((d) => this.#fromFirestore(d.id, d.data())),
+      new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null])));
+      const texts = new Map(textDocs.docs.map((t) => {
+        const data = t.data();
+        return [textKey(data.event as string, data.field as TextField), { value: data.value as string, salt: data.salt as string }];
+      }));
+      return withTexts(events, texts);
+    });
   }
 
   // The people table, laid out as FIRESTORE_PEOPLE says: `people/{id}` holds the row, and
