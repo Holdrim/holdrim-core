@@ -399,8 +399,12 @@ async function recordEvent(
   }
 
   const e = await events.append(incoming, email);
+  // `e.author` is the e-mail again: `append` hands a fresh event back with the plain value it was
+  // given, not a round trip through the people table (engine/api/store.ts, `#record`). The log is
+  // evidence and keeps the id, so it asks the people table directly — `personFor` on the same
+  // address returns the id `append` just wrote, never a new one.
   log('INFO', 'event_recorded', {
-    id: e.id, type: e.type, page: e.page, block: e.block, author: e.author,
+    id: e.id, type: e.type, page: e.page, block: e.block, author: await events.personFor(email),
     from: e.data?.from, to: e.data?.state, through,
   });
   return { status: 201, body: e as unknown as Record<string, unknown>, event: e };
@@ -430,7 +434,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       const failure = UserInputError.from(error, 'api.password.invalid');
       return json(res, 400, { error: i18n.t(languageOf(req), failure.key, failure.params) });
     }
-    log('INFO', 'password_changed', { email });
+    log('INFO', 'password_changed', { person: await events.personFor(email) });
     return json(res, 200, { ok: true });
   }
 
@@ -602,7 +606,7 @@ async function userRoutes(
       return true;
     }
     // The password is NOT in this line, and this is the line where it would be easiest to put it.
-    log('INFO', 'user_created', { email: address, by: email });
+    log('INFO', 'user_created', { person: await events.personFor(address), by: await events.personFor(email) });
     json(res, 201, { user: await users.find(address), password });
     return true;
   }
@@ -620,7 +624,7 @@ async function userRoutes(
       json(res, 400, { error: say(failure.key, failure.params) });
       return true;
     }
-    log('INFO', 'user_renamed', { email });
+    log('INFO', 'user_renamed', { person: await events.personFor(email) });
     json(res, 200, { user: await users.find(email) });
     return true;
   }
@@ -646,7 +650,7 @@ async function userRoutes(
     }
     const password = await users.resetPassword(target);
     // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
-    log('INFO', 'user_password_reset', { email: target, by: email });
+    log('INFO', 'user_password_reset', { person: await events.personFor(target), by: await events.personFor(email) });
     json(res, 200, { user: await users.find(target), password });
     return true;
   }
@@ -679,7 +683,8 @@ async function userRoutes(
       return true;
     }
     await users.setEnabled(target, body.enabled);
-    log('INFO', 'user_enabled_changed', { email: target, enabled: body.enabled, by: email });
+    log('INFO', 'user_enabled_changed',
+      { person: await events.personFor(target), enabled: body.enabled, by: await events.personFor(email) });
     json(res, 200, { user: await users.find(target) });
     return true;
   }
@@ -984,11 +989,19 @@ const server = createServer(async (req, res) => {
         // The address as typed, but never more of it than an address can be: signIn refuses an
         // oversized one before the throttle sees it, so unsliced, each such refusal would write up
         // to a megabyte into the log, as often as anyone cared to ask.
+        //
+        // The raw address, never an id: a refusal never reaches `personFor`, so this line names
+        // nobody's row in the people table — a wrong guess against the owner's e-mail must not
+        // create a person, and an attacker trying a thousand addresses must not create a thousand
+        // of them. This is the one log line an operator needs to see an attack, and there is no
+        // person behind it yet to protect (`docs/PRIVACY.md`, section 6).
         log('WARNING', 'sign_in_refused', { email: email.slice(0, PasswordIdentity.MAX_EMAIL) });
         return json(res, 401, { error: i18n.t(languageOf(req), 'api.credentials.invalid') });
       }
       res.setHeader('set-cookie', byPassword.sessionCookie(r.session));
-      log('INFO', 'signed_in', { email: r.user.email, mustChangePassword: r.user.mustChangePassword });
+      // Unlike the refusal above, this address DID become a person the moment `signIn` found their
+      // row — so the log gets the id, the same as any other event.
+      log('INFO', 'signed_in', { person: await events.personFor(r.user.email), mustChangePassword: r.user.mustChangePassword });
       return json(res, 200, { email: r.user.email, name: r.user.name, mustChangePassword: r.user.mustChangePassword });
     }
 

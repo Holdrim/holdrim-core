@@ -400,9 +400,21 @@ expect "and the design system came with it"    0 "$(curl -s $B/sign-in | has -F 
 expect "wearing the engine's neutral brand"    0 "$(curl -s $B/sign-in | has -F -- '>:root { --holdrim-brand: #3F4B57; --holdrim-brand-ink: #FFFFFF; }</style>'; echo $?)"
 expect "X-Dev-Email doesn't count here → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" $B/api/me)"
 expect "wrong password → 401"          401 "$(login 'not-the-password')"
+# A refusal never became a person, so the log keeps the address exactly as it was typed — the one
+# line an operator needs to see an attack (docs/PRIVACY.md, section 6).
+expect "and a refused sign-in still logs the address that was typed" 1 \
+  "$(grep '"event":"sign_in_refused"' $WORK/password.log | grep -Fc -e "\"email\":\"$OWNER\"")"
 expect "correct password → 200"        200 "$(login "$PASSWORD")"
 expect "and the session identifies the owner" owner "$(curl -s -b $COOKIES $B/api/me | jfield role)"
+# This address DID become a person: the log names their id, never their e-mail.
+expect "and a successful sign-in is logged by id, not by e-mail" 0 \
+  "$(grep '"event":"signed_in"' $WORK/password.log | grep -Fc -e "$OWNER")"
+expect "as a person id"                1 "$(grep '"event":"signed_in"' $WORK/password.log | grep -cE '"person":"p_[0-9a-f]{24}"')"
 expect "and the owner truly approves"  201 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc123"}' $B/api/events)"
+# The event's own author, as the log gets it: an id, never the e-mail the request carried.
+expect "and the recorded event names its author by id, not by e-mail" 0 \
+  "$(grep '"event":"event_recorded"' $WORK/password.log | grep -Fc -e "$OWNER")"
+expect "as a person id"                1 "$(grep '"event":"event_recorded"' $WORK/password.log | grep -cE '"author":"p_[0-9a-f]{24}"')"
 expect "the first-access password requires a change" true "$(curl -s -b $COOKIES $B/api/me | jfield mustChangePassword)"
 expect "now the docs open → 200"       200 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' $B/pages/A01.html)"
 # The project home is a report and needs no script, so its policy allows none at all: a request's
@@ -425,6 +437,9 @@ expect "and /sign-in no longer has anything to do" 302 "$(curl -s -b $COOKIES -o
 # A current password that is not a string would reach `.normalize()` and answer 500; it is a wrong one.
 expect "a current password that is a number → 403, like any wrong one" 403 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"current":1,"next":"a-long-enough-password"}' $B/api/change-password)"
 expect "changing the password → 200"   200 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"current\":\"$PASSWORD\",\"next\":\"a-long-enough-password\"}" $B/api/change-password)"
+expect "and the change is logged by id, not by e-mail" 0 \
+  "$(grep '"event":"password_changed"' $WORK/password.log | grep -Fc -e "$OWNER")"
+expect "as a person id"                1 "$(grep '"event":"password_changed"' $WORK/password.log | grep -cE '"person":"p_[0-9a-f]{24}"')"
 expect "and nothing is demanded any more" false "$(curl -s -b $COOKIES $B/api/me | jfield mustChangePassword)"
 PASSWORD=a-long-enough-password
 
@@ -462,6 +477,12 @@ expect "and has to change that password" true "$(echo "$CREATED" | jfield user.m
 # a far wider audience than the account it opens.
 expect "the password is NOT in the listing" 0 "$(as_owner $B/api/users | grep -Fc -e "$MEMBER_PASSWORD")"
 expect "nor anywhere in the log"        0 "$(grep -Fc -e "$MEMBER_PASSWORD" $WORK/password.log)"
+# The new account and whoever created it, both by id: the log is evidence an operator greps, not a
+# second copy of the users table.
+expect "and creating an access is logged by id, not by e-mail" 0 \
+  "$(grep '"event":"user_created"' $WORK/password.log | grep -Ec -e "$MEMBER" -e "$OWNER")"
+expect "for both the new person and who created them" 1 \
+  "$(grep '"event":"user_created"' $WORK/password.log | grep -cE '"person":"p_[0-9a-f]{24}","by":"p_[0-9a-f]{24}"')"
 # Ordered in the store, not by the database's own idea of order: three databases with three natural
 # orders would hand the same team three different lists.
 expect "the list is ordered by e-mail"  "$MEMBER $OWNER" "$(emails)"
@@ -485,6 +506,9 @@ expect "not an admin: a new password → 403" 403 "$(code_member -X POST $B/api/
 # The one route that is about the caller's own row. Fixing the spelling of your own name is not a
 # privilege, and making it one would send people to an admin over a typo.
 expect "but anybody renames themselves → 200" 200 "$(code_member -d '{"name":"Renamed Themselves"}' $B/api/users/me/name)"
+expect "and it is logged by id, not by e-mail" 0 \
+  "$(grep '"event":"user_renamed"' $WORK/password.log | grep -Fc -e "$MEMBER")"
+expect "as a person id"                1 "$(grep '"event":"user_renamed"' $WORK/password.log | grep -cE '"person":"p_[0-9a-f]{24}"')"
 expect "and the listing shows the new name" "Renamed Themselves" "$(as_owner $B/api/users | jfield users.0.name)"
 expect "an empty name → 400"            400 "$(code_member -d '{"name":"   "}' $B/api/users/me/name)"
 
@@ -560,6 +584,11 @@ expect "disabling is not deleting"      "$ADMIN $MEMBER $OWNER" "$(emails)"
 expect "a body with no enabled → 400"   400 "$(code_owner -d '{}' $B/api/users/$MEMBER/enabled)"
 
 expect "giving the access back → 200"   200 "$(code_owner -d '{"enabled":true}' $B/api/users/$MEMBER/enabled)"
+# Both the account touched and who touched it, by id — taking access away and giving it back alike.
+expect "changing who may sign in is logged by id, not by e-mail" 0 \
+  "$(grep '"event":"user_enabled_changed"' $WORK/password.log | grep -Ec -e "$MEMBER" -e "$OWNER")"
+expect "for both the account and the admin, both times" 2 \
+  "$(grep '"event":"user_enabled_changed"' $WORK/password.log | grep -cE '"person":"p_[0-9a-f]{24}".*"by":"p_[0-9a-f]{24}"')"
 expect "and the same password works again → 200" 200 "$(mlogin "$MEMBER_PASSWORD")"
 
 RESET=$(as_owner -X POST $B/api/users/$MEMBER/password)
@@ -572,6 +601,12 @@ expect "the old password stops working → 401" 401 "$(mlogin "$MEMBER_PASSWORD"
 expect "the new one gets in → 200"      200 "$(mlogin "$NEW_PASSWORD")"
 expect "and it is not in the listing"   0 "$(as_owner $B/api/users | grep -Fc -e "$NEW_PASSWORD")"
 expect "nor in the log"                 0 "$(grep -Fc -e "$NEW_PASSWORD" $WORK/password.log)"
+expect "and a reset is logged by id, not by e-mail" 0 \
+  "$(grep '"event":"user_password_reset"' $WORK/password.log | grep -Ec -e "$MEMBER" -e "$OWNER")"
+# Two resets so far: the owner on themselves (line above, "the owner still can") and this one, on
+# the member — both carry the account and the admin as ids.
+expect "for both the account and who reset it, both times" 2 \
+  "$(grep '"event":"user_password_reset"' $WORK/password.log | grep -cE '"person":"p_[0-9a-f]{24}","by":"p_[0-9a-f]{24}"')"
 # The current password, asked for by change-password, is the same secret sign-in guards: guessing it
 # with a session in hand has to meet the same wait. Six wrong, then the right one is still refused.
 mchange() { curl -s -b $MCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"current\":\"$1\",\"next\":\"a-long-enough-new-password\"}" $B/api/change-password; }
