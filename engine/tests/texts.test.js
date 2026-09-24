@@ -212,6 +212,28 @@ test('withTextsRetrying returns exactly the events it was given, never the extra
     'exactly the events given, same order, same length — never the fetched removal itself');
 });
 
+// `fetchRemovals` reads the whole project unfiltered by page (see withTextsRetrying's own doc
+// comment), so a removal that already sits in `events` — because it happened on the same page as
+// the tampered field that triggered the re-read — comes back again in `more`. Without the `known`
+// filter, `events.concat(more)` would carry that removal twice, and `removalsOf`'s duplicate rule
+// (round 3, finding 6) would then mark the field it genuinely removed as tampered too — punished
+// for another field's tampering, which has nothing to do with it.
+test('withTextsRetrying does not re-count a removal fetchRemovals hands back that was already in the list', async () => {
+  const salt = newSalt();
+  const tampered = { id: 'e1', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:00.000Z',
+    data: null, text: null, textHash: hashText('gone', salt) }; // no row, no removal: tampered on its own
+  const removedOk = { id: 'e2', type: 'comment', author: 'r@example.org', when: '2026-01-02T00:00:00.000Z',
+    data: null, text: null, textHash: hashText('y', salt) };
+  const r2 = { id: 'r2', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-03T00:00:00.000Z',
+    data: { event: 'e2', field: 'text' } }; // e2's own genuine removal, already in `events`
+  const out = await withTextsRetrying([tampered, removedOk, r2], new Map(), async () => [r2]);
+  const e1 = out.find((e) => e.id === 'e1');
+  const e2 = out.find((e) => e.id === 'e2');
+  assert.equal(e2.textTampered, false, 'a removal already in the list must not be counted a second time');
+  assert.equal(e2.textRemoved?.by, 'owner@example.org');
+  assert.equal(e1.textTampered, true, 'the other, genuinely unaccounted-for field is unaffected either way');
+});
+
 // ===================================================================== the events file
 function tempFile(t) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-texts-'));
@@ -383,6 +405,31 @@ test('[firestore] the CLI pages through more documents than one page holds, and 
   }
   assert.deepEqual([...events.map((e) => e.id)].sort(), written.map((e) => e.id).sort(),
     'every document comes back exactly once, however many pages it took');
+});
+
+test('[firestore] list does not re-count a same-page removal fetchRemovals hands back a second time', cloud, async (t) => {
+  // The store-level version of the unit test above: `removeText` gives its removal event the same
+  // `page` as the text it removes (store-firestore.ts), so a removal on this page is already inside
+  // `list(page)`'s own `events` read before `fetchRemovals` — triggered here by the OTHER comment's
+  // field looking tampered — asks the whole project again and hands the very same removal back.
+  const project = freshFirestoreProject('holdrim-texts');
+  const { Firestore } = await import('@google-cloud/firestore');
+  const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+  const store = new FirestoreEventStore(project);
+  const db = new Firestore({ projectId: project });
+  t.after(async () => { await store.close(); await db.terminate(); });
+  const tampered = await store.append({ type: 'comment', page: 'A01', text: 'tampered one' }, 'r@example.org');
+  const removed = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
+  await db.collection('texts').doc(`${tampered.id}:text`).delete(); // no event names this: genuine tampering
+  await store.removeText(removed.id, 'text', 'owner@example.org'); // genuine, on the SAME page
+
+  const a01 = await store.list('A01');
+  const tamperedRead = a01.find((e) => e.id === tampered.id);
+  const removedRead = a01.find((e) => e.id === removed.id);
+  assert.equal(tamperedRead.textTampered, true, 'still correctly tampered — unrelated to the other field');
+  assert.equal(removedRead.textTampered, false,
+    'a genuine removal must not be counted twice just because another field on the same page is tampered');
+  assert.equal(removedRead.textRemoved?.by, 'owner@example.org');
 });
 
 test('[firestore] list(page) never leaks another page\'s removal event into its answer', cloud, async (t) => {
