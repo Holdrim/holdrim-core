@@ -84,6 +84,36 @@ test('the database REFUSES to alter and to delete an event', async () => {
   }
 });
 
+test('the database REFUSES to replace an event, in both REPLACE forms', async () => {
+  const dir = scratch();
+  const path = join(dir, 'events.db');
+  try {
+    const store = new SqliteEventStore(path);
+    const e = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
+    await store.close();
+    // From outside, as for the test above: REPLACE deletes and re-inserts, and no delete trigger
+    // fires for it, so only a guard on the insert itself stands in its way.
+    const db = new DatabaseSync(path);
+    const forged = `(id, type, page, block, fingerprint, author, happened_at)
+      VALUES ('${e.id}', 'approval', 'A01', 'A01.1.1', 'forged', 'intruder@example.org', '${e.when}')`;
+    assert.throws(() => db.exec(`INSERT OR REPLACE INTO events ${forged}`), /not replaced/, 'INSERT OR REPLACE has to be refused');
+    assert.throws(() => db.exec(`REPLACE INTO events ${forged}`), /not replaced/, 'REPLACE INTO has to be refused');
+    // `events` is a rowid table: a held rowid under a new id is a conflict too, and REPLACE would
+    // drop the ✓ on it just the same, leaving its id free to be inserted again with forged content.
+    const { rowid } = db.prepare('SELECT rowid FROM events WHERE id = ?').get(e.id);
+    const byRowid = `(rowid, id, type, page, block, fingerprint, author, happened_at)
+      VALUES (${rowid}, 'forged', 'approval', 'A01', 'A01.1.1', 'forged', 'intruder@example.org', '${e.when}')`;
+    assert.throws(() => db.exec(`INSERT OR REPLACE INTO events ${byRowid}`), /not replaced/, 'INSERT OR REPLACE on a held rowid has to be refused');
+    assert.throws(() => db.exec(`REPLACE INTO events ${byRowid}`), /not replaced/, 'REPLACE INTO on a held rowid has to be refused');
+    const row = db.prepare('SELECT fingerprint, author FROM events WHERE id = ?').get(e.id);
+    assert.deepEqual({ ...row }, { fingerprint: 'abc', author: 'owner@example.org' }, 'the original event stays as it was');
+    assert.equal(db.prepare('SELECT COUNT(*) c FROM events').get().c, 1);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the sqlite store keeps and gives back the whole event', async () => {
   const store = new SqliteEventStore(':memory:');
   const e = await store.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'x',
