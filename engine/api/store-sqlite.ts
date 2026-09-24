@@ -15,6 +15,99 @@ import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './p
  * person's e-mail — the only change the people table takes, and the triggers refuse any other. The
  * trail is the product.
  */
+/**
+ * The triggers "Nothing is erased" rests on, by name. The database refuses, even for someone opening
+ * the file with another program, so the rule stops depending on this code never calling UPDATE.
+ */
+export const GUARDS: Record<string, string> = {
+  events_no_update: `BEFORE UPDATE ON events
+    BEGIN SELECT RAISE(ABORT, 'an event is not altered: the trail is the product'); END`,
+  events_no_delete: `BEFORE DELETE ON events
+    BEGIN SELECT RAISE(ABORT, 'an event is not deleted: the trail is the product'); END`,
+  // The two above do not see REPLACE. `INSERT OR REPLACE` and `REPLACE INTO` delete the row they
+  // conflict with and insert the new one without firing the delete trigger, because
+  // recursive_triggers is off and a program opening the file never turns it on. The conflict can be
+  // on the id or on the rowid — `events` is a rowid table, and naming a held rowid under a new id
+  // erases that row just the same. So an insert that holds either is refused before REPLACE reaches
+  // its delete step: without this, any event, a ✓ included, could be rewritten from outside.
+  events_no_replace: `BEFORE INSERT ON events
+    WHEN EXISTS (SELECT 1 FROM events WHERE id = NEW.id OR rowid = NEW.rowid)
+    BEGIN SELECT RAISE(ABORT, 'an event is not replaced: the trail is the product'); END`,
+  // A row may only lose its e-mail, as an event may not change at all: an UPDATE that does anything
+  // but empty the address is refused, and so is every DELETE. A re-pointed row would hand every
+  // event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3). The rowid may not move
+  // either: `UPDATE OR REPLACE` onto another person's rowid drops that person's row, and REPLACE
+  // fires no delete trigger.
+  people_only_lose_email: `BEFORE UPDATE ON people
+    WHEN NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.email IS NOT NULL
+    BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
+  people_no_delete: `BEFORE DELETE ON people
+    BEGIN SELECT RAISE(ABORT, 'a person is not deleted: forgetting empties the e-mail and keeps the id'); END`,
+  // REPLACE again: with a held id or rowid it re-points or erases that row, and with a new id and a
+  // held address the unique index makes it drop the other person's row. So an insert may only add a
+  // row whose id, rowid and address are all unheld; a forgotten row's empty address holds nothing.
+  people_no_replace: `BEFORE INSERT ON people
+    WHEN EXISTS (SELECT 1 FROM people WHERE id = NEW.id OR rowid = NEW.rowid
+                 OR (NEW.email IS NOT NULL AND email = NEW.email))
+    BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
+};
+
+/**
+ * Puts the guards in place, exactly as written in `guards`, and nothing else on the two tables.
+ * `CREATE TRIGGER IF NOT EXISTS` alone looks only at the name: a guard swapped for a same-named one
+ * that does nothing, or a second trigger that answers RAISE(IGNORE) to every ✓, would stay in place
+ * on every boot and the lock would be off without a word. So every trigger on `events` and `people`
+ * is compared with this list: one that differs is replaced, one that is not on it is dropped, and
+ * both are said out loud. The same path carries a guard whose text changed between versions onto a
+ * database an older version made.
+ *
+ * The repair runs in one IMMEDIATE transaction: between a DROP and its CREATE the table would have
+ * no guard, and another process with the file open could REPLACE a ✓ in that gap. A failure halfway
+ * rolls everything back rather than leave a guard dropped. When nothing needs repair — every boot
+ * but the first after an upgrade or a tampering — no write lock is taken at all.
+ */
+export function installGuards(db: DatabaseSync, guards: Record<string, string> = GUARDS,
+                              warn: (line: string) => void = console.warn): void {
+  // SQLite keeps the text as written, spacing included.
+  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+  const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
+  // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
+  const held = () => db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people')"
+  ).all() as { name: string; sql: string }[];
+  const inPlace = (rows: { name: string; sql: string }[]) =>
+    rows.length === want.size &&
+    rows.every((r) => want.has(r.name) && flat(r.sql) === flat(want.get(r.name)!));
+  if (inPlace(held())) return;
+  // The name comes from the file, so it is quoted: unquoted, a trigger named
+  // `x; DROP TRIGGER events_no_delete` would drop a guard and keep itself.
+  const drop = (name: string) => db.exec(`DROP TRIGGER IF EXISTS "${name.replace(/"/g, '""')}"`);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // Read again under the lock: another process may have repaired it while this one waited.
+    const rows = held();
+    const byName = new Map(rows.map((r) => [r.name, r]));
+    for (const r of rows) {
+      if (want.has(r.name)) continue;
+      warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
+      drop(r.name);
+    }
+    for (const [name, sql] of want) {
+      const r = byName.get(name);
+      if (r && flat(r.sql) === flat(sql)) continue;
+      if (r) {
+        warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);
+        drop(r.name);
+      }
+      db.exec(sql);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
 export class SqliteEventStore implements EventStore {
   #db: DatabaseSync;
 
@@ -62,16 +155,6 @@ export class SqliteEventStore implements EventStore {
       -- to erase it. See engine/api/index-store.ts — one definition, and the difference explicit.
     `);
 
-    // Triggers that REFUSE to alter and to delete. "Nothing is erased" stops depending on the code
-    // never calling UPDATE: the database refuses, even for someone opening the file with another
-    // program.
-    this.#db.exec(`
-      CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
-        BEGIN SELECT RAISE(ABORT, 'an event is not altered: the trail is the product'); END;
-      CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
-        BEGIN SELECT RAISE(ABORT, 'an event is not deleted: the trail is the product'); END;
-    `);
-
     // The people table: an id and an e-mail, next to the events that will name the id
     // (docs/PRIVACY.md, section 1). The unique index covers only rows that still hold an address,
     // so a forgotten row never stands in the way of the new person the same address becomes.
@@ -83,26 +166,7 @@ export class SqliteEventStore implements EventStore {
       CREATE UNIQUE INDEX IF NOT EXISTS people_by_email ON people (email) WHERE email IS NOT NULL;
     `);
 
-    // A row may only lose its e-mail, and the database says so, as it does for events: an UPDATE
-    // that does anything but empty the address is refused, and so is every DELETE. A re-pointed
-    // row would hand every event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3).
-    this.#db.exec(`
-      CREATE TRIGGER IF NOT EXISTS people_only_lose_email BEFORE UPDATE ON people
-        WHEN NEW.id IS NOT OLD.id OR NEW.email IS NOT NULL
-        BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END;
-      CREATE TRIGGER IF NOT EXISTS people_no_delete BEFORE DELETE ON people
-        BEGIN SELECT RAISE(ABORT, 'a person is not deleted: forgetting empties the e-mail and keeps the id'); END;
-    `);
-
-    // REPLACE is a delete in disguise, and it fires no delete trigger (recursive_triggers is off):
-    // `INSERT OR REPLACE` with a held id re-points that row, and with a new id and a held address
-    // the unique index makes it drop the other person's row. So an insert may only add a row whose
-    // id and address are both unheld; a forgotten row's empty address holds nothing.
-    this.#db.exec(`
-      CREATE TRIGGER IF NOT EXISTS people_no_replace BEFORE INSERT ON people
-        WHEN EXISTS (SELECT 1 FROM people WHERE id = NEW.id OR (NEW.email IS NOT NULL AND email = NEW.email))
-        BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END;
-    `);
+    installGuards(this.#db);
   }
 
   async personFor(email: string): Promise<string> {
@@ -115,7 +179,8 @@ export class SqliteEventStore implements EventStore {
     if (found) return found;
     const id = newPersonId();
     try {
-      this.#db.prepare('INSERT INTO people (id, email) VALUES (?, ?)').run(id, e);
+      const r = this.#db.prepare('INSERT INTO people (id, email) VALUES (?, ?)').run(id, e);
+      if (r.changes !== 1) throw new Error('the person was not recorded: the database dropped the insert');
     } catch (err) {
       const winner = this.#heldBy(e);
       if (winner) return winner;
@@ -146,11 +211,14 @@ export class SqliteEventStore implements EventStore {
   // a moment later does.
   async append(event: NewEvent, author: string): Promise<Event> {
     const e = stored(event, crypto.randomUUID().replace(/-/g, ''), await this.personFor(author), new Date().toISOString());
-    this.#db.prepare(
+    const r = this.#db.prepare(
       `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, author, happened_at, data)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(e.id, e.type, e.page, e.block ?? null, e.fingerprint ?? null, e.text ?? null,
           e.snapshot ?? null, e.author, e.when, e.data ? JSON.stringify(e.data) : null);
+    // A trigger that answers RAISE(IGNORE) drops the row and reports no error: without this, an
+    // approval that was never written would be handed back as recorded.
+    if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
     return { ...e, author: personEmail(author) };
   }
 

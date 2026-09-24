@@ -31,6 +31,15 @@ yours is whether it works.
   equal elements undefined, a date read as UTC when it means a local day.
 - **State that is read after it was replaced**, or a value cached past the event that invalidates it.
 - **A resource left open**: a server, a file handle, a database, a child process, a temporary file.
+- **A procedure that cannot be followed.** When the change is a procedure — a skill, a lens, a
+  workflow, a runbook, a README step — walk it as the reader who follows it: at each instruction,
+  where is that reader, and does what the instruction needs exist yet? Walk every instruction in
+  one pass; stopping at the first that fails leaves the next one for another round. A review step
+  that told the reviewer to record prompt sentences after the terminal holding them was gone is
+  the example.
+- **A tool that exists but does not run.** `command -v java` finds macOS's `/usr/bin/java`, which
+  only says no runtime is installed. A check that a tool is on the `PATH` is not a check that it
+  works; ask it to do something (`java -version`) and read the exit code.
 - **The boundary values**: empty, one, missing, `null`, a duplicate key, a name with a quote in it.
 
 ## Severity
