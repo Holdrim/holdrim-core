@@ -40,7 +40,7 @@ const STUB_TOOLS = ['cat'];
  * already `cached`, and `sha256sum` on the PATH or not. Hands back the exit code, both outputs,
  * every call the stubs saw, and the cache.
  */
-function run(t, { served = JAR, java = 'answers', running = false, cached = null, sha256sum = true } = {}) {
+function run(t, { served = JAR, java = 'answers', running = false, cached = null, sha256sum = true, wait = 2 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-emulator-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin');
@@ -75,6 +75,10 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
       answers: `printf Ok > '${up}'; echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
       dies: 'echo "port in use"; exit 1',
       hangs: `echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
+      // Answers and exits at once. Whether the exit lands before or after the script's probe is
+      // left to the scheduler: staging the in-between exactly would need the stub to see its own
+      // exit, and a dead child stays a zombie until the script's shell reaps it.
+      'answers-then-exits': `printf Ok > '${up}'; exit 0`,
     }[java];
     // `-version` is the script asking whether Java runs at all; macOS's placeholder says no.
     const runs = java === 'placeholder' ? 'exit 1' : 'exit 0';
@@ -86,7 +90,7 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
   writeFileSync(script, SCRIPT.replace(/^SHA256=\w+$/m, `SHA256=${pinned}`));
   const r = spawnSync(join(bin, 'bash'), [script], {
     encoding: 'utf8',
-    env: { PATH: bin, HOME: dir, XDG_CACHE_HOME: join(dir, 'cache'), HOLDRIM_EMULATOR_WAIT: '2' },
+    env: { PATH: bin, HOME: dir, XDG_CACHE_HOME: join(dir, 'cache'), HOLDRIM_EMULATOR_WAIT: String(wait) },
   });
   const pidFile = join(dir, 'java.pid');
   if (existsSync(pidFile)) {
@@ -167,7 +171,7 @@ test('an emulator that never answers fails, with the end of its log', (t) => {
   const { code, out, err } = run(t, { java: 'dies' });
   assert.equal(code, 1);
   assert.equal(out, '');
-  assert.match(err, /did not answer on 127\.0\.0\.1:8433 within 2s/);
+  assert.match(err, /exited before answering on 127\.0\.0\.1:8433/);
   assert.match(err, /port in use/);
 });
 
@@ -199,7 +203,19 @@ test("macOS's java placeholder counts as no Java, before anything is downloaded"
 
 test('an emulator that dies is reported at once, not after the whole wait', (t) => {
   const started = Date.now();
-  const { code } = run(t, { java: 'dies' });
+  // A wait long enough that "at once" and "after the whole wait" cannot be confused on a busy machine.
+  const { code } = run(t, { java: 'dies', wait: 10 });
   assert.equal(code, 1);
-  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started}ms against a 2s wait`);
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started}ms against a 10s wait`);
+});
+
+test('an emulator that answered on its way out still counts as answered', (t) => {
+  const { code, out } = run(t, { java: 'answers-then-exits' });
+  assert.equal(code, 0);
+  assert.equal(out, EXPORT);
+});
+
+test('one that never answers says it timed out, not that it died', (t) => {
+  const { err } = run(t, { java: 'hangs' });
+  assert.match(err, /did not answer on 127\.0\.0\.1:8433 within 2s/);
 });

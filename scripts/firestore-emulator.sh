@@ -65,18 +65,24 @@ fi
 LOG="$CACHE/firestore-emulator.log"
 nohup java -jar "$JAR" --host "${HOST%:*}" --port "${HOST#*:}" > "$LOG" 2>&1 &
 pid=$!
+ready() { echo "export FIRESTORE_EMULATOR_HOST=$HOST"; exit 0; }
+why="did not answer on $HOST within ${WAIT}s"
 for _ in $(seq "$WAIT"); do
-  if answers; then
-    echo "export FIRESTORE_EMULATOR_HOST=$HOST"
-    exit 0
+  answers && ready
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # One last look: it may have answered between the probe and its exit. Without it, which of the
+    # two came first would decide the result.
+    answers && ready
+    why="exited before answering on $HOST"
+    break
   fi
-  # Asked after the probe, not before: a process that answered and then exited has still answered.
-  kill -0 "$pid" 2>/dev/null || break   # it died: waiting on would only make the failure slower
   sleep 1
 done
 # Stopped, so that the failure is true: left running, it could start answering after the caller
-# was told there is no emulator, and the tests would skip beside a live one.
+# was told there is no emulator, and the tests would skip beside a live one. Waited for, so that it
+# is gone and not a zombie the moment this script says so.
 kill "$pid" 2>/dev/null || true
-echo "the Firestore emulator did not answer on $HOST within ${WAIT}s. Its log, $LOG, ends:" >&2
+wait "$pid" 2>/dev/null || true
+echo "the Firestore emulator $why. Its log, $LOG, ends:" >&2
 tail -20 "$LOG" >&2
 exit 1
