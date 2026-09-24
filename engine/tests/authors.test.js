@@ -11,14 +11,15 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { authorOf, withAuthors, PERSON_ID } from '../api/people.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { Source } from '../cli/remote.ts';
+import { stub } from './helpers/stub.js';
+import { freshFirestoreProject } from './helpers/firestore.js';
 
 // The Source reads these before its own options; a developer's own would point these tests at
 // their real events file or account.
@@ -93,20 +94,42 @@ test('an events file from before the people table reads as the addresses it hold
 });
 
 // ===================================================================== the cloud, over REST
-test('the CLI refuses to write to a cloud with no project before it asks gcloud for anything', async () => {
-  // Without the emulator, which needs no token: the question is whether gcloud is asked first, and
-  // on a machine without it that would answer "no gcloud account issues a token" instead.
-  const host = process.env.FIRESTORE_EMULATOR_HOST;
-  const project = process.env.HOLDRIM_PROJECT;
+/**
+ * Runs `body` with no emulator, no configured project, and a `gcloud` first on the PATH that answers
+ * like a signed-in one and writes down every call — and hands back those calls. Without the
+ * emulator, which needs no token, the CLI would ask gcloud; with a working one, a check that came
+ * too late would still end in the right error, so only the count shows whether it came first.
+ */
+async function withGcloud(t, body) {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-gcloud-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const log = join(dir, 'calls.log');
+  writeFileSync(log, '');
+  stub(dir, 'gcloud', `echo "$*" >> '${log}'\n[ "$2" = list ] && echo ci@example.org || echo a-token`);
+  const saved = { host: process.env.FIRESTORE_EMULATOR_HOST, project: process.env.HOLDRIM_PROJECT, path: process.env.PATH };
   delete process.env.FIRESTORE_EMULATOR_HOST;
   delete process.env.HOLDRIM_PROJECT;
+  process.env.PATH = `${dir}:${saved.path}`;
   try {
-    await assert.rejects(new Source({ account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }),
-      /cloud\.project|HOLDRIM_PROJECT/);
+    await body();
   } finally {
-    if (host !== undefined) process.env.FIRESTORE_EMULATOR_HOST = host;
-    if (project !== undefined) process.env.HOLDRIM_PROJECT = project;
+    for (const [key, name] of [['host', 'FIRESTORE_EMULATOR_HOST'], ['project', 'HOLDRIM_PROJECT'], ['path', 'PATH']]) {
+      if (saved[key] === undefined) delete process.env[name]; else process.env[name] = saved[key];
+    }
   }
+  return readFileSync(log, 'utf8').split('\n').filter(Boolean);
+}
+
+test('the CLI refuses to write to a cloud with no project before it asks gcloud for anything', async (t) => {
+  const calls = await withGcloud(t, () => assert.rejects(
+    new Source({ account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }), /cloud\.project|HOLDRIM_PROJECT/));
+  assert.deepEqual(calls, [], 'gcloud was asked for a write that could not happen');
+});
+
+test('the CLI refuses to read a cloud with no project before it asks gcloud for anything', async (t) => {
+  const calls = await withGcloud(t, () => assert.rejects(new Source({ account: 'ci@example.org' }).events(),
+    /cloud\.project|HOLDRIM_PROJECT/));
+  assert.deepEqual(calls, [], 'gcloud was asked for a read that could not happen');
 });
 
 const cloud = process.env.FIRESTORE_EMULATOR_HOST
@@ -116,7 +139,7 @@ const cloud = process.env.FIRESTORE_EMULATOR_HOST
 
 /** A project of its own per test: the emulator keeps what every earlier run wrote. */
 async function cloudProject(t) {
-  const project = `holdrim-authors-${randomBytes(6).toString('hex')}`;
+  const project = freshFirestoreProject('holdrim-authors');
   const { Firestore } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
   const db = new Firestore({ projectId: project });
@@ -223,4 +246,16 @@ test('the cloud tests ran when this run was told to expect Firestore', () => {
   // come up would turn every [firestore] test above into a skip and the job green.
   const required = (process.env.HOLDRIM_TEST_REQUIRE ?? '').split(',').map((s) => s.trim());
   if (required.includes('firestore')) assert.ok(process.env.FIRESTORE_EMULATOR_HOST, 'promised Firestore and none was set');
+});
+
+test('[firestore] a person that cannot be looked up stops the write before anything is committed', cloud, async (t) => {
+  const { project, db } = await cloudProject(t);
+  await withFetch(
+    (url) => (url.includes('/people_by_email/') ? new globalThis.Response('{"error":{"message":"down on purpose"}}', { status: 500 }) : null),
+    async (commits) => {
+      await assert.rejects(new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }),
+        /error 500 reading Firestore: down on purpose/);
+      assert.deepEqual(commits, [], 'a read that failed was taken for "nobody yet", and a person was made');
+    });
+  assert.equal((await db.collection('events').get()).size, 0);
 });

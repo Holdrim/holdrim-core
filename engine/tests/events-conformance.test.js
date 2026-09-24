@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { randomBytes } from 'node:crypto';
+import { freshFirestoreProject } from './helpers/firestore.js';
 import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
@@ -37,7 +37,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
     // A project of its own on every open: the emulator keeps what earlier tests and runs wrote, and
     // a leftover event — or one written by another run against the same emulator at the same
     // time — would make an ordering or a count pass or fail for the wrong reason.
-    open: async () => new FirestoreEventStore(`holdrim-conformance-${randomBytes(6).toString('hex')}`),
+    open: async () => new FirestoreEventStore(freshFirestoreProject('holdrim-conformance')),
   });
 } else {
   skipped.push({
@@ -156,7 +156,8 @@ forEachStore('a forgotten owner\'s ✓ reads as an id, which is nobody\'s addres
 });
 
 forEachStore('the same address, however it is typed, is one author, and reads back as the table writes it', async (s) => {
-  await s.append({ type: 'comment', page: 'A01', text: 'one' }, 'Typed-Twice@Example.org');
+  const answered = await s.append({ type: 'comment', page: 'A01', text: 'one' }, 'Typed-Twice@Example.org');
+  assert.equal(answered.author, 'typed-twice@example.org', 'the answer to an append names the author as a list will');
   await s.append({ type: 'comment', page: 'A01', text: 'two' }, ' typed-twice@example.org ');
   assert.deepEqual((await s.list('A01')).map((e) => e.author), ['typed-twice@example.org', 'typed-twice@example.org']);
 });
@@ -203,7 +204,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
 
   test('[firestore] no e-mail is in the events collection, only ids of the people collection', async () => {
-    const project = `holdrim-authors-${randomBytes(6).toString('hex')}`;
+    const project = freshFirestoreProject('holdrim-authors');
     const s = new FirestoreEventStore(project);
     const db = new Firestore({ projectId: project });
     try {
@@ -220,7 +221,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
   });
 
   test('[firestore] an event written before authors were ids still reads as the address it holds', async () => {
-    const project = `holdrim-authors-${randomBytes(6).toString('hex')}`;
+    const project = freshFirestoreProject('holdrim-authors');
     const s = new FirestoreEventStore(project);
     const db = new Firestore({ projectId: project });
     try {

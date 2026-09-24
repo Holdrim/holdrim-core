@@ -303,6 +303,9 @@ export class Source {
    * is the path — and it is marked as such.
    */
   async add(event: Record<string, unknown>): Promise<string> {
+    // The project before the author: naming the author asks gcloud for an account, and with no
+    // project that is two gcloud runs for a write that cannot happen.
+    if (!this.#local) this.#requireProject();
     const author = `agent via ${await this.#accountWithToken().catch(() => 'local')}`;
 
     if (this.#local) {
@@ -315,7 +318,6 @@ export class Source {
       return ((await r.json()) as { id: string }).id;
     }
 
-    this.#requireProject();
     const token = { Authorization: `Bearer ${await this.#gcloudToken()}` };
     // An id, as the server writes it: the address stays in the people table, where forgetting
     // the person can empty it (docs/PRIVACY.md, section 1).

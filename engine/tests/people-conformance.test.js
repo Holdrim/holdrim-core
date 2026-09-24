@@ -15,12 +15,12 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { Worker } from 'node:worker_threads';
 import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
+import { freshFirestoreProject } from './helpers/firestore.js';
 
 const stores = [
   { name: 'memory', open: async () => new MemoryEventStore() },
@@ -35,7 +35,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
   // id it did not make.
   stores.push({
     name: 'firestore',
-    open: async () => new FirestoreEventStore(`holdrim-people-${randomBytes(6).toString('hex')}`),
+    open: async () => new FirestoreEventStore(freshFirestoreProject('holdrim-people')),
   });
 } else {
   skipped.push({
