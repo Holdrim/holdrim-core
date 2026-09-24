@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -23,17 +23,16 @@ function stub(dir, name, body) {
 }
 
 /**
- * Runs the hook in a throwaway project, with `node` reporting `nodeVersion` (null: not installed)
- * and the Chromium download succeeding or not. Hands back what a person would see and every command the stubs saw.
+ * Runs the hook in a throwaway project whose package.json asks for `engines`, with `node` reporting
+ * `nodeVersion` (null: not installed) and the Chromium download succeeding or not. Hands back what
+ * a person would see and every command the stubs saw.
  */
-function run(t, { remote = 'true', nodeVersion = '22.18.0', chromium = true, engines } = {}) {
+function run(t, { remote = 'true', nodeVersion = '22.18.0', chromium = true, engines = '>=22.18' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-hook-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  copyFileSync(join(ROOT, 'package.json'), join(dir, 'package.json'));
-  if (engines) {
-    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...pkg, engines: { node: engines } }));
-  }
+  // The test owns its floor: with the repository's own package.json, bumping engines.node would
+  // turn every default run into a warning and break tests that are not about the version.
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ engines: { node: engines } }));
   const log = join(dir, 'calls.log');
   writeFileSync(log, '');
   stub(dir, 'npm', `echo "npm $*" >> '${log}'`);
