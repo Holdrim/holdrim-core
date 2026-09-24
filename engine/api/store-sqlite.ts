@@ -72,6 +72,17 @@ export class SqliteEventStore implements EventStore {
         BEGIN SELECT RAISE(ABORT, 'an event is not deleted: the trail is the product'); END;
     `);
 
+    // The two above do not see REPLACE. `INSERT OR REPLACE` and `REPLACE INTO` with a held id delete
+    // the old row and insert the new one without firing the delete trigger, because
+    // recursive_triggers is off, and a program opening the file never turns it on. So an insert
+    // whose id is already held is refused before REPLACE reaches its delete step: without this, any
+    // event, a ✓ included, could be rewritten from outside.
+    this.#db.exec(`
+      CREATE TRIGGER IF NOT EXISTS events_no_replace BEFORE INSERT ON events
+        WHEN EXISTS (SELECT 1 FROM events WHERE id = NEW.id)
+        BEGIN SELECT RAISE(ABORT, 'an event is not replaced: the trail is the product'); END;
+    `);
+
     // The people table: an id and an e-mail, next to the events that will name the id
     // (docs/PRIVACY.md, section 1). The unique index covers only rows that still hold an address,
     // so a forgotten row never stands in the way of the new person the same address becomes.
