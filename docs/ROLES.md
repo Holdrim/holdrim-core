@@ -96,11 +96,13 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   a person named in `LOCKS` belong to the owner alone, on all three routes, because a password
   handed out for that account is a lock handed out. Guarding one route leaves the others open, as
   `AGENTS.md` already says of the owner's.
-- **A lock comes from a session, and it fails closed.** A ✓ is a lock only from a session opened
-  with a credential the person set themselves after an issuance by the owner that is **on record**
-  for that account. The store records, for each credential, who issued or set it; an account with no
-  owner issuance on record — every account that predates that record included — gives no lock until
-  the owner issues one. Every issuance by the owner drops all of the account's sessions, and a
+- **A lock comes from a session, and it fails closed.** A ✓ is a lock only when the latest
+  credential issued or reset for that account by anyone but the person was issued by the owner, and
+  the session was opened after it. The test reads the account's whole credential history, never
+  only the current credential: a password the person changes afterwards cannot wash out an admin's
+  reset, because the server cannot tell the person from someone holding their password. The store
+  records who issued, reset or set each credential; an account with no owner issuance on record —
+  every account that predates that record included — gives no lock until the owner issues one. Every issuance by the owner drops all of the account's sessions, and a
   credential created or changed by anyone other than the owner or the person — an admin creating the
   account, or resetting it while it was not yet guarded — leaves it unable to lock until the owner
   issues again. Otherwise an admin could reset an account before its promotion, keep
@@ -204,6 +206,7 @@ theme colour does: a toggle misspelled is a toggle that silently did nothing. Fi
 | An admin prepares an account before it is promoted, and keeps its session | A credential changed by anyone but the owner or the person leaves the account unable to lock until the owner issues again |
 | An agent triages, or files a request that starts approved | Its credential never holds `triage`, and the starting state written on its requests is always triage |
 | Granting someone triage decides their open requests after the fact | A request's starting state is written when it is filed and never recomputed |
+| An admin resets an unguarded account, then changes its password through the self-service route | The test reads the whole history: the latest issuance or reset by anyone but the person must be the owner's |
 | An admin keeps a session open across the owner's re-issue of a lock-holder's password | A lock needs a session opened with a credential the person set after the owner's latest issuance; each issuance drops every session |
 | A direct writer to the store writes a ✓ with the lock bit set | Nothing stops it before signed events, exactly as for the owner's ✓ today (`docs/PRIVACY.md` §3); phase E closes it |
 | A commit renumbers a page into a lock-holder's scope | Not closed by design: the repository decides what a code means. Start logs each scope's coverage and refuses a scope that matches no page; the renumbering itself is a reviewed change |
