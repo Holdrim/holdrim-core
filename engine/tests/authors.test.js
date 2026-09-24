@@ -146,3 +146,14 @@ test('[firestore] a person the server made first is the one the CLI\'s write nam
   assert.deepEqual((await db.collection('events').get()).docs.map((d) => d.data().author), [id]);
   assert.equal((await db.collection('people').get()).size, 1, 'no second person for one address');
 });
+
+test('[firestore] first writes by one account at once are one person', cloud, async (t) => {
+  // Each write looks for the person, finds none, and makes one: only one make can win, and the
+  // others have to take the winner's id instead of failing the write they were asked for.
+  const { project, db } = await cloudProject(t);
+  const source = () => new Source({ project, account: 'ci@example.org' });
+  await Promise.all(Array.from({ length: 4 }, (_, i) => source().add({ type: 'comment', page: 'A01', text: `w${i}` })));
+  const authors = new Set((await db.collection('events').get()).docs.map((d) => d.data().author));
+  assert.equal(authors.size, 1, `one account became ${authors.size} people`);
+  assert.equal((await db.collection('people').get()).size, 1);
+});
