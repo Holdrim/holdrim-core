@@ -22,8 +22,8 @@
  *   docker run -d -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:16-alpine
  *
  * To run Firestore locally:
- *   firebase emulators:start --only firestore --project holdrim-conformance
- *   FIRESTORE_EMULATOR_HOST=127.0.0.1:8433 npm test
+ *   eval "$(bash scripts/firestore-emulator.sh)"
+ *   npm test
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -103,8 +103,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
     name: 'firestore',
     why: 'FIRESTORE_EMULATOR_HOST is not set, so nothing ran against Firestore. This '
       + 'implementation is proved by code review only — do not read this suite as evidence that '
-      + 'it works. Start one with: firebase emulators:start --only firestore --project '
-      + 'holdrim-conformance, then re-run with FIRESTORE_EMULATOR_HOST=127.0.0.1:8433',
+      + 'it works. Start one with: eval "$(bash scripts/firestore-emulator.sh)", then re-run.',
   });
 }
 

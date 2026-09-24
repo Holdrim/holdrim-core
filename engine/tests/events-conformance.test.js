@@ -43,7 +43,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
   skipped.push({
     name: 'firestore',
     why: 'FIRESTORE_EMULATOR_HOST is not set, so nothing ran against Firestore. Start the emulator '
-      + '(firebase emulators:start --only firestore) and set FIRESTORE_EMULATOR_HOST=127.0.0.1:8433.',
+      + 'with: eval "$(bash scripts/firestore-emulator.sh)", then re-run.',
   });
 }
 

@@ -19,8 +19,8 @@ import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
  * ⚠️ Proved by the conformance suite ONLY when the emulator is running. `npm test` on its own
  * skips this implementation with a message instead of pretending. To prove it:
  *
- *   firebase emulators:start --only firestore --project holdrim-conformance
- *   FIRESTORE_EMULATOR_HOST=127.0.0.1:8433 npm test
+ *   eval "$(bash scripts/firestore-emulator.sh)"
+ *   npm test
  *
  * Without that variable, do not read a green suite as evidence that this file works.
  */
