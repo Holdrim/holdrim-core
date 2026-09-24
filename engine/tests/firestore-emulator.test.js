@@ -56,6 +56,7 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
   writeFileSync(log, '');
   if (running) writeFileSync(up, running === true ? 'Ok' : running);
   if (served !== null) writeFileSync(join(dir, 'served'), served);
+  if (java === 'exits-then-answers') writeFileSync(join(dir, 'counted'), '');
   if (cached !== null) {
     mkdirSync(cache, { recursive: true });
     writeFileSync(join(cache, JAR_NAME), cached);
@@ -67,12 +68,16 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
       ? '[ -n "$out" ] && { printf "half a jar" > "$out"; exit 18; }'
       : `[ -n "$out" ] && { cat '${join(dir, 'served')}' > "$out"; exit 0; }`,
     `[ -e '${up}' ] && { cat '${up}'; exit 0; }`,
-    // For 'exits-then-answers': the first probe after the start waits until the emulator is gone,
-    // returns empty, and from then on the port answers. Only a look taken after the death sees it.
-    `if [ -e '${join(dir, 'exits.pid')}' ]; then`,
+    // For 'exits-then-answers', every probe is counted. The first is the check before the start.
+    // The second, the first after it, waits for the emulator to exist and then to be gone, and
+    // returns empty; from the third on, the port answers. Only a look taken after the death sees it.
+    `if [ -e '${join(dir, 'counted')}' ]; then`,
     `  n=$(( $(cat '${join(dir, 'probes')}' 2>/dev/null || echo 0) + 1 )); echo $n > '${join(dir, 'probes')}'`,
-    `  if [ "$n" -ge 2 ]; then printf Ok; exit 0; fi`,
-    `  if [ "$n" -eq 1 ]; then for _ in $(seq 50); do kill -0 "$(cat '${join(dir, 'exits.pid')}')" 2>/dev/null || break; sleep 0.1; done; fi`,
+    `  if [ "$n" -ge 3 ]; then printf Ok; exit 0; fi`,
+    `  if [ "$n" -eq 2 ]; then`,
+    `    for _ in $(seq 50); do [ -e '${join(dir, 'exits.pid')}' ] && break; sleep 0.1; done`,
+    `    for _ in $(seq 50); do kill -0 "$(cat '${join(dir, 'exits.pid')}')" 2>/dev/null || break; sleep 0.1; done`,
+    '  fi',
     'fi',
     'exit 0',
   ].join('\n'));
@@ -84,10 +89,13 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
       hangs: `echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
       // Exits without answering; the port answers only after it is gone (see the curl stub).
       'exits-then-answers': `echo $$ > '${join(dir, 'exits.pid')}'; exit 0`,
-      // Takes a moment to die on TERM, as a JVM running its shutdown hooks does.
-      'slow-to-die': `echo $$ > '${join(dir, 'java.pid')}'; trap 'sleep 0.5; exit 0' TERM; sleep 30 & wait $!`,
-      // Ignores TERM altogether: only KILL stops it.
-      'deaf-to-term': `echo $$ > '${join(dir, 'java.pid')}'; trap '' TERM; sleep 30 & wait $!; sleep 30`,
+      // Takes a moment to die on TERM, as a JVM running its shutdown hooks does, and leaves a mark
+      // when it finishes them: a KILL that cut the shutdown short leaves none.
+      'slow-to-die': `echo $$ > '${join(dir, 'java.pid')}'; `
+        + `trap "sleep 0.5; kill \\$!; : > '${join(dir, 'graceful')}'; exit 0" TERM; sleep 30 & wait $!`,
+      // Ignores TERM altogether: only KILL stops it. Its child is recorded so the test can stop it.
+      'deaf-to-term': `echo $$ > '${join(dir, 'java.pid')}'; trap '' TERM; `
+        + `sleep 30 & echo $! > '${join(dir, 'child.pid')}'; wait $!; sleep 30`,
     }[java];
     // `-version` is the script asking whether Java runs at all; macOS's placeholder says no.
     const runs = java === 'placeholder' ? 'exit 1' : 'exit 0';
@@ -102,13 +110,15 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
     env: { PATH: bin, HOME: dir, XDG_CACHE_HOME: join(dir, 'cache'), HOLDRIM_EMULATOR_WAIT: String(wait) },
   });
   const pidFile = join(dir, 'java.pid');
-  if (existsSync(pidFile)) {
-    const pid = Number(readFileSync(pidFile, 'utf8'));
-    t.after(() => { try { process.kill(pid); } catch { /* already gone */ } });
+  for (const file of [pidFile, join(dir, 'child.pid')].filter(existsSync)) {
+    const pid = Number(readFileSync(file, 'utf8'));
+    // KILL, not TERM: a child of the stub deaf to TERM inherits the deafness.
+    t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } });
   }
   return {
     code: r.status, out: r.stdout, err: r.stderr, calls: readFileSync(log, 'utf8'),
     javaPid: existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : null,
+    graceful: existsSync(join(dir, 'graceful')),
     jar: existsSync(join(cache, JAR_NAME)),
     part: existsSync(join(cache, `${JAR_NAME}.part`)),
   };
@@ -230,8 +240,9 @@ test('one that never answers says it timed out, not that it died', (t) => {
 });
 
 test('the stopped emulator is gone, not a zombie, even when it takes a moment to die', (t) => {
-  const { code, javaPid } = run(t, { java: 'slow-to-die' });
+  const { code, javaPid, graceful } = run(t, { java: 'slow-to-die' });
   assert.equal(code, 1);
+  assert.ok(graceful, 'its shutdown was cut short by KILL, or it was never sent TERM');
   assert.throws(() => process.kill(javaPid, 0), /ESRCH/);
 });
 
