@@ -167,7 +167,7 @@ computed — only what is demanded before a block counts as ready.
 
 Nothing is erased. Every ✓, every request, every rejection becomes a new event with author and
 timestamp. The database refuses `UPDATE` and `DELETE` — through triggers, not through discipline.
-The one thing that can go is a request's own `text` or `snapshot`, held apart in its own table, and
+The one thing that can go is an event's own `text` or `snapshot`, held apart in its own table, and
 even that only as a recorded removal: `removeText` deletes the row and writes a `text_removed` event
 naming who and when, in the same transaction, so what changed is never silent.
 

@@ -96,8 +96,9 @@ Each has a test. If you change the code around one, run the contract test and re
   deleted, and disabling drops the open session. An event's own `text` and `snapshot` live apart, in
   `texts`: a row there is never updated or replaced, and is deleted only by `EventStore.removeText`,
   together with a `text_removed` event recording who and when (`texts_no_update`, `texts_no_replace`,
-  `texts_no_delete`, `engine/api/store-sqlite.ts`). A hash with no row and no removal naming it reads
-  as tampered, not as erased.
+  `texts_no_delete`, `engine/api/store-sqlite.ts`). No route writes a `text_removed` event — `POST
+  /events` refuses the type. A hash with no row that matches it, and no valid removal (later than
+  its target) naming it, or with two removals, reads as tampered, not as erased.
 - **Only the owner's ✓ becomes a lock.** An agent may *close* an impact — "this change did not reach
   here" — and never *approve* — "this text is correct".
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a

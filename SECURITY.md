@@ -17,7 +17,7 @@ Worth knowing before you run it:
   `INSERT`: someone with write access to the file can `DROP TRIGGER` before touching a row, or
   simply insert a forged event, so the triggers stop mistakes and ordinary tools, not that person.
   (A dropped trigger is reinstalled, but only silently, on the next boot — an existing gap,
-  [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89).) For a request's own text, moved
+  [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89).) For an event's own text, moved
   out of the event into its own table, a forged removal dated and ordered after the text it targets
   can still pass as a genuine one; a backdated one cannot (docs/PRIVACY.md, section 4). Closing this
   for every kind of forgery, or for a trigger dropped outright, needs the events themselves signed —
