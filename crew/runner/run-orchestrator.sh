@@ -3,8 +3,14 @@
 # again; nothing here loops, so a pass that goes wrong ends instead of repeating itself.
 set -euo pipefail
 
-: "${GH_TOKEN:?GH_TOKEN, the GitHub token of the machine account, is required}"
-: "${CLAUDE_CODE_OAUTH_TOKEN:?a Claude token from claude setup-token is required}"
+# Either passed in (docker run --env-file) or left by setup.sh in the container's volumes
+# (docker compose); the checks below apply the same way to both.
+if [ -z "${GH_TOKEN:-}" ]; then GH_TOKEN=$(gh auth token 2>/dev/null || true); export GH_TOKEN; fi
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -r "$HOME/.secrets/claude-token" ]; then
+  CLAUDE_CODE_OAUTH_TOKEN=$(cat "$HOME/.secrets/claude-token"); export CLAUDE_CODE_OAUTH_TOKEN
+fi
+: "${GH_TOKEN:?no GitHub token: run setup first, or pass GH_TOKEN}"
+: "${CLAUDE_CODE_OAUTH_TOKEN:?no Claude token: run setup first, or pass CLAUDE_CODE_OAUTH_TOKEN}"
 
 # The run must be the orchestrator's machine account and nobody else. Refusing the owner's id
 # alone would let any other credential through; requiring the listed id refuses them all

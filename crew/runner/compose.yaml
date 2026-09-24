@@ -1,0 +1,26 @@
+# One-time setup, interactive:  docker compose --profile setup run --rm setup
+# Then, unattended:             docker compose up -d orchestrator
+services:
+  setup:
+    build: .
+    profiles: [setup]
+    entrypoint: ["bash", "setup.sh"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - secrets:/home/crew/.secrets
+      - gh-config:/home/crew/.config/gh
+
+  orchestrator:
+    build: .
+    entrypoint: ["bash", "loop.sh"]
+    restart: unless-stopped
+    environment:
+      INTERVAL_SECONDS: "7200"
+    volumes:
+      - secrets:/home/crew/.secrets
+      - gh-config:/home/crew/.config/gh
+
+volumes:
+  secrets:
+  gh-config:
