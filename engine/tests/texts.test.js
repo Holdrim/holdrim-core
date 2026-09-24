@@ -259,6 +259,39 @@ test('the CLI reads the events file\'s texts as the server does: present, remove
   assert.equal(cli.find((e) => e.id === gone.id).textRemoved.by, 'owner@example.org');
 });
 
+/**
+ * `SqliteEventStore.list()` orders `ORDER BY happened_at, rowid` (store-sqlite.ts) precisely because
+ * a clock stepping back between an `append` and its `removeText` (round 3, finding 3) can tie a
+ * removal's `when` to its target's own `happened_at` exactly — `notBefore` clamps to it — and a tie
+ * has to keep breaking toward insertion order, or `removalsOf`'s own list-order check (round 2,
+ * finding F) could see the removal sorted BEFORE the very event it names. `Source#fromFile`
+ * (engine/cli/remote.ts) reads the same table and has to agree.
+ */
+test('a removal tied to its target\'s happened_at still reads as the removal it was, through the CLI', async (t) => {
+  const RealDate = Date;
+  const path = tempFile(t);
+  const s = new SqliteEventStore(path);
+  const written = await s.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
+  class SteppedBack extends RealDate {
+    constructor(...args) { super(...(args.length ? args : ['2000-01-01T00:00:00.000Z'])); }
+    static now() { return new RealDate('2000-01-01T00:00:00.000Z').getTime(); }
+  }
+  globalThis.Date = SteppedBack;
+  let removal;
+  try {
+    removal = await s.removeText(written.id, 'text', 'owner@example.org');
+  } finally {
+    globalThis.Date = RealDate;
+  }
+  assert.equal(removal.when, written.when, 'notBefore clamped the removal to an exact tie with its target');
+  await s.close();
+
+  const [read] = await new Source({ db: path }).events();
+  assert.equal(read.text, null);
+  assert.equal(read.textRemoved?.by, 'owner@example.org', 'a tied removal still reads as the removal it was');
+  assert.equal(read.textTampered, false);
+});
+
 test('an events file from before texts were extracted reads its own plain text, through the CLI too', async (t) => {
   const { DatabaseSync } = await import('node:sqlite');
   const path = tempFile(t);

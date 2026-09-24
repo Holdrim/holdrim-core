@@ -191,7 +191,15 @@ export class Source {
       // `*`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no such
       // columns at all, and naming them would fail the query outright rather than read the file's
       // own, older shape — the same reason `hasPeople` below asks before it reads that table.
-      const rows = db.prepare('SELECT * FROM events ORDER BY happened_at').all() as Record<string, any>[];
+      // `rowid`, same as the server's own `SqliteEventStore.list()` (store-sqlite.ts): a removal is
+      // always inserted after the event it names, so a tie inside one `happened_at` millisecond —
+      // `notBefore` clamping a removal to its target's own timestamp — has to keep breaking toward
+      // recorded order, not whatever the planner happens to pick, or the two readers of one file
+      // could disagree about which side of the tie a removal falls on. As store-sqlite.ts's own
+      // comment says of its identical clause: today's SQLite already hands ties back in rowid order,
+      // so dropping this changes nothing the suite below can see; naming it turns that accident into
+      // a promise. `rowid DESC` does fail it.
+      const rows = db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
       // A file written before the people table existed has no such table, and every author in it
       // is an address: an empty table resolves none of them, which is what they need. The read
       // is the same rule the server's store applies, through the same resolver.
