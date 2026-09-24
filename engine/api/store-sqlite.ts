@@ -68,29 +68,28 @@ export const GUARDS: Record<string, string> = {
  */
 export function installGuards(db: DatabaseSync, guards: Record<string, string> = GUARDS,
                               warn: (line: string) => void = console.warn): void {
-  // SQLite compares trigger names without case, and keeps the text as written, spacing included.
-  const key = (name: string) => name.toLowerCase();
+  // SQLite keeps the text as written, spacing included.
   const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
-  const want = new Map(Object.entries(guards).map(([name, body]) => [key(name), `CREATE TRIGGER ${name} ${body}`]));
+  const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
   const held = () => db.prepare(
     "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people')"
   ).all() as { name: string; sql: string }[];
   const inPlace = (rows: { name: string; sql: string }[]) =>
     rows.length === want.size &&
-    rows.every((r) => want.has(key(r.name)) && flat(r.sql) === flat(want.get(key(r.name))!));
+    rows.every((r) => want.has(r.name) && flat(r.sql) === flat(want.get(r.name)!));
   if (inPlace(held())) return;
   db.exec('BEGIN IMMEDIATE');
   try {
     // Read again under the lock: another process may have repaired it while this one waited.
     const rows = held();
-    const byName = new Map(rows.map((r) => [key(r.name), r]));
+    const byName = new Map(rows.map((r) => [r.name, r]));
     for (const r of rows) {
-      if (want.has(key(r.name))) continue;
+      if (want.has(r.name)) continue;
       warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
       db.exec(`DROP TRIGGER IF EXISTS "${r.name.replace(/"/g, '""')}"`);
     }
-    for (const [k, sql] of want) {
-      const r = byName.get(k);
+    for (const [name, sql] of want) {
+      const r = byName.get(name);
       if (r && flat(r.sql) === flat(sql)) continue;
       if (r) {
         warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);

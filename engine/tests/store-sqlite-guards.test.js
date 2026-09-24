@@ -44,7 +44,7 @@ test('a guard swapped for a same-named one that does nothing is put back on the 
   db.close();
 }));
 
-test('the same swap under the name in capitals is caught too: SQLite names ignore case', withFile(async (path, said) => {
+test('the same swap under the name in capitals is caught too', withFile(async (path, said) => {
   await reopen(path);
   outside(path, 'DROP TRIGGER events_no_update; CREATE TRIGGER EVENTS_NO_UPDATE BEFORE UPDATE ON events BEGIN SELECT 1; END;');
   await reopen(path);
@@ -135,4 +135,20 @@ test('a repair that fails halfway leaves the database as it found it, never with
   assert.throws(() => installGuards(db, { ...GUARDS, zz_broken: 'BEFORE INSERT ON events BEGIN SELEC 1; END' }, () => {}));
   assert.deepEqual(before(db), was, 'nothing of the repair may stay behind');
   db.close();
+}));
+
+test('a boot while another process holds the write lock does not wait on it when nothing needs repair', withFile(async (path) => {
+  await reopen(path);
+  const writer = new DatabaseSync(path);
+  writer.exec('BEGIN IMMEDIATE');
+  try {
+    // Every boot but the first after an upgrade finds the guards in place: taking the write lock
+    // anyway would make each one wait out the busy timeout behind any writer, and then fail.
+    const started = Date.now();
+    await reopen(path);
+    assert.ok(Date.now() - started < 2000, 'the open has to go through without waiting for the lock');
+  } finally {
+    writer.exec('ROLLBACK');
+    writer.close();
+  }
 }));
