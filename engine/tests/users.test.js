@@ -98,11 +98,63 @@ test('the database REFUSES to replace an event, in both REPLACE forms', async ()
       VALUES ('${e.id}', 'approval', 'A01', 'A01.1.1', 'forged', 'intruder@example.org', '${e.when}')`;
     assert.throws(() => db.exec(`INSERT OR REPLACE INTO events ${forged}`), /not replaced/, 'INSERT OR REPLACE has to be refused');
     assert.throws(() => db.exec(`REPLACE INTO events ${forged}`), /not replaced/, 'REPLACE INTO has to be refused');
+    // `events` is a rowid table: a held rowid under a new id is a conflict too, and REPLACE would
+    // drop the ✓ on it just the same, leaving its id free to be inserted again with forged content.
+    const { rowid } = db.prepare('SELECT rowid FROM events WHERE id = ?').get(e.id);
+    const byRowid = `(rowid, id, type, page, block, fingerprint, author, happened_at)
+      VALUES (${rowid}, 'forged', 'approval', 'A01', 'A01.1.1', 'forged', 'intruder@example.org', '${e.when}')`;
+    assert.throws(() => db.exec(`INSERT OR REPLACE INTO events ${byRowid}`), /not replaced/, 'INSERT OR REPLACE on a held rowid has to be refused');
+    assert.throws(() => db.exec(`REPLACE INTO events ${byRowid}`), /not replaced/, 'REPLACE INTO on a held rowid has to be refused');
     const row = db.prepare('SELECT fingerprint, author FROM events WHERE id = ?').get(e.id);
     assert.deepEqual({ ...row }, { fingerprint: 'abc', author: 'owner@example.org' }, 'the original event stays as it was');
     assert.equal(db.prepare('SELECT COUNT(*) c FROM events').get().c, 1);
     db.close();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a guard swapped for a same-named one that does nothing is put back on the next open, out loud', async () => {
+  const dir = scratch();
+  const path = join(dir, 'events.db');
+  const said = [];
+  const warn = console.warn;
+  try {
+    let store = new SqliteEventStore(path);
+    await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
+    await store.close();
+    // From outside: the name stays, the refusal goes. CREATE TRIGGER IF NOT EXISTS would keep it.
+    const db = new DatabaseSync(path);
+    db.exec('DROP TRIGGER events_no_delete; CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT 1; END;');
+    db.close();
+    console.warn = (line) => said.push(line);
+    store = new SqliteEventStore(path);
+    await store.close();
+    console.warn = warn;
+    assert.ok(said.some((line) => /events_no_delete/.test(line)), 'the swap has to be said, not repaired in silence');
+    const again = new DatabaseSync(path);
+    assert.throws(() => again.exec('DELETE FROM events'), /not deleted/, 'the real guard has to be back');
+    assert.equal(again.prepare('SELECT COUNT(*) c FROM events').get().c, 1);
+    again.close();
+  } finally {
+    console.warn = warn;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a database whose guards are already right opens without a word', async () => {
+  const dir = scratch();
+  const path = join(dir, 'events.db');
+  const said = [];
+  const warn = console.warn;
+  try {
+    await new SqliteEventStore(path).close();
+    console.warn = (line) => said.push(line);
+    await new SqliteEventStore(path).close();
+    console.warn = warn;
+    assert.deepEqual(said, [], 'a guard as installed is not replaced, and nothing is said');
+  } finally {
+    console.warn = warn;
     rmSync(dir, { recursive: true, force: true });
   }
 });

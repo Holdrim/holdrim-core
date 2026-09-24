@@ -15,6 +15,41 @@ import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
  * person's e-mail — the only change the people table takes, and the triggers refuse any other. The
  * trail is the product.
  */
+/**
+ * The triggers "Nothing is erased" rests on, by name. The database refuses, even for someone opening
+ * the file with another program, so the rule stops depending on this code never calling UPDATE.
+ */
+const GUARDS: Record<string, string> = {
+  events_no_update: `BEFORE UPDATE ON events
+    BEGIN SELECT RAISE(ABORT, 'an event is not altered: the trail is the product'); END`,
+  events_no_delete: `BEFORE DELETE ON events
+    BEGIN SELECT RAISE(ABORT, 'an event is not deleted: the trail is the product'); END`,
+  // The two above do not see REPLACE. `INSERT OR REPLACE` and `REPLACE INTO` delete the row they
+  // conflict with and insert the new one without firing the delete trigger, because
+  // recursive_triggers is off and a program opening the file never turns it on. The conflict can be
+  // on the id or on the rowid — `events` is a rowid table, and naming a held rowid under a new id
+  // erases that row just the same. So an insert that holds either is refused before REPLACE reaches
+  // its delete step: without this, any event, a ✓ included, could be rewritten from outside.
+  events_no_replace: `BEFORE INSERT ON events
+    WHEN EXISTS (SELECT 1 FROM events WHERE id = NEW.id OR rowid = NEW.rowid)
+    BEGIN SELECT RAISE(ABORT, 'an event is not replaced: the trail is the product'); END`,
+  // A row may only lose its e-mail, as an event may not change at all: an UPDATE that does anything
+  // but empty the address is refused, and so is every DELETE. A re-pointed row would hand every
+  // event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3).
+  people_only_lose_email: `BEFORE UPDATE ON people
+    WHEN NEW.id IS NOT OLD.id OR NEW.email IS NOT NULL
+    BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
+  people_no_delete: `BEFORE DELETE ON people
+    BEGIN SELECT RAISE(ABORT, 'a person is not deleted: forgetting empties the e-mail and keeps the id'); END`,
+  // REPLACE again: with a held id or rowid it re-points or erases that row, and with a new id and a
+  // held address the unique index makes it drop the other person's row. So an insert may only add a
+  // row whose id, rowid and address are all unheld; a forgotten row's empty address holds nothing.
+  people_no_replace: `BEFORE INSERT ON people
+    WHEN EXISTS (SELECT 1 FROM people WHERE id = NEW.id OR rowid = NEW.rowid
+                 OR (NEW.email IS NOT NULL AND email = NEW.email))
+    BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
+};
+
 export class SqliteEventStore implements EventStore {
   #db: DatabaseSync;
 
@@ -62,27 +97,6 @@ export class SqliteEventStore implements EventStore {
       -- to erase it. See engine/api/index-store.ts — one definition, and the difference explicit.
     `);
 
-    // Triggers that REFUSE to alter and to delete. "Nothing is erased" stops depending on the code
-    // never calling UPDATE: the database refuses, even for someone opening the file with another
-    // program.
-    this.#db.exec(`
-      CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
-        BEGIN SELECT RAISE(ABORT, 'an event is not altered: the trail is the product'); END;
-      CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
-        BEGIN SELECT RAISE(ABORT, 'an event is not deleted: the trail is the product'); END;
-    `);
-
-    // The two above do not see REPLACE. `INSERT OR REPLACE` and `REPLACE INTO` with a held id delete
-    // the old row and insert the new one without firing the delete trigger, because
-    // recursive_triggers is off, and a program opening the file never turns it on. So an insert
-    // whose id is already held is refused before REPLACE reaches its delete step: without this, any
-    // event, a ✓ included, could be rewritten from outside.
-    this.#db.exec(`
-      CREATE TRIGGER IF NOT EXISTS events_no_replace BEFORE INSERT ON events
-        WHEN EXISTS (SELECT 1 FROM events WHERE id = NEW.id)
-        BEGIN SELECT RAISE(ABORT, 'an event is not replaced: the trail is the product'); END;
-    `);
-
     // The people table: an id and an e-mail, next to the events that will name the id
     // (docs/PRIVACY.md, section 1). The unique index covers only rows that still hold an address,
     // so a forgotten row never stands in the way of the new person the same address becomes.
@@ -94,26 +108,27 @@ export class SqliteEventStore implements EventStore {
       CREATE UNIQUE INDEX IF NOT EXISTS people_by_email ON people (email) WHERE email IS NOT NULL;
     `);
 
-    // A row may only lose its e-mail, and the database says so, as it does for events: an UPDATE
-    // that does anything but empty the address is refused, and so is every DELETE. A re-pointed
-    // row would hand every event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3).
-    this.#db.exec(`
-      CREATE TRIGGER IF NOT EXISTS people_only_lose_email BEFORE UPDATE ON people
-        WHEN NEW.id IS NOT OLD.id OR NEW.email IS NOT NULL
-        BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END;
-      CREATE TRIGGER IF NOT EXISTS people_no_delete BEFORE DELETE ON people
-        BEGIN SELECT RAISE(ABORT, 'a person is not deleted: forgetting empties the e-mail and keeps the id'); END;
-    `);
+    for (const [name, body] of Object.entries(GUARDS)) this.#guard(name, body);
+  }
 
-    // REPLACE is a delete in disguise, and it fires no delete trigger (recursive_triggers is off):
-    // `INSERT OR REPLACE` with a held id re-points that row, and with a new id and a held address
-    // the unique index makes it drop the other person's row. So an insert may only add a row whose
-    // id and address are both unheld; a forgotten row's empty address holds nothing.
-    this.#db.exec(`
-      CREATE TRIGGER IF NOT EXISTS people_no_replace BEFORE INSERT ON people
-        WHEN EXISTS (SELECT 1 FROM people WHERE id = NEW.id OR (NEW.email IS NOT NULL AND email = NEW.email))
-        BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END;
-    `);
+  /**
+   * Puts one guard in place, as written here. `CREATE TRIGGER IF NOT EXISTS` alone looks only at the
+   * name: a trigger swapped for a same-named one that does nothing would stay in place on every boot,
+   * and the lock would stay off without a word. So the stored text is compared with this one, and a
+   * trigger that differs is replaced, and said out loud. The same path carries a guard whose text
+   * changed between versions onto a database an older version made.
+   */
+  #guard(name: string, body: string): void {
+    const want = `CREATE TRIGGER ${name} ${body}`;
+    const row = this.#db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name) as
+      { sql: string } | undefined;
+    const same = (a: string, b: string) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim();
+    if (row && same(row.sql, want)) return;
+    if (row) {
+      console.warn(`holdrim: the database's guard ${name} was not the one this version installs; replacing it`);
+      this.#db.exec(`DROP TRIGGER ${name}`);
+    }
+    this.#db.exec(want);
   }
 
   async personFor(email: string): Promise<string> {
