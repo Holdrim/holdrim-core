@@ -96,15 +96,24 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   a person named in `LOCKS` belong to the owner alone, on all three routes, because a password
   handed out for that account is a lock handed out. Guarding one route leaves the others open, as
   `AGENTS.md` already says of the owner's.
-- **Promotion starts clean.** A person newly named in `LOCKS` gives no lock until the owner has
-  issued their password after they were named, and their open sessions are dropped at start.
-  Otherwise an admin could reset the account while it was not yet guarded, keep the session, and
-  inherit the lock when the deployment promotes it.
+- **A lock comes from a session, not from an account's past.** A ✓ is a lock only from a session
+  opened with a credential the person set themselves after the owner last issued one for that
+  account. Every issuance by the owner for an account named in `LOCKS` drops all of that account's
+  sessions, and any change to the account's credential made by someone other than the owner or the
+  person — a reset while the account was not yet guarded, for instance — leaves it unable to lock
+  until the owner issues again. Otherwise an admin could reset an account before its promotion, keep
+  a session open across the owner's re-issue, and give locks in the person's name; and "newly named"
+  would need a definition that someone taken out of `LOCKS` and put back would slip through.
 - **One parser, one question.** `LOCKS` is parsed once at start, with the addresses normalized by
   the same function the store uses; the account guard and the lock check both ask one function in
   `engine/core/roles.js`, and neither compares strings on its own.
 - **Written at the moment, read forever after.** When the server records a ✓, it writes on the event
-  the author's authority at that moment: their role, and whether this ✓ is a lock for this block. The
+  the author's authority at that moment: their role, and whether this ✓ is a lock for this block.
+  The same holds for a request: the state it starts in — at triage, or already decided because its
+  author could triage that block at that moment — is written on the request when it is filed, and
+  never recomputed from what its author may do later. Today it is recomputed on every read
+  (`engine/core/cycle.js`), so granting someone triage would silently decide every open request of
+  theirs, with no triage event written. Old requests without the field keep today's reading. The
   panel, the home and `holdrim sync` read what was written and never recompute it — this is
   `docs/PRIVACY.md` section 2, whose role field it extends with the lock bit. Removing someone from
   `LOCKS` leaves their past ✓s locks, as an owner's ✓s stay locks after they hand over: they
@@ -188,8 +197,10 @@ theme colour does: a toggle misspelled is a toggle that silently did nothing. Fi
 |---|---|
 | An admin grants themselves `lock` | `lock` is not granted by anyone in the product: only `LOCKS`, set by whoever deploys |
 | A committer, or the agent applying an approved request, adds a lock-holder or names a new owner | Authority is read from the environment only, and a `holdrim.json` that names any refuses to start |
-| An admin prepares an account before it is promoted, and keeps its session | A newly named lock-holder gives no lock until the owner issues their password; sessions are dropped at start |
-| An agent triages, or files a request that starts approved | Its credential never holds `triage`, and its requests always start at triage |
+| An admin prepares an account before it is promoted, and keeps its session | A credential changed by anyone but the owner or the person leaves the account unable to lock until the owner issues again |
+| An agent triages, or files a request that starts approved | Its credential never holds `triage`, and the starting state written on its requests is always triage |
+| Granting someone triage decides their open requests after the fact | A request's starting state is written when it is filed and never recomputed |
+| An admin keeps a session open across the owner's re-issue of a lock-holder's password | A lock needs a session opened with a credential the person set after the owner's latest issuance; each issuance drops every session |
 | A direct writer to the store writes a ✓ with the lock bit set | Nothing stops it before signed events, exactly as for the owner's ✓ today (`docs/PRIVACY.md` §3); phase E closes it |
 | A commit renumbers a page into a lock-holder's scope | Not closed by design: the repository decides what a code means. Start logs each scope's coverage and refuses a scope that matches no page; the renumbering itself is a reviewed change |
 | An admin resets a lock-holder's password and signs in as them | Their accounts are the owner's to reset, create and re-enable, on all three routes |
