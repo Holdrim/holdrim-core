@@ -66,11 +66,16 @@ echo "Holdrim local → http://localhost:$PORT   (you are acting as: $ACTING_AS 
 # the placeholder owner above — a real e-mail nobody chose on purpose — would get first-access on a
 # store that outlives this process: a permanent account, made by a runner whose README entry says
 # "no login". Pinning here, in the exec, beats anything already exported: `env NAME=value` always
-# wins for the child, regardless of what the caller's shell had set. HOLDRIM_EVENTS_PATH,
-# HOLDRIM_USERS and HOLDRIM_USERS_PATH are unset too, on the same reasoning, even though memory and
-# dev identity alone already keep them from being read — a value already sitting there is a lie
-# about where this runner keeps data, worth removing rather than merely outvoting.
-exec env -u HOLDRIM_EVENTS_PATH -u HOLDRIM_USERS -u HOLDRIM_USERS_PATH \
-  HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_EVENTS=memory HOLDRIM_IDENTITY=dev \
+# wins for the child, regardless of what the caller's shell had set.
+#
+# HOLDRIM_EVENTS_PATH, HOLDRIM_USERS and HOLDRIM_USERS_PATH are left alone, on purpose, not merely
+# forgotten. server.ts only reads HOLDRIM_EVENTS_PATH when eventsKind is 'sqlite', and HOLDRIM_USERS
+# / HOLDRIM_USERS_PATH only when identityKind is 'password' — and both pins above rule those out
+# before either is ever looked at. Unsetting them here would be a claim this file cannot back up:
+# nothing observes whether a variable reached the child unset versus merely unread, so a dropped
+# `-u` would go on passing every proof forever, and this comment would go on describing a guard
+# that guards nothing. Two pins are the whole claim; a value sitting in the environment that the
+# code path never reaches is not a leak.
+exec env HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_EVENTS=memory HOLDRIM_IDENTITY=dev \
   HOLDRIM_OWNER="$OWNER" HOLDRIM_DEV_EMAIL="$ACTING_AS" HOLDRIM_SITE="$SITE" PORT="$PORT" \
   node engine/api/server.ts
