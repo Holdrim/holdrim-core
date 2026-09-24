@@ -37,7 +37,7 @@ So:
 - **Text that still describes what the change removed.** When a change reverses or removes a
   behaviour, grep the whole tree for its old wording, not only the diff: examples, site pages,
   plugin guides, comments. A site page kept telling adopters to put the owner in `holdrim.json`
-  after the change made that file refuse to start.
+  after the change made the service refuse to start on a file that names one.
 - **A value written twice** that must stay equal, with nothing holding the two together.
 - **Depth that buys nothing**: a wrapper that only forwards, an abstraction with one implementation
   and no second one in sight.
