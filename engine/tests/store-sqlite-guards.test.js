@@ -124,6 +124,45 @@ test('a database the previous version made: the changed guards are replaced once
   assert.deepEqual(said, [], 'and the next open says nothing');
 }));
 
+test('a text row can only ever name the field text or snapshot', withFile(async (path) => {
+  await reopen(path);
+  const db = new DatabaseSync(path);
+  assert.throws(() => db.prepare("INSERT INTO texts (event, field, value, salt) VALUES ('e1', 'author', 'x', 'y')").run(),
+    /CHECK constraint failed/, 'a text row for any other field is nonsense: there are only two');
+  db.close();
+}));
+
+test('a database from before texts were extracted gains the columns it needs and keeps its rows', withFile(async (path, said) => {
+  // The schema exactly as the version before this one wrote it: `events` with no `text_hash` or
+  // `snapshot_hash`, and no `texts` table at all.
+  outside(path, `
+      CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT, fingerprint TEXT,
+        text TEXT, snapshot TEXT, author TEXT NOT NULL, happened_at TEXT NOT NULL, data TEXT);
+      CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, email TEXT);
+      INSERT INTO events (id, type, page, author, happened_at, text)
+        VALUES ('old', 'comment', 'A01', 'owner@example.org', '2026-01-01T00:00:00.000Z', 'a plain remark');
+  `);
+  const store = new SqliteEventStore(path);
+  try {
+    const [before] = await store.list('A01');
+    assert.equal(before.text, 'a plain remark', 'a row from before the migration keeps its own plain text');
+    const after = await store.append({ type: 'comment', page: 'A01', text: 'a new one', snapshot: null, data: null }, 'owner@example.org');
+    assert.equal(after.text, 'a new one', 'a fresh append works on a database ALTER just widened');
+  } finally { await store.close(); }
+  assert.deepEqual(said, [], 'widening the schema is not a guard repair, and says nothing');
+}));
+
+test('a text is written once: no UPDATE on the texts table goes through, from outside or in', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const written = await store.append({ ...approval, text: 'first', snapshot: null }, 'owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  assert.throws(() => db.prepare('UPDATE texts SET value = ? WHERE event = ? AND field = ?').run('forged', written.id, 'text'),
+    /not edited/, 'the guard has to refuse an edit in place, salt and all');
+  db.close();
+}));
+
 test('a repair that fails halfway leaves the database as it found it, never with a guard dropped', withFile(async (path) => {
   await reopen(path);
   outside(path, 'DROP TRIGGER events_no_delete; CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT 1; END;');

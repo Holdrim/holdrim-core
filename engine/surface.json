@@ -93,7 +93,11 @@
     "id",
     "page",
     "snapshot",
+    "snapshotRemoved",
+    "snapshotTampered",
     "text",
+    "textRemoved",
+    "textTampered",
     "type",
     "when"
   ],
@@ -101,6 +105,8 @@
     "blocks",
     "category",
     "commit",
+    "event",
+    "field",
     "from",
     "request",
     "state"

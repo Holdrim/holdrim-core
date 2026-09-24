@@ -33,6 +33,18 @@ who ran the engine from `main` before it.
   too, and, like the server, now talks to the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is
   set. The development identity (`X-Dev-Email`, `HOLDRIM_DEV_EMAIL`) is lowercased and trimmed, as
   sign-in and the identity proxy already were.
+- **An event's `text` and `snapshot` move to a table of their own, one row per event and field; the
+  event keeps only a salted hash of each.** Reading an event is unchanged — the API, the panel, the
+  CLI reading the events file or the cloud, all still get the plain value back — but four fields are
+  new on every event: `textRemoved`/`snapshotRemoved` (`{by, when}` once a field is let go on
+  purpose) and `textTampered`/`snapshotTampered` (`true` when a field's hash no longer matches
+  anything at hand and no removal accounts for it — missing with nothing to say why, read as
+  tampering, never as absence). What reads the database directly now finds `text`/`snapshot` empty
+  on a fresh row and the value in the new `texts` table (SQLite) or collection (Firestore), joined
+  by event id and field; a row from before this change keeps its own plain value and reads as it. A
+  text is removed with `EventStore.removeText(event, field, by)`, which also records a `text_removed`
+  event — not reachable through `POST /events` yet, since the door for a person to ask for one, with
+  its own permission, is a later issue.
 
 ### Added
 

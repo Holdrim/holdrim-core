@@ -23,6 +23,7 @@ import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
 import { createRoles } from '../core/roles.js';
+import { newSalt, TEXT_REMOVED } from '../api/texts.ts';
 
 const stores = [
   { name: 'memory', open: async () => new MemoryEventStore() },
@@ -162,6 +163,64 @@ forEachStore('the same address, however it is typed, is one author, and reads ba
   assert.deepEqual((await s.list('A01')).map((e) => e.author), ['typed-twice@example.org', 'typed-twice@example.org']);
 });
 
+// ===================================================================== text and snapshot, out of the event
+// docs/PRIVACY.md, section 4: the event carries a salted hash, the text lives in its own table, and
+// removing it is itself an event. The same three outcomes — present, removed on purpose, and
+// missing with no such event — have to read the same way whichever store answers.
+
+forEachStore('text and snapshot come back exactly as given, and removeText refuses a field never given', async (s) => {
+  const answered = await s.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
+    text: 'change this' }, 'r@example.org'); // no snapshot on this one
+  const [listed] = await s.list('A01');
+  assert.equal(listed.text, 'change this');
+  assert.equal(listed.snapshot, null);
+  assert.equal(listed.textRemoved, null);
+  assert.equal(listed.textTampered, false);
+  await assert.rejects(s.removeText(answered.id, 'snapshot', 'r@example.org'), /no snapshot to remove/, 'nothing to remove for a field that was never given');
+  await assert.rejects(s.removeText('no-such-event', 'text', 'r@example.org'), /no event/,
+    'an unknown event is its own refusal, not the same one a real event with nothing to remove gets');
+});
+
+forEachStore('removeText deletes the row and records who and when, as an event beside the others', async (s) => {
+  const answered = await s.append({ type: 'comment', page: 'A01', text: 'a remark to redact' }, 'r@example.org');
+  await tick();
+  const removal = await s.removeText(answered.id, 'text', 'owner@example.org');
+  assert.equal(removal.type, TEXT_REMOVED);
+  assert.deepEqual(removal.data, { event: answered.id, field: 'text' });
+  assert.equal(removal.author, 'owner@example.org');
+
+  const all = await s.list('A01');
+  assert.equal(all.length, 2, 'the removal is a new event, not a rewrite of the first');
+  const [original, removedEvent] = all;
+  assert.equal(original.id, answered.id);
+  assert.equal(original.text, null, 'the text itself is gone');
+  assert.deepEqual(original.textRemoved, { by: 'owner@example.org', when: removal.when });
+  assert.equal(original.textTampered, false, 'removed on purpose is not tampering');
+  assert.equal(removedEvent.id, removal.id);
+});
+
+forEachStore('removeText refuses a field already removed: nothing to remove twice', async (s) => {
+  const answered = await s.append({ type: 'comment', page: 'A01', text: 'once' }, 'r@example.org');
+  await s.removeText(answered.id, 'text', 'owner@example.org');
+  await assert.rejects(s.removeText(answered.id, 'text', 'owner@example.org'), /no text to remove/);
+  // The refusal has to mean it: a second, silently recorded removal would be a duplicate fact for
+  // one field let go once, and the transaction that refuses it (store-sqlite.ts, store-firestore.ts)
+  // has to have rolled all the way back, not left the removal event behind on its own.
+  assert.equal((await s.list('A01')).filter((e) => e.type === TEXT_REMOVED).length, 1,
+    'a refused removal writes no event of its own');
+});
+
+forEachStore('removing the text leaves the snapshot untouched, and the other way round', async (s) => {
+  const answered = await s.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
+    text: 'please change it', snapshot: 'the block today' }, 'r@example.org');
+  await s.removeText(answered.id, 'snapshot', 'owner@example.org');
+  const [listed] = await s.list('A01');
+  assert.equal(listed.text, 'please change it', 'untouched: only the named field was asked for');
+  assert.equal(listed.snapshot, null);
+  assert.equal(listed.snapshotRemoved.by, 'owner@example.org');
+  assert.equal(listed.textRemoved, null);
+});
+
 // ===================================================================== the stored rows, around the code
 // Asked with SQL written here, not through the store: the claim is about what the file holds.
 test('[sqlite] no e-mail is in the events table, only ids of the people table', async () => {
@@ -199,6 +258,78 @@ test('[sqlite] an event written before authors were ids still reads as the addre
   } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('[sqlite] no text or snapshot is in the events table, only the hash of each', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
+  const path = join(dir, 'events.db');
+  const s = new SqliteEventStore(path);
+  try {
+    await s.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
+      text: 'a CPF: 123.456.789-00', snapshot: 'the block as it was' }, 'r@example.org');
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      const [row] = db.prepare('SELECT * FROM events').all();
+      assert.equal(row.text, null, 'the plain text is not a column of the event');
+      assert.equal(row.snapshot, null);
+      assert.match(row.text_hash, /^[0-9a-f]{64}$/);
+      assert.match(row.snapshot_hash, /^[0-9a-f]{64}$/);
+      const [text] = db.prepare("SELECT * FROM texts WHERE event = ? AND field = 'text'").all(row.id);
+      assert.equal(text.value, 'a CPF: 123.456.789-00');
+      assert.match(text.salt, /^[0-9a-f]{32}$/);
+    } finally { db.close(); }
+  } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('[sqlite] a text deleted straight in the store, with no removal event, reads as tampered — not as absence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
+  const path = join(dir, 'events.db');
+  const s = new SqliteEventStore(path);
+  try {
+    const written = await s.append({ type: 'comment', page: 'A01', text: 'a comment' }, 'r@example.org');
+    const db = new DatabaseSync(path);
+    db.prepare('DELETE FROM texts WHERE event = ?').run(written.id); // straight in the store, no event
+    db.close();
+    const [read] = await s.list('A01');
+    assert.equal(read.text, null, 'the value cannot be shown: it is gone');
+    assert.equal(read.textRemoved, null, 'no event says it was let go on purpose');
+    assert.equal(read.textTampered, true, 'so it reads as tampering, exactly what issue #28 asks for');
+  } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('[sqlite] a text kept but edited straight in the store reads as tampered too: the hash no longer matches', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
+  const path = join(dir, 'events.db');
+  const s = new SqliteEventStore(path);
+  try {
+    const written = await s.append({ type: 'comment', page: 'A01', text: 'the real text' }, 'r@example.org');
+    const db = new DatabaseSync(path);
+    // The trigger refuses UPDATE; forging a row means going around it with DELETE + INSERT — the
+    // one thing an attacker with the file, and not this code, could still do.
+    db.prepare("DELETE FROM texts WHERE event = ? AND field = 'text'").run(written.id);
+    db.prepare("INSERT INTO texts (event, field, value, salt) VALUES (?, 'text', 'a forged text', ?)")
+      .run(written.id, newSalt());
+    db.close();
+    const [read] = await s.list('A01');
+    assert.equal(read.text, null, 'a value that does not match its own hash is not handed out as the text');
+    assert.equal(read.textTampered, true);
+  } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('[sqlite] an event written before texts were extracted still reads its own plain text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
+  const path = join(dir, 'events.db');
+  const s = new SqliteEventStore(path);
+  try {
+    const db = new DatabaseSync(path);
+    db.prepare("INSERT INTO events (id, type, page, author, happened_at, text) VALUES " +
+      "('old', 'comment', 'A01', 'owner@example.org', '2026-01-01T00:00:00.000Z', 'from before extraction')").run();
+    db.close();
+    const [read] = await s.list('A01');
+    assert.equal(read.text, 'from before extraction');
+    assert.equal(read.textRemoved, null);
+    assert.equal(read.textTampered, false, 'no hash was ever given for this row, so there is nothing to fail to verify');
+  } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 if (process.env.FIRESTORE_EMULATOR_HOST) {
   const { Firestore } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
@@ -230,9 +361,57 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
       assert.deepEqual((await s.list('A01')).map((e) => e.author), ['owner@example.org']);
     } finally { await s.close(); await db.terminate(); }
   });
+
+  test('[firestore] no text or snapshot is in the events collection, only the hash of each', async () => {
+    const project = freshFirestoreProject('holdrim-texts');
+    const s = new FirestoreEventStore(project);
+    const db = new Firestore({ projectId: project });
+    try {
+      const written = await s.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
+        text: 'a CPF: 123.456.789-00', snapshot: 'the block as it was' }, 'r@example.org');
+      const doc = (await db.collection('events').doc(written.id).get()).data();
+      assert.equal(doc.text, null, 'the plain text is not a field of the event document');
+      assert.equal(doc.snapshot, null);
+      assert.match(doc.textHash, /^[0-9a-f]{64}$/);
+      assert.match(doc.snapshotHash, /^[0-9a-f]{64}$/);
+      const row = (await db.collection('texts').doc(`${written.id}:text`).get()).data();
+      assert.equal(row.value, 'a CPF: 123.456.789-00');
+      assert.match(row.salt, /^[0-9a-f]{32}$/);
+    } finally { await s.close(); await db.terminate(); }
+  });
+
+  test('[firestore] a text deleted straight in the store, with no removal event, reads as tampered — not as absence', async () => {
+    const project = freshFirestoreProject('holdrim-texts');
+    const s = new FirestoreEventStore(project);
+    const db = new Firestore({ projectId: project });
+    try {
+      const written = await s.append({ type: 'comment', page: 'A01', text: 'a comment' }, 'r@example.org');
+      await db.collection('texts').doc(`${written.id}:text`).delete(); // straight in the store, no event
+      const [read] = await s.list('A01');
+      assert.equal(read.text, null, 'the value cannot be shown: it is gone');
+      assert.equal(read.textRemoved, null, 'no event says it was let go on purpose');
+      assert.equal(read.textTampered, true, 'so it reads as tampering, exactly what issue #28 asks for');
+    } finally { await s.close(); await db.terminate(); }
+  });
+
+  test('[firestore] an event written before texts were extracted still reads its own plain text', async () => {
+    const project = freshFirestoreProject('holdrim-texts');
+    const s = new FirestoreEventStore(project);
+    const db = new Firestore({ projectId: project });
+    try {
+      await db.collection('events').doc('old').create({ type: 'comment', page: 'A01', author: 'owner@example.org',
+        text: 'from before extraction', when: new Date('2026-01-01T00:00:00Z') });
+      const [read] = await s.list('A01');
+      assert.equal(read.text, 'from before extraction');
+      assert.equal(read.textTampered, false, 'no hash was ever given for this document, so there is nothing to fail to verify');
+    } finally { await s.close(); await db.terminate(); }
+  });
 } else {
   for (const title of ['no e-mail is in the events collection, only ids of the people collection',
-    'an event written before authors were ids still reads as the address it holds']) {
+    'an event written before authors were ids still reads as the address it holds',
+    'no text or snapshot is in the events collection, only the hash of each',
+    'a text deleted straight in the store, with no removal event, reads as tampered — not as absence',
+    'an event written before texts were extracted still reads its own plain text']) {
     test(`[firestore] ${title}`, { skip: skipped[0].why }, () => {});
   }
 }

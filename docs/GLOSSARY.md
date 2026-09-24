@@ -164,8 +164,8 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `page` | the page code (`D01`, `UC-01`) |
 | `block` | the block's `data-id`, or null when the event belongs to the page or to a decision |
 | `fingerprint` | of the block's text at that moment: an approval holds for THIS text |
-| `text` | what the person wrote |
-| `snapshot` | the text of the block at that instant |
+| `text` | what the person wrote. Stored outside the event, in a table of texts (`engine/api/texts.ts`); the event keeps a salted hash. Reads as the plain value while its row holds one, as `null` with `textRemoved: {by, when}` once `EventStore.removeText` has let it go on purpose, and as `null` with `textTampered: true` when the hash no longer matches anything at hand and no such removal explains why — missing with nothing to say why, never shown as plain absence. An event from before texts were extracted holds its own value directly, with no hash, and reads as it |
+| `snapshot` | the text of the block at that instant. The same table, the same hash, the same three readings as `text` — `snapshotRemoved`, `snapshotTampered` |
 | `author` | who made it. Stored as the person's opaque id (`p_` and 24 hex characters) from the people table, never as an e-mail; every reader gets the e-mail back, as verified by whichever identity is in charge — or the id, once the person is forgotten. An event written before ids holds the e-mail itself, and reads as it |
 | `when` | ISO, the server's clock. Stored in the column `happened_at`, since `WHEN` is an SQL keyword |
 | `data` | a small map of scalars: `request`, `state` and `from` on `request_state`, `commit` and `blocks` on an applied one, `category` on a request, `related` on a request that follows an approved one |
@@ -180,6 +180,7 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `decision_reply` | an answer to an open decision. The API accepts it; nothing in the panel writes one yet |
 | `request_state` | a request moving from one state of the cycle to another |
 | `supplement` | detail added to a request by whoever asked |
+| `text_removed` | a `text` or `snapshot` let go on purpose, naming the event and the field in `data`. Written only by `EventStore.removeText`, never through `POST /events` — deliberately not in `EVENT_TYPES`, since the removal has to delete the row in the same step, which that door does not do |
 
 ## Request categories
 
@@ -199,6 +200,7 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | Table | Where | What it is |
 |---|---|---|
 | `events` | `engine/api/store-sqlite.ts` | the facts. Triggers `events_no_update` and `events_no_delete` refuse to alter or erase a row |
+| `texts` | `engine/api/store-sqlite.ts` | an event's `text` and `snapshot`, one row per event and field: `value`, `salt`. Trigger `texts_no_update` refuses to edit a row; `EventStore.removeText` is the only code that deletes one, and only together with the event that records why |
 | `blocks` | `engine/api/index-store.ts` | derived: every block, its kind, its fingerprint |
 | `dependencies` | `engine/api/index-store.ts` | derived: `block` → `depends_on`, with the `severity` of the pair |
 | `issues` | `engine/api/index-store.ts` | derived: what each block is `missing` |

@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
+import { hashText, newSalt, noText, textKey, withTexts, TEXT_FIELDS, TEXT_REMOVED, type TextField } from './texts.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -50,6 +51,13 @@ export const GUARDS: Record<string, string> = {
     WHEN EXISTS (SELECT 1 FROM people WHERE id = NEW.id OR rowid = NEW.rowid
                  OR (NEW.email IS NOT NULL AND email = NEW.email))
     BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
+  // A text is written once, by `append`, and afterwards only removed, by `removeText` — never
+  // edited in place. Without this, a value could be swapped for another while keeping the same
+  // salt, and unless the two happened to hash alike (infeasible) `withTexts` would call it
+  // tampered — which is the right answer for an edit made straight in the database, but a trigger
+  // that refuses the edit outright is one less way for that to depend on the hash comparing right.
+  texts_no_update: `BEFORE UPDATE ON texts
+    BEGIN SELECT RAISE(ABORT, 'a text is not edited: removeText deletes it, and records why'); END`,
 };
 
 /**
@@ -73,7 +81,7 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
   const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
   // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
   const held = () => db.prepare(
-    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people')"
+    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people', 'texts')"
   ).all() as { name: string; sql: string }[];
   const inPlace = (rows: { name: string; sql: string }[]) =>
     rows.length === want.size &&
@@ -106,6 +114,19 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
     db.exec('ROLLBACK');
     throw err;
   }
+}
+
+/**
+ * Adds a column to a table that does not already have it — the migration path for a database a
+ * version before this one made. `CREATE TABLE IF NOT EXISTS` only decides whether to create the
+ * table; it does not add a column to one that already exists, so a database made before
+ * `text_hash`/`snapshot_hash` existed would otherwise open with the old, narrower `events` and every
+ * read of the new columns would fail. `type` is never a caller's value — always one of the two
+ * literals below — so building the statement from it is safe.
+ */
+function ensureColumn(db: DatabaseSync, table: string, column: string, type: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!columns.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
 export class SqliteEventStore implements EventStore {
@@ -154,6 +175,12 @@ export class SqliteEventStore implements EventStore {
       -- and rebuilt on every "holdrim index", while this table is fact and the database refuses
       -- to erase it. See engine/api/index-store.ts — one definition, and the difference explicit.
     `);
+    // A database from before texts were extracted has `events` with no such columns at all — the
+    // one column `ensureColumn` cannot add by `CREATE TABLE IF NOT EXISTS` alone. Its `text` and
+    // `snapshot` columns stay exactly as that version wrote them, plain, and read as such: no hash,
+    // so `withTexts` returns a pre-extraction row's own value unchanged (docs/PRIVACY.md, section 4).
+    ensureColumn(this.#db, 'events', 'text_hash', 'TEXT');
+    ensureColumn(this.#db, 'events', 'snapshot_hash', 'TEXT');
 
     // The people table: an id and an e-mail, next to the events that will name the id
     // (docs/PRIVACY.md, section 1). The unique index covers only rows that still hold an address,
@@ -164,6 +191,20 @@ export class SqliteEventStore implements EventStore {
         email  TEXT
       );
       CREATE UNIQUE INDEX IF NOT EXISTS people_by_email ON people (email) WHERE email IS NOT NULL;
+    `);
+
+    // The texts table: one row per event and field, holding what `events.text_hash` and
+    // `events.snapshot_hash` are a hash OF (docs/PRIVACY.md, section 4). `removeText` is the only
+    // code that deletes a row — the trigger only refuses UPDATE — and it always deletes exactly one
+    // together with recording why, never on its own.
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS texts (
+        event  TEXT NOT NULL REFERENCES events (id),
+        field  TEXT NOT NULL CHECK (field IN ('text', 'snapshot')),
+        value  TEXT NOT NULL,
+        salt   TEXT NOT NULL,
+        PRIMARY KEY (event, field)
+      );
     `);
 
     installGuards(this.#db);
@@ -209,17 +250,77 @@ export class SqliteEventStore implements EventStore {
   // The column holds the person's id, never the address: the address lives in `people` alone, where
   // forgetting can empty it (docs/PRIVACY.md, section 1). The answer names the address, as a list
   // a moment later does.
+  //
+  // `text` and `snapshot` are written NULL: their values move to `texts`, and the columns keep only
+  // the two's hash. Both the event row and its texts rows land in one transaction — an event with a
+  // hash and no row to match, from a crash between the two, is exactly what `withTexts` cannot tell
+  // from tampering (docs/PRIVACY.md, section 4).
   async append(event: NewEvent, author: string): Promise<Event> {
-    const e = stored(event, crypto.randomUUID().replace(/-/g, ''), await this.personFor(author), new Date().toISOString());
-    const r = this.#db.prepare(
-      `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, author, happened_at, data)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(e.id, e.type, e.page, e.block ?? null, e.fingerprint ?? null, e.text ?? null,
-          e.snapshot ?? null, e.author, e.when, e.data ? JSON.stringify(e.data) : null);
-    // A trigger that answers RAISE(IGNORE) drops the row and reports no error: without this, an
-    // approval that was never written would be handed back as recorded.
-    if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
-    return { ...e, author: personEmail(author) };
+    const personId = await this.personFor(author);
+    const id = crypto.randomUUID().replace(/-/g, '');
+    const when = new Date().toISOString();
+    const hashes: Record<TextField, string | null> = { text: null, snapshot: null };
+    const rows: { field: TextField; value: string; salt: string }[] = [];
+    for (const field of TEXT_FIELDS) {
+      const value = event[field];
+      if (value == null) continue;
+      const salt = newSalt();
+      hashes[field] = hashText(value, salt);
+      rows.push({ field, value, salt });
+    }
+    const e = stored({ ...event, text: null, snapshot: null }, id, personId, when);
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const r = this.#db.prepare(
+        `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash, author, happened_at, data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(e.id, e.type, e.page, e.block ?? null, e.fingerprint ?? null, null, null,
+            hashes.text, hashes.snapshot, e.author, e.when, e.data ? JSON.stringify(e.data) : null);
+      // A trigger that answers RAISE(IGNORE) drops the row and reports no error: without this, an
+      // approval that was never written would be handed back as recorded.
+      if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
+      for (const t of rows) {
+        this.#db.prepare('INSERT INTO texts (event, field, value, salt) VALUES (?, ?, ?, ?)').run(id, t.field, t.value, t.salt);
+      }
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
+    // a round trip through `withTexts` — are what the caller of a fresh append gets back.
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
+  }
+
+  async removeText(event: string, field: TextField, by: string): Promise<Event> {
+    const original = this.#db.prepare('SELECT page, block FROM events WHERE id = ?').get(event) as
+      { page: string; block: string | null } | undefined;
+    if (!original) throw new Error(`no event ${event}`);
+    const personId = await this.personFor(by);
+    const id = crypto.randomUUID().replace(/-/g, '');
+    const when = new Date().toISOString();
+    const data = { event, field };
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      // The delete and the removal event in one transaction, for the reason `append` gives: a crash
+      // between the two must not leave one without the other.
+      const del = this.#db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(event, field);
+      if (del.changes !== 1) throw noText(event, field);
+      const r = this.#db.prepare(
+        `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash, author, happened_at, data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, TEXT_REMOVED, original.page, original.block ?? null, null, null, null, null, null, personId, when, JSON.stringify(data));
+      if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+    return {
+      id, type: TEXT_REMOVED, page: original.page, block: original.block ?? null, fingerprint: null,
+      text: null, snapshot: null, textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+      author: personEmail(by), when, data,
+    };
   }
 
   async list(page?: string | null): Promise<Event[]> {
@@ -233,11 +334,19 @@ export class SqliteEventStore implements EventStore {
     // before its event was written, so a read of the people that starts now holds it.
     const people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
       .map((p) => [p.id, p.email]));
-    return withAuthors((rows as Record<string, string | null>[]).map((r) => ({
+    const events = withAuthors((rows as Record<string, string | null>[]).map((r) => ({
       id: r.id!, type: r.type!, page: r.page!, block: r.block, fingerprint: r.fingerprint,
-      text: r.text, snapshot: r.snapshot, author: r.author!, when: r.happened_at!,
-      data: r.data ? JSON.parse(r.data) : null,
+      text: r.text, snapshot: r.snapshot, textHash: r.text_hash, snapshotHash: r.snapshot_hash,
+      author: r.author!, when: r.happened_at!, data: r.data ? JSON.parse(r.data) : null,
+      textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
     })), people);
+    // The texts after the events, for the same reason the people are: `append` writes an event's
+    // texts rows in the same transaction as the event itself, so every hash a read of the events
+    // can see already has its row in a read of the texts that starts after it.
+    const texts = new Map((this.#db.prepare('SELECT event, field, value, salt FROM texts').all() as
+      { event: string; field: TextField; value: string; salt: string }[])
+      .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt }]));
+    return withTexts(events, texts);
   }
 
   async close(): Promise<void> { this.#db.close(); }

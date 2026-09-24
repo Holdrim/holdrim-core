@@ -195,3 +195,8 @@ jobs:
 
       - name: Every reader of events names authors the same way
         run: node --test engine/tests/authors.test.js
+
+      # `text` and `snapshot`, out of the event and into their own table — present, removed on
+      # purpose, or tampered with — read the same way by every store and by the CLI's own readers.
+      - name: Every reader of events resolves text and snapshot the same way
+        run: node --test engine/tests/texts.test.js

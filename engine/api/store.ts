@@ -1,5 +1,7 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
+import { hashText, newSalt, noText, textKey, withTexts, TEXT_FIELDS, TEXT_REMOVED,
+  type RawEvent, type TextField, type TextRow } from './texts.ts';
 
 /*
  * The Firestore store lives in store-firestore.ts, loaded only when HOLDRIM_EVENTS=firestore.
@@ -11,21 +13,58 @@ import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './p
 
 /** Only for running and testing on the machine. Persists nothing. */
 export class MemoryEventStore implements EventStore {
-  #events: Event[] = [];
+  #events: RawEvent<Event>[] = [];
+
+  // The text table beside the events, as docs/PRIVACY.md, section 4 asks: value and salt, keyed by
+  // event and field. What the event itself keeps is the hash alone, on `#events` — never here.
+  #texts = new Map<string, TextRow>();
 
   // The author goes in as the person's id and comes out as their address, as in every store:
   // what is kept names nobody once the person is forgotten (docs/PRIVACY.md, section 1).
   async append(event: NewEvent, author: string): Promise<Event> {
-    const e = stored(event, crypto.randomUUID().replace(/-/g, ''), await this.personFor(author), new Date().toISOString());
-    this.#events.push(e);
-    return { ...e, author: personEmail(author) };
+    const id = crypto.randomUUID().replace(/-/g, '');
+    const hashes = this.#putTexts(id, event);
+    const e = stored({ ...event, text: null, snapshot: null }, id, await this.personFor(author), new Date().toISOString());
+    this.#events.push({ ...e, textHash: hashes.text, snapshotHash: hashes.snapshot });
+    // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
+    // a round trip through `withTexts` — are what the caller of a fresh append gets back.
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
+  }
+
+  /** Salts and hashes each field the event was given, writes its row, and returns the hashes. */
+  #putTexts(event: string, fields: { text?: string | null; snapshot?: string | null }): Record<TextField, string | null> {
+    const hashes: Record<TextField, string | null> = { text: null, snapshot: null };
+    for (const field of TEXT_FIELDS) {
+      const value = fields[field];
+      if (value == null) continue;
+      const salt = newSalt();
+      hashes[field] = hashText(value, salt);
+      this.#texts.set(textKey(event, field), { value, salt });
+    }
+    return hashes;
   }
 
   async list(page?: string | null): Promise<Event[]> {
     const people = new Map([...this.#people.values()].map((p) => [p.id, p.email]));
-    return withAuthors(this.#events
+    const events = withAuthors(this.#events
       .filter((e) => page == null || e.page === page)
       .sort((a, b) => a.when.localeCompare(b.when)), people);
+    return withTexts(events, this.#texts);
+  }
+
+  async removeText(event: string, field: TextField, by: string): Promise<Event> {
+    // The event before the row, as the other two stores answer it: an unknown event is "no event",
+    // not the same "nothing to remove" a real field already gone would give.
+    const original = this.#events.find((e) => e.id === event);
+    if (!original) throw new Error(`no event ${event}`);
+    const key = textKey(event, field);
+    if (!this.#texts.has(key)) throw noText(event, field);
+    // Deleted before the removal is recorded. Nothing here persists past the process, so there is
+    // no crash for the two to disagree across — the gap a real database closes with a transaction
+    // (store-sqlite.ts, store-firestore.ts) is one this store cannot have in the first place.
+    this.#texts.delete(key);
+    return this.append({ type: TEXT_REMOVED, page: original.page, block: original.block ?? null,
+      data: { event, field } }, by);
   }
 
   // The people table. No database to hold the rule here, so `setEmail` is the only code that

@@ -3,6 +3,10 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
 import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
+import { textKey, withTexts, type RawEvent as Raw, type TextField, type TextRow } from '../api/texts.ts';
+
+/** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
+type RawEvent = Raw<Event>;
 
 const exec = promisify(execFile);
 
@@ -179,9 +183,10 @@ export class Source {
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      const rows = db.prepare(
-        'SELECT id, type, page, block, fingerprint, text, snapshot, author, happened_at, data' +
-        '  FROM events ORDER BY happened_at').all() as Record<string, any>[];
+      // `*`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no such
+      // columns at all, and naming them would fail the query outright rather than read the file's
+      // own, older shape — the same reason `hasPeople` below asks before it reads that table.
+      const rows = db.prepare('SELECT * FROM events ORDER BY happened_at').all() as Record<string, any>[];
       // A file written before the people table existed has no such table, and every author in it
       // is an address: an empty table resolves none of them, which is what they need. The read
       // is the same rule the server's store applies, through the same resolver.
@@ -190,12 +195,24 @@ export class Source {
         ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
           .map((p) => [p.id, p.email ?? null])
         : []);
-      return withAuthors(rows.map((row) => ({
+      const events = withAuthors(rows.map((row) => ({
         id: String(row.id), type: String(row.type), page: String(row.page),
         block: row.block ?? null, fingerprint: row.fingerprint ?? null, text: row.text ?? null,
-        snapshot: row.snapshot ?? null, author: String(row.author), when: String(row.happened_at),
+        snapshot: row.snapshot ?? null, textHash: row.text_hash ?? null, snapshotHash: row.snapshot_hash ?? null,
+        author: String(row.author), when: String(row.happened_at),
         data: row.data ? JSON.parse(String(row.data)) : null,
+        textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
       })), people);
+      // A file written before texts were extracted has no `texts` table either, and every row's
+      // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
+      // an empty people map gives an author (docs/PRIVACY.md, section 4).
+      const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
+      const texts = new Map(hasTexts
+        ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
+            { event: string; field: TextField; value: string; salt: string }[])
+          .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt } as TextRow])
+        : []);
+      return withTexts(events, texts);
     } finally {
       db.close();
     }
@@ -219,7 +236,14 @@ export class Source {
     // a person is made before their first event, so every author read above is in this read.
     const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
       [String(d.name).split('/').pop()!, (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null]));
-    return withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
+    const events = withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
+    // The texts after the events, as the server's Firestore store reads them, for the same reason.
+    const texts = new Map((await this.#collection(headers, 'texts')).map((d) => {
+      const f = d.fields ?? {};
+      return [textKey(f.event?.stringValue, f.field?.stringValue),
+        { value: f.value?.stringValue, salt: f.salt?.stringValue } as TextRow];
+    }));
+    return withTexts(events, texts);
   }
 
   /** Every document of one collection, over as many pages as the cloud answers in. */
@@ -338,7 +362,7 @@ export class Source {
     return id;
   }
 
-  #fromFirestore(d: Record<string, any>): Event {
+  #fromFirestore(d: Record<string, any>): RawEvent {
     const f = d.fields ?? {};
     const s = (k: string) => f[k]?.stringValue ?? null;
     const data: Record<string, string> = {};
@@ -348,9 +372,14 @@ export class Source {
     return {
       id: String(d.name).split('/').pop()!,
       type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
-      text: s('text'), snapshot: s('snapshot'), author: s('author')!,
+      // Absent on a document from before texts were extracted, or one the CLI's own `add` wrote —
+      // that path writes straight to the cloud with no hash, a gap docs/PRIVACY.md, section 3 already
+      // names — and `text`/`snapshot` there already hold their own plain value: read as such.
+      text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
+      author: s('author')!,
       when: f.when?.timestampValue ?? '',
       data: Object.keys(data).length ? data : null,
+      textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
     };
   }
 }
