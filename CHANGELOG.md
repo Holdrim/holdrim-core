@@ -10,7 +10,22 @@ first, under **Breaking**, with what to change.
 
 ## [0.1.0] — unreleased
 
-The first version. There is nothing before it to break.
+The first version. Nothing released comes before it; what follows under **Breaking** is for anyone
+who ran the engine from `main` before it.
+
+### Breaking
+
+- **`owner` and `admins` are no longer read from `holdrim.json`, and a `holdrim.json` that names
+  `owner`, `admins` or `locks` now refuses to start the service and to run the CLI.** Authority is
+  set by the deployment: whoever can commit to the file — or the agent applying an approved
+  request — is not whoever deploys it. What to change: delete those keys from `holdrim.json`, set
+  `HOLDRIM_OWNER` (one e-mail) and `HOLDRIM_ADMINS` (comma separated) where the service runs, and
+  export the same two wherever `holdrim` runs (`sync`, `list`, `state` refuse without the owner).
+  `holdrim sync` now prints the owner it used and that it came from `HOLDRIM_OWNER`.
+  `bash engine/run-local.sh` names `you@example.org` as the owner when the variable is unset.
+  `owner` and `admins` leave the `config-keys` of `engine/surface.json`.
+
+### Added
 
 - **Approvals that stop holding.** Every block of a page is approved against its exact text. A
   block whose text changed turns 🟡, and one whose text is intact but whose dependency moved

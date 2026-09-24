@@ -5,28 +5,34 @@
 # Usage: bash engine/run-local.sh              → http://localhost:8095
 #        bash engine/run-local.sh examples/cash-register   → another project, the same way
 #        ACTING_AS=reviewer@example.org bash engine/run-local.sh   → simulates another person
+#        HOLDRIM_OWNER=ana@example.org bash engine/run-local.sh    → another owner (default: you@example.org)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # The project to serve: this repository's own example by default, or any folder with a holdrim.json.
 # Without it, the README's red example would need Docker for the one thing a newcomer most needs to see.
 SITE=$(cd "${1:-$ROOT}" 2>/dev/null && pwd) || { echo "✗ no such folder: $1"; exit 1; }
 cd "$ROOT"
-# Who approves and who you pretend to be come from the project's holdrim.json — the engine has no fixed e-mail.
+[ -f "$SITE/holdrim.json" ] || { echo "✗ no holdrim.json in $SITE: is this a project folder?"; exit 1; }
+# Who you pretend to be and the port come from the project's holdrim.json — the engine has no fixed
+# e-mail. A file that readConfig refuses (one naming an owner, say) prints its reason and stops here:
+# silenced, the runner would go on with empty values and blame something else.
 read_config() { node -e "
 const {readConfig}=await import('./engine/core/config.js');
 const fs=await import('node:fs');
-const c=readConfig(process.argv[2],{readFile:p=>fs.readFileSync(p,'utf8')},process.env);
+let c; try { c=readConfig(process.argv[2],{readFile:p=>fs.readFileSync(p,'utf8')},process.env); }
+catch (e) { console.log('✗ '+e.message); process.exit(1); }
 console.log(c[process.argv[1]] ?? '');" --input-type=module "$1" "$SITE" 2>/dev/null; }
 # readConfig takes a holdrim.json it cannot parse for no file at all, which is right for the service
-# and wrong here: the owner check below would then blame a missing owner for a trailing comma.
-UNREADABLE=$(read_config unreadable)
+# and wrong here: the runner would then go on with the file's settings missing and never say why.
+UNREADABLE=$(read_config unreadable) || { echo "$UNREADABLE"; exit 1; }
 [ -z "$UNREADABLE" ] || { echo "✗ $SITE/holdrim.json is not valid JSON: $UNREADABLE"; exit 1; }
-OWNER=${HOLDRIM_OWNER:-$(read_config owner)}
+# The owner is the deployment's to name, never the file's, and here this runner is the deployment:
+# events in memory, gone when it stops, so a placeholder owner can lock nothing anybody keeps.
+# Without a default, "straight in" would first need a variable nobody reading the README has set.
+OWNER=${HOLDRIM_OWNER:-you@example.org}; OWNER_FROM=${HOLDRIM_OWNER:+HOLDRIM_OWNER}; OWNER_FROM=${OWNER_FROM:-this runner}
 # A project that names nobody to act as is opened as its owner: "straight in", as promised.
 ACTING_AS=${ACTING_AS:-${HOLDRIM_DEV_EMAIL:-$(read_config actAs)}}; ACTING_AS=${ACTING_AS:-$OWNER}
 PORT=${PORT:-$(read_config port)}; PORT=${PORT:-8095}
-[ -n "$OWNER" ] || [ -f "$SITE/holdrim.json" ] || { echo "✗ no holdrim.json in $SITE: is this a project folder?"; exit 1; }
-[ -n "$OWNER" ] || { echo "✗ missing the owner: put it in holdrim.json or in HOLDRIM_OWNER."; exit 1; }
 
 # If the port is already in use, the OLD process keeps answering — and you end up testing the
 # previous binary without knowing it, and may undo a fix that is actually correct because the old
@@ -52,7 +58,24 @@ fi
 # documented way to run it locally would be dead, silently, and no test would notice because no
 # test runs this file.
 
-echo "Holdrim local → http://localhost:$PORT   (you are acting as: $ACTING_AS · test data, disappears when you stop)"
-exec env HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER="$OWNER" \
-  HOLDRIM_DEV_EMAIL="$ACTING_AS" HOLDRIM_SITE="$SITE" PORT="$PORT" \
+echo "Holdrim local → http://localhost:$PORT   (you are acting as: $ACTING_AS · owner: $OWNER, from $OWNER_FROM · test data, disappears when you stop)"
+# This runner's one promise is "test data, disappears when you stop" — a shell that already has
+# HOLDRIM_EVENTS=sqlite or =firestore, or HOLDRIM_IDENTITY=password, set for some OTHER project
+# would otherwise carry straight through to server.ts, which prefers the environment over this
+# runner's own defaults (the local default only applies when the variable is absent at all). Then
+# the placeholder owner above — a real e-mail nobody chose on purpose — would get first-access on a
+# store that outlives this process: a permanent account, made by a runner whose README entry says
+# "no login". Pinning here, in the exec, beats anything already exported: `env NAME=value` always
+# wins for the child, regardless of what the caller's shell had set.
+#
+# HOLDRIM_EVENTS_PATH, HOLDRIM_USERS and HOLDRIM_USERS_PATH are left alone, on purpose, not merely
+# forgotten. server.ts only reads HOLDRIM_EVENTS_PATH when eventsKind is 'sqlite', and HOLDRIM_USERS
+# / HOLDRIM_USERS_PATH only when identityKind is 'password' — and both pins above rule those out
+# before either is ever looked at. Unsetting them here would be a claim this file cannot back up:
+# nothing observes whether a variable reached the child unset versus merely unread, so a dropped
+# `-u` would go on passing every proof forever, and this comment would go on describing a guard
+# that guards nothing. Two pins are the whole claim; a value sitting in the environment that the
+# code path never reaches is not a leak.
+exec env HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_EVENTS=memory HOLDRIM_IDENTITY=dev \
+  HOLDRIM_OWNER="$OWNER" HOLDRIM_DEV_EMAIL="$ACTING_AS" HOLDRIM_SITE="$SITE" PORT="$PORT" \
   node engine/api/server.ts

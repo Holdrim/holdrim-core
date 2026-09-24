@@ -4,8 +4,7 @@ import { join, extname, normalize, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
-import { readConfig } from '../core/config.js';
-import { createRoles } from '../core/roles.js';
+import { createRoles, rolesOf } from '../core/roles.js';
 import { overLimit, validCommit } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
@@ -20,7 +19,7 @@ import { withPanelNonce, pagePolicy, FILE_POLICY } from './content-policy.ts';
 import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
 import { renderPeoplePage } from './people-page.ts';
 import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
-import { readBlocks } from '../cli/pages.ts';
+import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { loadTheme } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
@@ -37,9 +36,23 @@ import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types
  */
 
 // The PROJECT's configuration comes from holdrim.json; environment variables beat the file. The
-// engine knows no product name, no e-mail and no cloud project — it asks.
+// engine knows no product name, no e-mail and no cloud project — it asks. The owner and the admins
+// come from the environment alone, and a holdrim.json that names them refuses to load.
 const projectRoot = process.env.HOLDRIM_SITE ?? join(import.meta.dirname, '..', '..');
-const project = readConfig(projectRoot, { readFile: (p: string) => readFileSync(p, 'utf8') }, process.env);
+/** The same line, the same exit, for every configuration the service refuses before it listens. */
+function refuseToStart(error: unknown): never {
+  // ⚠️ English, hard-coded, and NOT through i18n. This prints before the server listens, so there
+  // is no request, no session and nobody whose language we could have chosen — the same reason the
+  // first-access banner below stays English. See the comment at the top of engine/core/i18n.js.
+  console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
+  process.exit(1);
+}
+// Read through `ofProject`, the CLI's own reader, so the owner the service boots with and the one
+// `holdrim sync` locks with come out of one call, not two that merely look alike. Guarded because it
+// throws on a holdrim.json that names an owner: unguarded, that refusal would be a stack trace.
+const project = (() => {
+  try { return ofProject(projectRoot); } catch (error) { return refuseToStart(error); }
+})();
 
 // The sentences the reviewer reads. The core returns keys; here they become words, in the language
 // of whoever is reading. Logs and boot errors do NOT come through here, on purpose — a log is
@@ -82,7 +95,6 @@ const cfg = {
   site: projectRoot,
   project: project.project,
   owner: project.owner,
-  admins: project.admins,
   mode: process.env.HOLDRIM_MODE,
   environment: process.env.NODE_ENV === 'development' ? 'Development' : (process.env.HOLDRIM_ENVIRONMENT ?? 'Production'),
 };
@@ -109,7 +121,7 @@ const cycle = createCycle(JSON.parse(readFileSync(new URL('../cycle.json', impor
 try {
   // No default, on purpose: in a distributed package, an e-mail of ours here would make anyone who
   // forgot to configure it start a service with OUR owner.
-  roles = createRoles(cfg.owner, cfg.admins);
+  roles = rolesOf(project);
   // The proxy identity is only built when it is the one in charge: demanding its audience from
   // someone logging in with a password would block the "start it and use it" case, which is the
   // whole point of password identity.
@@ -124,11 +136,7 @@ try {
     throw new Error(`HOLDRIM_IDENTITY="${identityKind}" does not exist (use password, iap or dev)`);
   }
 } catch (error) {
-  // ⚠️ English, hard-coded, and NOT through i18n. This prints before the server listens, so there
-  // is no request, no session and nobody whose language we could have chosen — the same reason the
-  // first-access banner below stays English. See the comment at the top of engine/core/i18n.js.
-  console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
-  process.exit(1);
+  refuseToStart(error);
 }
 
 /**

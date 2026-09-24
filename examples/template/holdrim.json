@@ -1,6 +1,8 @@
 {
   "_read": [
-    "THE TEMPLATE. Copy this folder into your project, swap the owner, and start writing.",
+    "THE TEMPLATE. Copy this folder into your project, set the name, and start writing. The owner",
+    "is set where you deploy, in HOLDRIM_OWNER, never here: a holdrim.json with `owner` or `admins`",
+    "refuses to load, because whoever commits to this file is not whoever deploys it.",
     "",
     "After 00-kinds, the catalogue of what a block can be, the ten sections are the order in which",
     "product documentation usually gets on its feet:",
@@ -13,7 +15,6 @@
     "checks/ holds the test that Y01's rule names in data-proof. Run it with: node --test 'checks/*.test.js'"
   ],
   "name": "Template",
-  "owner": "you@example.org",
 
   "theme": {
     "brand": "#2E6E5B",

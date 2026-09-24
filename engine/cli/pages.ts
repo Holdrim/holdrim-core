@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readConfig } from '../core/config.js';
+import { rolesOf } from '../core/roles.js';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { kindOf, whatIsMissing } from '../core/kinds.js';
@@ -43,6 +44,18 @@ export interface Block {
  */
 export function ofProject(root: string) {
   return readConfig(root, { readFile: (p: string) => readFileSync(p, 'utf8') }, process.env);
+}
+
+/**
+ * Who the owner and the admins of the project at `root` are, resolved exactly as the server
+ * resolves them: `ofProject`, then `rolesOf`. Zero owners or two throw, here as at boot.
+ *
+ * ⚠️ Not `process.env.HOLDRIM_OWNER` read here. The variables are the only source, but reading them
+ * in a second place is a second statement of where authority comes from, and the day one of the two
+ * changes the CLI and the server disagree about whose ✓ locks and whose request needs no triage.
+ */
+export function projectRoles(root: string) {
+  return rolesOf(ofProject(root));
 }
 
 /**

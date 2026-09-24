@@ -107,8 +107,8 @@ forgot one.
 
 | Concept | What it is |
 |---|---|
-| **owner** | exactly one, always the same: the founding architect. Can do everything, including creating the roles. Zero or more than one **does not bring the service up** — it is an invariant, not a convention. It comes from `HOLDRIM_OWNER` (or `owner` in `holdrim.json`), never from a database column |
-| **admin** | can do everything the owner does, except be the owner. A role of the **project**, not of the method |
+| **owner** | exactly one, always the same: the founding architect. Can do everything, including creating the roles. Zero or more than one **does not bring the service up** — it is an invariant, not a convention. It comes from `HOLDRIM_OWNER`, never from a database column and never from `holdrim.json`, which refuses to load if it names one |
+| **admin** | can do everything the owner does, except be the owner. A role of the **project**, not of the method. Named by `HOLDRIM_ADMINS`, and only there |
 | **other** | any other allowed identity |
 | **founder** | a tag that grants the power to see the whole documentation. It sits **on the role, not on the person**, so the second holder of that role sees it too, without an exception. ⚠️ A concept of the method only: no code reads it yet |
 | **capability** | what the engine actually asks about: **can approve?**, **can triage?** (`canApprove`, `canTriage`). Role names change with every company; capabilities do not |
@@ -136,7 +136,7 @@ accident.
 
 | Concept | What it is |
 |---|---|
-| **config** | the configuration of the project using the method, in `holdrim.json` at the root. It exists so the **engine** does not know the product. Environment variables beat the file, so the same repository serves more than one environment — except `language`, where `HOLDRIM_LANGUAGE` counts only when the file names none. `engine/core/config.js` |
+| **config** | the configuration of the project using the method, in `holdrim.json` at the root. It exists so the **engine** does not know the product. Environment variables beat the file, so the same repository serves more than one environment — except `language`, where `HOLDRIM_LANGUAGE` counts only when the file names none. Authority is not in it at all: a file naming `owner`, `admins` or `locks` refuses to load. `engine/core/config.js` |
 | **theme** | how the project dresses the engine: `theme.brand`, `theme.logo`, `theme.name` in `holdrim.json`. ⚠️ Untrusted input — it lands inside CSS and HTML, so it is validated in `engine/api/theme.ts`, next to the code that writes it |
 | **i18n** | the core returns **keys**; the edge turns them into sentences, in the reader's language. `engine/core/i18n.js` |
 | **brief** | everything an agent needs to act on one approved request, in plain text. `holdrim apply <id>` writes it and hands it to the person's own agent CLI. `engine/cli/agent.ts` |

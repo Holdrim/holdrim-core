@@ -17,11 +17,16 @@ import { readBlocks } from '../cli/pages.ts';
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
 
-/** Runs the CLI and returns what the user would see plus the exit code. */
+/**
+ * Runs the CLI and returns what the user would see plus the exit code. The owner is set the way a
+ * deployment sets it, in HOLDRIM_OWNER: holdrim.json cannot name one. Set here rather than inherited,
+ * so an owner exported in the shell running the suite does not decide whose triage counts.
+ */
 function run(args, cwd, env = {}) {
   try {
     return { out: execFileSync(process.execPath, [CLI, ...args],
-      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } }), code: 0 };
+      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '', ...env } }), code: 0 };
   } catch (e) {
     return { out: String(e.stdout ?? '') + String(e.stderr ?? ''), code: e.status };
   }
@@ -138,7 +143,7 @@ test('list, show, impact, summary and apply --dry-run read the events file with 
     text: 'still open', snapshot: null, data: null }, 'reviewer@example.org');
   await store.close();
 
-  // The owner comes from the project's holdrim.json (you@example.org), so their triage counts.
+  // The owner comes from HOLDRIM_OWNER (you@example.org, set by `run`), so their triage counts.
   const list = run(['list', '--db', db], dir);
   assert.equal(list.code, 0);
   assert.match(list.out, new RegExp(`${request.id.slice(0, 8)}\\s+Approved\\s+A01\\.1\\.2`));

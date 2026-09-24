@@ -113,7 +113,7 @@ test('the keys of holdrim.json are the ones engine/surface.json lists', () => {
   }
   // A section is not a key of its own: `cloud` is only ever the place `cloud.project` lives.
   const leaves = [...paths].filter((p) => ![...paths].some((q) => q.startsWith(`${p}.`)));
-  assert.ok(leaves.includes('owner') && leaves.includes('cloud.project'), 'the config reading found nothing');
+  assert.ok(leaves.includes('name') && leaves.includes('cloud.project'), 'the config reading found nothing');
   sameAs('holdrim.json keys', leaves, SURFACE['config-keys']);
 });
 

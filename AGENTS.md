@@ -84,8 +84,11 @@ next.
 
 Each has a test. If you change the code around one, run the contract test and read it.
 
-- **Exactly one owner**, and it comes from `HOLDRIM_OWNER`, never from a database column. Zero or two
-  and the service refuses to start. (`engine/core/roles.js`)
+- **Exactly one owner**, and it comes from `HOLDRIM_OWNER`, never from a database column and never
+  from `holdrim.json`: the admins likewise, from `HOLDRIM_ADMINS`. Zero or two owners and the service
+  refuses to start; a `holdrim.json` naming `owner`, `admins` or `locks` refuses too, on the server
+  and in the CLI, because whoever commits to the file is not whoever deploys.
+  (`engine/core/roles.js`, `engine/core/config.js`)
 - **Nobody but the owner resets or creates the owner's account.** Both routes are guarded, because
   guarding only one leaves the other open — an admin could create the owner's account during a
   handover and read the generated password out of the response.

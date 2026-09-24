@@ -1,7 +1,7 @@
 {
   "_read": [
     "The configuration of the PROJECT that uses the method. It is the only file whoever adopts",
-    "Holdrim has to edit: the name, who approves, and where the content is.",
+    "Holdrim has to edit: the name and where the content is.",
     "The engine (engine/, served by the image) knows none of this — it asks here.",
     "Environment variables beat this file, so one repository can serve more than one environment —",
     "except `language`, where HOLDRIM_LANGUAGE counts only when the file names none.",
@@ -12,11 +12,12 @@
   "name": "Holdrim",
   "_name": "Shown in page titles and in the menu.",
 
-  "owner": "you@example.org",
-  "_owner": "ONE e-mail. It is their ✓ that becomes a lock in the repository. Zero or two do not bring the service up.",
-
-  "admins": [],
-  "_admins": "Can do everything the owner does, except be the owner. Empty is the normal case.",
+  "_owner": [
+    "WHO APPROVES IS NOT HERE, and may not be: a file that names `owner`, `admins` or `locks` refuses",
+    "to load. Authority is set by the deployment, in HOLDRIM_OWNER (ONE e-mail: their ✓ becomes a",
+    "lock) and HOLDRIM_ADMINS (comma separated), because whoever can commit to this file is not",
+    "whoever deploys it. engine/run-local.sh names a placeholder owner when the variable is unset."
+  ],
 
   "_theme": [
     "HOW YOUR PROJECT DRESSES THE ENGINE — optional, in the Keycloak arrangement. Without it the",
