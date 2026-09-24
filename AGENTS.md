@@ -55,6 +55,15 @@ alternative and what breaks without it — that is what this codebase's comments
 how the next reader avoids making the mistake. Say it in the present: "without this, X", not a story
 of when X happened.
 
+## Working here
+
+An agent working on this repository — whichever one it is — does three things at a larger scale
+than a person typing each command would: hands the mechanical part of a change, once it is planned,
+to a cheaper sub-agent and keeps the strongest model for the parts that need judgment; runs
+independent work in parallel instead of one step at a time; and answers briefly, the outcome before
+the explanation, because a reply nobody asked to be long is a review cost paid by whoever reads it
+next.
+
 ## Git
 
 - **Never `git add -A`**, and never while another agent is working: it sweeps another agent's
