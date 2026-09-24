@@ -100,7 +100,9 @@ who ran the engine from `main` before it.
   `HOLDRIM_OWNER`, and the first-access password is printed once.
 - **Storage.** Events go to SQLite or Firestore and are only ever appended; SQLite refuses
   `UPDATE` and `DELETE` by trigger. People go to SQLite, Postgres or Firestore. Every event store
-  and every user store passes its own conformance suite in CI, against real databases.
+  and every user store passes its own conformance suite in CI, against real databases. Reopening a
+  SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
+  putting it back without a word.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a

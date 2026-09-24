@@ -16,8 +16,11 @@ Worth knowing before you run it:
   `DELETE` through triggers — but only from a program that does not first drop them, and not
   `INSERT`: someone with write access to the file can `DROP TRIGGER` before touching a row, or
   simply insert a forged event, so the triggers stop mistakes and ordinary tools, not that person.
-  (A dropped trigger is reinstalled, but only silently, on the next boot — an existing gap,
-  [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89).) For an event's own text, moved
+  (A dropped trigger is reinstalled on the next boot, and that boot now names it in a warning
+  [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89) closed the silent half of this
+  gap. It does not stop the drop itself, or catch someone who drops every guard on a database that
+  never had one to begin with — a first install looks the same from inside the file, on purpose, so
+  that boot stays quiet too.) For an event's own text, moved
   out of the event into its own table, a forged removal dated and ordered after the text it targets
   can still pass as a genuine one; a backdated one cannot (docs/PRIVACY.md, section 4). Closing this
   for every kind of forgery, or for a trigger dropped outright, needs the events themselves signed —
