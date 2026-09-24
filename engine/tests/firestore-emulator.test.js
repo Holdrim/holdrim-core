@@ -27,13 +27,15 @@ const EXPORT = 'export FIRESTORE_EMULATOR_HOST=127.0.0.1:8433\n';
 
 // What the script calls besides curl and java, then what the stubs below call. The PATH holds only
 // these, so that "no Java" — or "no sha256sum", as on macOS — can be staged on a machine that has one.
-const SCRIPT_TOOLS = ['bash', 'cut', 'sha256sum', 'shasum', 'mkdir', 'rm', 'mv', 'seq', 'sleep', 'tail', 'nohup', 'kill'];
+// Builtins such as kill, echo and printf never come from the PATH, so they are not listed.
+const SCRIPT_TOOLS = ['bash', 'cut', 'sha256sum', 'shasum', 'mkdir', 'rm', 'mv', 'seq', 'sleep', 'tail', 'nohup'];
 const STUB_TOOLS = ['cat'];
 
 
 /**
  * Runs the script with a download that serves `served` (null: the download cut halfway), a `java`
- * that starts an emulator that answers or not (null: no Java at all), something already listening
+ * that starts an emulator that answers, dies or hangs (null: no Java at all; 'placeholder': the
+ * /usr/bin/java macOS ships without a runtime), something already listening
  * on the port (`running`: true for the emulator, or the body something else answers with), a jar
  * already `cached`, and `sha256sum` on the PATH or not. Hands back the exit code, both outputs,
  * every call the stubs saw, and the cache.
@@ -69,11 +71,14 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
   ].join('\n'));
   if (java !== null) {
     const starts = {
-      answers: `printf Ok > '${up}'`,
+      // Like the real one, it answers and stays up; the test stops it (below).
+      answers: `printf Ok > '${up}'; echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
       dies: 'echo "port in use"; exit 1',
       hangs: `echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
     }[java];
-    stub(bin, 'java', `echo "java $*" >> '${log}'\n${starts}`);
+    // `-version` is the script asking whether Java runs at all; macOS's placeholder says no.
+    const runs = java === 'placeholder' ? 'exit 1' : 'exit 0';
+    stub(bin, 'java', `if [ "$1" = -version ]; then ${runs}; fi\necho "java $*" >> '${log}'\n${starts ?? ''}`);
   }
   // The copy differs from the script in one constant: the checksum it pins.
   const pinned = createHash('sha256').update(JAR).digest('hex');
@@ -84,6 +89,10 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
     env: { PATH: bin, HOME: dir, XDG_CACHE_HOME: join(dir, 'cache'), HOLDRIM_EMULATOR_WAIT: '2' },
   });
   const pidFile = join(dir, 'java.pid');
+  if (existsSync(pidFile)) {
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    t.after(() => { try { process.kill(pid); } catch { /* already gone */ } });
+  }
   return {
     code: r.status, out: r.stdout, err: r.stderr, calls: readFileSync(log, 'utf8'),
     javaPid: existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : null,
@@ -150,7 +159,7 @@ test('a download cut halfway says so and leaves nothing half-written behind', (t
 test('no Java is said in those words, before anything is downloaded', (t) => {
   const { code, err, calls } = run(t, { java: null });
   assert.equal(code, 1);
-  assert.match(err, /needs Java, and there is none on the PATH/);
+  assert.match(err, /needs Java, and none runs here/);
   assert.doesNotMatch(calls, / -o /);
 });
 
@@ -179,4 +188,18 @@ test('an emulator that never answers is stopped, so the failure it reports is tr
   assert.equal(code, 1);
   assert.ok(javaPid);
   assert.throws(() => process.kill(javaPid, 0), /ESRCH/);
+});
+
+test("macOS's java placeholder counts as no Java, before anything is downloaded", (t) => {
+  const { code, err, calls } = run(t, { java: 'placeholder' });
+  assert.equal(code, 1);
+  assert.match(err, /needs Java/);
+  assert.doesNotMatch(calls, / -o /);
+});
+
+test('an emulator that dies is reported at once, not after the whole wait', (t) => {
+  const started = Date.now();
+  const { code } = run(t, { java: 'dies' });
+  assert.equal(code, 1);
+  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started}ms against a 2s wait`);
 });

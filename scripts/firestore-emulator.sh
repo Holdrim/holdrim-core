@@ -39,8 +39,10 @@ if answers; then
   exit 0
 fi
 
-if ! command -v java >/dev/null; then
-  echo "the Firestore emulator needs Java, and there is none on the PATH" >&2
+# `java -version`, not `command -v java`: macOS ships a /usr/bin/java that only says no runtime is
+# installed, and would pass the lookup, download 130 MB and then die.
+if ! java -version >/dev/null 2>&1; then
+  echo "the Firestore emulator needs Java, and none runs here" >&2
   exit 1
 fi
 
@@ -68,6 +70,8 @@ for _ in $(seq "$WAIT"); do
     echo "export FIRESTORE_EMULATOR_HOST=$HOST"
     exit 0
   fi
+  # Asked after the probe, not before: a process that answered and then exited has still answered.
+  kill -0 "$pid" 2>/dev/null || break   # it died: waiting on would only make the failure slower
   sleep 1
 done
 # Stopped, so that the failure is true: left running, it could start answering after the caller
