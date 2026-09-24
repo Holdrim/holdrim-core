@@ -643,6 +643,24 @@ expect "the event is still there after shutdown" 1 "$(node -e "
   console.log(new DatabaseSync('$DATA_DIR/events.db').prepare('SELECT COUNT(*) c FROM events').get().c)")"
 rm -rf $DATA_DIR
 
+echo "the local runner pins its own environment, even when the caller's shell has one:"
+# A shell already exporting HOLDRIM_EVENTS=sqlite or HOLDRIM_IDENTITY=password, left over from some
+# OTHER project, must not carry through: server.ts prefers the environment over the local default,
+# and this runner's one promise is "test data, disappears when you stop".
+LEAK=$(mktemp -d)
+HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH="$LEAK/events.db" HOLDRIM_IDENTITY=password \
+  HOLDRIM_USERS=sqlite:$LEAK/users.db HOLDRIM_USERS_PATH="$LEAK/users.db" PORT=$PORT \
+  bash engine/run-local.sh >$WORK/leak.log 2>&1 & RUNNER_PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+# HOLDRIM_IDENTITY=password would need a session cookie, not this header: 200 here proves the
+# runner overrode it back to dev — "straight in, no login", as the top of this file documents.
+expect "the caller's HOLDRIM_IDENTITY=password does not reach it" 200 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Dev-Email: someone@example.org' $B/api/me)"
+kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
+expect "and the caller's HOLDRIM_EVENTS=sqlite wrote no events file: it stayed memory" 1 \
+  "$([ -e "$LEAK/events.db" ] && echo 0 || echo 1)"
+rm -rf "$LEAK"
+
 echo "the local runner, on another project:"
 # The README's red example, with no Docker: the runner serves the folder it is given, read from that
 # folder's own holdrim.json, and opens it as its owner — the cash register names nobody to act as.
@@ -653,6 +671,14 @@ expect "serves the project it was given: the cash register's two reds" 2 \
   "$(curl -s $B/engine/home | grep -o '🔴</span> <strong>[0-9]*' | grep -o '[0-9]*$')"
 expect "and opens it as its owner, straight in"  owner "$(curl -s $B/api/me | jfield role)"
 expect "and says whose the owner is, and why"    0 "$(has -F 'owner: you@example.org, from this runner' $WORK/runner.log; echo $?)"
+kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
+# The other half of that same banner line: with HOLDRIM_OWNER set, it has to name THAT as the
+# source, not "this runner" — the two share one OWNER_FROM assignment in run-local.sh, and only a
+# real boot with the variable set exercises the branch where it is.
+HOLDRIM_OWNER=$OWNER PORT=$PORT bash engine/run-local.sh examples/cash-register >$WORK/runner-owner.log 2>&1 & RUNNER_PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "and with HOLDRIM_OWNER set, names it as the source" 0 \
+  "$(has -F "owner: $OWNER, from HOLDRIM_OWNER" $WORK/runner-owner.log; echo $?)"
 kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
 # The port comes from the project too, not from this repository's holdrim.json: a copy that declares
 # this run's port, started with no PORT at all, has to answer on it.
@@ -723,6 +749,12 @@ HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SI
 expect "the owner only in holdrim.json → exits 1"  1 "$?"
 expect "and says authority is the deployment's"    0 "$(grep -q 'holdrim.json names "owner", and it may not: authority is set by the deployment' $WORK/file-owner.log; echo $?)"
 expect "and names the variables to set"            0 "$(grep -q 'set HOLDRIM_OWNER (one e-mail) and HOLDRIM_ADMINS' $WORK/file-owner.log; echo $?)"
+# refuseToStart prints error.message alone (see the comment above it in server.ts). A stack trace
+# reads the same to a human — the message is still in there somewhere — so nothing here would fail
+# if refuseToStart were changed to log the raw Error instead: this is what catches that.
+expect "printed as ONE line, not a caught exception" 1 \
+  "$(grep -cE '^invalid configuration: .*holdrim\.json names \"owner\"' $WORK/file-owner.log)"
+expect "with no stack frame trailing it"           1 "$(grep -qE '^ +at ' $WORK/file-owner.log; echo $?)"
 # `env` execs node in its own pid, so run_for's single-pid kill still reaches the server.
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SITE="$FILE_OWNER" PORT=$PORT \
   run_for 15 env HOLDRIM_OWNER=$OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/file-owner-and-variable.log" 2>&1
@@ -738,6 +770,9 @@ expect "and names the key"                         0 "$(grep -q 'holdrim.json na
 RUNNER=$(PORT=$PORT HOLDRIM_OWNER=$OWNER run_for 15 bash engine/run-local.sh "$FILE_OWNER" 2>&1); RUNNER_EXIT=$?
 expect "the local runner refuses it too → exits 1" 1 "$RUNNER_EXIT"
 expect "with the same reason"                      0 "$(echo "$RUNNER" | has 'authority is set by the deployment'; echo $?)"
+# The broken-config case above already proves this for a file that will not parse at all; this is
+# the same guarantee for a file that parses fine but claims an authority it may not have.
+expect "and never started the server"              1 "$(echo "$RUNNER" | has 'Holdrim local'; echo $?)"
 rm -rf "$FILE_OWNER"
 # With the variables, the same project comes up: and the admin named by HOLDRIM_ADMINS alone files a
 # request that the server AND the agent's CLI both read as past triage.
