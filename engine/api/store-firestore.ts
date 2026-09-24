@@ -1,7 +1,7 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
-import { noText, saltFields, textKey, withTexts, TEXT_REMOVED,
+import { noText, saltFields, textKey, withTextsRetrying, TEXT_REMOVED,
   type RawEvent, type TextField } from './texts.ts';
 
 /**
@@ -78,33 +78,41 @@ export class FirestoreEventStore implements EventStore {
   }
 
   /**
-   * The three reads — events, people, texts — from one Firestore transaction, so the three answer
-   * as of the same instant. Separate, untransacted reads leave a window: a `removeText` that
-   * commits between the events read and the texts read is not what either one alone shows —
-   * the events read misses the new `text_removed` event, the texts read already misses its row —
-   * and a legitimate removal would come back as `textTampered` instead. A transaction with no
-   * writes never conflicts and never retries; it only pins every `tx.get` inside it to one snapshot,
-   * which is all this needs.
+   * The three reads — events, people, texts — as three ordinary, untransacted reads. They used to
+   * be one Firestore transaction, so the three would answer as of the same instant; round 2, finding
+   * A, is why they no longer are: Firestore aborts a read-only transaction after 270 seconds and does
+   * not retry it, and `events`/`texts` only grow — nothing is erased — so a store that holds one open
+   * across a full scan of both eventually fails outright, on nothing more than a project living long
+   * enough. `withTextsRetrying` (engine/api/texts.ts) is the fix: a `removeText` that commits between
+   * the events read and the texts read can make a legitimate removal look tampered on a first pass —
+   * the events read misses the new `text_removed` event, the texts read already misses its row — and
+   * for exactly those fields, and only those, it asks a fresh, later query for the removal events
+   * that first read could not have seen yet.
    */
   async list(page?: string | null): Promise<Event[]> {
-    return this.#db.runTransaction(async (tx) => {
-      let q: FirebaseFirestore.Query = this.#db.collection('events');
-      if (page != null) q = q.where('page', '==', page);
-      const r = await tx.get(q);
-      const people = await tx.get(this.#db.collection(LAYOUT.rows));
-      const textDocs = await tx.get(this.#db.collection('texts'));
-      // By the server's timestamp itself, to the nanosecond: `when` is kept to the millisecond, and
-      // two events inside one would otherwise come back in document-id order, which is random.
-      const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
-      const events = withAuthors([...r.docs]
-        .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
-        .map((d) => this.#fromFirestore(d.id, d.data())),
-      new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null])));
-      const texts = new Map(textDocs.docs.map((t) => {
-        const data = t.data();
-        return [textKey(data.event as string, data.field as TextField), { value: data.value as string, salt: data.salt as string }];
-      }));
-      return withTexts(events, texts);
+    let q: FirebaseFirestore.Query = this.#db.collection('events');
+    if (page != null) q = q.where('page', '==', page);
+    const r = await q.get();
+    const people = await this.#db.collection(LAYOUT.rows).get();
+    // By the server's timestamp itself, to the nanosecond: `when` is kept to the millisecond, and
+    // two events inside one would otherwise come back in document-id order, which is random.
+    const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
+    const peopleMap = new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null]));
+    const events = withAuthors([...r.docs]
+      .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
+      .map((d) => this.#fromFirestore(d.id, d.data())),
+    peopleMap);
+    const textDocs = await this.#db.collection('texts').get();
+    const texts = new Map(textDocs.docs.map((t) => {
+      const data = t.data();
+      return [textKey(data.event as string, data.field as TextField), { value: data.value as string, salt: data.salt as string }];
+    }));
+    return withTextsRetrying(events, texts, async () => {
+      // Not narrowed to the suspect ids: `type == text_removed` alone needs no composite index, and
+      // removals are a small, bounded subset of an ever-growing events collection — bounded by how
+      // many texts have ever been let go, not by how many events there have ever been.
+      const removed = await this.#db.collection('events').where('type', '==', TEXT_REMOVED).get();
+      return withAuthors(removed.docs.map((d) => this.#fromFirestore(d.id, d.data())), peopleMap);
     });
   }
 

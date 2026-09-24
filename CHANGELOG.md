@@ -44,7 +44,12 @@ who ran the engine from `main` before it.
   by event id and field; a row from before this change keeps its own plain value and reads as it. A
   text is removed with `EventStore.removeText(event, field, by)`, which also records a `text_removed`
   event — not reachable through `POST /events` yet, since the door for a person to ask for one, with
-  its own permission, is a later issue.
+  its own permission, is a later issue. A removal is only credited if it is later, in time and in
+  the list, than the event it names, so one dated ahead of a real text does not read as though that
+  text never existed. `FirestoreEventStore.list` and the CLI's cloud reader read events, people and
+  texts as ordinary, unbounded reads, not inside one Firestore transaction — a read-only transaction
+  aborts after 270 seconds, and both collections only grow — and correct a field that looks tampered
+  by asking once more, later, for the removal it could not have seen yet.
 
 ### Added
 

@@ -72,6 +72,37 @@ test('a hash, no matching row, and a TEXT_REMOVED event naming it: removed on pu
   assert.equal(out.textTampered, false, 'a removal that is accounted for is not tampering');
 });
 
+test('a removal dated before the event it names does not count, even placed after it in the list', () => {
+  // Round 2, finding F(a): a direct writer can insert a text_removed of their own — the general
+  // POST /events path refuses the type, but a row inserted straight into the file cannot be told
+  // from a real one this way — so a removal only counts once it is LATER than the event it names,
+  // in time and not only in list order: a forger dating their fake removal ahead of a real text
+  // must not have it read as though that text never existed past that moment.
+  const salt = newSalt();
+  const backdated = { id: 'r1', type: TEXT_REMOVED, author: 'forger@example.org', when: '2025-01-01T00:00:00.000Z',
+    data: { event: 'e1', field: 'text' } }; // earlier than AN_EVENT's own when, later in the list
+  const [out] = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', salt) }, backdated], new Map());
+  assert.equal(out.textRemoved, null, 'a removal dated before its target is not accepted as one');
+  assert.equal(out.textTampered, true, 'so it reads as tampering — missing, and nothing at hand explains why');
+});
+
+test('a removal earlier in the list than the event it names does not count, even dated after it', () => {
+  const salt = newSalt();
+  const outOfOrder = { id: 'r1', type: TEXT_REMOVED, author: 'forger@example.org', when: '2026-01-02T00:00:00.000Z',
+    data: { event: 'e1', field: 'text' } }; // later `when`, but placed BEFORE its target in the list
+  const [, out] = withTexts([outOfOrder, { ...AN_EVENT, text: null, textHash: hashText('gone', salt) }], new Map());
+  assert.equal(out.textRemoved, null, 'a removal that precedes its own target in the list is not accepted either');
+  assert.equal(out.textTampered, true);
+});
+
+test('a removal naming an event that is not in the list at all does not count', () => {
+  const removal = { id: 'r1', type: TEXT_REMOVED, author: 'forger@example.org', when: '2026-01-02T00:00:00.000Z',
+    data: { event: 'no-such-event', field: 'text' } };
+  const [out] = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', newSalt()) }, removal], new Map());
+  assert.equal(out.textRemoved, null, 'nothing to compare against: the removal cannot be verified, so it does not count');
+  assert.equal(out.textTampered, true);
+});
+
 test('a hash, no matching row, and no removal event: tampered — the "Done when" of issue #28', () => {
   const [out] = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', newSalt()) }], new Map());
   assert.equal(out.text, null);
@@ -166,30 +197,33 @@ test('an events file from before texts were extracted reads its own plain text, 
 
 // ===================================================================== one snapshot, not three reads
 // Round 1, finding 6: FirestoreEventStore.list() read events, people and texts as three separate,
-// untransacted calls. A removeText committing between the events read and the texts read is not
-// what either one alone shows — the events read misses the new text_removed event, the texts read
-// already misses its row — and a legitimate removal read back as tampering.
+// untransacted calls, and a removeText committing between the events read and the texts read read
+// back as tampering. Round 1's fix was one Firestore transaction around the three; round 2, finding
+// A, is why that is gone — a read-only transaction aborts after 270 seconds, and events/texts only
+// grow, so it would eventually fail outright on nothing more than a project living long enough.
+// list's own reads are ordinary again; withTextsRetrying (engine/api/texts.ts) is what closes the
+// same gap now, by asking once more, later, for the removal a first pass could not have seen yet.
 
-test('[firestore] list reads events and texts from one snapshot: a removal mid-read never looks like tampering',
+test('[firestore] list reads a removal committed mid-read as the removal it was, never as tampering',
   process.env.FIRESTORE_EMULATOR_HOST ? {} : { skip: 'needs the Firestore emulator, as above' }, async (t) => {
   const project = freshFirestoreProject('holdrim-texts');
-  const { Transaction } = await import('@google-cloud/firestore');
+  const { Query } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
   const store = new FirestoreEventStore(project);
   t.after(async () => { await store.close(); });
   const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
 
-  // Between list()'s own reads, remove the text for real, through a second store on the same
-  // project. The hook fires on the transaction's FIRST internal read, whichever of the three that
-  // is — so it also catches a partial fix that leaves only one of the three outside the transaction:
-  // that one runs as an ordinary read, ahead of the removal, while the other two — still `tx.get`,
-  // and so pinned to the transaction's own snapshot, taken only once ITS first read runs — end up
-  // pinned to a moment already after it.
-  const originalGet = Transaction.prototype.get;
-  let fired = false;
-  Transaction.prototype.get = async function (...args) {
-    if (!fired) {
-      fired = true;
+  // Between list()'s events read (its first) and its texts read (its third), remove the text for
+  // real, through a second store on the same project: the exact torn read a first pass cannot help
+  // reading as tampering — the events read missed the removal event, the texts read already misses
+  // the row — and only withTextsRetrying's later, second look, made after the removal has landed,
+  // can still catch. `Query.prototype.get` underlies every one of list's reads, that later look
+  // included, so the count guards against firing twice.
+  const originalGet = Query.prototype.get;
+  let calls = 0;
+  Query.prototype.get = async function (...args) {
+    calls++;
+    if (calls === 2) { // right after the events read, before people and texts
       const other = new FirestoreEventStore(project);
       await other.removeText(written.id, 'text', 'owner@example.org');
       await other.close();
@@ -201,7 +235,7 @@ test('[firestore] list reads events and texts from one snapshot: a removal mid-r
     assert.equal(read.textTampered, false, 'a removal mid-read must never look like tampering');
     assert.equal(read.textRemoved?.by, 'owner@example.org', 'and it has to read as the removal it was');
   } finally {
-    Transaction.prototype.get = originalGet;
+    Query.prototype.get = originalGet;
   }
 });
 
@@ -225,4 +259,72 @@ test('[firestore] the CLI reads the cloud\'s texts as the server\'s own store do
   const read = cli.find((e) => e.id === gone.id);
   assert.equal(read.text, null);
   assert.equal(read.textRemoved.by, 'owner@example.org');
+});
+
+test('[firestore] the CLI reads a removal committed mid-read as the removal it was, never as tampering', cloud, async (t) => {
+  // Round 2, finding C: the CLI's own reader of the cloud has the same torn-read window
+  // `withTextsRetrying` closes in the server (finding A) — proved here the way the proof lens did,
+  // wrapping fetch to land a real removeText right after the CLI's first :runQuery response (its
+  // events read), ahead of its texts read and of its own later re-read of removals.
+  const project = freshFirestoreProject('holdrim-texts');
+  const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+  const store = new FirestoreEventStore(project);
+  t.after(async () => { await store.close(); });
+  const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+
+  const original = globalThis.fetch;
+  let queries = 0;
+  globalThis.fetch = async (url, init) => {
+    const res = await original(url, init);
+    if (String(url).endsWith(':runQuery') && ++queries === 1) {
+      await res.clone().text(); // let this response finish landing before the next store starts
+      const other = new FirestoreEventStore(project);
+      await other.removeText(written.id, 'text', 'owner@example.org');
+      await other.close();
+    }
+    return res;
+  };
+  let events;
+  try {
+    events = await new Source({ project, account: 'ci@example.org' }).events();
+  } finally {
+    globalThis.fetch = original;
+  }
+  const read = events.find((e) => e.id === written.id);
+  assert.equal(read.textTampered, false, 'a removal mid-read must never look like tampering');
+  assert.equal(read.textRemoved?.by, 'owner@example.org', 'and it has to read as the removal it was');
+});
+
+test('[firestore] the CLI pages through more documents than one page holds, and drops none', cloud, async (t) => {
+  // Round 2, finding D: pagination was untested, and three of its lines can each fail silently —
+  // a cursor never sent loops forever re-reading the first page; a page not fully drained stops
+  // one document short. A `pageSize` of 2 against 5 documents forces three pages without writing
+  // hundreds of them; the cap on :runQuery calls below is what makes a looping mutant fail fast,
+  // as this named test, instead of hanging the run — node:test's own `timeout` option marks a test
+  // failed at the deadline but does not stop the dangling call still running underneath it, and a
+  // fetch against the local emulator loops far too fast for that to ever matter anyway.
+  const project = freshFirestoreProject('holdrim-texts');
+  const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+  const store = new FirestoreEventStore(project);
+  t.after(async () => { await store.close(); });
+  const written = [];
+  for (let i = 0; i < 5; i++) written.push(await store.append({ type: 'comment', page: 'A01', text: `t${i}` }, 'r@example.org'));
+
+  const original = globalThis.fetch;
+  let calls = 0;
+  // 5 documents at 2 a page is 3 calls for events, and a handful more for people, texts and (if
+  // anything looked tampered, which nothing here does) a re-read — comfortably under the cap; a
+  // cursor that never advances would still be on page 1 at call 30.
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith(':runQuery') && ++calls > 30) throw new Error('too many :runQuery calls: a page never advanced');
+    return original(url, init);
+  };
+  let events;
+  try {
+    events = await new Source({ project, account: 'ci@example.org', pageSize: 2 }).events();
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.deepEqual([...events.map((e) => e.id)].sort(), written.map((e) => e.id).sort(),
+    'every document comes back exactly once, however many pages it took');
 });

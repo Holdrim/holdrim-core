@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
 import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
-import { textKey, withTexts, type RawEvent as Raw, type TextField, type TextRow } from '../api/texts.ts';
+import { textKey, withTexts, withTextsRetrying, TEXT_REMOVED, type RawEvent as Raw, type TextField, type TextRow } from '../api/texts.ts';
 
 /** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
 type RawEvent = Raw<Event>;
@@ -38,9 +38,10 @@ export class Source {
   #token?: string;
   #account?: string;
   #preferredAccount?: string;
+  #pageSize: number;
 
   constructor(options: { local?: boolean; project?: string; localUrl?: string; account?: string;
-                        db?: string } = {}) {
+                        db?: string; pageSize?: number } = {}) {
     this.#local = options.local ?? false;
     // The events file, when the project runs without a cloud. This is what closes the loop
     // offline: without it, `sync` only works against the cloud store or against a server in
@@ -49,6 +50,10 @@ export class Source {
     // No hard-coded value: it comes from the project's holdrim.json, or from the environment.
     this.#project = options.project ?? process.env.HOLDRIM_PROJECT ?? '';
     this.#localUrl = options.localUrl ?? process.env.HOLDRIM_LOCAL_URL ?? 'http://localhost:8095';
+    // Not an adopter's setting — nothing here reads an environment variable for it. It exists so a
+    // test can force more than one page without writing hundreds of documents to prove pagination
+    // holds (round 2, finding D): the real cloud never sees anything but the default.
+    this.#pageSize = options.pageSize ?? 300;
     this.#preferredAccount = process.env.HOLDRIM_ACCOUNT ?? options.account;
   }
 
@@ -231,66 +236,65 @@ export class Source {
     // an address that does not exist.
     this.#requireProject();
     const headers = { Authorization: `Bearer ${await this.#gcloudToken()}` };
-    // One transaction for all three, the CLI's twin of the server's own `runTransaction`
-    // (store-firestore.ts, `list`): a `removeText` that commits between separate, untransacted
-    // reads of `events` and `texts` could make a legitimate removal look like tampering — the
-    // events read missing the new `text_removed` event, the texts read already missing its row.
-    // The first read opens the transaction; the other two are asked inside the same one.
-    const first = await this.#collection(headers, 'events');
-    const txn = first.transaction;
-    const out = first.docs.map((d) => this.#fromFirestore(d));
+    const out = (await this.#collection(headers, 'events')).map((d) => this.#fromFirestore(d));
     // The people after the events, as the server's Firestore store reads them and for its reason:
     // a person is made before their first event, so every author read above is in this read.
-    const people = new Map((await this.#collection(headers, LAYOUT.rows, txn)).docs.map((d) =>
+    const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
       [String(d.name).split('/').pop()!, (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null]));
     const events = withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
     // The texts after the events, as the server's Firestore store reads them, for the same reason.
-    const texts = new Map((await this.#collection(headers, 'texts', txn)).docs.map((d) => {
+    const texts = new Map((await this.#collection(headers, 'texts')).map((d) => {
       const f = d.fields ?? {};
       return [textKey(f.event?.stringValue, f.field?.stringValue),
         { value: f.value?.stringValue, salt: f.salt?.stringValue } as TextRow];
     }));
-    return withTexts(events, texts);
+    // Round 2, finding A: these three used to be one Firestore transaction, the CLI's twin of the
+    // server's own (store-firestore.ts, `list`) — dropped for the same reason: a read-only
+    // transaction aborts after 270 seconds and is not retried, and events/texts only grow, so
+    // holding one open across a full scan of both eventually fails outright. `withTextsRetrying`
+    // (engine/api/texts.ts) is the one rule both readers now share: for a field a first pass calls
+    // tampered, ask once more, later, for the removal events that first pass could not have seen.
+    return withTextsRetrying(events, texts, async () => {
+      const removed = await this.#collection(headers, 'events',
+        { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
+      return withAuthors(removed.map((d) => this.#fromFirestore(d)), people);
+    });
   }
 
   /**
-   * Every document of one collection, over as many pages as the cloud answers in — and, when a
-   * transaction id is given or one comes back from the first page, all of it read at that one
-   * snapshot. `documents.list` (the plain REST read) takes no `transaction`; `documents:runQuery`
-   * does, ordered by document name so a cursor (`startAt` on the last name seen) still paginates.
-   * Without a `transaction`, the first page opens a read-only one (`newTransaction`) and hands its
-   * id back, so a caller reading several collections for one consistent view passes it to the rest.
+   * Every document of one collection, over as many pages as the cloud answers in, via
+   * `documents:runQuery` rather than the plain `documents.list` REST read — needed for the `where`
+   * the removals re-read above narrows by, which `documents.list` has no way to express. Ordered by
+   * document name so a cursor (`startAt` on the last name seen) can page it. `pageSize` is `#pageSize`
+   * unless a call needs its own — none here does; it exists for the constructor option of the same
+   * name, which only a test sets.
    */
-  async #collection(headers: Record<string, string>, name: string, transaction?: string):
-    Promise<{ docs: Record<string, any>[]; transaction: string }> {
+  async #collection(headers: Record<string, string>, name: string, where?: Record<string, unknown>):
+    Promise<Record<string, any>[]> {
     const docs: Record<string, any>[] = [];
     let after: string | undefined;
-    let txn = transaction;
     for (;;) {
       const structuredQuery: Record<string, unknown> = {
         from: [{ collectionId: name }],
         orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
-        limit: 300,
+        limit: this.#pageSize,
       };
+      if (where) structuredQuery.where = where;
       if (after) structuredQuery.startAt = { values: [{ referenceValue: after }], before: false };
       const r = await fetch(`${this.#database()}/documents:runQuery`, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify(txn ? { structuredQuery, transaction: txn } : { structuredQuery, newTransaction: { readOnly: {} } }),
+        body: JSON.stringify({ structuredQuery }),
       });
       if (!r.ok) throw await this.#cloudError(r, 'reading');
-      const rows = (await r.json()) as { transaction?: string; document?: Record<string, any> }[];
+      const rows = (await r.json()) as { document?: Record<string, any> }[];
       let onThisPage = 0;
       for (const row of rows) {
-        if (row.transaction) txn = row.transaction;
         if (row.document) { docs.push(row.document); after = row.document.name as string; onThisPage++; }
       }
-      if (onThisPage < 300) break; // fewer than the limit: nothing left to page for
+      if (onThisPage < this.#pageSize) break; // fewer than the limit: nothing left to page for
     }
-    // `newTransaction` only actually opens one once a query runs; an empty collection's single
-    // response still carries it, so this is reachable only if the cloud changed shape underneath.
-    if (!txn) throw new Error(`no transaction came back reading ${name}`);
-    return { docs, transaction: txn };
+    return docs;
   }
 
   /** The project's database over REST, in the cloud or in the emulator the variable names. */
