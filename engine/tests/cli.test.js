@@ -15,6 +15,7 @@ import { readBlocks, sheetFiles } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, check } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests } from '../cli/requests.ts';
+import { createRoles } from '../core/roles.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const EXAMPLE = join(ROOT, 'examples', 'hello-world');
@@ -360,8 +361,16 @@ test('no example has a repeated block code', async () => {
  * owner's place, and an "applied" without a commit would be a closed request nobody can audit.
  */
 function trail(t, ...events) {
-  process.env.HOLDRIM_OWNER = 'owner@y.org';
-  t.after(() => { delete process.env.HOLDRIM_OWNER; });
+  // The owner is named in the project's file, the way an adopter names it; the variable is cleared
+  // for the test, or a HOLDRIM_OWNER exported in the shell running it would decide who the owner is.
+  const root = mkdtempSync(join(tmpdir(), 'holdrim-trail-'));
+  writeFileSync(join(root, 'holdrim.json'), JSON.stringify({ owner: 'owner@y.org' }));
+  const before = process.env.HOLDRIM_OWNER;
+  delete process.env.HOLDRIM_OWNER;
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    if (before === undefined) delete process.env.HOLDRIM_OWNER; else process.env.HOLDRIM_OWNER = before;
+  });
   const added = [];
   const request = (id, author) => ({
     id, type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f', text: 'please', snapshot: 's',
@@ -372,16 +381,16 @@ function trail(t, ...events) {
     request('approved-by-the-owner', 'owner@y.org'),
     ...events,
   ];
-  return { added, source: { events: async () => all, add: async (e) => { added.push(e); } } };
+  return { root, added, source: { events: async () => all, add: async (e) => { added.push(e); } } };
 }
 
 test('the agent only moves a request the owner APPROVED, and never into the owner\'s states', async (t) => {
-  const { source, added } = trail(t);
-  await assert.rejects(() => setState(source, 'open-by', 'applying', 'starting'), /only applies requests the owner APPROVED/);
-  await assert.rejects(() => setState(source, 'approved-by', 'rejected', 'no'), /the agent only uses/);
+  const { root, source, added } = trail(t);
+  await assert.rejects(() => setState(root, source, 'open-by', 'applying', 'starting'), /only applies requests the owner APPROVED/);
+  await assert.rejects(() => setState(root, source, 'approved-by', 'rejected', 'no'), /the agent only uses/);
   assert.equal(added.length, 0, 'a refusal writes nothing');
 
-  await setState(source, 'approved-by', 'applying', 'starting');
+  await setState(root, source, 'approved-by', 'applying', 'starting');
   assert.equal(added.length, 1);
   assert.equal(added[0].type, 'request_state');
   assert.deepEqual(added[0].data, { request: 'approved-by-the-owner', state: 'applying', from: 'approved' },
@@ -392,19 +401,19 @@ test('a request already in the agent\'s hands is refused by where it can go, not
   const moved = (id, state, from) => ({ id: `st-${id}`, type: 'request_state', page: 'A01', block: 'A01.1.1',
     author: 'agent@y.org', when: '2026-09-20T11:00:00.000Z', data: { request: 'approved-by-the-owner', state, from } });
   const applied = trail(t, moved(1, 'applying', 'approved'), moved(2, 'applied', 'applying'));
-  await assert.rejects(() => setState(applied.source, 'approved-by', 'applied', 'again', { commit: 'abc1234' }),
+  await assert.rejects(() => setState(applied.root, applied.source, 'approved-by', 'applied', 'again', { commit: 'abc1234' }),
     /no: the request is "Applied": nothing is left to do on it\.$/);
   const waiting = trail(t, moved(1, 'waiting', 'approved'));
-  await assert.rejects(() => setState(waiting.source, 'approved-by', 'waiting', 'still asking'),
+  await assert.rejects(() => setState(waiting.root, waiting.source, 'approved-by', 'waiting', 'still asking'),
     /no: the request is "Being applied · query"; from there it goes to: Being applied, Applied\.$/);
   assert.equal(applied.added.length + waiting.added.length, 0, 'a refusal writes nothing');
 });
 
 test('"applied" without a commit is refused: the trail ties request to commit', async (t) => {
-  const { source, added } = trail(t);
-  await assert.rejects(() => setState(source, 'approved-by', 'applied', 'done'), /--commit/);
+  const { root, source, added } = trail(t);
+  await assert.rejects(() => setState(root, source, 'approved-by', 'applied', 'done'), /--commit/);
   assert.equal(added.length, 0);
-  await setState(source, 'approved-by', 'applied', 'done', { commit: 'abc1234567', blocks: 'A01.1.1' });
+  await setState(root, source, 'approved-by', 'applied', 'done', { commit: 'abc1234567', blocks: 'A01.1.1' });
   assert.equal(added[0].data.commit, 'abc1234567');
   assert.match(added[0].text, /commit abc1234 · blocks: A01\.1\.1/);
 });
@@ -441,9 +450,7 @@ test('a local server that answers but refuses says why, not "is it running?"', a
   await assert.rejects(new Source({ local: true, localUrl: `${localUrl}/silent` }).events(), /refused it \(500\)$/);
 });
 
-test('a request\'s history comes from its own thread, oldest first, whatever order it was stored in', (t) => {
-  process.env.HOLDRIM_OWNER = 'owner@y.org';
-  t.after(() => { delete process.env.HOLDRIM_OWNER; });
+test('a request\'s history comes from its own thread, oldest first, whatever order it was stored in', () => {
   const move = (id, state, from, when) => ({ id, type: 'request_state', page: 'A01', author: 'owner@y.org', when,
     data: { request: 'q', state, from } });
   const [found] = requests([
@@ -452,14 +459,12 @@ test('a request\'s history comes from its own thread, oldest first, whatever ord
     { id: 'other', type: 'request', page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:30Z' },
     move('m1', 'approved', 'open', '2026-09-22T10:01:00Z'),
     move('m2', 'applying', 'approved', '2026-09-22T10:02:00Z'),
-  ]);
+  ], createRoles('owner@y.org', ''));
   assert.deepEqual(found.history.map((e) => e.id), ['m1', 'm2', 'm3']);
   assert.equal(found.state, 'applied');
 });
 
-test('the request list is linear in its history: 30 000 requests read in well under a second', (t) => {
-  process.env.HOLDRIM_OWNER = 'owner@y.org';
-  t.after(() => { delete process.env.HOLDRIM_OWNER; });
+test('the request list is linear in its history: 30 000 requests read in well under a second', () => {
   // Computing each request's state by filtering every event, once per request, costs the square
   // of the history, which at this size is minutes. The bound is loose on purpose — a quadratic
   // version does not come near it, and a slow runner still does.
@@ -471,7 +476,7 @@ test('the request list is linear in its history: 30 000 requests read in well un
       when: '2026-09-22T10:01:00Z', data: { request: id, state: 'approved', from: 'open' } });
   }
   const started = performance.now();
-  const found = requests(events);
+  const found = requests(events, createRoles('owner@y.org', ''));
   const took = performance.now() - started;
   assert.equal(found.length, 30000);
   assert.ok(found.every((r) => r.state === 'approved' && r.history.length === 1));

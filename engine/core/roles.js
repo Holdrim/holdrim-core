@@ -24,7 +24,10 @@ export function createRoles(owner, admins) {
   if (list.length !== 1) {
     throw new Error(
       `HOLDRIM_OWNER needs exactly one e-mail (got ${list.length}). ` +
-      'The owner is unique by definition: they are the founding architect of the project.');
+      'The owner is unique by definition: they are the founding architect of the project. ' +
+      // Without this, a project that names its owner in holdrim.json and gets it wrong is sent to
+      // look for a variable it never set.
+      'It comes from HOLDRIM_OWNER, or from `owner` in holdrim.json when the variable is not set.');
   }
   const ownerEmail = list[0];
   // The owner is an admin by consequence, not by configuration: there is no way to strip their
@@ -42,4 +45,20 @@ export function createRoles(owner, admins) {
     canTriage: (e) => everyone.has(normalized(e)),
     roleOf: (e) => (normalized(e) === ownerEmail ? 'owner' : everyone.has(normalized(e)) ? 'admin' : 'other'),
   };
+}
+
+/**
+ * The roles a project's configuration grants — what `readConfig` returned, turned into roles.
+ *
+ * ⚠️ The one way from configuration to roles, for the server AND the CLI. Who the owner is decides
+ * whose ✓ becomes a lock, so the two cannot be allowed to answer it differently: a CLI that read
+ * only HOLDRIM_OWNER while the server also read `owner` from holdrim.json would lock nothing the
+ * owner approved, or triage as the owner someone the server does not know as one. The precedence
+ * (the variable over the file) lives in `readConfig` alone; this adds no rule of its own, so there
+ * is no second copy of it to drift.
+ *
+ * @param {{ owner: string|null, admins: string }} config  as `readConfig` returns it
+ */
+export function rolesOf(config) {
+  return createRoles(config.owner, config.admins);
 }

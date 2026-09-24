@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readConfig } from '../core/config.js';
+import { rolesOf } from '../core/roles.js';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { kindOf, whatIsMissing } from '../core/kinds.js';
@@ -43,6 +44,18 @@ export interface Block {
  */
 export function ofProject(root: string) {
   return readConfig(root, { readFile: (p: string) => readFileSync(p, 'utf8') }, process.env);
+}
+
+/**
+ * Who the owner and the admins of the project at `root` are, resolved exactly as the server
+ * resolves them: `ofProject`, then `rolesOf`. Zero owners or two throw, here as at boot.
+ *
+ * ⚠️ Not `process.env.HOLDRIM_OWNER`. Read straight from the variable, a project that names its
+ * owner only in holdrim.json has no owner as far as the CLI is concerned, while the server, reading
+ * the file, has one — and the two disagree about whose ✓ locks and whose request needs no triage.
+ */
+export function projectRoles(root: string) {
+  return rolesOf(ofProject(root));
 }
 
 /**

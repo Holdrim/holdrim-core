@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createCycle } from '../core/cycle.js';
-import { createRoles } from '../core/roles.js';
-import { readBlocks } from './pages.ts';
+import { readBlocks, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
 import type { Event } from '../api/types.ts';
 
@@ -65,14 +64,15 @@ export function mustBeQueued(r: { state: string }) {
   if (!cycle.table.agent_queue.includes(r.state)) throw notTheAgents(cycle, r.state);
 }
 
-export function rolesFromEnvironment() {
-  return createRoles(process.env.HOLDRIM_OWNER, process.env.HOLDRIM_ADMINS);
-}
-
-/** Reduces events to requests with a state — using the SAME core as the server and the browser. */
-export function requests(events: Event[]): Request[] {
+/**
+ * Reduces events to requests with a state — using the SAME core as the server and the browser.
+ *
+ * The roles are handed in, not looked up here: this has no project root to resolve them from, and
+ * resolving them from the environment alone is how the CLI came to know a different owner than
+ * the server. The callers take them from `projectRoles(root)`.
+ */
+export function requests(events: Event[], roles: Pick<ReturnType<typeof projectRoles>, 'isAdmin'>): Request[] {
   const cycle = loadCycle();
-  const roles = rolesFromEnvironment();
   const threads = cycle.threadsOf(events);
   return events.filter((e) => e.type === 'request').map((r) => {
     const thread = threads.get(r.id) ?? [];
@@ -116,7 +116,7 @@ export const formatWhen = (iso: string) => {
 export async function queue(root: string, source: Pick<Source, 'events'>, all: boolean) {
   const cycle = loadCycle();
   const events = await source.events();
-  const found = requests(events);
+  const found = requests(events, projectRoles(root));
   const agentQueue = cycle.table.agent_queue ?? ['approved', 'applying', 'waiting'];
   const showing = all ? found : found.filter((r) => agentQueue.includes(r.state));
   const blocks = await readBlocks(root);
@@ -161,7 +161,7 @@ export async function list(root: string, source: Pick<Source, 'events'>, options
 export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
   const cycle = loadCycle();
   const events = await source.events();
-  const r = find(requests(events), prefix);
+  const r = find(requests(events, projectRoles(root)), prefix);
   const blocks = await readBlocks(root);
   const block = r.block ? blocks.get(r.block) : undefined;
 
@@ -192,7 +192,7 @@ export async function show(root: string, source: Pick<Source, 'events'>, prefix:
 /** Where else the subject shows up — the impact analysis you run before editing. As data. */
 export async function impactOf(root: string, source: Pick<Source, 'events'>, prefix: string, terms: string[]) {
   const events = await source.events();
-  const r = find(requests(events), prefix);
+  const r = find(requests(events, projectRoles(root)), prefix);
   const blocks = await readBlocks(root);
   const searching = terms.length ? terms : [(r.text ?? '').split(/\s+/).slice(0, 3).join(' ')];
   return {
@@ -220,9 +220,9 @@ export async function impact(root: string, source: Pick<Source, 'events'>, prefi
   }
 }
 
-export async function summary(source: Pick<Source, 'events'>) {
+export async function summary(root: string, source: Pick<Source, 'events'>) {
   const events = await source.events();
-  const all = requests(events);
+  const all = requests(events, projectRoles(root));
   const perPage = new Map<string, { approvals: number; requests: number; open: number }>();
   for (const e of events) {
     const v = perPage.get(e.page) ?? { approvals: 0, requests: 0, open: 0 };
@@ -248,11 +248,11 @@ export async function summary(source: Pick<Source, 'events'>) {
  * The agent only uses ITS OWN states: approving, rejecting and asking is the owner's triage, on
  * the site.
  */
-export async function setState(source: Pick<Source, 'events' | 'add'>, prefix: string, target: string,
+export async function setState(root: string, source: Pick<Source, 'events' | 'add'>, prefix: string, target: string,
                                message: string, extra: { commit?: string; blocks?: string } = {}) {
   const cycle = loadCycle();
   const events = await source.events();
-  const r = find(requests(events), prefix);
+  const r = find(requests(events, projectRoles(root)), prefix);
 
   if (!cycle.agentStates.includes(target)) {
     throw new Error(`the agent only uses: ${cycle.agentStates.join(', ')} ` +

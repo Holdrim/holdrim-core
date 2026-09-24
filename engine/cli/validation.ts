@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, type Block } from './pages.ts';
+import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, projectRoles, type Block } from './pages.ts';
 import { trafficLight, dependentsOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
@@ -251,7 +251,10 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
   // compares it, and zero or two refused before the cloud is even asked. A comparison written here
   // would drift from it — a space around the address, and the owner's ✓ would lock nothing; two
   // addresses, and they would be read as one owner nobody matches, with no error either way.
-  const roles = createRoles(options.owner ?? process.env.HOLDRIM_OWNER, '');
+  // WHO the owner is comes from `projectRoles`, the server's resolution too: read from the variable
+  // alone, a project naming its owner only in holdrim.json would sync no ✓ at all. `options.owner`
+  // is for a caller that already knows the owner, and replaces the resolution rather than joining it.
+  const roles = options.owner === undefined ? projectRoles(root) : createRoles(options.owner, '');
 
   // The cloud being down must not take the whole session down with it. The registry in the repository
   // is the source of what is already validated; the cloud only adds what came from the site. Without

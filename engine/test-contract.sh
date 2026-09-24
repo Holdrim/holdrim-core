@@ -699,6 +699,26 @@ expect "no owner anywhere → exits 1"   1 "$?"
 expect "and says what's missing"       0 "$(grep -qi 'HOLDRIM_OWNER' $WORK/no-config.log; echo $?)"
 rmdir $EMPTY
 
+echo "with the owner named only in holdrim.json:"
+# The variable is not the only place the owner lives: an adopter names them in the project's file,
+# and the CLI resolves them through the same call (engine/tests/owner.test.js). Without this boot,
+# a server that read HOLDRIM_OWNER alone would pass every check above — they all set the variable.
+FILE_OWNER=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1]+'/holdrim.json','utf8')).owner)" "$SITE")
+env -u HOLDRIM_OWNER HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/file-owner.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "it comes up, and the file's owner is the owner" owner "$(curl -s -H "X-Dev-Email: $FILE_OWNER" $B/api/me | jfield role)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+TWO=$(mktemp -d)
+echo '{"owner":"a@example.org,b@example.org"}' > "$TWO/holdrim.json"
+# `env` execs node in its own pid, so run_for's single-pid kill still reaches the server.
+HOLDRIM_SITE="$TWO" PORT=$PORT \
+  run_for 15 env -u HOLDRIM_OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/two-owners.log" 2>&1
+expect "two owners in the file → exits 1" 1 "$?"
+expect "and says it needs exactly one"     0 "$(grep -q 'exactly one e-mail (got 2)' $WORK/two-owners.log; echo $?)"
+rm -rf "$TWO"
+
 # Firestore is optional: configured but not installed, the boot has to fail and name the package,
 # not come up half-working or die in a module-resolution stack. The forbid-optional hook stands in
 # for "not installed" — it refuses the package exactly the way a missing one would.

@@ -55,6 +55,7 @@ holdrim — the agent's tool for the Holdrim method
 
   Variables
     HOLDRIM_OWNER               who approves; it is THEIR ✓ that becomes a lock
+                                  (beats \`owner\` in holdrim.json, as on the server)
     HOLDRIM_PROJECT             the Firestore project, in the cloud
     HOLDRIM_ACCOUNT             pins the gcloud account (default: the first one to issue a token)
     HOLDRIM_EVENTS_PATH         the SQLite events file, when there is no cloud
@@ -91,9 +92,11 @@ async function main() {
     console.error(`no such folder: ${root}`);
     return 2;
   }
-  // The project configuration (name, owner, cloud project) comes from the holdrim.json at the root.
+  // The project configuration (name, cloud project) comes from the holdrim.json at the root. The
+  // owner is NOT copied from it into HOLDRIM_OWNER here: each command resolves it from `root`
+  // through `projectRoles`, the server's own resolution, so no second statement of "the variable
+  // beats the file" exists for the two to drift apart on.
   const projectConfig = ofProject(root);
-  if (projectConfig.owner) process.env.HOLDRIM_OWNER ??= projectConfig.owner;
   const source = new Source({
     local: values.local,
     project: projectConfig.project ?? undefined,
@@ -105,8 +108,8 @@ async function main() {
     case 'list':       await requests.list(root, source, { all: values.all, json: values.json }); return 0;
     case 'show':       await requests.show(root, source, requireArg(arg, 'show <id>')); return 0;
     case 'impact':     await requests.impact(root, source, requireArg(arg, 'impact <id>'), values.term ?? []); return 0;
-    case 'summary':    await requests.summary(source); return 0;
-    case 'state':      await requests.setState(source, requireArg(arg, 'state <id> <state> "message"'),
+    case 'summary':    await requests.summary(root, source); return 0;
+    case 'state':      await requests.setState(root, source, requireArg(arg, 'state <id> <state> "message"'),
                          requireArg(positionals[2], 'state <id> <state> "message"'),
                          requireArg(positionals[3], 'state <id> <state> "message"'),
                          { commit: values.commit, blocks: values.blocks }); return 0;

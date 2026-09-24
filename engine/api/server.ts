@@ -4,8 +4,7 @@ import { join, extname, normalize, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
-import { readConfig } from '../core/config.js';
-import { createRoles } from '../core/roles.js';
+import { createRoles, rolesOf } from '../core/roles.js';
 import { overLimit, validCommit } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
@@ -20,7 +19,7 @@ import { withPanelNonce, pagePolicy, FILE_POLICY } from './content-policy.ts';
 import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
 import { renderPeoplePage } from './people-page.ts';
 import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
-import { readBlocks } from '../cli/pages.ts';
+import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { loadTheme } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
@@ -39,7 +38,9 @@ import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types
 // The PROJECT's configuration comes from holdrim.json; environment variables beat the file. The
 // engine knows no product name, no e-mail and no cloud project — it asks.
 const projectRoot = process.env.HOLDRIM_SITE ?? join(import.meta.dirname, '..', '..');
-const project = readConfig(projectRoot, { readFile: (p: string) => readFileSync(p, 'utf8') }, process.env);
+// Read through `ofProject`, the CLI's own reader, so the owner the service boots with and the one
+// `holdrim sync` locks with come out of one call, not two that merely look alike.
+const project = ofProject(projectRoot);
 
 // The sentences the reviewer reads. The core returns keys; here they become words, in the language
 // of whoever is reading. Logs and boot errors do NOT come through here, on purpose — a log is
@@ -109,7 +110,7 @@ const cycle = createCycle(JSON.parse(readFileSync(new URL('../cycle.json', impor
 try {
   // No default, on purpose: in a distributed package, an e-mail of ours here would make anyone who
   // forgot to configure it start a service with OUR owner.
-  roles = createRoles(cfg.owner, cfg.admins);
+  roles = rolesOf(project);
   // The proxy identity is only built when it is the one in charge: demanding its audience from
   // someone logging in with a password would block the "start it and use it" case, which is the
   // whole point of password identity.
