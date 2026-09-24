@@ -109,6 +109,13 @@ whoever merges. Run them at once where your agent can and one after another wher
 lenses never talk to each other, so the order changes nothing but the wait. In Claude Code that is
 one message with six `Agent` calls.
 
+**Which lenses, and on which model**, follows the tier the change declares (`CONTRIBUTING.md`, "And
+the six lenses"): tier 1 runs all six, tier 2 proof, correctness and craft, tier 3 the ones its row
+names. Pass the model explicitly on every call — `sonnet`, and `opus` only for locks and proof on a
+tier 1 change. The model named in a lens file is not always the one that runs: a call made from a
+workflow inherits its caller's unless it is told otherwise, and six lenses on the strongest model
+for a documentation change is the waste this rule exists to stop.
+
 | Agent | Lens |
 |---|---|
 | `review-language` | nothing in Portuguese |
