@@ -1,6 +1,6 @@
 # Roles: who may do what, set by the project
 
-> Design · `2026-09-24` · decided by the owner, **not built yet**; it is what phase B of 0.1.0 builds.
+> Design · `2026-09-24` · decided by the owner; phase B of 0.1.0 is building it, piece by piece.
 > It takes over the groups draft (removed in the commit that added this file; it is in the history),
 > whose question — who reviews which part — becomes one case of this one. The table at the end says
 > what exists.
@@ -243,7 +243,7 @@ loses the file fallback for the owner and the admins, and the templates, which s
 |---|---|
 | Capabilities instead of role names (`canApprove`, `canTriage`) | built |
 | Owner and admins, from configuration | built |
-| The closed capability list, and roles as sets of it | not built |
+| The closed capability list, and roles as sets of it | built — `engine/core/roles.js`, `CAPABILITIES` and `capabilitiesOf` |
 | `LOCKS`, and lock-holders' accounts guarded like the owner's | not built |
 | Roles and grants as events, from a settings screen, by the owner | not built |
 | Scopes: exact pages, explicit wildcard, blocks | not built |

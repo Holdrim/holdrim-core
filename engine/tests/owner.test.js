@@ -92,7 +92,7 @@ function cli(args, dir, env) {
 
 /**
  * What the server would boot with, under the case's environment: server.ts's own two calls, and
- * each request's state as server.ts derives it (`cycle.currentState` with `roles.isAdmin`).
+ * each request's state as server.ts derives it (`cycle.currentState` with `roles.can('triage', …)`).
  */
 function serverView({ dir, ids, events }, variables) {
   const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
@@ -104,7 +104,7 @@ function serverView({ dir, ids, events }, variables) {
     const roles = rolesOf(ofProject(dir));
     const threads = cycle.threadsOf(events);
     const states = Object.fromEntries(Object.entries(ids).map(([who, id]) =>
-      [who, cycle.currentState(id, threads.get(id) ?? [], roles.isAdmin(who))]));
+      [who, cycle.currentState(id, threads.get(id) ?? [], roles.can('triage', who))]));
     return { owner: roles.owner, states };
   } catch (e) {
     return { refused: e.message };

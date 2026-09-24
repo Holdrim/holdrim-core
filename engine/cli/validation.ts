@@ -279,7 +279,7 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
     return { added: 0, unchanged: 0, expired: 0, offline: true };
   }
   const approvals = events.filter((e) => e.type === 'approval');
-  const theOwners = approvals.filter((e) => roles.isOwner(e.author));
+  const theOwners = approvals.filter((e) => roles.can('lock', e.author));
   if (approvals.length !== theOwners.length) {
     console.log(`  · ${approvals.length - theOwners.length} approval(s) by somebody else ignored: only the owner's ✓ locks`);
   }

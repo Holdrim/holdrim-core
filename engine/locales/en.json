@@ -184,7 +184,7 @@
   "people.reset": "New password",
   "people.role": "Role",
   "people.role.admin": "Admin",
-  "people.role.other": "Reviewer",
+  "people.role.member": "Member",
   "people.role.owner": "Owner",
   "people.state": "Access",
   "people.state.active": "Active",

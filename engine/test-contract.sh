@@ -122,7 +122,7 @@ grep -q 'optional package was loaded' $WORK/tests.log && grep -m1 'optional pack
 echo "identity and roles:"
 expect "no identity → 401"             401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/events)"
 expect "owner is owner"                owner "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield role)"
-expect "reviewer is other"             other "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/api/me | jfield role)"
+expect "reviewer is a member"          member "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/api/me | jfield role)"
 expect "capability instead of role"    true "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield canApprove)"
 
 echo "approval:"
@@ -506,7 +506,7 @@ expect "the list is ordered by e-mail"  "$MEMBER $OWNER" "$(emails)"
 expect "the new person signs in → 200"  200 "$(mlogin "$MEMBER_PASSWORD")"
 expect "and it logs no person either — nobody has acted on anything yet" null \
   "$(log_field $WORK/password.log signed_in person)"
-expect "and is nobody special"          other "$(as_member $B/api/me | jfield role)"
+expect "and is nobody special"          member "$(as_member $B/api/me | jfield role)"
 # One real act, so the member has a row of their own: every later line about their account can then
 # be checked against this EXACT id, the way OWNER_ID lets the owner's be checked.
 expect "and they may comment → 201" 201 "$(as_member -o /dev/null -w '%{http_code}' -d '{"type":"comment","page":"D01","text":"a comment"}' $B/api/events)"

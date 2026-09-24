@@ -172,7 +172,7 @@
   "people.reset": "Nova senha",
   "people.role": "Papel",
   "people.role.admin": "Admin",
-  "people.role.other": "Revisor",
+  "people.role.member": "Membro",
   "people.role.owner": "Dono",
   "people.state": "Acesso",
   "people.state.active": "Ativo",

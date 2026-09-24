@@ -315,7 +315,7 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
   }
   // Approving belongs to owner and admin. Only the owner's ✓ becomes a lock in the repository —
   // `holdrim sync` takes theirs alone — and an admin's is recorded, and stays an opinion.
-  if (incoming.type === 'approval' && !roles.canApprove(email)) {
+  if (incoming.type === 'approval' && !roles.can('approve', email)) {
     return { status: 403, body: { error: say('api.approval.ownerOnly') } };
   }
   if (['request', 'comment', 'supplement'].includes(incoming.type) && !incoming.text?.trim()) {
@@ -332,7 +332,7 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
  */
 const withStatus = (e: Event, thread: Event[]) => ({
   ...e,
-  status: cycle.status(cycle.currentState(e.id, thread, roles.isAdmin(e.author))),
+  status: cycle.status(cycle.currentState(e.id, thread, roles.can('triage', e.author))),
 });
 
 /**
@@ -343,7 +343,7 @@ const withStatus = (e: Event, thread: Event[]) => ({
  */
 const asRead = (e: Event, threads: Map<string, Event[]>) => {
   if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? []);
-  if (e.type === 'approval') return { ...e, locks: roles.isOwner(e.author) };
+  if (e.type === 'approval') return { ...e, locks: roles.can('lock', e.author) };
   return e;
 };
 
@@ -359,7 +359,7 @@ async function recordEvent(
   incoming: NewEvent, email: string, say: (key: string, params?: Record<string, string | number>) => string,
   through = 'api',
 ): Promise<{ status: number; body: Record<string, unknown>; event?: Event }> {
-  const canApprove = roles.canApprove(email);
+  const canApprove = roles.can('approve', email);
   const refusal = refusalOf(incoming, email, say);
   if (refusal) return refusal;
 
@@ -369,7 +369,7 @@ async function recordEvent(
     const ofPage = await events.list(incoming.page);
     const request = ofPage.find((e) => e.id === requestId && e.type === 'request');
     if (!request) return { status: 404, body: { error: say('api.request.notFound') } };
-    const current = cycle.currentState(requestId, ofPage, roles.isAdmin(request.author));
+    const current = cycle.currentState(requestId, ofPage, roles.can('triage', request.author));
 
     if (incoming.type === 'supplement') {
       if (email !== request.author && !canApprove) {
@@ -449,8 +449,8 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     return json(res, 200, {
       email,
       role: roles.roleOf(email),
-      canApprove: roles.canApprove(email),
-      canTriage: roles.canTriage(email),
+      canApprove: roles.can('approve', email),
+      canTriage: roles.can('triage', email),
       owner: roles.isOwner(email),
       admins: roles.admins,
       // The language this person reads in, decided here by the one rule the server's screens use —
@@ -515,7 +515,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     const all = await events.list(null);
     const threads = cycle.threadsOf(all);
     const toTriage = all.filter((e) => e.type === 'request')
-      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.isAdmin(r.author)) === 'open').length;
+      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.can('triage', r.author)) === 'open').length;
     return json(res, 200, { toTriage });
   }
 
@@ -554,8 +554,8 @@ async function userRoutes(
   users: UserStore, lang: string,
 ): Promise<boolean> {
   const say = (key: string, params?: Record<string, string | number>) => i18n.t(lang, key, params);
-  /** Owner and admin, and nobody else. `isAdmin` already counts the owner as one. */
-  const manages = () => roles.isAdmin(email);
+  /** Owner and admin, and nobody else: the `people` capability, which member does not hold. */
+  const manages = () => roles.can('people', email);
   const forbidden = () => (json(res, 403, { error: say('api.users.adminOnly') }), true);
 
   // ---------------------------------------------------------------- the list
@@ -652,7 +652,7 @@ async function userRoutes(
     // the service removes the account and restarts, and the first-access password is generated
     // again. That is an operations act, on purpose — being the owner is configuration, not a
     // button someone else can press.
-    if (roles.roleOf(target) === 'owner' && target !== email) {
+    if (roles.isOwner(target) && target !== email) {
       return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
     }
     const password = await users.resetPassword(target);
@@ -735,7 +735,7 @@ async function viewerOf(req: IncomingMessage): Promise<string | null> {
  * serves the screen and the home that links to it — a link to a screen that then sends you away is
  * a door painted on a wall. Password sign-in only: behind a proxy, people live in the proxy.
  */
-const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.isAdmin(viewer));
+const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.can('people', viewer));
 
 /** Headers for a screen the engine renders itself: never cached, framed by nobody, and its policy. */
 function screenHeaders(nonce: string, script: boolean) {
@@ -755,7 +755,8 @@ async function servePeople(req: IncomingMessage, res: ServerResponse) {
   const nonce = randomBytes(16).toString('base64');
   res.writeHead(200, screenHeaders(nonce, true));
   res.end(renderPeoplePage(i18n, languageOf(req), {
-    projectName: project.name, people: await byPassword.users.list(), roleOf: (e) => roles.roleOf(e),
+    projectName: project.name, people: await byPassword.users.list(),
+    roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),
   }, projectTheme, nonce));
 }
 
@@ -825,18 +826,19 @@ async function homeForm(req: IncomingMessage, res: ServerResponse) {
 async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOutcome = {}, status = 200) {
   const lang = languageOf(req);
   const all = await events.list(null);
-  // Only the owner's ✓ can become a lock, so only theirs is worth counting as waiting for one.
-  const ownerApprovals = all.filter((e) => e.type === 'approval' && roles.isOwner(e.author));
+  // Only a ✓ from someone who holds `lock` can become one, so only those are worth counting as
+  // waiting for one.
+  const ownerApprovals = all.filter((e) => e.type === 'approval' && roles.can('lock', e.author));
   const pages = summarisePages(await readBlocks(projectRoot), loadRegistry(projectRoot), cfg.site, ownerApprovals,
     (path) => readFileSync(path, 'utf8'));
   const threads = cycle.threadsOf(all);
   const requests = requestsInProgress(all,
-    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.isAdmin(r.author)),
+    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.can('triage', r.author)),
     new Map(pages.map((p) => [p.page, p.href])));
   const viewer = await viewerOf(req);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the
   // same one the panel draws its buttons from. Nobody else is offered a form the server refuses.
-  if (viewer && roles.canApprove(viewer)) {
+  if (viewer && roles.can('approve', viewer)) {
     for (const r of requests) {
       const { triage, requiresReason } = cycle.status(r.state);
       Object.assign(r, { triage, requiresReason });

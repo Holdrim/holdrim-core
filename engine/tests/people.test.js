@@ -23,12 +23,12 @@ const person = (email, extra = {}) => ({
 });
 
 test('the owner\'s row offers nothing: their password is theirs, and they are never disabled', () => {
-  assert.deepEqual(actionsFor(person('owner@x.org'), 'owner'), []);
+  assert.deepEqual(actionsFor(person('owner@x.org'), true), []);
 });
 
 test('everyone else can get a new password, and lose or regain access, never both at once', () => {
-  assert.deepEqual(actionsFor(person('a@x.org'), 'admin'), ['reset', 'disable']);
-  assert.deepEqual(actionsFor(person('r@x.org', { enabled: false }), 'other'), ['reset', 'enable']);
+  assert.deepEqual(actionsFor(person('a@x.org'), false), ['reset', 'disable']);
+  assert.deepEqual(actionsFor(person('r@x.org', { enabled: false }), false), ['reset', 'enable']);
 });
 
 test('the People link appears only for whoever may manage people', () => {
@@ -49,7 +49,8 @@ test('a name or an address somebody typed is shown, never run', () => {
     projectName: 'P',
     people: [person('owner@x.org'), person('x@x.org', { name: '<img src=x onerror=alert(1)>' }),
       person('"><script>alert(1)</script>@x.org')],
-    roleOf: (e) => (e === 'owner@x.org' ? 'owner' : 'other'),
+    roleOf: (e) => (e === 'owner@x.org' ? 'owner' : 'member'),
+    isOwner: (e) => e === 'owner@x.org',
   }, ENGINE_THEME, 'n0nce');
   // One script, the page's own, carrying the nonce; nothing a person typed opens another.
   assert.equal(html.match(/<script/g).length, 1);
@@ -60,16 +61,18 @@ test('a name or an address somebody typed is shown, never run', () => {
 
 test('a translation cannot close the script it is handed to', () => {
   const hostile = createI18n({ ...dictionaries, en: { ...dictionaries.en, 'people.noAnswer': '</script><b>x' } }, 'en');
-  const html = renderPeoplePage(hostile, 'en', { projectName: 'P', people: [], roleOf: () => 'other' },
+  const html = renderPeoplePage(hostile, 'en',
+    { projectName: 'P', people: [], roleOf: () => 'member', isOwner: () => false },
     ENGINE_THEME, 'n');
   assert.equal(html.match(/<\/script>/g).length, 1, 'only the page\'s own script closes');
   assert.match(html, /\\u003c\/script>/);
 });
 
 test('the owner comes first, then admins, then everyone else, whatever their names', () => {
-  const roles = { 'zed@x.org': 'owner', 'yan@x.org': 'admin', 'abe@x.org': 'other' };
+  const roles = { 'zed@x.org': 'owner', 'yan@x.org': 'admin', 'abe@x.org': 'member' };
   const html = renderPeoplePage(i18n, 'en', {
     projectName: 'P', people: Object.keys(roles).map((e) => person(e)).reverse(), roleOf: (e) => roles[e],
+    isOwner: (e) => roles[e] === 'owner',
   }, ENGINE_THEME, 'n');
   const at = (email) => html.indexOf(`<td>${email}</td>`);
   assert.ok(at('zed@x.org') < at('yan@x.org') && at('yan@x.org') < at('abe@x.org'),
