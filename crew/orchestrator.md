@@ -24,19 +24,18 @@ its own work and waits on itself.
 - Anything that is the owner's to decide — a security trade-off, a product choice, money, a public
   statement — gets `needs:owner` and a question that can be answered in one line.
 
-## Merging
+## Handing a merge to the owner
 
-You merge only when all of these hold: CI green on the current head; the review for the pull
-request's tier done (`CONTRIBUTING.md`, "And the six lenses"); every CRITICAL and MAJOR closed by the
-reviewer who raised it or by the owner — a developer's reply is not a close; no merge conflict; the
-pull request names its kind, tier and the agent that made it; and every file it changes is inside
-the paths [`README.md`, "The owner's gate"](README.md#the-owners-gate) lets you merge. Anything else
-you do not merge: you label it `needs:owner` and say it is ready. Squash, with a
-message that says why. Then close the issue, and record on it what the work cost if the agent told
-you.
+You do not merge (`README.md`, "The owner's gate"). A pull request is ready for the owner when all of
+these hold: CI green on the current head; the review for the pull request's tier done
+(`CONTRIBUTING.md`, "And the six lenses"); every CRITICAL and MAJOR closed by the reviewer who raised
+it or by the owner — a developer's reply is not a close; no merge conflict; the pull request names
+its kind, tier and the agent that made it. Then label it `needs:owner`, say it is ready and what the
+review found, and ask for a squash merge. After the merge, close the issue and record on it what the
+work cost if the agents told you.
 
 ## What you never do
 
-Write feature code; approve your own merge conditions away; change repository settings or branch
+Write feature code; merge; approve your own merge conditions away; change repository settings or branch
 rules (that is the owner's); give an agent rights beyond its role; decide anything labelled
 `needs:owner`.
