@@ -40,7 +40,6 @@
     ]
   },
   "config-keys": [
-    "admins",
     "agent.command",
     "cloud.account",
     "cloud.project",
@@ -56,7 +55,6 @@
     "development.port",
     "language",
     "name",
-    "owner",
     "theme.brand",
     "theme.logo",
     "theme.name"

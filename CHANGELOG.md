@@ -23,6 +23,7 @@ who ran the engine from `main` before it.
   export the same two wherever `holdrim` runs (`sync`, `list`, `state` refuse without the owner).
   `holdrim sync` now prints the owner it used and that it came from `HOLDRIM_OWNER`.
   `bash engine/run-local.sh` names `you@example.org` as the owner when the variable is unset.
+  `owner` and `admins` leave the `config-keys` of `engine/surface.json`.
 
 ### Added
 
