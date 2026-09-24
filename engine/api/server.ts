@@ -26,7 +26,7 @@ import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { IapIdentity } from './identity-iap.ts';
 import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types.ts';
-import { idForLog as peopleIdForLog, actedOn as peopleActedOn } from './people.ts';
+import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -405,12 +405,11 @@ async function recordEvent(
 
   // Resolved BEFORE the write, not after: an event's author is never null — the row has to exist
   // for the event to mean anything — so this is the one log id that must still find-OR-CREATE.
-  // Doing it here, ahead of `append`, means a failure here writes nothing at all; done after, as
-  // it was, it would leave a committed event unanswered by a 500, and a retry would write it
-  // twice, since no idempotency key ties this call to that request. `append` resolves the same
-  // address again to store the event, and finds the row this just made — one person, one insert.
-  const author = await events.personFor(email);
-  const e = await events.append(incoming, email);
+  // `recordAuthored` (engine/api/people.ts) is why the order can't drift back: it takes the store as
+  // a parameter precisely so a stub can prove the resolve-then-append order without a running server.
+  // `append` resolves the same address again to store the event, and finds the row this just made —
+  // one person, one insert.
+  const { author, event: e } = await recordAuthored(events, incoming, email);
   log('INFO', 'event_recorded', {
     id: e.id, type: e.type, page: e.page, block: e.block, author,
     from: e.data?.from, to: e.data?.state, through,

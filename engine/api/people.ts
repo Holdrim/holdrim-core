@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { normalizeEmail } from './users.ts';
-import type { PeopleTable } from './types.ts';
+import { log } from './log.ts';
+import type { EventStore, Event, NewEvent, PeopleTable } from './types.ts';
 
 /**
  * What every store's people table agrees on: the shape of an id, how one is made, and what "the
@@ -99,11 +100,36 @@ export function withAuthors<E extends { author: string }>(events: E[], people: R
  * against a lookup that throws without booting a server.
  */
 export async function idForLog(people: Pick<PeopleTable, 'personOf'>, email: string): Promise<string | null> {
-  try { return await people.personOf(email); } catch { return null; }
+  try {
+    return await people.personOf(email);
+  } catch {
+    // No e-mail here — that is the point of this function — but an empty catch would make a real
+    // outage indistinguishable from the ordinary "nobody yet" that `personOf` itself answers with
+    // null, and an operator watching the log has no other way to tell the two apart.
+    log('WARNING', 'person_lookup_failed');
+    return null;
+  }
 }
 
 /** The `{person, by}` pair every account-management log line needs, resolved the same safe way. */
 export async function actedOn(people: Pick<PeopleTable, 'personOf'>, subject: string, actor: string):
   Promise<{ person: string | null; by: string | null }> {
   return { person: await idForLog(people, subject), by: await idForLog(people, actor) };
+}
+
+/**
+ * Resolves an event's author, then writes the event — in that order, never the other way round. An
+ * author that cannot be resolved must produce no event: every event's author is meant to be a real
+ * person id, never null (docs/PRIVACY.md, section 1), so writing first and resolving after would let
+ * a resolution failure follow a committed write — an event nobody can credit — and, with no
+ * idempotency key tying a retry to this call, a second attempt would write it twice. Takes the store
+ * as a parameter, like `idForLog` above, so the order can be proven against a stub whose `personFor`
+ * rejects, without booting a server.
+ */
+export async function recordAuthored(
+  store: Pick<EventStore, 'personFor' | 'append'>, incoming: NewEvent, email: string,
+): Promise<{ author: string; event: Event }> {
+  const author = await store.personFor(email);
+  const event = await store.append(incoming, email);
+  return { author, event };
 }
