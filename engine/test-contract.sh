@@ -734,7 +734,8 @@ HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SI
 expect "an admin named in holdrim.json → exits 1"  1 "$?"
 expect "and names the key"                         0 "$(grep -q 'holdrim.json names "admins"' $WORK/file-admins.log; echo $?)"
 # The same file through the local runner: it reads the config itself, and must say why, not start.
-RUNNER=$(PORT=$PORT HOLDRIM_OWNER=$OWNER bash engine/run-local.sh "$FILE_OWNER" 2>&1); RUNNER_EXIT=$?
+# Under a deadline: a runner that let the file through would serve until killed, and hang the suite.
+RUNNER=$(PORT=$PORT HOLDRIM_OWNER=$OWNER run_for 15 bash engine/run-local.sh "$FILE_OWNER" 2>&1); RUNNER_EXIT=$?
 expect "the local runner refuses it too → exits 1" 1 "$RUNNER_EXIT"
 expect "with the same reason"                      0 "$(echo "$RUNNER" | has 'authority is set by the deployment'; echo $?)"
 rm -rf "$FILE_OWNER"
