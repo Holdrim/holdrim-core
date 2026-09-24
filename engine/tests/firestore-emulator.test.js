@@ -66,7 +66,14 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
     served === null
       ? '[ -n "$out" ] && { printf "half a jar" > "$out"; exit 18; }'
       : `[ -n "$out" ] && { cat '${join(dir, 'served')}' > "$out"; exit 0; }`,
-    `[ -e '${up}' ] && cat '${up}'`,
+    `[ -e '${up}' ] && { cat '${up}'; exit 0; }`,
+    // For 'exits-then-answers': the first probe after the start waits until the emulator is gone,
+    // returns empty, and from then on the port answers. Only a look taken after the death sees it.
+    `if [ -e '${join(dir, 'exits.pid')}' ]; then`,
+    `  n=$(( $(cat '${join(dir, 'probes')}' 2>/dev/null || echo 0) + 1 )); echo $n > '${join(dir, 'probes')}'`,
+    `  if [ "$n" -ge 2 ]; then printf Ok; exit 0; fi`,
+    `  if [ "$n" -eq 1 ]; then for _ in $(seq 50); do kill -0 "$(cat '${join(dir, 'exits.pid')}')" 2>/dev/null || break; sleep 0.1; done; fi`,
+    'fi',
     'exit 0',
   ].join('\n'));
   if (java !== null) {
@@ -75,10 +82,12 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
       answers: `printf Ok > '${up}'; echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
       dies: 'echo "port in use"; exit 1',
       hangs: `echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
-      // Answers and exits at once. Whether the exit lands before or after the script's probe is
-      // left to the scheduler: staging the in-between exactly would need the stub to see its own
-      // exit, and a dead child stays a zombie until the script's shell reaps it.
-      'answers-then-exits': `printf Ok > '${up}'; exit 0`,
+      // Exits without answering; the port answers only after it is gone (see the curl stub).
+      'exits-then-answers': `echo $$ > '${join(dir, 'exits.pid')}'; exit 0`,
+      // Takes a moment to die on TERM, as a JVM running its shutdown hooks does.
+      'slow-to-die': `echo $$ > '${join(dir, 'java.pid')}'; trap 'sleep 0.5; exit 0' TERM; sleep 30 & wait $!`,
+      // Ignores TERM altogether: only KILL stops it.
+      'deaf-to-term': `echo $$ > '${join(dir, 'java.pid')}'; trap '' TERM; sleep 30 & wait $!; sleep 30`,
     }[java];
     // `-version` is the script asking whether Java runs at all; macOS's placeholder says no.
     const runs = java === 'placeholder' ? 'exit 1' : 'exit 0';
@@ -209,8 +218,8 @@ test('an emulator that dies is reported at once, not after the whole wait', (t) 
   assert.ok(Date.now() - started < 5000, `took ${Date.now() - started}ms against a 10s wait`);
 });
 
-test('an emulator that answered on its way out still counts as answered', (t) => {
-  const { code, out } = run(t, { java: 'answers-then-exits' });
+test('a port that answers after the emulator died is found by the last look', (t) => {
+  const { code, out } = run(t, { java: 'exits-then-answers' });
   assert.equal(code, 0);
   assert.equal(out, EXPORT);
 });
@@ -218,4 +227,18 @@ test('an emulator that answered on its way out still counts as answered', (t) =>
 test('one that never answers says it timed out, not that it died', (t) => {
   const { err } = run(t, { java: 'hangs' });
   assert.match(err, /did not answer on 127\.0\.0\.1:8433 within 2s/);
+});
+
+test('the stopped emulator is gone, not a zombie, even when it takes a moment to die', (t) => {
+  const { code, javaPid } = run(t, { java: 'slow-to-die' });
+  assert.equal(code, 1);
+  assert.throws(() => process.kill(javaPid, 0), /ESRCH/);
+});
+
+test('an emulator deaf to TERM is killed, and the script still ends', (t) => {
+  const started = Date.now();
+  const { code, javaPid } = run(t, { java: 'deaf-to-term' });
+  assert.equal(code, 1);
+  assert.ok(Date.now() - started < 15000, `took ${Date.now() - started}ms`);
+  assert.throws(() => process.kill(javaPid, 0), /ESRCH/);
 });
