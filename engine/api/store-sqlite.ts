@@ -74,8 +74,10 @@ export const GUARDS: Record<string, string> = {
   // ⚠️ This clause has no way to refuse an INSERT — none of the guards here do — so a direct writer
   // can still insert a text_removed event of their own and then satisfy this WHEN clause with a
   // forgery; the same writer could also just `DROP TRIGGER texts_no_delete` first and skip the
-  // forgery entirely. A dropped trigger is reinstalled, but only silently, on the next boot — a
-  // pre-existing gap, holdrim#89, this change does not close. `removalsOf` (engine/api/texts.ts)
+  // forgery entirely. A dropped trigger is reinstalled on the next boot, and that boot now names it
+  // in a warning (holdrim#89) — it does not stop the drop itself, and it cannot catch someone who
+  // drops every guard and also empties every table, since that file is indistinguishable from a
+  // first install. `removalsOf` (engine/api/texts.ts)
   // refuses a forged event dated, or placed, no later than the event it names, which closes the
   // easy version of the forgery path; one dated and ordered correctly, or a trigger dropped
   // outright, is not caught here and needs signed events (docs/PRIVACY.md, phase E) to close for
@@ -98,12 +100,18 @@ export const GUARDS: Record<string, string> = {
  * database an older version made.
  *
  * A guard from `guards` that is not held at all is put back the same way — but only said out loud
- * once at least one guard is already there. On the very first boot against an empty or pre-guard
- * database there is nothing to compare against yet, and warning about every guard being "missing"
- * would just be first install dressed up as an incident; the moment one guard exists and another
- * does not, that gap is exactly what `DROP TRIGGER events_no_delete` from outside this process would
- * leave, and staying silent about it is the bug (holdrim#89) — recreating it without a word looked
- * the same either way.
+ * once the database is not a first install. That is NOT "at least one guard is already held": a
+ * fresh file with one foreign trigger and none of ours would then report all nine of ours as
+ * missing on its very first boot, and — the sharper failure — someone who drops every guard of a
+ * database that already holds an approval, deletes it, and reopens would read as a first install
+ * too, since zero of our guards being held is exactly what a first install also looks like. So
+ * "first install" here means BOTH: none of `guards`' own names are held, AND the tables hold no row
+ * at all — no event, no person, no text. A file with data in it, whatever the reason, is not being
+ * installed for the first time, and a guard missing from it is said, naming it, whether that is
+ * `DROP TRIGGER events_no_delete` from outside this process (holdrim#89) or an old database that
+ * never had this guard to begin with. The one case this still cannot see is someone who drops every
+ * guard AND empties every table in the same sitting — that file is indistinguishable from a real
+ * first install, because there is nothing left in it this check could have found protected.
  *
  * The repair runs in one IMMEDIATE transaction: between a DROP and its CREATE the table would have
  * no guard, and another process with the file open could REPLACE a ✓ in that gap. A failure halfway
@@ -131,12 +139,15 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
     // Read again under the lock: another process may have repaired it while this one waited.
     const rows = held();
     const byName = new Map(rows.map((r) => [r.name, r]));
-    // Nothing held at all means there is nothing yet to have lost: a brand-new database and one
-    // from before any of these guards existed both look like this, and both are a first install,
-    // not a guard gone missing. The instant one guard is there, a second one being absent is no
-    // longer "not yet installed" — it is either an older version's guard set (the "replaced once"
-    // case below already speaks up for that) or one somebody dropped, and either way it is said.
-    const firstInstall = rows.length === 0;
+    // Neither half alone is enough: a fresh file can hold a foreign trigger (still reported below,
+    // just not as one of OUR guards missing) before it ever holds a row, and an old, real database
+    // can hold rows with none of our guards on it at all — see the long comment above the function.
+    const noGuardOfOursHeld = !rows.some((r) => want.has(r.name));
+    const holdsNoRow = () =>
+      !db.prepare('SELECT 1 FROM events LIMIT 1').get() &&
+      !db.prepare('SELECT 1 FROM people LIMIT 1').get() &&
+      !db.prepare('SELECT 1 FROM texts LIMIT 1').get();
+    const firstInstall = noGuardOfOursHeld && holdsNoRow();
     for (const r of rows) {
       if (want.has(r.name)) continue;
       warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
