@@ -11,48 +11,52 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync }
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync }
   from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stub } from './helpers/stub.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const SCRIPT = readFileSync(join(ROOT, 'scripts', 'firestore-emulator.sh'), 'utf8');
+const VERSION = SCRIPT.match(/^VERSION=(\S+)$/m)[1];
+const JAR_NAME = `cloud-firestore-emulator-v${VERSION}.jar`;
 const JAR = 'a jar, as far as the stubs are concerned\n';
+const literally = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 const EXPORT = 'export FIRESTORE_EMULATOR_HOST=127.0.0.1:8433\n';
 
-// What the script calls besides curl and java. The PATH holds only these, so that "no Java" can be
-// staged on a machine that has one.
-const TOOLS = ['bash', 'cut', 'sha256sum', 'shasum', 'mkdir', 'rm', 'mv', 'seq', 'sleep', 'tail', 'nohup', 'cat', 'touch'];
+// What the script calls besides curl and java, then what the stubs below call. The PATH holds only
+// these, so that "no Java" — or "no sha256sum", as on macOS — can be staged on a machine that has one.
+const SCRIPT_TOOLS = ['bash', 'cut', 'sha256sum', 'shasum', 'mkdir', 'rm', 'mv', 'seq', 'sleep', 'tail', 'nohup', 'kill'];
+const STUB_TOOLS = ['cat'];
 
-function stub(dir, name, body) {
-  writeFileSync(join(dir, name), `#!/bin/bash\n${body}\n`);
-  chmodSync(join(dir, name), 0o755);
-}
 
 /**
- * Runs the script with a download that serves `served` (null: the download fails), a `java` that
- * starts an emulator that answers or not (null: no Java at all), and an emulator already answering
- * or not. Hands back the exit code, both outputs, every call the stubs saw, and the cache.
+ * Runs the script with a download that serves `served` (null: the download cut halfway), a `java`
+ * that starts an emulator that answers or not (null: no Java at all), something already listening
+ * on the port (`running`: true for the emulator, or the body something else answers with), a jar
+ * already `cached`, and `sha256sum` on the PATH or not. Hands back the exit code, both outputs,
+ * every call the stubs saw, and the cache.
  */
-function run(t, { served = JAR, java = 'answers', running = false, cached = null } = {}) {
+function run(t, { served = JAR, java = 'answers', running = false, cached = null, sha256sum = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-emulator-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin');
   const cache = join(dir, 'cache', 'holdrim');
   mkdirSync(bin);
-  for (const tool of TOOLS) {
+  for (const tool of [...SCRIPT_TOOLS, ...STUB_TOOLS]) {
+    if (tool === 'sha256sum' && !sha256sum) continue;
     const found = spawnSync('bash', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
     if (found) symlinkSync(found, join(bin, tool));
   }
   const log = join(dir, 'calls.log');
   const up = join(dir, 'up');
   writeFileSync(log, '');
-  if (running) writeFileSync(up, '');
+  if (running) writeFileSync(up, running === true ? 'Ok' : running);
   if (served !== null) writeFileSync(join(dir, 'served'), served);
   if (cached !== null) {
     mkdirSync(cache, { recursive: true });
-    writeFileSync(join(cache, 'cloud-firestore-emulator-v1.22.0.jar'), cached);
+    writeFileSync(join(cache, JAR_NAME), cached);
   }
   stub(bin, 'curl', [
     `echo "curl $*" >> '${log}'`,
@@ -60,11 +64,16 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
     served === null
       ? '[ -n "$out" ] && { printf "half a jar" > "$out"; exit 18; }'
       : `[ -n "$out" ] && { cat '${join(dir, 'served')}' > "$out"; exit 0; }`,
-    `[ -e '${up}' ] && printf Ok`,
+    `[ -e '${up}' ] && cat '${up}'`,
     'exit 0',
   ].join('\n'));
   if (java !== null) {
-    stub(bin, 'java', `echo "java $*" >> '${log}'\n${java === 'answers' ? `touch '${up}'` : 'echo "port in use"; exit 1'}`);
+    const starts = {
+      answers: `printf Ok > '${up}'`,
+      dies: 'echo "port in use"; exit 1',
+      hangs: `echo $$ > '${join(dir, 'java.pid')}'; exec sleep 30`,
+    }[java];
+    stub(bin, 'java', `echo "java $*" >> '${log}'\n${starts}`);
   }
   // The copy differs from the script in one constant: the checksum it pins.
   const pinned = createHash('sha256').update(JAR).digest('hex');
@@ -74,10 +83,12 @@ function run(t, { served = JAR, java = 'answers', running = false, cached = null
     encoding: 'utf8',
     env: { PATH: bin, HOME: dir, XDG_CACHE_HOME: join(dir, 'cache'), HOLDRIM_EMULATOR_WAIT: '2' },
   });
+  const pidFile = join(dir, 'java.pid');
   return {
     code: r.status, out: r.stdout, err: r.stderr, calls: readFileSync(log, 'utf8'),
-    jar: existsSync(join(cache, 'cloud-firestore-emulator-v1.22.0.jar')),
-    part: existsSync(join(cache, 'cloud-firestore-emulator-v1.22.0.jar.part')),
+    javaPid: existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : null,
+    jar: existsSync(join(cache, JAR_NAME)),
+    part: existsSync(join(cache, `${JAR_NAME}.part`)),
   };
 }
 
@@ -90,10 +101,11 @@ test('it downloads the pinned jar, starts it, and prints only the line to export
   const { code, out, calls, jar } = run(t);
   assert.equal(code, 0);
   assert.equal(out, EXPORT);
-  assert.match(calls, /^curl .*-o .*cloud-firestore-emulator-v1\.22\.0\.jar\.part https:\/\/storage\.googleapis\.com\//m);
-  assert.match(calls, /^java -jar .*cloud-firestore-emulator-v1\.22\.0\.jar --host 127\.0\.0\.1 --port 8433$/m);
+  assert.match(calls, new RegExp(`^curl .*-o .*${literally(JAR_NAME)}\\.part https://storage\\.googleapis\\.com/`, 'm'));
+  assert.match(calls, new RegExp(`^java -jar .*${literally(JAR_NAME)} --host 127\\.0\\.0\\.1 --port 8433$`, 'm'));
   // Asked past the proxy: the cloud session's proxy cannot reach this machine's loopback.
-  assert.match(calls, /^curl -s --noproxy \* http:\/\/127\.0\.0\.1:8433$/m);
+  // Bounded, or a port that takes the connection and never replies hangs the session start.
+  assert.match(calls, /^curl -s --noproxy \* --max-time 2 http:\/\/127\.0\.0\.1:8433$/m);
   assert.ok(jar);
 });
 
@@ -148,4 +160,23 @@ test('an emulator that never answers fails, with the end of its log', (t) => {
   assert.equal(out, '');
   assert.match(err, /did not answer on 127\.0\.0\.1:8433 within 2s/);
   assert.match(err, /port in use/);
+});
+
+test('something else answering on the port is not taken for the emulator', (t) => {
+  const { out, calls } = run(t, { running: 'Not Found' });
+  assert.equal(out, EXPORT);
+  assert.match(calls, /^java /m);
+});
+
+test('without sha256sum, as on macOS, shasum computes the same digest', (t) => {
+  const { code, out } = run(t, { sha256sum: false });
+  assert.equal(code, 0);
+  assert.equal(out, EXPORT);
+});
+
+test('an emulator that never answers is stopped, so the failure it reports is true', (t) => {
+  const { code, javaPid } = run(t, { java: 'hangs' });
+  assert.equal(code, 1);
+  assert.ok(javaPid);
+  assert.throws(() => process.kill(javaPid, 0), /ESRCH/);
 });

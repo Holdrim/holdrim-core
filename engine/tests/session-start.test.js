@@ -9,18 +9,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stub } from './helpers/stub.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const HOOK = join(ROOT, '.claude', 'hooks', 'session-start.sh');
 
-function stub(dir, name, body) {
-  const file = join(dir, name);
-  writeFileSync(file, `#!/bin/bash\n${body}\n`);
-  chmodSync(file, 0o755);
-}
 
 /**
  * Runs the hook in a throwaway project whose package.json asks for `engines`, with `node` reporting
@@ -49,8 +45,9 @@ function run(t, {
   mkdirSync(join(dir, 'scripts'));
   writeFileSync(join(dir, 'scripts', 'firestore-emulator.sh'),
     emulator ? 'echo "export FIRESTORE_EMULATOR_HOST=127.0.0.1:8433"\n' : 'echo "no Java" >&2; exit 1\n');
+  // Other hooks write to the same file before this one: whatever is there must survive.
   const sessionEnv = join(dir, 'session.env');
-  writeFileSync(sessionEnv, '');
+  writeFileSync(sessionEnv, 'export BEFORE=1\n');
   const env = {
     ...process.env, PATH: `${dir}:${process.env.PATH}`, CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_REMOTE: remote,
     CLAUDE_ENV_FILE: envFile ? sessionEnv : '',
@@ -114,14 +111,14 @@ test('a Chromium download that works says nothing', (t) => {
 
 test('a running emulator reaches the session through CLAUDE_ENV_FILE', (t) => {
   const { out, sessionEnv } = run(t);
-  assert.equal(sessionEnv, 'export FIRESTORE_EMULATOR_HOST=127.0.0.1:8433\n');
+  assert.equal(sessionEnv, 'export BEFORE=1\nexport FIRESTORE_EMULATOR_HOST=127.0.0.1:8433\n');
   assert.doesNotMatch(out, /Firestore/);
 });
 
 test('no emulator is said out loud, names the tests that will skip, and the session still starts', (t) => {
   const { code, out, sessionEnv } = run(t, { emulator: false });
   assert.equal(code, 0);
-  assert.equal(sessionEnv, '');
+  assert.equal(sessionEnv, 'export BEFORE=1\n');
   assert.match(out, /WARNING: no Firestore emulator in this session\. Its tests will SKIP here/);
 });
 

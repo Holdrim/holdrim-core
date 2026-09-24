@@ -21,9 +21,11 @@ CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/holdrim"
 JAR="$CACHE/cloud-firestore-emulator-v$VERSION.jar"
 WAIT=${HOLDRIM_EMULATOR_WAIT:-60}
 
-# The emulator answers "Ok" on its root once it takes requests. `--noproxy`, because the cloud
-# session routes everything through a proxy that cannot reach this machine's loopback.
-answers() { [ "$(curl -s --noproxy '*' "http://$HOST" || true)" = "Ok" ]; }
+# The emulator answers "Ok" on its root once it takes requests, and exactly "Ok": anything else on
+# that port is not the emulator. `--noproxy`, because the cloud session routes everything through a
+# proxy that cannot reach this machine's loopback. `--max-time`, because a process that takes the
+# connection and never replies would otherwise hang the session start with it.
+answers() { [ "$(curl -s --noproxy '*' --max-time 2 "http://$HOST" || true)" = "Ok" ]; }
 
 # macOS ships `shasum`, Linux `sha256sum`; either prints the digest first.
 digest() {
@@ -60,6 +62,7 @@ fi
 
 LOG="$CACHE/firestore-emulator.log"
 nohup java -jar "$JAR" --host "${HOST%:*}" --port "${HOST#*:}" > "$LOG" 2>&1 &
+pid=$!
 for _ in $(seq "$WAIT"); do
   if answers; then
     echo "export FIRESTORE_EMULATOR_HOST=$HOST"
@@ -67,6 +70,9 @@ for _ in $(seq "$WAIT"); do
   fi
   sleep 1
 done
+# Stopped, so that the failure is true: left running, it could start answering after the caller
+# was told there is no emulator, and the tests would skip beside a live one.
+kill "$pid" 2>/dev/null || true
 echo "the Firestore emulator did not answer on $HOST within ${WAIT}s. Its log, $LOG, ends:" >&2
 tail -20 "$LOG" >&2
 exit 1
