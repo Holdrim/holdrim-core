@@ -70,12 +70,27 @@ export class MemoryEventStore implements EventStore {
   // changes a row and it refuses everything but emptying it (docs/PRIVACY.md, sections 1 and 3).
   #people = new Map<string, Person>();
 
+  // Synchronous, and called from both methods below without an `await` in front of it: an `await`
+  // always yields at least one microtask, even over a body with no I/O, and two `personFor` calls
+  // for the same brand-new address, kicked off together (`Promise.all`), would both see "not found"
+  // before either got to insert — two people for one first sighting. Keeping the find itself
+  // synchronous is what makes one of two racing calls observe the other's insert.
+  #findByEmail(e: string): string | null {
+    for (const p of this.#people.values()) if (p.email === e) return p.id;
+    return null;
+  }
+
   async personFor(email: string): Promise<string> {
     const e = personEmail(email);
-    for (const p of this.#people.values()) if (p.email === e) return p.id;
+    const found = this.#findByEmail(e);
+    if (found) return found;
     const id = newPersonId();
     this.#people.set(id, { id, email: e });
     return id;
+  }
+
+  async personOf(email: string): Promise<string | null> {
+    return this.#findByEmail(personEmail(email));
   }
 
   async person(id: string): Promise<Person | null> {

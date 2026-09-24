@@ -257,6 +257,10 @@ export class SqliteEventStore implements EventStore {
     return id;
   }
 
+  async personOf(email: string): Promise<string | null> {
+    return this.#heldBy(personEmail(email)) ?? null;
+  }
+
   #heldBy(email: string): string | undefined {
     return (this.#db.prepare('SELECT id FROM people WHERE email = ?').get(email) as { id: string } | undefined)?.id;
   }

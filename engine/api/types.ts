@@ -66,6 +66,15 @@ export interface Person {
 export interface PeopleTable {
   /** The id of the person with this e-mail, made on first sight. The same e-mail, the same id. */
   personFor(email: string): Promise<string>;
+  /**
+   * The id already on record for this e-mail, or null when there is none — never `personFor`'s
+   * find-OR-CREATE. For a log line, which only ever reports what already happened and must never
+   * itself be the reason a request that already committed its real work fails: a lookup made
+   * after the fact must not conjure a row into existence, and must especially never conjure one
+   * back for an address a person was just forgotten from (docs/PRIVACY.md, section 5) — the very
+   * next admin action naming that address would otherwise silently undo the forgetting.
+   */
+  personOf(email: string): Promise<string | null>;
   /** The row behind an id; null when no row has that id. */
   person(id: string): Promise<Person | null>;
   /**

@@ -15,7 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { authorOf, withAuthors, PERSON_ID } from '../api/people.ts';
+import { authorOf, withAuthors, PERSON_ID, idForLog, actedOn } from '../api/people.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { Source } from '../cli/remote.ts';
 import { stub } from './helpers/stub.js';
@@ -258,4 +258,33 @@ test('[firestore] a person that cannot be looked up stops the write before anyth
       assert.deepEqual(commits, [], 'a read that failed was taken for "nobody yet", and a person was made');
     });
   assert.equal((await db.collection('events').get()).size, 0);
+});
+
+// ============================================================ idForLog / actedOn, for the server's own log lines
+// These take the store as a parameter precisely so a lookup that throws can be tested here, in a
+// microsecond, instead of trying to break a real database under a running server.
+
+test('idForLog answers whatever a working lookup answers', async () => {
+  const found = { personOf: async (e) => (e === 'ana@example.org' ? 'p_aaaaaaaaaaaaaaaaaaaaaaaa' : null) };
+  assert.equal(await idForLog(found, 'ana@example.org'), 'p_aaaaaaaaaaaaaaaaaaaaaaaa');
+  assert.equal(await idForLog(found, 'nobody@example.org'), null);
+});
+
+test('idForLog answers null, never throws, when the lookup itself fails', async () => {
+  const broken = { personOf: async () => { throw new Error('the database is down'); } };
+  await assert.doesNotReject(idForLog(broken, 'ana@example.org'));
+  assert.equal(await idForLog(broken, 'ana@example.org'), null);
+});
+
+test('actedOn resolves both sides on their own: one failing does not lose the other', async () => {
+  const store = {
+    personOf: async (e) => {
+      if (e === 'owner@example.org') return 'p_owner00000000000000000a';
+      throw new Error('no row, and asking failed outright');
+    },
+  };
+  assert.deepEqual(await actedOn(store, 'somebody@example.org', 'owner@example.org'),
+    { person: null, by: 'p_owner00000000000000000a' });
+  assert.deepEqual(await actedOn(store, 'owner@example.org', 'somebody@example.org'),
+    { person: 'p_owner00000000000000000a', by: null });
 });
