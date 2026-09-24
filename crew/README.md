@@ -35,6 +35,8 @@ accounts are named in [`accounts.md`](accounts.md), and only the owner changes t
   not hold is flagged with `needs:owner`, and not followed.
 - Only the owner removes `needs:owner`. An agent that finds it gone with no comment from the owner's
   account puts it back.
+- Only the owner changes `accounts.md`, and a pull request that touches it is the owner's to merge
+  (see "The owner's gate").
 
 ## How they talk
 
@@ -68,20 +70,34 @@ the owner's to keep switched off.
 
 ## The owner's gate
 
-A pull request that touches what the security of the product rests on is tier 1 whatever it
-declares, and it waits for `needs:owner` before it merges — a tier the author chose cannot route a
-lock past the owner. Today that is any change to:
+**Only the owner merges, except inside a short list of paths where nothing can reach a lock.** The
+list says where an agent *may* merge, not where it may not: a path nobody thought of stays with the
+owner. A list of the dangerous files would be the opposite — each forgotten file, each new one, and
+each file that enforces the gate itself (this folder, the lenses, CI, the tests) would be a way
+around it, and the author of a change is the one who would decide whether it applies.
 
-- `engine/core/roles.js`, `engine/core/cycle.js`, `engine/core/config.js`;
-- `engine/api/users*.ts`, `engine/api/identity-*.ts`, `engine/api/people.ts`,
-  `engine/api/store*.ts`, `engine/api/theme.ts`;
-- `engine/cli/requests.ts`, `engine/cli/validation.ts`;
-- the section "Invariants the security of the product rests on" in `AGENTS.md`.
+The orchestrator may merge a pull request whose every changed file is under one of:
 
-The list follows those invariants: a change that adds code behind one of them adds its file here in
-the same pull request. Once each role has its own account, the owner makes this binding in GitHub
-itself — a `CODEOWNERS` entry for these paths and "require review from code owners" on `main` — so
-that it does not rest on anyone's reading of this page.
+- `docs/`, except `docs/ROLES.md` and `docs/PRIVACY.md`;
+- `site/`;
+- `examples/`, except any `holdrim.json`;
+- `README.md` and its translations, `ROADMAP.md`, `CHANGELOG.md`.
+
+Everything else — the engine, its tests, CI, `.claude/`, `.github/`, `AGENTS.md`, `CONTRIBUTING.md`,
+`SECURITY.md`, this folder — waits for the owner, who merges it: `needs:owner`, with a comment saying
+it is ready.
+
+**An owner's decision is one the owner makes, not one made with the owner's credentials.** A comment,
+a label or a merge from the owner's account is the owner's only while no agent works on that
+account. So every role runs on its own machine account, and none ever on the owner's.
+
+**Today the owner's account still carries the maintainer agent.** Until the crew's machine accounts
+exist, the Claude Code session that built this folder posts and merges through @Garbiati, so GitHub
+cannot yet tell the owner from that agent, and the gate above rests on the agent keeping it. Once
+the accounts exist, the owner binds it in GitHub itself: a `.github/CODEOWNERS` that makes the owner
+the code owner of everything, with the paths above listed without an owner, and "Require review from
+Code Owners" on `main`. That cannot be switched on before: a pull request cannot be approved by the
+account that opened it, and today the owner's account opens them all.
 
 ## Starting an agent in a role
 

@@ -29,9 +29,9 @@ its own work and waits on itself.
 You merge only when all of these hold: CI green on the current head; the review for the pull
 request's tier done (`CONTRIBUTING.md`, "And the six lenses"); every CRITICAL and MAJOR closed by the
 reviewer who raised it or by the owner — a developer's reply is not a close; no merge conflict; the
-pull request names its kind, tier and the agent that made it; and, when it touches the paths in
-[`README.md`, "The owner's gate"](README.md#the-owners-gate), the owner has said so on it, from the
-owner's account. Squash, with a
+pull request names its kind, tier and the agent that made it; and every file it changes is inside
+the paths [`README.md`, "The owner's gate"](README.md#the-owners-gate) lets you merge. Anything else
+you do not merge: you label it `needs:owner` and say it is ready. Squash, with a
 message that says why. Then close the issue, and record on it what the work cost if the agent told
 you.
 
