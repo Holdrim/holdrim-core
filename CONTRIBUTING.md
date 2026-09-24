@@ -135,6 +135,33 @@ The two exceptions are the translated values in `engine/locales/pt-BR.json` and
 and the README's translations, `README.pt-BR.md` and `README.es.md`, which a test keeps in step with
 the English they translate.
 
+## Kinds of pull request
+
+Every pull request names one kind, in its description and as a `kind:` label, so a reader of the
+history can find all the fixes, or everything that changed how people contribute, without reading
+every diff. The kind says what the change is for; the tier above says how hard it is reviewed. The
+two are separate on purpose: a `docs` change that rewords an invariant is still tier 1.
+
+| Kind | For |
+|---|---|
+| `feature` | something the engine could not do before |
+| `fix` | the engine did something wrong; the description says what, and how it was found |
+| `security` | a lock, sign-in, a permission or an attack surface; always tier 1 |
+| `docs` | documentation only |
+| `tests` | proofs only: a test, a mutation that was missing, a flake with its root cause |
+| `tooling` | CI, scripts, hooks, agent configuration |
+| `refactor` | the same behaviour, arranged better; never mixed with a change of behaviour |
+| `lessons` | what a review missed, turned into a rule in a lens (full-review, step 6) |
+| `contributor-experience` | what it takes to clone, build, run and contribute, found by doing it |
+
+Commit messages carry no kind prefix: the first line says what changed, in plain words, as the
+section below asks. The kind lives on the pull request, where it is read.
+
+**Say which agent made it.** This repository is built with AI agents and reviewed by people, and
+contributions come from more than one vendor's agent. The pull request names the agent and the
+model as its vendor names them, or says it was written by hand. That is how a reader weighs what
+it claims, and how the project learns which rules each agent follows well and which it does not.
+
 ## Commit messages
 
 Long ones. The first line says what changed, and the body says **why it was needed** — with the

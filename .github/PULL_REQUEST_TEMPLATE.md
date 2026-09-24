@@ -1,3 +1,9 @@
+**Kind:** <!-- one of: feature, fix, security, docs, tests, tooling, refactor, lessons,
+contributor-experience (CONTRIBUTING, "Kinds of pull request") -->
+**Tier:** <!-- 1, 2 or 3 (CONTRIBUTING, "And the six lenses"); when in doubt, the higher -->
+**Made with:** <!-- the agent and the model, as its vendor names them, or "by hand" -->
+**Closes:** <!-- #issue, if there is one -->
+
 ## What changes, and why it was needed
 
 <!-- The why matters more. If there was an accident behind this, describe it — that is what stops
