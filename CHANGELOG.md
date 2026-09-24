@@ -50,6 +50,15 @@ who ran the engine from `main` before it.
   texts as ordinary, unbounded reads, not inside one Firestore transaction — a read-only transaction
   aborts after 270 seconds, and both collections only grow — and correct a field that looks tampered
   by asking once more, later, for the removal it could not have seen yet.
+- **`holdrim apply`'s commit no longer carries `Requested-by:`.** Only `Request: <full id>` is
+  written; who asked is found from the request, through the people table, the one place it can be
+  removed. What to change: anything reading a commit for who asked now reads the request instead.
+  Log lines that used to carry an e-mail now carry the person's id — `event_recorded`, `signed_in`,
+  `password_changed`, `user_created`, `user_renamed`, `user_password_reset` and
+  `user_enabled_changed` name a `person` (and a `by`, where the line also says who acted). A refused
+  sign-in (`sign_in_refused`) still logs the address exactly as typed: it never became a person.
+  `docs/PRIVACY.md`, section 5, documents the manual procedure for removing a person, until there is
+  a screen for it.
 
 ### Added
 
