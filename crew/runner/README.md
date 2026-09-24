@@ -16,7 +16,21 @@ The owner's GitHub token never goes here. The script refuses to start unless the
 orchestrator's own account, listed in [`../accounts.md`](../accounts.md); that check catches a
 mistake, and the real guarantee is that the owner's token is never on the host that runs this.
 
-## Running it
+## With Docker Compose (one command after a one-time setup)
+
+```bash
+cd crew/runner
+docker compose --profile setup run --rm setup   # once: two sign-ins in a browser
+docker compose up -d orchestrator               # then a pass every two hours, for good
+docker compose logs -f orchestrator             # watch it
+```
+
+`setup.sh` signs in to GitHub **as @holdrim-orchestrator** and refuses, logging out again, if the
+account is anyone else. It then stores a Claude token from `claude setup-token`. Both live in the
+compose volumes `secrets` and `gh-config`, never in the image or the repository. To start over,
+`docker compose down -v` deletes them.
+
+## Running it by hand
 
 ```bash
 docker build -t holdrim-orchestrator crew/runner

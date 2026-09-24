@@ -6,8 +6,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git gh ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g @anthropic-ai/claude-code
-RUN useradd -m crew
+RUN useradd -m crew \
+ && mkdir -p /home/crew/.secrets /home/crew/.config/gh \
+ && chown -R crew:crew /home/crew/.secrets /home/crew/.config \
+ && chmod 700 /home/crew/.secrets
 USER crew
 WORKDIR /home/crew
-COPY --chown=crew run-orchestrator.sh .
+COPY --chown=crew run-orchestrator.sh setup.sh loop.sh ./
 CMD ["bash", "run-orchestrator.sh"]
