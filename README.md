@@ -167,6 +167,9 @@ computed — only what is demanded before a block counts as ready.
 
 Nothing is erased. Every ✓, every request, every rejection becomes a new event with author and
 timestamp. The database refuses `UPDATE` and `DELETE` — through triggers, not through discipline.
+The one thing that can go is a request's own `text` or `snapshot`, held apart in its own table, and
+even that only as a recorded removal: `removeText` deletes the row and writes a `text_removed` event
+naming who and when, in the same transaction, so what changed is never silent.
 
 Events live in a SQLite file on the `/data` volume by default (`HOLDRIM_EVENTS_PATH`). The same
 interface, `EventStore` in `engine/api/types.ts`, already takes Firestore (`HOLDRIM_EVENTS=firestore`);
@@ -362,9 +365,12 @@ Honest, as of `2026-09-22`:
   configuration (`HOLDRIM_USERS=postgres://…` or `firestore`); the service warns about it at start,
   and does not refuse to come up, on purpose.
 - **Nothing is erased, in Firestore, by the code alone.** SQLite refuses `UPDATE` and `DELETE` by
-  trigger; Firestore's store only ever creates, and CI's `stores` job runs every event store,
-  Firestore's included, against one conformance suite on the emulator. But the project's IAM still
-  lets someone with access delete a document by hand. Locking that is the deployment's to do.
+  trigger; Firestore's store only ever creates events, and CI's `stores` job runs every event store,
+  Firestore's included, against one conformance suite on the emulator. The one delete the code itself
+  issues is a text document, and only through `removeText`, which pairs it with a `text_removed`
+  event in the same transaction — an adopter who hands the service create-only IAM would be taking
+  away the one operation it legitimately needs. Beyond that, the project's IAM still lets someone
+  with access delete a document by hand. Locking that is the deployment's to do.
 
 ## Licence
 

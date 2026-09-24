@@ -93,7 +93,11 @@ Each has a test. If you change the code around one, run the contract test and re
   guarding only one leaves the other open — an admin could create the owner's account during a
   handover and read the generated password out of the response.
 - **Nothing is erased.** Events refuse `UPDATE` and `DELETE` by trigger. People are *disabled*, never
-  deleted, and disabling drops the open session.
+  deleted, and disabling drops the open session. An event's own `text` and `snapshot` live apart, in
+  `texts`: a row there is never updated or replaced, and is deleted only by `EventStore.removeText`,
+  together with a `text_removed` event recording who and when (`texts_no_update`, `texts_no_replace`,
+  `texts_no_delete`, `engine/api/store-sqlite.ts`). A hash with no row and no removal naming it reads
+  as tampered, not as erased.
 - **Only the owner's ✓ becomes a lock.** An agent may *close* an impact — "this change did not reach
   here" — and never *approve* — "this text is correct".
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
