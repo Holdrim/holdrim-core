@@ -659,6 +659,17 @@ expect "the caller's HOLDRIM_IDENTITY=password does not reach it" 200 \
 kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
 expect "and the caller's HOLDRIM_EVENTS=sqlite wrote no events file: it stayed memory" 1 \
   "$([ -e "$LEAK/events.db" ] && echo 0 || echo 1)"
+# The check above alone is fooled by removing the EVENTS pin on its own: HOLDRIM_EVENTS_PATH is
+# still unset, so a leaked HOLDRIM_EVENTS=sqlite with no pin would write to the DEFAULT path,
+# ./data/events.db, not to $LEAK — and the check above would still find nothing at $LEAK and pass.
+# Asking the server itself what it opened, from its own boot log, catches that: server.ts logs
+# `events: eventsKind` on server_listening, so a real sqlite fallback shows up as "events":"sqlite"
+# right there, whichever path it went to.
+expect "and the server itself reports events: memory" 0 \
+  "$(grep -q '\"event\":\"server_listening\".*\"events\":\"memory\"' $WORK/leak.log; echo $?)"
+expect "and no events file appeared at the default path either" 1 \
+  "$([ -e data/events.db ] && echo 0 || echo 1)"
+rm -f data/events.db
 rm -rf "$LEAK"
 
 echo "the local runner, on another project:"
@@ -770,6 +781,13 @@ expect "and names the key"                         0 "$(grep -q 'holdrim.json na
 RUNNER=$(PORT=$PORT HOLDRIM_OWNER=$OWNER run_for 15 bash engine/run-local.sh "$FILE_OWNER" 2>&1); RUNNER_EXIT=$?
 expect "the local runner refuses it too → exits 1" 1 "$RUNNER_EXIT"
 expect "with the same reason"                      0 "$(echo "$RUNNER" | has 'authority is set by the deployment'; echo $?)"
+# "with the same reason" is a substring match, and 'authority is set by the deployment' also
+# appears — wrapped — inside run-local.sh's OWN "...is not valid JSON: ✗ ..." sentence, the one it
+# prints for a file that will not parse at all. A run-local.sh that fell through the `||` guard on
+# line 27 into THAT branch, misreporting a well-formed authority-claiming file as bad JSON, would
+# still pass the check above. This one does not.
+expect "and does not call it invalid JSON: it is valid JSON, just not allowed to say this" 1 \
+  "$(echo "$RUNNER" | has 'not valid JSON'; echo $?)"
 # The broken-config case above already proves this for a file that will not parse at all; this is
 # the same guarantee for a file that parses fine but claims an authority it may not have.
 expect "and never started the server"              1 "$(echo "$RUNNER" | has 'Holdrim local'; echo $?)"
