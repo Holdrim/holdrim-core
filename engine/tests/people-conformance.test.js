@@ -176,6 +176,10 @@ forEachStore('once forgotten, personOf answers null again — it never re-insert
     const ana = await s.personFor('ana@example.org');
     await s.forget(ana);
     assert.equal(await s.personOf('ana@example.org'), null);
+    // Asked TWICE, as "personOf never creates" above asks a never-seen address twice: a lookup that
+    // quietly re-inserted the pointer on its first call would still answer null on THAT call, and
+    // only a second ask would find the row it had just made and answer something other than null.
+    assert.equal(await s.personOf('ana@example.org'), null, 'asking twice made no row either');
     // The forgotten row itself is untouched by asking: still there, still empty, same id — a
     // read-only lookup must not hand a freshly-forgotten address a person of its own again, which
     // is exactly what the very next admin action on that address needs (docs/PRIVACY.md, section 5).
