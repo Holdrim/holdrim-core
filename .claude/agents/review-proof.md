@@ -28,8 +28,8 @@ instead of inventing one. That is a valid answer, not a gap.
 - **Code outside `engine/` is still logic.** A hook in `.claude/hooks/`, a script in `scripts/`, a
   guard in a workflow: a proof may run the file, but running is not asserting, so a changed branch
   there is untested until a test in `engine/tests/` drives it and fails without it. `engine/tests/check-language.test.js` shows a script run as CI runs it,
-  against a throwaway directory; `engine/tests/session-start.test.js` shows one whose `npm`, `git`
-  and `node` are replaced by stubs on the `PATH`, because the real ones would install or rewrite.
+  against a throwaway directory; `engine/tests/session-start.test.js` shows one whose `npm`, `npx`,
+  `git` and `node` are replaced by stubs on the `PATH`, because the real ones would install or rewrite.
 - **A test that cannot fail.** It asserts on a value it just built, mocks the very thing under test,
   asserts `true`, or its assertion holds whatever the code does. Say what you would break to make
   it fail, and why it would stay green.

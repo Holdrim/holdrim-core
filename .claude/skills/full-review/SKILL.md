@@ -155,9 +155,9 @@ into six copies that disagree. Give every agent the same prompt, built from thes
 >
 > Two things inside the worktree are not isolated. `node_modules` is a **symlink into the person's
 > own tree** — never install, never write under it, or the isolation this whole step buys is gone.
-> The same holds for a script the change touches that installs or configures — `npm ci`,
-> `git config`, a hook: run it only with those commands stubbed on the `PATH`, the way
-> `engine/tests/session-start.test.js` runs the session hook, never as it stands.
+> The same holds for a script the change touches that installs, downloads or configures — a hook,
+> a setup script: run it only with every such command (`npm`, `npx`, `git`, …) stubbed on the
+> `PATH`, the way `engine/tests/session-start.test.js` runs the session hook, never as it stands.
 > And a server binds a fixed port shared with everything else on the machine: do not run
 > `engine/test-contract.sh`, `npm run browser` or `engine/run-local.sh`. One lens owns those; the
 > rest read their assertions. Two runs on one port means the second drives the first one's server
@@ -235,18 +235,20 @@ The second line is always the finding's `evidence`. Then, in this order:
 5. **The tree**, one line: clean, or what a reviewer left behind.
 
 The pull request that follows says what the lenses found, as `CONTRIBUTING.md` asks, and for step 6
-it says it in full: every confirmed CRITICAL and MAJOR, the lens that raised it, and the round —
-first review, a rerun after a fix, CI, or a person. The terminal is gone by the time step 6 runs;
-the pull request is not.
+it says it in full: every confirmed CRITICAL and MAJOR with the lens that raised it and the round,
+and every sentence a lens was given in its prompt beyond the shared contract, with the lens. A round
+that comes after the pull request opens goes in a comment on it, when it happens; CI and people
+leave their own record there. The terminal is gone by the time step 6 runs; the pull request is
+not.
 
 Then stop. Do not fix anything unless asked: this reports. When a fix follows, it is a change like
 any other: rerun every lens that reads what the fix touched, not only the lens that reported, and
-record what that round finds. Step 6 is a separate pass, after the merge.
+record what that round finds on the pull request. Step 6 is a separate pass, after the merge.
 
 ## 6. Learn, when the change is done
 
 A review that only reports repeats its misses on the next change. So once the pull request is
-merged, read its description, its review threads and its CI history, go back over every CRITICAL
+merged, read its description, its comments, its review threads and its CI history, go back over every CRITICAL
 and MAJOR that was confirmed, in every round and from every source, and ask one question of each:
 **which lens should have seen it, and did it, the first time?**
 
