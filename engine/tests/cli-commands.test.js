@@ -168,7 +168,8 @@ test('list, show, impact, summary and apply --dry-run read the events file with 
   const dry = run(['apply', request.id.slice(0, 6), '--db', db, '--dry-run'], dir);
   assert.equal(dry.code, 0);
   assert.match(dry.out, /# Holdrim request/);
-  assert.match(dry.out, /Requested-by: reviewer@example.org/);
+  assert.match(dry.out, /Request: /);
+  assert.doesNotMatch(dry.out, /Requested-by/);
 });
 
 test('the pre-commit lock over every example passes on a clean checkout', () => {

@@ -49,7 +49,7 @@ the site.
    anything without this: the command marks which blocks are **validated**, and those need the
    owner's permission to change.
 4. Ask about anything ambiguous. A misunderstood request turns into two requests.
-5. Apply it, with a commit that carries the trailers `Request: <id>` and `Requested-by: <e-mail>`.
+5. Apply it, with a commit that carries the trailer `Request: <id>`.
 6. `holdrim state <id> applied "Done" --commit <sha> --blocks D01.1.4,D02.3.1`
 7. Add the lesson to the Traps section below, if the fix teaches a rule that is not written yet.
 

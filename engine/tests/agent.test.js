@@ -97,7 +97,9 @@ test('the brief carries the request, the text then and now, the impact and the r
   assert.match(text, /## Thread\n\n- .* owner@example.org: approved — agreed/);
   // The rules the agent must not break, whatever else it knows.
   assert.match(text, /Request: req00001/);
-  assert.match(text, /Requested-by: reviewer@example.org/);
+  // No `Requested-by:` trailer: who asked stays out of the commit, and is found from the request
+  // id instead, in the people table, where it can be removed (docs/PRIVACY.md, section 6).
+  assert.doesNotMatch(text, /Requested-by/);
   assert.match(text, /holdrim state req00001 applied/);
   assert.match(text, /VALIDATED block does not change without the owner/);
   assert.match(text, /data-validated-fingerprint/);
