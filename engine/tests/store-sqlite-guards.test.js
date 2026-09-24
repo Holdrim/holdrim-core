@@ -181,6 +181,7 @@ test('two boots repairing one file at once: the second waits for the first and t
   // The first boot, in a thread of its own: it takes the write lock, repairs, and holds on a moment
   // before it commits, so the second boot is certain to read the file while it is still wrong.
   const { Worker } = await import('node:worker_threads');
+  const committed = new Int32Array(new SharedArrayBuffer(4));
   const first = new Worker(`
     const { DatabaseSync } = require('node:sqlite');
     const { workerData, parentPort } = require('node:worker_threads');
@@ -190,18 +191,25 @@ test('two boots repairing one file at once: the second waits for the first and t
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
     db.exec('DROP TRIGGER events_no_delete');
     db.exec(workerData.create);
+    Atomics.store(workerData.committed, 0, 1);
     db.exec('COMMIT');
     db.close();
-  `, { eval: true, workerData: { path, create: `CREATE TRIGGER events_no_delete ${GUARDS.events_no_delete}` } });
+  `, { eval: true, workerData: { path, committed, create: `CREATE TRIGGER events_no_delete ${GUARDS.events_no_delete}` } });
   await new Promise((resolve) => first.once('message', resolve));
   const said = [];
   const db = new DatabaseSync(path);
   db.exec('PRAGMA busy_timeout = 5000');
+  // The test means something only if this boot reads the file before the first one commits; on a
+  // machine slow enough to miss that, it has to fail rather than pass having tested nothing.
+  const prepare = db.prepare.bind(db);
+  let readBeforeCommit;
+  db.prepare = (sql) => { readBeforeCommit ??= Atomics.load(committed, 0) === 0; return prepare(sql); };
   try {
     // Without IMMEDIATE, this boot's read runs ahead and its write collides with the first one's;
     // without the read again under the lock, it repairs from the stale view and says so.
     assert.doesNotThrow(() => installGuards(db, GUARDS, (line) => said.push(line)));
     assert.deepEqual(said, [], 'the first boot already repaired it: the second has nothing to replace');
+    assert.equal(readBeforeCommit, true, 'the second boot has to read the file before the first one commits');
   } finally {
     db.close();
     await new Promise((resolve) => first.once('exit', resolve));
