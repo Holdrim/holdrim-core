@@ -659,17 +659,12 @@ expect "the caller's HOLDRIM_IDENTITY=password does not reach it" 200 \
 kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
 expect "and the caller's HOLDRIM_EVENTS=sqlite wrote no events file: it stayed memory" 1 \
   "$([ -e "$LEAK/events.db" ] && echo 0 || echo 1)"
-# The check above alone is fooled by removing the EVENTS pin on its own: HOLDRIM_EVENTS_PATH is
-# still unset, so a leaked HOLDRIM_EVENTS=sqlite with no pin would write to the DEFAULT path,
-# ./data/events.db, not to $LEAK — and the check above would still find nothing at $LEAK and pass.
-# Asking the server itself what it opened, from its own boot log, catches that: server.ts logs
-# `events: eventsKind` on server_listening, so a real sqlite fallback shows up as "events":"sqlite"
-# right there, whichever path it went to.
+# The check above looks at one path, the one this test exported; a store opened anywhere else would
+# pass it. The server's own boot log names the store it opened (`events: eventsKind` on
+# server_listening), whatever path it took. No check looks at ./data/events.db: that is a real
+# developer's default store, and a test that inspects or deletes it could destroy their events.
 expect "and the server itself reports events: memory" 0 \
   "$(grep -q '\"event\":\"server_listening\".*\"events\":\"memory\"' $WORK/leak.log; echo $?)"
-expect "and no events file appeared at the default path either" 1 \
-  "$([ -e data/events.db ] && echo 0 || echo 1)"
-rm -f data/events.db
 rm -rf "$LEAK"
 
 echo "the local runner, on another project:"
