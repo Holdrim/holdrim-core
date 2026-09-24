@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { normalize } from '../core/fingerprint.js';
+import { CLI_COMMANDS as COMMANDS } from './helpers/cli-source.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const read = (path) => readFileSync(join(ROOT, path), 'utf8');
@@ -31,8 +32,6 @@ const CODE = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude
   '*.ts', '*.js', '*.sh', '*.yml', '*.yaml', 'Dockerfile', '.env.example'],
 { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(Boolean).filter((f) => existsSync(join(ROOT, f)))
   .map((f) => read(f)).join('\n');
-
-const COMMANDS = new Set([...read('engine/cli/holdrim.ts').matchAll(/case '([a-z-]+)':/g)].map((m) => m[1]));
 
 test('every core document the repository promises exists', () => {
   for (const f of ['README.md', 'CONTRIBUTING.md', 'SECURITY.md', ...['BUGS', 'GLOSSARY', 'IMPACT',
