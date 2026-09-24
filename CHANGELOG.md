@@ -58,3 +58,8 @@ The first version. There is nothing before it to break.
 - **The image** is published to `ghcr.io/holdrim/holdrim-core` on a version tag, with provenance
   and an SBOM. Pin the version: there is no `latest`.
 - **Node 22.18 or newer** to run from a clone. The image carries its own Node.
+- **The names you build on, written down.** `engine/surface.json` lists every one of them — the
+  `HOLDRIM_*` variables, the keys of `holdrim.json`, the `data-*` attributes, the event types and
+  their fields, the request states and categories, the CLI's commands and flags, what
+  `holdrim list --json` prints, and the HTTP routes. CI derives each list from the code and fails
+  when one moves, naming it, and the failure asks for the change to be recorded here.

@@ -350,6 +350,15 @@ expect "keeping track of where it was headed" 0 "$(curl -s -D- -o /dev/null $B/p
 expect "the people screen does NOT open without a session" 0 "$(curl -s -D- -o /dev/null $B/engine/people | has -i 'location: /sign-in'; echo $?)"
 expect "the project home does NOT open without a session" 0 "$(curl -s -D- -o /dev/null $B/engine/home | has -i 'location: /sign-in'; echo $?)"
 expect "the login screen opens → 200"  200 "$(curl -s -o /dev/null -w '%{http_code}' $B/sign-in)"
+# The language selector is drawn on the login screen, so its route answers before any session:
+# behind the guard, the person who most needs it — not signed in yet — would be sent to sign in
+# instead. It sends them back where they were, and keeps the choice in a cookie that is `Secure`
+# everywhere but development.
+curl -s -D "$WORK/language.h" -o /dev/null "$B/language?lang=es&next=%2Fsign-in"
+expect "the language switch answers without a session → 302" 1 "$(grep -c '^HTTP/1.1 302' "$WORK/language.h")"
+# Exactly there: the guard's own redirect also starts `/sign-in`, and carries `?next=` after it.
+expect "and goes back to where the person was" 1 "$(tr -d '\r' < "$WORK/language.h" | grep -ci '^location: /sign-in$')"
+expect "and keeps the choice, Secure" 1 "$(grep -ci '^set-cookie: holdrim_language=es;.*; secure' "$WORK/language.h")"
 # The one route read before any session: a body of null would reach `body.email` and throw.
 expect "a sign-in with a body of null → 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d 'null' $B/api/sign-in)"
 # And fields of the wrong kind: an e-mail that is a number would reach `.trim()` and answer 500.
