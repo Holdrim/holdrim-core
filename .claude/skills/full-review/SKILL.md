@@ -248,9 +248,9 @@ record what that round finds on the pull request. Step 6 is a separate pass, aft
 ## 6. Learn, when the change is done
 
 A review that only reports repeats its misses on the next change. So once the pull request is
-merged, read its description, its comments, its review threads and its CI history, go back over every CRITICAL
-and MAJOR that was confirmed, in every round and from every source, and ask one question of each:
-**which lens should have seen it, and did it, the first time?**
+merged, read its description, its comments, its review threads and its CI history, go back over
+every CRITICAL and MAJOR that was confirmed, in every round and from every source, and ask one
+question of each: **which lens should have seen it, and did it, the first time?**
 
 - **It saw it first time:** nothing to learn.
 - **It missed it**, and a later round, another lens, CI or a person found it: that lens's file gets
