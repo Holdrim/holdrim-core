@@ -208,6 +208,31 @@ test('every guard dropped from a database that still holds an approval is named,
   for (const l of logged) assert.deepEqual(l, { severity: 'WARNING', event: 'sqlite_guard_missing', time: l.time, guard: l.guard });
 }));
 
+test('events and people emptied but a text left behind is not a first install either: every guard is named', withFile(async (path, said, logged) => {
+  // holdsNoRow checks all three tables, and this fixture is built to make the texts check the ONLY
+  // one still true: events and people are wiped below, so if that third check were `true` instead
+  // of a real SELECT, this database — one row in texts, nothing else — would pass as a first
+  // install and every guard would go back in silence, the exact failure holdrim#89 exists to name.
+  const store = new SqliteEventStore(path);
+  await store.append({ ...approval, text: 'a comment', snapshot: null }, 'owner@example.org');
+  await store.close();
+  // Foreign keys off on this connection (the store's own constructor is what turns them ON;
+  // node:sqlite otherwise enables them itself, so the plain `outside()` helper cannot be reused
+  // here), so the events row can be deleted below while a texts row still names it — leaving
+  // exactly one table, texts, non-empty.
+  const db = new DatabaseSync(path, { enableForeignKeyConstraints: false });
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name);
+  for (const n of names) db.exec(`DROP TRIGGER "${n}"`);
+  db.exec('DELETE FROM events; DELETE FROM people;');
+  db.close();
+  await reopen(path);
+  const missing = said.map(classify).filter((c) => c?.kind === 'missing').sort(byName);
+  assert.deepEqual(missing.map((c) => c.name), Object.keys(GUARDS).sort(),
+    'a text row alone, with no guard on any of the three tables, is not a first install: every guard is named missing');
+  assert.deepEqual(logged.map((l) => l.guard).sort(), Object.keys(GUARDS).sort(),
+    'and each is a structured WARNING too, one line per guard');
+}));
+
 test('all but one guard dropped: the other eight are named, the one left alone is not', withFile(async (path, said) => {
   const store = new SqliteEventStore(path);
   await store.append(approval, 'owner@example.org');
