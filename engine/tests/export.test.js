@@ -37,7 +37,7 @@ function project(t) {
   writeFileSync(join(root, 'pages', 'A01.html'), PAGE);
   writeFileSync(join(root, 'style', 's.css'), 'body { color: black }');
   writeFileSync(join(root, 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
-  writeFileSync(join(root, 'holdrim.json'), '{ "owner": "someone@example.org" }');
+  writeFileSync(join(root, 'holdrim.json'), '{ "name": "Someone\'s docs" }');
   writeFileSync(join(root, 'approvals.json'), '{}');
   writeFileSync(join(root, '.env'), 'SECRET=1');
   writeFileSync(join(root, 'notes.txt'), 'private notes');

@@ -28,7 +28,7 @@ test('with no file at all, the engine still has every default it needs', () => {
 
 test('the file is read under the keys the adopting project writes', () => {
   const c = readConfig('/p', file({
-    name: 'Handbook', owner: 'ana@example.org', admins: ['bob@example.org', 'cid@example.org'],
+    name: 'Handbook',
     language: 'es',
     content: { folders: ['sheets'], registry: 'locks.json', home: '/sheets/A01.html',
                trimPrefix: 'sheets/', pageExamples: 'A01 or A02' },
@@ -36,8 +36,6 @@ test('the file is read under the keys the adopting project writes', () => {
     cloud: { project: 'proj', account: 'acct', region: 'europe-west1', service: 'svc', projectNumber: '42' },
   }));
   assert.equal(c.name, 'Handbook');
-  assert.equal(c.owner, 'ana@example.org');
-  assert.equal(c.admins, 'bob@example.org,cid@example.org', 'a list in the file, a comma list out');
   assert.equal(c.language, 'es');
   assert.deepEqual(c.sheetFolders, ['sheets']);
   assert.equal(c.registry, 'locks.json');
@@ -54,7 +52,7 @@ test('the file is read under the keys the adopting project writes', () => {
 });
 
 test('the environment beats the file: one repository, more than one deployment', () => {
-  const c = readConfig('/p', file({ name: 'Handbook', owner: 'file@example.org', admins: ['a@example.org'],
+  const c = readConfig('/p', file({ name: 'Handbook',
     development: { port: 9000 }, theme: { brand: '#111111' } }), {
     HOLDRIM_NAME: 'Staging', HOLDRIM_OWNER: 'env@example.org', HOLDRIM_ADMINS: 'x@example.org',
     PORT: '8080', HOLDRIM_THEME_BRAND: '#0B5FA5', HOLDRIM_DEV_EMAIL: 'dev@example.org',
@@ -100,4 +98,34 @@ test('a file that is not JSON counts as no file, not as a crash', () => {
   const none = readConfig('/p', { readFile: () => { throw new Error('ENOENT'); } });
   assert.equal(none.unreadable, null, 'no file at all is not a broken file');
   assert.equal(readConfig('/p', { readFile: () => '{}' }).unreadable, null);
+});
+
+test('the owner and the admins come from the environment, and only from it', () => {
+  const c = readConfig('/p', file({ name: 'Handbook' }),
+    { HOLDRIM_OWNER: 'env@example.org', HOLDRIM_ADMINS: 'a@example.org,b@example.org' });
+  assert.equal(c.owner, 'env@example.org');
+  assert.equal(c.admins, 'a@example.org,b@example.org');
+  const none = readConfig('/p', file({ name: 'Handbook' }));
+  assert.equal(none.owner, null, 'no variable, no owner: the service then refuses to start');
+  assert.equal(none.admins, '');
+});
+
+test('a holdrim.json that names an owner, admins or lock-holders refuses to load', () => {
+  // Whoever commits to the file is not whoever deploys: read, the key would hand authority to
+  // anyone with a branch. The variable being set does not excuse it — the key would still say
+  // something false about who owns the project.
+  for (const [key, value] of [['owner', 'file@example.org'], ['admins', ['a@example.org']],
+    ['locks', 'a@example.org:A01'], ['owner', null]]) {
+    for (const env of [{}, { HOLDRIM_OWNER: 'env@example.org', HOLDRIM_ADMINS: 'x@example.org' }]) {
+      assert.throws(() => readConfig('/p', file({ name: 'Handbook', [key]: value }), env),
+        (e) => e instanceof Error && e.message.includes(`/p/holdrim.json names "${key}"`)
+          && /authority is set by the deployment/.test(e.message)
+          && e.message.includes('HOLDRIM_OWNER') && e.message.includes('HOLDRIM_ADMINS'),
+        `"${key}" in the file, with ${Object.keys(env).length ? 'the variables set' : 'no variables'}`);
+    }
+  }
+  assert.throws(() => readConfig('/p', file({ owner: 'o@example.org', admins: [], locks: '' })),
+    /names "owner", "admins", "locks"/, 'every key it names, not only the first');
+  // Keys that merely look alike are the project's own notes, not authority.
+  assert.doesNotThrow(() => readConfig('/p', file({ _owner: 'who approves is set by HOLDRIM_OWNER' })));
 });

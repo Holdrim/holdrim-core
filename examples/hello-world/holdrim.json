@@ -1,7 +1,8 @@
 {
   "_read": [
-    "The smallest working example of Holdrim. Copy this folder, swap the owner for your e-mail,",
-    "and you have reviewable documentation running.",
+    "The smallest working example of Holdrim. Copy this folder, start it with your e-mail in",
+    "HOLDRIM_OWNER, and you have reviewable documentation running. The owner is never named here:",
+    "authority is set by the deployment, and a holdrim.json with `owner` or `admins` refuses to load.",
     "",
     "  docker run -p 8080:8080 -v data:/data \\",
     "    -v $PWD/examples/hello-world:/content -e HOLDRIM_SITE=/content \\",
@@ -11,7 +12,6 @@
   ],
 
   "name": "Hello world",
-  "owner": "you@example.org",
 
   "content": {
     "folders": ["pages"],

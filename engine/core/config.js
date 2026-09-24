@@ -7,10 +7,42 @@
  *
  * Environment variables beat the file: the same repository serves more than one environment. The
  * one exception is `language`, below, where HOLDRIM_LANGUAGE counts only when the file names none.
+ *
+ * ⚠️ AUTHORITY IS NOT IN THE FILE AT ALL. Who the owner and the admins are comes from HOLDRIM_OWNER
+ * and HOLDRIM_ADMINS, and from nowhere else (docs/ROLES.md, "Authority comes from the deployment
+ * only"). The file travels with the repository, and whoever can commit to it — a contributor, or
+ * the agent applying an approved request — is not whoever deploys it: with a fallback to the file,
+ * editing one line would name a new owner at the next deploy, or at the next `holdrim sync` on
+ * somebody's machine.
  * @module
  */
 
 import { HOME_SCREEN } from './screens.js';
+
+/**
+ * The keys that would grant authority, refused in `holdrim.json`. `locks` is here before the
+ * lock-holders exist (docs/ROLES.md, section 3) so that no file ever learns to carry them.
+ *
+ * Refused, not ignored: an adopter who wrote `owner` there believes it counts. Ignored, the key
+ * would sit in the file looking authoritative while the variable decided — and the day someone
+ * read the file to find out who the owner is, it would answer wrong.
+ */
+const AUTHORITY_KEYS = ['owner', 'admins', 'locks'];
+
+/**
+ * @param {unknown} file  the parsed `holdrim.json`
+ * @param {string} root
+ */
+function refuseAuthority(file, root) {
+  if (!file || typeof file !== 'object') return;
+  const named = AUTHORITY_KEYS.filter((key) => Object.hasOwn(file, key));
+  if (named.length === 0) return;
+  throw new Error(
+    `${root}/holdrim.json names ${named.map((k) => `"${k}"`).join(', ')}, and it may not: ` +
+    'authority is set by the deployment, never by the repository. Remove ' +
+    (named.length === 1 ? 'the key' : 'the keys') + ' from the file and set HOLDRIM_OWNER (one e-mail) ' +
+    'and HOLDRIM_ADMINS (comma separated) where Holdrim runs.');
+}
 
 /**
  * The keys of `holdrim.json` are English, like everything else. They are a contract with every
@@ -39,6 +71,10 @@ export function readConfig(root, io, env = {}) {
       unreadable = error instanceof Error ? error.message : String(error);
     }
   }
+  // Here, where the file is read, and not in each caller: every path to the configuration — the
+  // server's boot, every CLI command, the local runner — comes through this function, so none of
+  // them can forget to ask.
+  refuseAuthority(file, root);
   const cloud = file.cloud ?? {};
   const dev = file.development ?? {};
   const content = file.content ?? {};
@@ -48,8 +84,10 @@ export function readConfig(root, io, env = {}) {
 
   return {
     name,
-    owner: env.HOLDRIM_OWNER ?? file.owner ?? null,
-    admins: env.HOLDRIM_ADMINS ?? (file.admins ?? []).join(','),
+    // The environment only: see the top of this file. `rolesOf` (engine/core/roles.js) turns these
+    // two into roles, for the server and the CLI alike.
+    owner: env.HOLDRIM_OWNER ?? null,
+    admins: env.HOLDRIM_ADMINS ?? '',
     project: env.HOLDRIM_PROJECT ?? cloud.project ?? null,
     account: env.HOLDRIM_ACCOUNT ?? cloud.account ?? null,
     region: cloud.region ?? null,

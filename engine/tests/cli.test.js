@@ -25,7 +25,7 @@ function project(t, config = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-cli-'));
   mkdirSync(join(dir, 'p'));
   writeFileSync(join(dir, 'holdrim.json'),
-    JSON.stringify({ owner: 'x@y.org', content: { folders: ['p'], registry: 'r.json' }, ...config }));
+    JSON.stringify({ content: { folders: ['p'], registry: 'r.json' }, ...config }));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -361,15 +361,17 @@ test('no example has a repeated block code', async () => {
  * owner's place, and an "applied" without a commit would be a closed request nobody can audit.
  */
 function trail(t, ...events) {
-  // The owner is named in the project's file, the way an adopter names it; the variable is cleared
-  // for the test, or a HOLDRIM_OWNER exported in the shell running it would decide who the owner is.
+  // The owner is named in HOLDRIM_OWNER, the way a deployment names it, and set for the test alone,
+  // so a HOLDRIM_OWNER exported in the shell running it does not decide who the owner is.
   const root = mkdtempSync(join(tmpdir(), 'holdrim-trail-'));
-  writeFileSync(join(root, 'holdrim.json'), JSON.stringify({ owner: 'owner@y.org' }));
-  const before = process.env.HOLDRIM_OWNER;
-  delete process.env.HOLDRIM_OWNER;
+  writeFileSync(join(root, 'holdrim.json'), JSON.stringify({}));
+  const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
+  process.env.HOLDRIM_OWNER = 'owner@y.org';
+  delete process.env.HOLDRIM_ADMINS;
   t.after(() => {
     rmSync(root, { recursive: true, force: true });
-    if (before === undefined) delete process.env.HOLDRIM_OWNER; else process.env.HOLDRIM_OWNER = before;
+    if (before.owner === undefined) delete process.env.HOLDRIM_OWNER; else process.env.HOLDRIM_OWNER = before.owner;
+    if (before.admins === undefined) delete process.env.HOLDRIM_ADMINS; else process.env.HOLDRIM_ADMINS = before.admins;
   });
   const added = [];
   const request = (id, author) => ({

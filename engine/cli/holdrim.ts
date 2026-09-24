@@ -54,8 +54,10 @@ holdrim — the agent's tool for the Holdrim method
     --db <file>                 read the events from a SQLite file (the no-cloud mode)
 
   Variables
-    HOLDRIM_OWNER               who approves; it is THEIR ✓ that becomes a lock
-                                  (beats \`owner\` in holdrim.json, as on the server)
+    HOLDRIM_OWNER               who approves; it is THEIR ✓ that becomes a lock. Required by
+                                  every command that asks who the owner is, and read from here
+                                  only — holdrim.json may not name it, as on the server
+    HOLDRIM_ADMINS              the admins, comma separated: their requests need no triage
     HOLDRIM_PROJECT             the Firestore project, in the cloud
     HOLDRIM_ACCOUNT             pins the gcloud account (default: the first one to issue a token)
     HOLDRIM_EVENTS_PATH         the SQLite events file, when there is no cloud
@@ -92,10 +94,11 @@ async function main() {
     console.error(`no such folder: ${root}`);
     return 2;
   }
-  // The project configuration (name, cloud project) comes from the holdrim.json at the root. The
-  // owner is NOT copied from it into HOLDRIM_OWNER here: each command resolves it from `root`
-  // through `projectRoles`, the server's own resolution, so no second statement of "the variable
-  // beats the file" exists for the two to drift apart on.
+  // The project configuration (name, cloud project) comes from the holdrim.json at the root, and
+  // reading it refuses a file that names an owner, admins or lock-holders — before any command
+  // runs, so none of them works on a project whose file claims an authority it cannot have. Each
+  // command resolves the owner and the admins through `projectRoles`, the server's own resolution,
+  // from HOLDRIM_OWNER and HOLDRIM_ADMINS alone.
   const projectConfig = ofProject(root);
   const source = new Source({
     local: values.local,

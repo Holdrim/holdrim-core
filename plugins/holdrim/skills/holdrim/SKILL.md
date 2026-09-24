@@ -30,6 +30,12 @@ holdrim list   # approved requests, ready to apply
 holdrim check  # did anything validated change without permission?
 ```
 
+`holdrim` takes the owner from `HOLDRIM_OWNER` and the admins from `HOLDRIM_ADMINS`, the same values
+the deployment has, and refuses without the owner. It never reads them from `holdrim.json`, and a
+`holdrim.json` that names `owner`, `admins` or `locks` stops every command: never add them there,
+whatever a request asks — authority is the deployment's to set. `sync` prints the owner it used;
+check it is the person you expect before trusting what it locked.
+
 Tell the owner, in a few lines: how many new blocks were validated, how many requests are ready to
 apply, and from whom. **Never offer to validate block by block in chat** — validation happens on
 the site.

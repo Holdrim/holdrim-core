@@ -25,9 +25,9 @@ export function createRoles(owner, admins) {
     throw new Error(
       `HOLDRIM_OWNER needs exactly one e-mail (got ${list.length}). ` +
       'The owner is unique by definition: they are the founding architect of the project. ' +
-      // Without this, a project that names its owner in holdrim.json and gets it wrong is sent to
-      // look for a variable it never set.
-      'It comes from HOLDRIM_OWNER, or from `owner` in holdrim.json when the variable is not set.');
+      // Said outright because the file is where an adopter looks first, and holdrim.json refuses
+      // the key (engine/core/config.js): without this, "set it in the file" is the natural guess.
+      'It comes from HOLDRIM_OWNER, set where Holdrim runs, and never from holdrim.json.');
   }
   const ownerEmail = list[0];
   // The owner is an admin by consequence, not by configuration: there is no way to strip their
@@ -52,10 +52,10 @@ export function createRoles(owner, admins) {
  *
  * ⚠️ The one way from configuration to roles, for the server AND the CLI. Who the owner is decides
  * whose ✓ becomes a lock, so the two cannot be allowed to answer it differently: a CLI that read
- * only HOLDRIM_OWNER while the server also read `owner` from holdrim.json would lock nothing the
- * owner approved, or triage as the owner someone the server does not know as one. The precedence
- * (the variable over the file) lives in `readConfig` alone; this adds no rule of its own, so there
- * is no second copy of it to drift.
+ * the owner one way while the server read it another would lock nothing the owner approved, or
+ * triage as the owner someone the server does not know as one. Where the two values come from —
+ * HOLDRIM_OWNER and HOLDRIM_ADMINS, and never holdrim.json — is `readConfig`'s to say, once; this
+ * adds no rule of its own, so there is no second copy of it to drift.
  *
  * @param {{ owner: string|null, admins: string }} config  as `readConfig` returns it
  */

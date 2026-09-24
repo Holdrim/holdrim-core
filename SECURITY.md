@@ -27,6 +27,10 @@ Worth knowing before you run it:
   is no default account.
 - **Exactly one owner**, and it comes from `HOLDRIM_OWNER`, never from a database column. Zero or
   two and the service refuses to start. Nobody but the owner resets or creates the owner's account.
+- **Authority comes from the deployment only.** The owner and the admins are read from
+  `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` and from nowhere else; a `holdrim.json` that names `owner`,
+  `admins` or `locks` refuses to start the service and to run the CLI. Otherwise anyone who can
+  commit to the repository — or an agent applying an approved request — could name a new owner.
 - **The theme is untrusted input.** It lands inside CSS and HTML, so the brand colour is accepted
   only as hex and anything else is refused and logged.
 - **The sign-in screen runs only what the server wrote into it.** Its Content-Security-Policy

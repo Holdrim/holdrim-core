@@ -637,11 +637,13 @@ rm -rf $DATA_DIR
 echo "the local runner, on another project:"
 # The README's red example, with no Docker: the runner serves the folder it is given, read from that
 # folder's own holdrim.json, and opens it as its owner — the cash register names nobody to act as.
-PORT=$PORT bash engine/run-local.sh examples/cash-register >$WORK/runner.log 2>&1 & RUNNER_PID=$!
+# No HOLDRIM_OWNER, as a newcomer runs it: the file cannot name the owner, so the runner does.
+env -u HOLDRIM_OWNER PORT=$PORT bash engine/run-local.sh examples/cash-register >$WORK/runner.log 2>&1 & RUNNER_PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 expect "serves the project it was given: the cash register's two reds" 2 \
   "$(curl -s $B/engine/home | grep -o '🔴</span> <strong>[0-9]*' | grep -o '[0-9]*$')"
 expect "and opens it as its owner, straight in"  owner "$(curl -s $B/api/me | jfield role)"
+expect "and says whose the owner is, and why"    0 "$(has -F 'owner: you@example.org, from this runner' $WORK/runner.log; echo $?)"
 kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
 # The port comes from the project too, not from this repository's holdrim.json: a copy that declares
 # this run's port, started with no PORT at all, has to answer on it.
@@ -656,12 +658,12 @@ kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
 RUNNER=$(bash engine/run-local.sh no/such/folder 2>&1); RUNNER_EXIT=$?
 expect "a folder that is not there is refused"   1 "$RUNNER_EXIT"
 expect "and named"                               0 "$(echo "$RUNNER" | has 'no such folder: no/such/folder'; echo $?)"
-# A trailing comma in holdrim.json must not read as no file at all, with a missing owner blamed.
-mkdir -p "$WORK/broken-config"; printf '{ "owner": "x@example.org", }' > "$WORK/broken-config/holdrim.json"
+# A trailing comma in holdrim.json must not read as no file at all, the runner going on without it.
+mkdir -p "$WORK/broken-config"; printf '{ "name": "Broken", }' > "$WORK/broken-config/holdrim.json"
 RUNNER=$(env -u HOLDRIM_OWNER bash engine/run-local.sh "$WORK/broken-config" 2>&1); RUNNER_EXIT=$?
 expect "a holdrim.json that does not parse is refused" 1 "$RUNNER_EXIT"
 expect "and named as the problem"                0 "$(echo "$RUNNER" | has 'broken-config/holdrim.json is not valid JSON'; echo $?)"
-expect "and the owner is not blamed for it"      1 "$(echo "$RUNNER" | has 'missing the owner'; echo $?)"
+expect "and nothing was started"                 1 "$(echo "$RUNNER" | has 'Holdrim local'; echo $?)"
 mkdir -p "$WORK/not-a-project"
 RUNNER=$(env -u HOLDRIM_OWNER bash engine/run-local.sh "$WORK/not-a-project" 2>&1); RUNNER_EXIT=$?
 expect "a folder with no holdrim.json is refused" 1 "$RUNNER_EXIT"
@@ -699,24 +701,51 @@ expect "no owner anywhere → exits 1"   1 "$?"
 expect "and says what's missing"       0 "$(grep -qi 'HOLDRIM_OWNER' $WORK/no-config.log; echo $?)"
 rmdir $EMPTY
 
-echo "with the owner named only in holdrim.json:"
-# The variable is not the only place the owner lives: an adopter names them in the project's file,
-# and the CLI resolves them through the same call (engine/tests/owner.test.js). Without this boot,
-# a server that read HOLDRIM_OWNER alone would pass every check above — they all set the variable.
-FILE_OWNER=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1]+'/holdrim.json','utf8')).owner)" "$SITE")
-env -u HOLDRIM_OWNER HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= PORT=$PORT \
-  HOLDRIM_SITE="$SITE" \
-  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/file-owner.log 2>&1 & PID=$!
-for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
-expect "it comes up, and the file's owner is the owner" owner "$(curl -s -H "X-Dev-Email: $FILE_OWNER" $B/api/me | jfield role)"
-kill $PID 2>/dev/null; wait $PID 2>/dev/null
-TWO=$(mktemp -d)
-echo '{"owner":"a@example.org,b@example.org"}' > "$TWO/holdrim.json"
+echo "authority comes from the deployment only:"
+# The owner and the admins come from HOLDRIM_OWNER and HOLDRIM_ADMINS, never from holdrim.json: a
+# committer, or the agent applying an approved request, could otherwise name a new owner by editing
+# one line. Unit tests prove readConfig refuses the keys (engine/tests/owner.test.js); only a boot
+# proves the service does not come up anyway, or come up with the file's owner.
+FILE_OWNER=$(mktemp -d); cp -r "$SITE/." "$FILE_OWNER"
+node -e "const f=process.argv[1]+'/holdrim.json', c=JSON.parse(require('fs').readFileSync(f,'utf8'));
+  c.owner=process.argv[2]; require('fs').writeFileSync(f, JSON.stringify(c))" "$FILE_OWNER" "$REVIEWER"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SITE="$FILE_OWNER" PORT=$PORT \
+  run_for 15 env -u HOLDRIM_OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/file-owner.log" 2>&1
+expect "the owner only in holdrim.json → exits 1"  1 "$?"
+expect "and says authority is the deployment's"    0 "$(grep -q 'holdrim.json names "owner", and it may not: authority is set by the deployment' $WORK/file-owner.log; echo $?)"
+expect "and names the variables to set"            0 "$(grep -q 'set HOLDRIM_OWNER (one e-mail) and HOLDRIM_ADMINS' $WORK/file-owner.log; echo $?)"
 # `env` execs node in its own pid, so run_for's single-pid kill still reaches the server.
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SITE="$FILE_OWNER" PORT=$PORT \
+  run_for 15 env HOLDRIM_OWNER=$OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/file-owner-and-variable.log" 2>&1
+expect "and with HOLDRIM_OWNER set as well → exits 1" 1 "$?"
+node -e "const f=process.argv[1]+'/holdrim.json', c=JSON.parse(require('fs').readFileSync(f,'utf8'));
+  delete c.owner; c.admins=[process.argv[2]]; require('fs').writeFileSync(f, JSON.stringify(c))" "$FILE_OWNER" "$REVIEWER"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SITE="$FILE_OWNER" PORT=$PORT \
+  run_for 15 env HOLDRIM_OWNER=$OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/file-admins.log" 2>&1
+expect "an admin named in holdrim.json → exits 1"  1 "$?"
+expect "and names the key"                         0 "$(grep -q 'holdrim.json names "admins"' $WORK/file-admins.log; echo $?)"
+# The same file through the local runner: it reads the config itself, and must say why, not start.
+RUNNER=$(PORT=$PORT HOLDRIM_OWNER=$OWNER bash engine/run-local.sh "$FILE_OWNER" 2>&1); RUNNER_EXIT=$?
+expect "the local runner refuses it too → exits 1" 1 "$RUNNER_EXIT"
+expect "with the same reason"                      0 "$(echo "$RUNNER" | has 'authority is set by the deployment'; echo $?)"
+rm -rf "$FILE_OWNER"
+# With the variables, the same project comes up: and the admin named by HOLDRIM_ADMINS alone files a
+# request that the server AND the agent's CLI both read as past triage.
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/variable-owner.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "HOLDRIM_OWNER alone: it comes up, and names the owner" owner "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield role)"
+expect "and HOLDRIM_ADMINS names the admin"        admin "$(curl -s -H "X-Dev-Email: $LEAD" $B/api/me | jfield role)"
+ADMIN_REQUEST=$(new_request $LEAD '{"type":"request","page":"A01","block":"A01.1.1","fingerprint":"x","text":"an admin asks"}')
+expect "the server starts the admin's request approved" approved "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$ADMIN_REQUEST" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status.state))")"
+expect "and so does the CLI, from the same variables" approved "$(HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_LOCAL_URL=$B node engine/cli/holdrim.ts list --all --json --local --root "$SITE" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).requests.find(r=>r.id===process.argv[1])?.state))" "$ADMIN_REQUEST")"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+TWO=$(mktemp -d); cp "$SITE/holdrim.json" "$TWO/holdrim.json"
 HOLDRIM_SITE="$TWO" PORT=$PORT \
-  run_for 15 env -u HOLDRIM_OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/two-owners.log" 2>&1
-expect "two owners in the file → exits 1" 1 "$?"
-expect "and says it needs exactly one"     0 "$(grep -q 'exactly one e-mail (got 2)' $WORK/two-owners.log; echo $?)"
+  run_for 15 env HOLDRIM_OWNER=a@example.org,b@example.org node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/two-owners.log" 2>&1
+expect "two owners in the variable → exits 1" 1 "$?"
+expect "and says it needs exactly one"        0 "$(grep -q 'exactly one e-mail (got 2)' $WORK/two-owners.log; echo $?)"
 rm -rf "$TWO"
 
 # Firestore is optional: configured but not installed, the boot has to fail and name the package,

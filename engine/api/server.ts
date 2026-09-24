@@ -36,11 +36,23 @@ import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types
  */
 
 // The PROJECT's configuration comes from holdrim.json; environment variables beat the file. The
-// engine knows no product name, no e-mail and no cloud project — it asks.
+// engine knows no product name, no e-mail and no cloud project — it asks. The owner and the admins
+// come from the environment alone, and a holdrim.json that names them refuses to load.
 const projectRoot = process.env.HOLDRIM_SITE ?? join(import.meta.dirname, '..', '..');
+/** The same line, the same exit, for every configuration the service refuses before it listens. */
+function refuseToStart(error: unknown): never {
+  // ⚠️ English, hard-coded, and NOT through i18n. This prints before the server listens, so there
+  // is no request, no session and nobody whose language we could have chosen — the same reason the
+  // first-access banner below stays English. See the comment at the top of engine/core/i18n.js.
+  console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
+  process.exit(1);
+}
 // Read through `ofProject`, the CLI's own reader, so the owner the service boots with and the one
-// `holdrim sync` locks with come out of one call, not two that merely look alike.
-const project = ofProject(projectRoot);
+// `holdrim sync` locks with come out of one call, not two that merely look alike. Guarded because it
+// throws on a holdrim.json that names an owner: unguarded, that refusal would be a stack trace.
+const project = (() => {
+  try { return ofProject(projectRoot); } catch (error) { return refuseToStart(error); }
+})();
 
 // The sentences the reviewer reads. The core returns keys; here they become words, in the language
 // of whoever is reading. Logs and boot errors do NOT come through here, on purpose — a log is
@@ -125,11 +137,7 @@ try {
     throw new Error(`HOLDRIM_IDENTITY="${identityKind}" does not exist (use password, iap or dev)`);
   }
 } catch (error) {
-  // ⚠️ English, hard-coded, and NOT through i18n. This prints before the server listens, so there
-  // is no request, no session and nobody whose language we could have chosen — the same reason the
-  // first-access banner below stays English. See the comment at the top of engine/core/i18n.js.
-  console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
-  process.exit(1);
+  refuseToStart(error);
 }
 
 /**

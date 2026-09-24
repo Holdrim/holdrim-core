@@ -251,10 +251,14 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
   // compares it, and zero or two refused before the cloud is even asked. A comparison written here
   // would drift from it — a space around the address, and the owner's ✓ would lock nothing; two
   // addresses, and they would be read as one owner nobody matches, with no error either way.
-  // WHO the owner is comes from `projectRoles`, the server's resolution too: read from the variable
-  // alone, a project naming its owner only in holdrim.json would sync no ✓ at all. `options.owner`
-  // is for a caller that already knows the owner, and replaces the resolution rather than joining it.
+  // WHO the owner is comes from `projectRoles`, the server's resolution too: HOLDRIM_OWNER, and never
+  // holdrim.json. `options.owner` is for a caller that already knows the owner, and replaces the
+  // resolution rather than joining it.
   const roles = options.owner === undefined ? projectRoles(root) : createRoles(options.owner, '');
+  // Said before anything is written, because this is whose ✓ is about to become a lock: a variable
+  // left over in the shell from another project would otherwise lock that person's approvals here,
+  // and nothing on screen would say whose they were.
+  console.log(`owner: ${roles.owner} (from ${options.owner === undefined ? 'HOLDRIM_OWNER' : 'the caller'})`);
 
   // The cloud being down must not take the whole session down with it. The registry in the repository
   // is the source of what is already validated; the cloud only adds what came from the site. Without
