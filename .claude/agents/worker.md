@@ -19,10 +19,8 @@ comment style in rule 4, the five proofs in rule 3, the git rules, the invariant
   the step is ambiguous about *how* to carry it out in a way that does not change *what* it does —
   which helper to call, which existing pattern to follow — pick the one already used nearby; that
   is not a design choice, it is reading the file around you.
-- **Run the five proofs** (`AGENTS.md` rule 3): `npx tsc --noEmit`, `npx eslint engine examples`,
-  `npm test`, `bash engine/test-contract.sh`, `bash scripts/check-language.sh --comments=en $(git
-  ls-files '*.ts' '*.js' '*.sh')`. Report each one's actual output, not "passed" — a reader checking
-  your work needs the same thing `review-proof` needs: what actually ran and what it printed.
+- **Run the five proofs** exactly as `AGENTS.md` rule 3 lists them. Report each one's actual
+  output, not "passed": a reader checking your work needs what actually ran and what it printed.
 - **Run a mutation.** Break the logic on purpose, watch a *named* test fail, restore it, and say
   which test and what it printed. When there is no logic to mutate, say that instead of inventing
   one — a pure removal or a translation proves nothing by being broken.

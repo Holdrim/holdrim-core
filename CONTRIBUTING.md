@@ -61,12 +61,19 @@ What each lens ASKS is described in exactly two places — its own file, and the
 skill — and nowhere else. The names appear in a few more, which is fine; a second description of
 what a lens looks for is not, because it goes on answering a question the lens has stopped asking.
 
-**The rite is proportional to what changed, not to how it feels to skip it.** A change with logic,
-or that touches one of the invariants in `AGENTS.md`, gets all six lenses, and as many rounds as it
-takes to reach a clean verdict. A change that is only documentation or configuration — nothing a
-proof exercises — gets one round of the lenses that apply: `review-language` and `review-craft` at
-least, and `review-locks` too when the wording of an invariant itself changed. A change that reads
-small is exactly the one most likely to go unchecked; the size of the diff is not the test.
+**The rite is proportional to what a mistake would cost, not to the size of the diff.** Every
+change, at every tier, passes the five proofs, gets a mutation when it has logic, and merges only on
+green CI. What varies is the review:
+
+| Tier | What it covers | Lenses | Rounds |
+|---|---|---|---|
+| **1 · Critical** | an invariant in `AGENTS.md`, the event format, sign-in, signatures, privacy, permissions | all six | until clean |
+| **2 · Product** | engine logic that touches no invariant: screens, CLI, the graph, toggles | proof, correctness, craft | one, and one more if a fix changed logic |
+| **3 · Support** | documentation, configuration, development scripts, CI, examples | language, craft — and locks when an invariant's wording changes | one |
+
+The pull request names its tier, and when in doubt the tier goes up, never down. A MINOR never opens
+another round: it rides the next commit when it is trivial, or becomes an issue. A later round reads
+only what the fix changed.
 
 Run them over your change and come back with no blocker before you open the pull request. Say in
 the pull request what they found and what you did with it.
@@ -88,10 +95,8 @@ with the diff open can work them.
 ## Working unattended
 
 `.claude/settings.json` allows, without a prompt, the commands a session needs to get through the
-rite on its own: `npm`, `npx`, `node`, `git` short of a force push, this project's own scripts and
-engine commands, and the tools that read, edit, write and delegate work. That is the allowlist a
-long session needs to reach the five proofs without stalling on something it was always going to be
-asked to run anyway; anything outside it still asks.
+rite on its own, and denies a force push in any of its spellings; the list is there, not here, so
+that it has one copy. Anything outside it still asks.
 
 A person who wants a session that runs start to finish with no prompt at all starts it in a mode
 that skips them — in Claude Code that is the `--permission-mode` flag on the command line, and
