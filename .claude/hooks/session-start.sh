@@ -6,17 +6,21 @@ set -euo pipefail
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 cd "$CLAUDE_PROJECT_DIR"
 
-# The engine runs TypeScript by type stripping, which Node has without a flag only from 22.18.
-# An older Node fails later, inside a proof, with an error that names a syntax and not a version.
-if ! node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 18) ? 0 : 1)'; then
-  echo "WARNING: Node $(node -v 2>/dev/null || echo 'is missing'); Holdrim needs 22.18 or newer. The proofs will not run." >&2
+# The engine runs TypeScript by type stripping, which Node has without a flag only from the version
+# package.json's engines.node names. An older Node fails later, inside a proof, with an error that
+# names a syntax and not a version. The floor is read from there, so bumping it is one edit.
+if ! node -e '
+  const [need, have] = [require("./package.json").engines.node.replace(">=", ""), process.versions.node]
+    .map((v) => v.split(".").map(Number)).map(([a, b = 0, c = 0]) => (a * 1000 + b) * 1000 + c);
+  process.exit(have >= need ? 0 : 1)'; then
+  echo "WARNING: Node $(node -v 2>/dev/null || echo 'is missing') does not meet package.json's engines.node. The proofs will not run." >&2
 fi
 
 # `npm ci`, not `npm install`: install rewrites package-lock.json whenever the container's npm
 # resolves differently, and a dirty lockfile lands in the diff every review lens reads.
 npm ci --no-audit --no-fund
 
-# Without the hooks the commit-msg rule is checked only by CI, after the push.
+# Without the hooks nothing checks a commit message: CI does not run the commit-msg rule.
 git config core.hooksPath .githooks
 
 # `npm run browser` needs the Chromium build this playwright-core expects; the one the container
