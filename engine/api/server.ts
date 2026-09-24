@@ -95,7 +95,6 @@ const cfg = {
   site: projectRoot,
   project: project.project,
   owner: project.owner,
-  admins: project.admins,
   mode: process.env.HOLDRIM_MODE,
   environment: process.env.NODE_ENV === 'development' ? 'Development' : (process.env.HOLDRIM_ENVIRONMENT ?? 'Production'),
 };
