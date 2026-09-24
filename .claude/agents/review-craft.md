@@ -34,6 +34,10 @@ So:
   A duplicated *rule* — a cycle, a role, a list of states — belongs to review-engine, not here.
 - **A name that lies**: a function called `check` that writes, a flag called `enabled` that
   disables, a `fingerprint` that is not the core's fingerprint.
+- **Text that still describes what the change removed.** When a change reverses or removes a
+  behaviour, grep the whole tree for its old wording, not only the diff: examples, site pages,
+  plugin guides, comments. A site page kept telling adopters to put the owner in `holdrim.json`
+  after the change made that file refuse to start.
 - **A value written twice** that must stay equal, with nothing holding the two together.
 - **Depth that buys nothing**: a wrapper that only forwards, an abstraction with one implementation
   and no second one in sight.

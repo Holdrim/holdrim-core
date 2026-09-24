@@ -37,6 +37,11 @@ instead of inventing one. That is a valid answer, not a gap.
   agree, so the mutant "survived" for a reason the report missed. For example, a precedence test
   that configures the first agent in the list proves nothing, because the PATH would answer the
   same.
+- **A limit declared untestable.** A change that says a race, a timing or an exit "cannot be
+  staged deterministically" is making a claim, and the claim is yours to break before you accept
+  it. Try it from the other side: a stub that *observes* (counts calls, records order, stays alive)
+  instead of one that is observed. A counted `curl` stub proved the emulator script's deadline
+  after the change had called it untestable.
 - **A proof claimed but not run.** The change says a check passes; run it and see.
 - **The five proofs**, exactly as `AGENTS.md` rule 3 spells them — copy the commands from there,
   arguments included. A shortened one proves nothing: `scripts/check-language.sh` without its file
