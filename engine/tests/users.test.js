@@ -90,6 +90,8 @@ test('the database REFUSES to replace an event, in both REPLACE forms', async ()
   try {
     const store = new SqliteEventStore(path);
     const e = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
+    // The column holds the owner's person id, not the address (docs/PRIVACY.md, section 1).
+    const owner = await store.personFor('owner@example.org');
     await store.close();
     // From outside, as for the test above: REPLACE deletes and re-inserts, and no delete trigger
     // fires for it, so only a guard on the insert itself stands in its way.
@@ -106,7 +108,7 @@ test('the database REFUSES to replace an event, in both REPLACE forms', async ()
     assert.throws(() => db.exec(`INSERT OR REPLACE INTO events ${byRowid}`), /not replaced/, 'INSERT OR REPLACE on a held rowid has to be refused');
     assert.throws(() => db.exec(`REPLACE INTO events ${byRowid}`), /not replaced/, 'REPLACE INTO on a held rowid has to be refused');
     const row = db.prepare('SELECT fingerprint, author FROM events WHERE id = ?').get(e.id);
-    assert.deepEqual({ ...row }, { fingerprint: 'abc', author: 'owner@example.org' }, 'the original event stays as it was');
+    assert.deepEqual({ ...row }, { fingerprint: 'abc', author: owner }, 'the original event stays as it was');
     assert.equal(db.prepare('SELECT COUNT(*) c FROM events').get().c, 1);
     db.close();
   } finally {

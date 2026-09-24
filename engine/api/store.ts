@@ -1,5 +1,5 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 
 /*
  * The Firestore store lives in store-firestore.ts, loaded only when HOLDRIM_EVENTS=firestore.
@@ -13,16 +13,19 @@ import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
 export class MemoryEventStore implements EventStore {
   #events: Event[] = [];
 
+  // The author goes in as the person's id and comes out as their address, as in every store:
+  // what is kept names nobody once the person is forgotten (docs/PRIVACY.md, section 1).
   async append(event: NewEvent, author: string): Promise<Event> {
-    const e = stored(event, crypto.randomUUID().replace(/-/g, ''), author, new Date().toISOString());
+    const e = stored(event, crypto.randomUUID().replace(/-/g, ''), await this.personFor(author), new Date().toISOString());
     this.#events.push(e);
-    return e;
+    return { ...e, author: personEmail(author) };
   }
 
   async list(page?: string | null): Promise<Event[]> {
-    return this.#events
+    const people = new Map([...this.#people.values()].map((p) => [p.id, p.email]));
+    return withAuthors(this.#events
       .filter((e) => page == null || e.page === page)
-      .sort((a, b) => a.when.localeCompare(b.when));
+      .sort((a, b) => a.when.localeCompare(b.when)), people);
   }
 
   // The people table. No database to hold the rule here, so `setEmail` is the only code that

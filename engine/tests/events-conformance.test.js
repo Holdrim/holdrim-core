@@ -14,8 +14,15 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { freshFirestoreProject } from './helpers/firestore.js';
 import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
+import { PERSON_ID } from '../api/people.ts';
+import { createRoles } from '../core/roles.js';
 
 const stores = [
   { name: 'memory', open: async () => new MemoryEventStore() },
@@ -25,19 +32,12 @@ const skipped = [];
 
 if (process.env.FIRESTORE_EMULATOR_HOST) {
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const project = process.env.HOLDRIM_PROJECT ?? 'holdrim-conformance';
   stores.push({
     name: 'firestore',
-    // Empty on every open: the emulator keeps what the previous test wrote, and a leftover event
-    // would make an ordering or a count pass or fail for the wrong reason.
-    open: async () => {
-      const { Firestore } = await import('@google-cloud/firestore');
-      const db = new Firestore({ projectId: project });
-      const docs = await db.collection('events').get();
-      await Promise.all(docs.docs.map((d) => d.ref.delete()));
-      await db.terminate();
-      return new FirestoreEventStore(project);
-    },
+    // A project of its own on every open: the emulator keeps what earlier tests and runs wrote, and
+    // a leftover event — or one written by another run against the same emulator at the same
+    // time — would make an ordering or a count pass or fail for the wrong reason.
+    open: async () => new FirestoreEventStore(freshFirestoreProject('holdrim-conformance')),
   });
 } else {
   skipped.push({
@@ -126,3 +126,113 @@ forEachStore('appending the same event twice records it twice: nothing is overwr
   assert.notEqual(one.id, two.id);
   assert.equal((await s.list('A01')).length, 2);
 });
+
+// ===================================================================== who, as an id
+// An event names its author by the person's id, and every reader gets the address back through one
+// resolver (docs/PRIVACY.md, section 1).
+
+forEachStore('the author is kept as the person\'s id: forgotten, the events name the id and no address', async (s) => {
+  await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, 'kept-as-id@example.org');
+  await s.append({ type: 'comment', page: 'A01', text: 'x' }, 'kept-as-id@example.org');
+  const id = await s.personFor('kept-as-id@example.org');
+  assert.deepEqual((await s.list('A01')).map((e) => e.author), ['kept-as-id@example.org', 'kept-as-id@example.org'],
+    'while the person is there, the events read as their address');
+  await s.forget(id);
+  const after = await s.list('A01');
+  assert.deepEqual(after.map((e) => e.author), [id, id], 'an event that held the address would still show it');
+  assert.ok(!JSON.stringify(after).includes('kept-as-id@'), 'no copy of the address is left on an event');
+});
+
+forEachStore('a forgotten owner\'s ✓ reads as an id, which is nobody\'s address — the owner\'s least of all', async (s) => {
+  const owner = 'forgotten-owner@example.org';
+  await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, owner);
+  const roles = createRoles(owner, '');
+  assert.equal(roles.isOwner((await s.list('A01'))[0].author), true, 'resolved, the owner\'s ✓ is the owner\'s');
+  await s.forget(await s.personFor(owner));
+  const [read] = await s.list('A01');
+  assert.match(read.author, PERSON_ID);
+  assert.equal(roles.isOwner(read.author), false);
+  assert.equal(roles.isAdmin(read.author), false);
+});
+
+forEachStore('the same address, however it is typed, is one author, and reads back as the table writes it', async (s) => {
+  const answered = await s.append({ type: 'comment', page: 'A01', text: 'one' }, 'Typed-Twice@Example.org');
+  assert.equal(answered.author, 'typed-twice@example.org', 'the answer to an append names the author as a list will');
+  await s.append({ type: 'comment', page: 'A01', text: 'two' }, ' typed-twice@example.org ');
+  assert.deepEqual((await s.list('A01')).map((e) => e.author), ['typed-twice@example.org', 'typed-twice@example.org']);
+});
+
+// ===================================================================== the stored rows, around the code
+// Asked with SQL written here, not through the store: the claim is about what the file holds.
+test('[sqlite] no e-mail is in the events table, only ids of the people table', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
+  const path = join(dir, 'events.db');
+  const s = new SqliteEventStore(path);
+  try {
+    await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, 'owner@example.org');
+    await s.append({ type: 'comment', page: 'A02', text: 'a remark' }, 'reader@example.org');
+    await s.append({ type: 'request', page: 'A02', text: 'please' }, 'agent via ci@example.org');
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      const rows = db.prepare('SELECT * FROM events').all();
+      assert.equal(rows.length, 3);
+      assert.ok(!JSON.stringify(rows).includes('@'), `an address in the events table: ${JSON.stringify(rows)}`);
+      const people = new Set(db.prepare('SELECT id FROM people').all().map((p) => p.id));
+      for (const r of rows) {
+        assert.match(r.author, PERSON_ID);
+        assert.ok(people.has(r.author), `${r.author} is a row of the people table`);
+      }
+    } finally { db.close(); }
+  } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('[sqlite] an event written before authors were ids still reads as the address it holds', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
+  const path = join(dir, 'events.db');
+  const s = new SqliteEventStore(path);
+  try {
+    const db = new DatabaseSync(path);
+    db.prepare("INSERT INTO events (id, type, page, author, happened_at) VALUES ('old', 'approval', 'A01', 'owner@example.org', '2026-01-01T00:00:00.000Z')").run();
+    db.close();
+    await s.append({ type: 'comment', page: 'A01', text: 'new' }, 'owner@example.org');
+    assert.deepEqual((await s.list('A01')).map((e) => e.author), ['owner@example.org', 'owner@example.org']);
+  } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+if (process.env.FIRESTORE_EMULATOR_HOST) {
+  const { Firestore } = await import('@google-cloud/firestore');
+  const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+
+  test('[firestore] no e-mail is in the events collection, only ids of the people collection', async () => {
+    const project = freshFirestoreProject('holdrim-authors');
+    const s = new FirestoreEventStore(project);
+    const db = new Firestore({ projectId: project });
+    try {
+      await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, 'owner@example.org');
+      await s.append({ type: 'comment', page: 'A02', text: 'a remark' }, 'reader@example.org');
+      const docs = (await db.collection('events').get()).docs.map((d) => d.data());
+      assert.equal(docs.length, 2);
+      assert.ok(!JSON.stringify(docs).includes('@'), `an address in the events collection: ${JSON.stringify(docs)}`);
+      for (const d of docs) {
+        assert.match(d.author, PERSON_ID);
+        assert.equal((await db.collection('people').doc(d.author).get()).exists, true, `${d.author} is a person`);
+      }
+    } finally { await s.close(); await db.terminate(); }
+  });
+
+  test('[firestore] an event written before authors were ids still reads as the address it holds', async () => {
+    const project = freshFirestoreProject('holdrim-authors');
+    const s = new FirestoreEventStore(project);
+    const db = new Firestore({ projectId: project });
+    try {
+      await db.collection('events').doc('old').create({ type: 'approval', page: 'A01', author: 'owner@example.org',
+        when: new Date('2026-01-01T00:00:00Z') });
+      assert.deepEqual((await s.list('A01')).map((e) => e.author), ['owner@example.org']);
+    } finally { await s.close(); await db.terminate(); }
+  });
+} else {
+  for (const title of ['no e-mail is in the events collection, only ids of the people collection',
+    'an event written before authors were ids still reads as the address it holds']) {
+    test(`[firestore] ${title}`, { skip: skipped[0].why }, () => {});
+  }
+}

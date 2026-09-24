@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -206,8 +206,11 @@ export class SqliteEventStore implements EventStore {
 
   async forget(id: string): Promise<void> { await this.setEmail(id, null); }
 
+  // The column holds the person's id, never the address: the address lives in `people` alone, where
+  // forgetting can empty it (docs/PRIVACY.md, section 1). The answer names the address, as a list
+  // a moment later does.
   async append(event: NewEvent, author: string): Promise<Event> {
-    const e = stored(event, crypto.randomUUID().replace(/-/g, ''), author, new Date().toISOString());
+    const e = stored(event, crypto.randomUUID().replace(/-/g, ''), await this.personFor(author), new Date().toISOString());
     const r = this.#db.prepare(
       `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, author, happened_at, data)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -216,7 +219,7 @@ export class SqliteEventStore implements EventStore {
     // A trigger that answers RAISE(IGNORE) drops the row and reports no error: without this, an
     // approval that was never written would be handed back as recorded.
     if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
-    return e;
+    return { ...e, author: personEmail(author) };
   }
 
   async list(page?: string | null): Promise<Event[]> {
@@ -226,11 +229,15 @@ export class SqliteEventStore implements EventStore {
       // test can see; naming it turns that accident into a promise. `rowid DESC` fails the suite.
       ? this.#db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all()
       : this.#db.prepare('SELECT * FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
-    return (rows as Record<string, string | null>[]).map((r) => ({
+    // After the events, as the Firestore store explains: every author those rows name was made
+    // before its event was written, so a read of the people that starts now holds it.
+    const people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
+      .map((p) => [p.id, p.email]));
+    return withAuthors((rows as Record<string, string | null>[]).map((r) => ({
       id: r.id!, type: r.type!, page: r.page!, block: r.block, fingerprint: r.fingerprint,
       text: r.text, snapshot: r.snapshot, author: r.author!, when: r.happened_at!,
       data: r.data ? JSON.parse(r.data) : null,
-    }));
+    })), people);
   }
 
   async close(): Promise<void> { this.#db.close(); }

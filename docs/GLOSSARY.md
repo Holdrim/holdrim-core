@@ -130,7 +130,7 @@ accident.
 | **limits** | the size and shape of everything crossing the boundary. `engine/core/limits.js`. It exists because without it a POST with 500 KB per field would be accepted and then served back to everyone, on every page load, into a collection nobody can delete from |
 | **source** | where the agent's tool reads events from: the cloud, a SQLite file (`--db`), or a local server (`--local`). `engine/cli/remote.ts` |
 | **user store** | where the people who log in, and their sessions, are kept — apart from the events. SQLite, Firestore or Postgres, chosen by `HOLDRIM_USERS`. `engine/api/users.ts` |
-| **disabled** | what happens to a person instead of deletion. There is no way to delete one: every ✓ they gave is signed by their e-mail, and deleting them would leave approvals nobody can attribute. Disabling takes the access away, drops the open session, and keeps the history |
+| **disabled** | what happens to a person instead of deletion. There is no way to delete one: every ✓ they gave names them, and deleting them would leave approvals nobody can attribute. Disabling takes the access away, drops the open session, and keeps the history |
 
 ## Around the edges
 
@@ -166,7 +166,7 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `fingerprint` | of the block's text at that moment: an approval holds for THIS text |
 | `text` | what the person wrote |
 | `snapshot` | the text of the block at that instant |
-| `author` | the e-mail, verified by whichever identity is in charge |
+| `author` | who made it. Stored as the person's opaque id (`p_` and 24 hex characters) from the people table, never as an e-mail; every reader gets the e-mail back, as verified by whichever identity is in charge — or the id, once the person is forgotten. An event written before ids holds the e-mail itself, and reads as it |
 | `when` | ISO, the server's clock. Stored in the column `happened_at`, since `WHEN` is an SQL keyword |
 | `data` | a small map of scalars: `request`, `state` and `from` on `request_state`, `commit` and `blocks` on an applied one, `category` on a request, `related` on a request that follows an approved one |
 

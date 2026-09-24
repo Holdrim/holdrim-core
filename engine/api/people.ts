@@ -29,6 +29,22 @@ export function personEmail(email: string): string {
   return e;
 }
 
+/**
+ * How the people table is laid out in Firestore, for the two writers that reach it: the server's
+ * store (engine/api/store-firestore.ts) and the CLI's direct path over REST (engine/cli/remote.ts).
+ * `rows/{id}` holds `{ email }`, and `pointers/{pointerId(email)}` holds `{ id }` for an address still
+ * held. Written once because the two must agree to the character: a person the CLI made under a
+ * pointer the server spells another way is a second person for one address.
+ */
+export const FIRESTORE_PEOPLE = {
+  rows: 'people',
+  pointers: 'people_by_email',
+  email: 'email',
+  id: 'id',
+  /** The pointer's document id. Encoded, since a raw `/` in an address would name a sub-collection. */
+  pointerId: (email: string): string => encodeURIComponent(email),
+} as const;
+
 /** The message every store refuses a re-pointed row with, so a caller sees one reason. */
 export const ONLY_LOSES = 'a person keeps their id and can only lose their e-mail: a new address is a new person';
 
@@ -38,4 +54,32 @@ export const ONLY_LOSES = 'a person keeps their id and can only lose their e-mai
  */
 export function noPerson(id: string): Error {
   return new Error(`no person ${id}`);
+}
+
+/**
+ * What an event's `author` means, for every reader of events: the two server stores and the CLI's
+ * two readers of the cloud and of the events file (docs/PRIVACY.md, section 1). Each of them hands
+ * over the people table as a map of id to e-mail, and this is the one place the rule is written:
+ *
+ * - an id whose row still holds an address reads as that address, so every comparison with a
+ *   person downstream — the owner's ✓, an admin's request, "your own request" — is the comparison
+ *   it was when the event held the address itself;
+ * - an id whose row was emptied reads as the id: stable, and never an address, so a forgotten
+ *   person's ✓ can match nobody's e-mail — the owner's least of all;
+ * - anything with no row is returned as it is, which is how an event written before authors were
+ *   ids goes on reading as the e-mail it holds.
+ *
+ * Resolved when the events are read, and not at the API's edge: the server's own readers of the
+ * list (the lock on a ✓, a request's starting state, the home, the "own request" check) and the
+ * CLI's (`sync`, `list`, `apply`) all compare authors with addresses, and a raw id reaching any of
+ * them would fail every comparison quietly — no ✓ would lock, no admin's request would start
+ * triaged. Read here, no reader ever sees an id unless the person behind it is gone.
+ */
+export function authorOf(author: string, people: ReadonlyMap<string, string | null>): string {
+  return people.get(author) ?? author;
+}
+
+/** `authorOf` over a list, for the readers that hold a list. */
+export function withAuthors<E extends { author: string }>(events: E[], people: ReadonlyMap<string, string | null>): E[] {
+  return events.map((e) => ({ ...e, author: authorOf(e.author, people) }));
 }
