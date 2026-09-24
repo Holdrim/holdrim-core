@@ -96,12 +96,14 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   a person named in `LOCKS` belong to the owner alone, on all three routes, because a password
   handed out for that account is a lock handed out. Guarding one route leaves the others open, as
   `AGENTS.md` already says of the owner's.
-- **A lock comes from a session, not from an account's past.** A ✓ is a lock only from a session
-  opened with a credential the person set themselves after the owner last issued one for that
-  account. Every issuance by the owner for an account named in `LOCKS` drops all of that account's
-  sessions, and any change to the account's credential made by someone other than the owner or the
-  person — a reset while the account was not yet guarded, for instance — leaves it unable to lock
-  until the owner issues again. Otherwise an admin could reset an account before its promotion, keep
+- **A lock comes from a session, and it fails closed.** A ✓ is a lock only from a session opened
+  with a credential the person set themselves after an issuance by the owner that is **on record**
+  for that account. The store records, for each credential, who issued or set it; an account with no
+  owner issuance on record — every account that predates that record included — gives no lock until
+  the owner issues one. Every issuance by the owner drops all of the account's sessions, and a
+  credential created or changed by anyone other than the owner or the person — an admin creating the
+  account, or resetting it while it was not yet guarded — leaves it unable to lock until the owner
+  issues again. Otherwise an admin could reset an account before its promotion, keep
   a session open across the owner's re-issue, and give locks in the person's name; and "newly named"
   would need a definition that someone taken out of `LOCKS` and put back would slip through.
 - **One parser, one question.** `LOCKS` is parsed once at start, with the addresses normalized by
@@ -113,7 +115,9 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   author could triage that block at that moment — is written on the request when it is filed, and
   never recomputed from what its author may do later. Today it is recomputed on every read
   (`engine/core/cycle.js`), so granting someone triage would silently decide every open request of
-  theirs, with no triage event written. Old requests without the field keep today's reading. The
+  theirs, with no triage event written. A request filed before the field existed reads as at triage:
+missing, the field fails closed, and no request's starting state is derived from its author's
+current authority after 0.1.0. The
   panel, the home and `holdrim sync` read what was written and never recompute it — this is
   `docs/PRIVACY.md` section 2, whose role field it extends with the lock bit. Removing someone from
   `LOCKS` leaves their past ✓s locks, as an owner's ✓s stay locks after they hand over: they
