@@ -239,8 +239,9 @@ it says it in full: every confirmed CRITICAL and MAJOR, the lens that raised it,
 first review, a rerun after a fix, CI, or a person. The terminal is gone by the time step 6 runs;
 the pull request is not.
 
-Then stop. Do not fix anything unless asked: this reports. Step 6 is a separate pass, after the
-merge.
+Then stop. Do not fix anything unless asked: this reports. When a fix follows, it is a change like
+any other: rerun every lens that reads what the fix touched, not only the lens that reported, and
+record what that round finds. Step 6 is a separate pass, after the merge.
 
 ## 6. Learn, when the change is done
 
@@ -256,8 +257,8 @@ and MAJOR that was confirmed, in every round and from every source, and ask one 
 - **You had to tell a lens in its prompt** something it should have known — where not to run a
   command, what to look at — that sentence belongs in its file, or in the shared contract above
   when all six need it.
-- **Fixing a finding produced a new one:** the fix is a change like any other. Rerun the lenses
-  that read what the fix touched, not only the lens that reported.
+- **A fix brought in a new finding** that a later round caught: say which lens should have been
+  rerun on the fix, and if it was not, why the rule above did not reach it.
 
 The lessons go in a pull request of their own, through the same gate, and its description says,
 in one line each, what was added, to which lens, and which pull request taught it. When nothing
