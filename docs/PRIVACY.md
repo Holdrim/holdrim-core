@@ -1,8 +1,8 @@
 # Privacy: what Holdrim keeps about people, and how it lets go
 
 > Design · `2026-09-23` · decided by the owner, **not built yet**. The table at the end says what
-> exists. The event format ships in 0.1.0, because a format changed after the first release is a
-> format every adopter's history already holds; the tool that removes a person comes in 0.2.
+> exists. All of it ships in 0.1.0, because a format changed after the first release is a format
+> every adopter's history already holds.
 
 ## The problem
 
@@ -60,8 +60,9 @@ change meaning without a single event changing: the owner hands over, and every 
 synced stops being a lock, with nothing in the trail to say so. An anonymised person would lose it
 the same way.
 
-So the role of the author — owner, admin or other — is written on the event when the server records
-it, from `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` at that moment, and every reader uses what is written.
+So the author's authority is written on the event when the server records it — the role they acted
+under and, on a ✓, whether it is a lock — from the configuration in force at that moment, and every
+reader uses what is written. Which roles exist, and who may lock, is `docs/ROLES.md`.
 A ✓ given by the owner stays the owner's ✓ after they hand over, after they are removed, after
 anything. The owner is still named only by `HOLDRIM_OWNER`, and the server writes the role from it:
 what changes is that a role, once written on a fact, is part of the fact. What that rests on, and
@@ -145,8 +146,8 @@ These describe today's format and move in the same change that replaces it, so n
 describing the old one: `docs/GLOSSARY.md` (the event fields `author`, `text` and `snapshot`, and
 **disabled**, which says a person cannot be removed), `docs/METHOD.md` (the commit trailers of the
 request cycle), `docs/BUGS.md` (why the trailer carries the person), and, in `AGENTS.md`, the
-invariants "Nothing is erased" and "Only the owner's ✓ becomes a lock" — the second to say a lock is
-the ✓ of whoever was the owner when it was given.
+invariants "Nothing is erased" and "Only the owner's ✓ becomes a lock" — the second in the words
+`docs/ROLES.md` section 3 gives it.
 
 ## What Holdrim cannot remove
 
@@ -164,10 +165,10 @@ Said here so nobody promises it:
 | Events never altered or deleted (SQLite by trigger) | ✅ built |
 | People disabled, never deleted | ✅ built |
 | `author` as an opaque id, a people table in every mode, one resolver | ⬜ 0.1.0 |
-| The author's role written on the event, never recomputed on read | ⬜ 0.1.0 |
+| The author's role, and on a ✓ whether it is a lock, written on the event, never recomputed | ⬜ 0.1.0 |
 | Free text and snapshot outside the event, salted hash inside, removals as events | ⬜ 0.1.0 |
 | Commits without `Requested-by:`, ids in logs | ⬜ 0.1.0 |
 | Removing a person, documented procedure | ⬜ 0.1.0 |
-| Removing a person, from the people screen | ⬜ 0.2 |
-| Events signed by the server, and readers that trust only signed roles | ⬜ not scheduled |
-| The agent writing through the API, and no direct write to the cloud | ⬜ not scheduled |
+| Removing a person, from the people screen | ⬜ 0.1.0 |
+| Events signed by the server, and readers that trust only signed roles | ⬜ 0.1.0 (phase E) |
+| The agent writing through the API with its own credential, and no direct write to the cloud | ⬜ 0.1.0 (`docs/ROLES.md` §4) |

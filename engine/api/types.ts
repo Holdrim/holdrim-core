@@ -30,8 +30,33 @@ export function stored(event: NewEvent, id: string, author: string, when: string
   };
 }
 
+/** A row of the people table. `email` is null once the person was forgotten; the id stays. */
+export interface Person {
+  id: string;
+  email: string | null;
+}
+
+/**
+ * The people table, kept by every event store next to its events (docs/PRIVACY.md, section 1).
+ * A row is created, and afterwards it can only lose its e-mail: never re-pointed, never deleted.
+ */
+export interface PeopleTable {
+  /** The id of the person with this e-mail, made on first sight. The same e-mail, the same id. */
+  personFor(email: string): Promise<string>;
+  /** The row behind an id; null when no row has that id. */
+  person(id: string): Promise<Person | null>;
+  /**
+   * The one change a row takes after it is made. Only `null` gets through; anything else is
+   * refused with the row untouched. A method and not only `forget`, so the refusal is reachable
+   * and a test can prove it holds in each store.
+   */
+  setEmail(id: string, email: string | null): Promise<void>;
+  /** Empties the row's e-mail and keeps its id. The same e-mail, seen again, is a new person. */
+  forget(id: string): Promise<void>;
+}
+
 /** Persistence. The in-memory store, SQLite and Firestore implement the same contract. */
-export interface EventStore {
+export interface EventStore extends PeopleTable {
   append(event: NewEvent, author: string): Promise<Event>;
   list(page?: string | null): Promise<Event[]>;
   close(): Promise<void>;
