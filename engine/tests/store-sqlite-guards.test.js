@@ -152,3 +152,25 @@ test('a boot while another process holds the write lock does not wait on it when
     writer.close();
   }
 }));
+
+test('a foreign trigger is found under any spelling of the table, and its name cannot drop a guard', withFile(async (path, said) => {
+  const store = new SqliteEventStore(path);
+  await store.append(approval, 'owner@example.org');
+  await store.close();
+  // An AFTER INSERT that adds rows changes nothing the insert itself reports, so only the check on
+  // open can catch it; `ON EVENTS` is the same table, spelled otherwise.
+  outside(path, `
+    CREATE TRIGGER x_forge AFTER INSERT ON EVENTS BEGIN SELECT 1; END;
+    CREATE TRIGGER "x; DROP TRIGGER events_no_delete" BEFORE INSERT ON events BEGIN SELECT 1; END;
+    CREATE TRIGGER "a""b" BEFORE INSERT ON people BEGIN SELECT 1; END;
+  `);
+  await reopen(path);
+  const db = new DatabaseSync(path);
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
+  assert.deepEqual(names, Object.keys(GUARDS).sort(), 'exactly the guards remain');
+  assert.throws(() => db.exec('DELETE FROM events'), /not deleted/, 'no name may drop a guard on its way out');
+  db.close();
+  for (const name of ['x_forge', 'x; DROP TRIGGER events_no_delete', 'a"b']) {
+    assert.ok(said.some((line) => line.includes(name)), `${name} has to be said`);
+  }
+}));

@@ -71,6 +71,7 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
   // SQLite keeps the text as written, spacing included.
   const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
   const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
+  // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
   const held = () => db.prepare(
     "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people')"
   ).all() as { name: string; sql: string }[];
@@ -78,6 +79,9 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
     rows.length === want.size &&
     rows.every((r) => want.has(r.name) && flat(r.sql) === flat(want.get(r.name)!));
   if (inPlace(held())) return;
+  // The name comes from the file, so it is quoted: unquoted, a trigger named
+  // `x; DROP TRIGGER events_no_delete` would drop a guard and keep itself.
+  const drop = (name: string) => db.exec(`DROP TRIGGER IF EXISTS "${name.replace(/"/g, '""')}"`);
   db.exec('BEGIN IMMEDIATE');
   try {
     // Read again under the lock: another process may have repaired it while this one waited.
@@ -86,14 +90,14 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
     for (const r of rows) {
       if (want.has(r.name)) continue;
       warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
-      db.exec(`DROP TRIGGER IF EXISTS "${r.name.replace(/"/g, '""')}"`);
+      drop(r.name);
     }
     for (const [name, sql] of want) {
       const r = byName.get(name);
       if (r && flat(r.sql) === flat(sql)) continue;
       if (r) {
         warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);
-        db.exec(`DROP TRIGGER IF EXISTS "${r.name.replace(/"/g, '""')}"`);
+        drop(r.name);
       }
       db.exec(sql);
     }
