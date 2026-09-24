@@ -132,6 +132,10 @@ test('every test file that runs against the Firestore emulator is run by the job
   const needing = readdirSync(dir).filter((f) => f.endsWith('.test.js'))
     .filter((f) => /process\.env\.FIRESTORE_EMULATOR_HOST/.test(readFileSync(join(dir, f), 'utf8')));
   assert.ok(needing.includes('authors.test.js'), `the search found too little: ${needing.join(', ')}`);
-  const missing = needing.filter((f) => !new RegExp(`run:\\s*node --test engine/tests/${f.replace(/\./g, '\\.')}`).test(job));
+  // Escapes every regex metacharacter, not just the dot: a file name is data, and CodeQL flags a
+  // partial escape here because a name carrying a backslash or another special character would
+  // build a pattern that means something other than the literal name.
+  const literally = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const missing = needing.filter((f) => !new RegExp(`run:\\s*node --test engine/tests/${literally(f)}`).test(job));
   assert.deepEqual(missing, [], `run against the emulator by nobody: ${missing.join(', ')}`);
 });
