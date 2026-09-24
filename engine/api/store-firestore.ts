@@ -1,6 +1,6 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, noPerson, ONLY_LOSES } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 
 /**
  * Firestore, `events` collection. INSERT ONLY: `create` fails if the document already exists, so
@@ -17,23 +17,31 @@ export class FirestoreEventStore implements EventStore {
   async append(event: NewEvent, author: string): Promise<Event> {
     const doc = this.#db.collection('events').doc();
     // The shape every store answers, from the one function that decides it; the id is the
-    // document's own and the time is the server's, so neither is written as a field.
-    const { id: _id, when: _when, ...fields } = stored(event, doc.id, author, '');
+    // document's own and the time is the server's, so neither is written as a field. The author is
+    // written as the person's id and answered as the address, as a list names it a moment later
+    // (docs/PRIVACY.md, section 1).
+    const { id: _id, when: _when, ...fields } = stored(event, doc.id, await this.personFor(author), '');
     await doc.create({ ...fields, when: FieldValue.serverTimestamp() });
     const read = await doc.get();
-    return this.#fromFirestore(read.id, read.data()!);
+    return { ...this.#fromFirestore(read.id, read.data()!), author: personEmail(author) };
   }
 
   async list(page?: string | null): Promise<Event[]> {
     let q: FirebaseFirestore.Query = this.#db.collection('events');
     if (page != null) q = q.where('page', '==', page);
     const r = await q.get();
+    // The people after the events, never beside them: an append makes the person before the event,
+    // so every author a read of the events can see is already in a read of the people that starts
+    // after it. Side by side, the people could be read first, and a new person's first event would
+    // come back naming their id.
+    const people = await this.#db.collection('people').get();
     // By the server's timestamp itself, to the nanosecond: `when` is kept to the millisecond, and
     // two events inside one would otherwise come back in document-id order, which is random.
     const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
-    return [...r.docs]
+    return withAuthors([...r.docs]
       .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
-      .map((d) => this.#fromFirestore(d.id, d.data()));
+      .map((d) => this.#fromFirestore(d.id, d.data())),
+    new Map(people.docs.map((p) => [p.id, (p.data().email as string | null) ?? null])));
   }
 
   // The people table: `people/{id}` holds the row, and `people_by_email/{address}` points an

@@ -164,7 +164,7 @@ Said here so nobody promises it:
 |---|---|
 | Events never altered or deleted (SQLite by trigger) | ✅ built |
 | People disabled, never deleted | ✅ built |
-| `author` as an opaque id, a people table in every mode, one resolver | ⬜ 0.1.0 |
+| `author` as an opaque id, a people table in every mode, one resolver | ✅ built — a person gets their row the first time they act |
 | The author's role, and on a ✓ whether it is a lock, written on the event, never recomputed | ⬜ 0.1.0 |
 | Free text and snapshot outside the event, salted hash inside, removals as events | ⬜ 0.1.0 |
 | Commits without `Requested-by:`, ids in logs | ⬜ 0.1.0 |

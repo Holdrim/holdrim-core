@@ -97,3 +97,12 @@ test('the development shortcut demands BOTH conditions', async () => {
   assert.equal(both.localMode, true);
   assert.equal(await both.email({ 'x-dev-email': 'anyone@example.org' }), 'anyone@example.org');
 });
+
+test('the development shortcut hands over the address as the people table writes it', async () => {
+  // An event's author reads back as the people table's address, lowercase and trimmed. The signed-in
+  // address has to be the same string, or "your own request" refuses whoever typed a capital.
+  const dev = new IapIdentity({ mode: 'local', environment: 'Development', devEmail: ' Owner@Example.org ' });
+  assert.equal(await dev.email({ 'x-dev-email': '  Ana@Example.org ' }), 'ana@example.org');
+  assert.equal(await dev.email({}), 'owner@example.org', 'and the configured one the same way');
+  assert.equal(await dev.email({ 'x-dev-email': '  ' }), null, 'a blank header is nobody, as an empty one is');
+});

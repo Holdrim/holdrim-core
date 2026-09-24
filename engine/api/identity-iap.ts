@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { log } from './log.ts';
+import { normalizeEmail } from './users.ts';
 
 /**
  * Who is using it comes from IAP: the `x-goog-iap-jwt-assertion` header is signed by Google
@@ -56,7 +57,12 @@ export class IapIdentity {
   async email(headers: Record<string, string | string[] | undefined>): Promise<string | null> {
     if (this.#local) {
       const dev = headers['x-dev-email'];
-      return (Array.isArray(dev) ? dev[0] : dev) ?? this.#devEmail ?? null;
+      const raw = (Array.isArray(dev) ? dev[0] : dev) ?? this.#devEmail;
+      // Written the way the people table writes an address, and so the way every event's author
+      // reads back: `Ana@Example.org` signed in would otherwise not be the author of the request
+      // she filed, which reads `ana@example.org`, and "your own request" would refuse her. The
+      // proxy's JWT and password sign-in already hand over an address in this form.
+      return raw == null ? null : normalizeEmail(raw) || null;
     }
     const raw = headers['x-goog-iap-jwt-assertion'];
     const jwt = Array.isArray(raw) ? raw[0] : raw;

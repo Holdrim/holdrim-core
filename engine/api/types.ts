@@ -7,7 +7,10 @@ export interface Event {
   fingerprint?: string | null; // of the text at that moment: the approval holds for THIS text
   text?: string | null;
   snapshot?: string | null;    // the text of the block at that instant
-  author: string;              // e-mail, verified by whichever identity is in charge
+  // Stored as the person's id (`p_…`, engine/api/people.ts) and read back as their e-mail, through
+  // the one resolver every reader uses; an id once the person is forgotten, and an e-mail as written
+  // on an event from before ids. The e-mail was verified by whichever identity is in charge.
+  author: string;
   when: string;                // ISO, server clock
   // The same shape the core reads (engine/core/cycle.js, typedef EventData): `request` and
   // `state` on request_state, `commit` on the applied one, `category` on the request. `unknown`

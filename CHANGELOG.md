@@ -24,6 +24,15 @@ who ran the engine from `main` before it.
   `holdrim sync` now prints the owner it used and that it came from `HOLDRIM_OWNER`.
   `bash engine/run-local.sh` names `you@example.org` as the owner when the variable is unset.
   `owner` and `admins` leave the `config-keys` of `engine/surface.json`.
+- **An event's `author` is stored as the person's id, never as an e-mail.** Every store keeps a
+  people table beside its events (an id, `p_` and 24 hex characters, and an address), and every
+  reader — the API, the panel, the home, and the CLI reading the events file or the cloud — gets the
+  e-mail back, so nothing Holdrim shows changes. What reads the database directly, around Holdrim,
+  now sees ids in `events.author`: join them to `people`. Events recorded before keep the e-mail they
+  hold and read as it. The CLI's direct write to the cloud names its `agent via <account>` by an id
+  too, and, like the server, now talks to the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is
+  set. The development identity (`X-Dev-Email`, `HOLDRIM_DEV_EMAIL`) is lowercased and trimmed, as
+  sign-in and the identity proxy already were.
 
 ### Added
 

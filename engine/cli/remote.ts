@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
+import { withAuthors, personEmail, newPersonId } from '../api/people.ts';
 
 const exec = promisify(execFile);
 
@@ -18,6 +19,13 @@ const exec = promisify(execFile);
  * a message that changes wording with the machine's locale cannot be searched for, and a message
  * that only states the failure leaves the reader to guess the remedy.
  */
+/**
+ * The Firestore emulator's address, when one is named — the variable Google's own client reads, so
+ * the CLI's REST path and the server's store point at the same place. It is what lets the path
+ * that writes the cloud directly be proved against a real Firestore instead of a stub.
+ */
+const emulator = (): string | undefined => process.env.FIRESTORE_EMULATOR_HOST || undefined;
+
 export class Source {
   #local: boolean;
   #db?: string;
@@ -94,6 +102,9 @@ export class Source {
    */
   async #accountWithToken(): Promise<string> {
     if (this.#account) return this.#account;
+    // The emulator takes any token and has no accounts: asking gcloud would reach the real cloud
+    // for a credential the emulator never reads.
+    if (emulator()) return (this.#account = this.#preferredAccount ?? 'emulator');
     let accounts: string[] = [];
     try {
       const { stdout } = await exec('gcloud', ['auth', 'list', '--format=value(account)']);
@@ -128,6 +139,8 @@ export class Source {
 
   async #gcloudToken(): Promise<string> {
     if (this.#token) return this.#token;
+    // `owner` is the emulator's own word for a caller its security rules do not apply to.
+    if (emulator()) return (this.#token = 'owner');
     const account = await this.#accountWithToken();
     try {
       const { stdout } = await exec('gcloud', ['auth', 'print-access-token', '--account', account]);
@@ -169,12 +182,20 @@ export class Source {
       const rows = db.prepare(
         'SELECT id, type, page, block, fingerprint, text, snapshot, author, happened_at, data' +
         '  FROM events ORDER BY happened_at').all() as Record<string, any>[];
-      return rows.map((row) => ({
+      // A file written before the people table existed has no such table, and every author in it
+      // is an address: an empty table resolves none of them, which is what they need. The read
+      // is the same rule the server's store applies, through the same resolver.
+      const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
+      const people = new Map(hasPeople
+        ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
+          .map((p) => [p.id, p.email ?? null])
+        : []);
+      return withAuthors(rows.map((row) => ({
         id: String(row.id), type: String(row.type), page: String(row.page),
         block: row.block ?? null, fingerprint: row.fingerprint ?? null, text: row.text ?? null,
         snapshot: row.snapshot ?? null, author: String(row.author), when: String(row.happened_at),
         data: row.data ? JSON.parse(String(row.data)) : null,
-      }));
+      })), people);
     } finally {
       db.close();
     }
@@ -189,19 +210,77 @@ export class Source {
       return r.json() as Promise<Event[]>;
     }
 
-    const base = `https://firestore.googleapis.com/v1/projects/${this.#requireProject()}/databases/(default)/documents`;
+    const base = this.#documents();
     const headers = { Authorization: `Bearer ${await this.#gcloudToken()}` };
-    const out: Event[] = [];
+    const out = (await this.#collection(base, headers, 'events')).map((d) => this.#fromFirestore(d));
+    // The people after the events, as the server's Firestore store reads them and for its reason:
+    // a person is made before their first event, so every author read above is in this read.
+    const people = new Map((await this.#collection(base, headers, 'people')).map((d) =>
+      [String(d.name).split('/').pop()!, (d.fields?.email?.stringValue as string | undefined) ?? null]));
+    return withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
+  }
+
+  /** Every document of one collection, over as many pages as the cloud answers in. */
+  async #collection(base: string, headers: Record<string, string>, name: string): Promise<Record<string, any>[]> {
+    const out: Record<string, any>[] = [];
     let page: string | undefined;
     do {
-      const url = `${base}/events?pageSize=300${page ? `&pageToken=${page}` : ''}`;
+      const url = `${base}/${name}?pageSize=300${page ? `&pageToken=${page}` : ''}`;
       const r = await fetch(url, { headers });
       if (!r.ok) throw await this.#cloudError(r, 'reading');
-      const body = (await r.json()) as { documents?: unknown[]; nextPageToken?: string };
-      for (const d of body.documents ?? []) out.push(this.#fromFirestore(d as Record<string, any>));
+      const body = (await r.json()) as { documents?: Record<string, any>[]; nextPageToken?: string };
+      out.push(...(body.documents ?? []));
       page = body.nextPageToken;
     } while (page);
-    return out.sort((a, b) => a.when.localeCompare(b.when));
+    return out;
+  }
+
+  /** The documents root of the project, in the cloud or in the emulator the variable names. */
+  #documents(): string {
+    const host = emulator();
+    return `${host ? `http://${host}` : 'https://firestore.googleapis.com'}/v1/projects/${this.#requireProject()}`
+      + '/databases/(default)/documents';
+  }
+
+  /**
+   * The id of the person with this address in the cloud's people table, made on first sight —
+   * the same rows, under the same document ids, as the server's Firestore store makes
+   * (engine/api/store-firestore.ts, `personFor`), so a person the CLI makes is the one the server
+   * finds, and the other way round. The pointer is created only if absent; when another writer
+   * made it first, theirs is the person.
+   */
+  async #cloudPersonFor(author: string, base: string, headers: Record<string, string>): Promise<string> {
+    const email = personEmail(author);
+    const key = encodeURIComponent(email);
+    // Encoded twice in the URL: once is the document's own id, as the server's store names it, and
+    // the second is undone by the path itself — without it `%40` would arrive as `@`, another id.
+    const pointer = `${base}/people_by_email/${encodeURIComponent(key)}`;
+    const read = async (): Promise<string | null> => {
+      const r = await fetch(pointer, { headers });
+      if (r.status === 404) return null;
+      if (!r.ok) throw await this.#cloudError(r, 'reading');
+      return ((await r.json()) as Record<string, any>).fields?.id?.stringValue ?? null;
+    };
+    const found = await read();
+    if (found) return found;
+    const id = newPersonId();
+    const name = (path: string) => `projects/${this.#project}/databases/(default)/documents/${path}`;
+    const r = await fetch(`${base.replace('/documents', '')}/documents:commit`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        writes: [
+          { update: { name: name(`people/${id}`), fields: { email: { stringValue: email } } },
+            currentDocument: { exists: false } },
+          { update: { name: name(`people_by_email/${key}`), fields: { id: { stringValue: id } } },
+            currentDocument: { exists: false } },
+        ],
+      }),
+    });
+    if (r.ok) return id;
+    const winner = await read();
+    if (winner) return winner;
+    throw await this.#cloudError(r, 'writing to');
   }
 
   /**
@@ -225,8 +304,11 @@ export class Source {
       return ((await r.json()) as { id: string }).id;
     }
 
-    const base = `https://firestore.googleapis.com/v1/projects/${this.#requireProject()}/databases/(default)/documents`;
-    const fields: Record<string, unknown> = { author: { stringValue: author } };
+    const base = this.#documents();
+    const token = { Authorization: `Bearer ${await this.#gcloudToken()}` };
+    // An id, as the server writes it: the address stays in the people table, where forgetting
+    // the person can empty it (docs/PRIVACY.md, section 1).
+    const fields: Record<string, unknown> = { author: { stringValue: await this.#cloudPersonFor(author, base, token) } };
     for (const [k, v] of Object.entries(event)) {
       if (v == null) continue;
       fields[k] = typeof v === 'object'
@@ -236,7 +318,7 @@ export class Source {
     const id = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
     const r = await fetch(`${base.replace('/documents', '')}/documents:commit`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${await this.#gcloudToken()}`, 'Content-Type': 'application/json' },
+      headers: { ...token, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         writes: [{
           update: { name: `projects/${this.#project}/databases/(default)/documents/events/${id}`, fields },
