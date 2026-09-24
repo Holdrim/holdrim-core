@@ -130,7 +130,7 @@ accident.
 | **limits** | the size and shape of everything crossing the boundary. `engine/core/limits.js`. It exists because without it a POST with 500 KB per field would be accepted and then served back to everyone, on every page load, into a collection nobody can delete from |
 | **source** | where the agent's tool reads events from: the cloud, a SQLite file (`--db`), or a local server (`--local`). `engine/cli/remote.ts` |
 | **user store** | where the people who log in, and their sessions, are kept — apart from the events. SQLite, Firestore or Postgres, chosen by `HOLDRIM_USERS`. `engine/api/users.ts` |
-| **disabled** | what happens to a person instead of deletion. There is no way to delete one: every ✓ they gave names them, and deleting them would leave approvals nobody can attribute. Disabling takes the access away, drops the open session, and keeps the history |
+| **disabled** | what happens to a person instead of deletion. There is no way to delete one: every ✓ they gave names them, and deleting them would leave approvals nobody can attribute. Disabling takes the access away, drops the open session, and keeps the history. The owner can go further, at the person's request: forget them (`EventStore.forget`, which only ever empties the row's e-mail) and remove the free text they wrote (`EventStore.removeText`) — the id, and every event, fingerprint and snapshot it is on, stay untouched, so a lock keeps saying what it locked. `docs/PRIVACY.md`, section 5, is the procedure |
 
 ## Around the edges
 

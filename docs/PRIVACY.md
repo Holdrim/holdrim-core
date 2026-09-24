@@ -125,7 +125,28 @@ The owner cannot remove themselves: the owner comes from `HOLDRIM_OWNER`, and ha
 before leaving. An admin can ask the owner; only the owner acts, for the same reason only the owner
 resets the owner's account.
 
-Until the tool exists, the same steps are a documented procedure the operator runs on the database.
+Until there is a screen for it ("Removing a person, from the people screen" below), the owner runs
+the same steps by hand, with what already exists:
+
+1. **Find the person's id.** Look them up by e-mail in the people table next to the events —
+   `SELECT id FROM people WHERE email = ?` in SQLite, or the `people_by_email/{encoded e-mail}`
+   pointer document in Firestore (`engine/api/people.ts`, `FIRESTORE_PEOPLE`).
+2. **Remove every `text` they wrote.** For each of the person's events that still holds one, call
+   `EventStore.removeText(event, 'text', by)` — `by` is the owner's own e-mail, the same call
+   section 4 describes, reached directly instead of through a route. Snapshots are left alone: they
+   are the documentation's own text, not the person's.
+3. **Forget the person.** `EventStore.forget(id)` empties their row. The id stays on every event
+   they ever touched, so a lock they were given keeps saying whose it was.
+4. **Disable their account**, if they sign in with a password: `PATCH /users/<e-mail>` with
+   `{"enabled": false}` — the same route an admin already has, and everything disabling does today
+   (`docs/GLOSSARY.md`, **disabled**). Erasing the account's own e-mail, name and password is not a
+   capability the user store has yet; that is what the people screen adds.
+5. **Write down that it happened.** There is no `person_removed` event type yet — recording one,
+   with ids only, is the people screen's own step. Until then, the owner's own comment naming the
+   id and the date is the trail.
+
+What none of this reaches is listed once, in "What Holdrim cannot remove" below — not repeated here
+so the two lists cannot drift apart.
 
 ### 6. What the engine writes elsewhere
 
@@ -167,8 +188,8 @@ Said here so nobody promises it:
 | `author` as an opaque id, a people table in every mode, one resolver | ✅ built — a person gets their row the first time they act |
 | The author's role, and on a ✓ whether it is a lock, written on the event, never recomputed | ⬜ 0.1.0 |
 | Free text and snapshot outside the event, salted hash inside, removals as events | ✅ built — `EventStore.removeText`, not reachable through `POST /events` yet |
-| Commits without `Requested-by:`, ids in logs | ⬜ 0.1.0 |
-| Removing a person, documented procedure | ⬜ 0.1.0 |
+| Commits without `Requested-by:`, ids in logs | ✅ built |
+| Removing a person, documented procedure | ✅ built — section 5, run by hand |
 | Removing a person, from the people screen | ⬜ 0.1.0 |
 | Events signed by the server, and readers that trust only signed roles | ⬜ 0.1.0 (phase E) |
 | The agent writing through the API with its own credential, and no direct write to the cloud | ⬜ 0.1.0 (`docs/ROLES.md` §4) |
