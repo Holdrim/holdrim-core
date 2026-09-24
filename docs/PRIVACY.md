@@ -109,12 +109,12 @@ commit, with its own history.
 
 ### 5. Removing a person: anonymised, never deleted
 
-"People are disabled, never deleted" stays. It gains one step, taken only by the **owner**, at the
-person's request:
+"People are disabled, never deleted" stays. Once there is a screen for it ("Removing a person, from
+the people screen" below), the owner gains one step, at the person's request:
 
 - the person's row in the people table keeps its id and loses its e-mail;
 - their account, under password sign-in, loses its e-mail and name, its password and its open
-  sessions — disabling already drops the last two;
+  sessions;
 - every `text` they wrote is removed, as above — the snapshots on their events stay;
 - an event records that a person was removed, by whom and when — with ids only.
 
@@ -125,22 +125,24 @@ The owner cannot remove themselves: the owner comes from `HOLDRIM_OWNER`, and ha
 before leaving. An admin can ask the owner; only the owner acts, for the same reason only the owner
 resets the owner's account.
 
-Until there is a screen for it ("Removing a person, from the people screen" below), the owner runs
-the same steps by hand, with what already exists:
+**Until then**, the owner reaches only the first three of those by hand, with what already exists —
+a `person_removed` event and erasing the account's own e-mail, name and password are capabilities
+only the people screen adds:
 
 1. **Find the person's id.** Look them up by e-mail in the people table next to the events —
    `SELECT id FROM people WHERE email = ?` in SQLite, or the `people_by_email/{encoded e-mail}`
    pointer document in Firestore (`engine/api/people.ts`, `FIRESTORE_PEOPLE`).
-2. **Remove every `text` they wrote.** For each of the person's events that still holds one, call
+2. **Disable their account first**, if they sign in with a password: `POST
+   /api/users/<e-mail>/enabled` with `{"enabled": false}`, in the owner's own session — the same
+   route an admin already has, and everything disabling does today (`docs/GLOSSARY.md`,
+   **disabled**). First, so nothing they do between this step and the next two — sign in, write
+   another comment — has to be removed all over again.
+3. **Remove every `text` they wrote.** For each of the person's events that still holds one, call
    `EventStore.removeText(event, 'text', by)` — `by` is the owner's own e-mail, the same call
    section 4 describes, reached directly instead of through a route. Snapshots are left alone: they
    are the documentation's own text, not the person's.
-3. **Forget the person.** `EventStore.forget(id)` empties their row. The id stays on every event
+4. **Forget the person.** `EventStore.forget(id)` empties their row. The id stays on every event
    they ever touched, so a lock they were given keeps saying whose it was.
-4. **Disable their account**, if they sign in with a password: `PATCH /users/<e-mail>` with
-   `{"enabled": false}` — the same route an admin already has, and everything disabling does today
-   (`docs/GLOSSARY.md`, **disabled**). Erasing the account's own e-mail, name and password is not a
-   capability the user store has yet; that is what the people screen adds.
 5. **Write down that it happened.** There is no `person_removed` event type yet — recording one,
    with ids only, is the people screen's own step. Until then, the owner's own comment naming the
    id and the date is the trail.
@@ -150,13 +152,16 @@ so the two lists cannot drift apart.
 
 ### 6. What the engine writes elsewhere
 
-- **Commits.** The brief that `holdrim apply` hands the agent asks for two trailers, `Request:` with
-  the request's id and `Requested-by:` with the requester's e-mail — and a commit stays in the
-  project's history for good. `Requested-by:` goes. `Request:` already names the request, and who
-  asked is found from it, in the place where it can be removed.
-- **Logs.** Log lines carry the person's id instead of the e-mail wherever there is one. A refused
-  sign-in still logs the address that was typed: that is the line an operator needs to see an
-  attack, and there is no person behind it yet.
+- **Commits.** The brief that `holdrim apply` hands the agent asks for one trailer, `Request:` with
+  the request's id — a commit stays in the project's history for good, and who asked is found from
+  the request instead, in the place where it can be removed. A commit made before this change still
+  carries a `Requested-by:` with the e-mail; that is in "What Holdrim cannot remove", below.
+- **Logs.** Log lines carry the person's id instead of the e-mail wherever there is one. Two
+  addresses are the deliberate exceptions: a refused sign-in still logs the address that was typed,
+  since that is the line an operator needs to see an attack and there is no person behind it yet;
+  and the first-access banner at boot still names the owner, since it is the one line that tells
+  whoever is standing at the terminal which address to sign in with — configuration, not a user's
+  personal data.
 - **The repository.** The registry of approvals holds the file, the date, the fingerprint, the
   start of the block's own text and the event's id; the page's `data-validated` holds a date. Neither
   names anybody.
