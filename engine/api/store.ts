@@ -1,5 +1,7 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
+import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED,
+  type RawEvent, type TextField, type TextRow } from './texts.ts';
 
 /*
  * The Firestore store lives in store-firestore.ts, loaded only when HOLDRIM_EVENTS=firestore.
@@ -11,21 +13,57 @@ import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './p
 
 /** Only for running and testing on the machine. Persists nothing. */
 export class MemoryEventStore implements EventStore {
-  #events: Event[] = [];
+  #events: RawEvent<Event>[] = [];
+
+  // The text table beside the events, as docs/PRIVACY.md, section 4 asks: value and salt, keyed by
+  // event and field. What the event itself keeps is the hash alone, on `#events` — never here.
+  #texts = new Map<string, TextRow>();
 
   // The author goes in as the person's id and comes out as their address, as in every store:
   // what is kept names nobody once the person is forgotten (docs/PRIVACY.md, section 1).
   async append(event: NewEvent, author: string): Promise<Event> {
-    const e = stored(event, crypto.randomUUID().replace(/-/g, ''), await this.personFor(author), new Date().toISOString());
-    this.#events.push(e);
-    return { ...e, author: personEmail(author) };
+    return this.#record(event, author, new Date().toISOString());
+  }
+
+  /**
+   * `append`'s own body, with `when` taken from the caller rather than always the wall clock now —
+   * `removeText` needs to clamp its own event's `when` (round 3, finding 3, `notBefore` in
+   * engine/api/texts.ts), and a second copy of this logic would be one more place for the hash on
+   * an event and its row in `#texts` to stop agreeing with each other.
+   */
+  async #record(event: NewEvent, author: string, when: string): Promise<Event> {
+    const id = crypto.randomUUID().replace(/-/g, '');
+    const { hashes, rows } = saltFields(event);
+    for (const r of rows) this.#texts.set(textKey(id, r.field), { value: r.value, salt: r.salt });
+    const e = stored({ ...event, text: null, snapshot: null }, id, await this.personFor(author), when);
+    this.#events.push({ ...e, textHash: hashes.text, snapshotHash: hashes.snapshot });
+    // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
+    // a round trip through `withTexts` — are what the caller of a fresh append gets back.
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
   }
 
   async list(page?: string | null): Promise<Event[]> {
     const people = new Map([...this.#people.values()].map((p) => [p.id, p.email]));
-    return withAuthors(this.#events
+    const events = withAuthors(this.#events
       .filter((e) => page == null || e.page === page)
       .sort((a, b) => a.when.localeCompare(b.when)), people);
+    return withTexts(events, this.#texts);
+  }
+
+  async removeText(event: string, field: TextField, by: string): Promise<Event> {
+    // The event before the row, as the other two stores answer it: an unknown event is "no event",
+    // not the same "nothing to remove" a real field already gone would give.
+    const original = this.#events.find((e) => e.id === event);
+    if (!original) throw new Error(`no event ${event}`);
+    const key = textKey(event, field);
+    if (!this.#texts.has(key)) throw noText(event, field);
+    // Deleted before the removal is recorded. Nothing here persists past the process, so there is
+    // no crash for the two to disagree across — the gap a real database closes with a transaction
+    // (store-sqlite.ts, store-firestore.ts) is one this store cannot have in the first place.
+    this.#texts.delete(key);
+    const when = notBefore(new Date().toISOString(), original.when);
+    return this.#record({ type: TEXT_REMOVED, page: original.page, block: original.block ?? null,
+      data: { event, field } }, by, when);
   }
 
   // The people table. No database to hold the rule here, so `setEmail` is the only code that

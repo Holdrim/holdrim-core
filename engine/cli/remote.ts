@@ -3,6 +3,10 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
 import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
+import { textKey, withTexts, withTextsRetrying, TEXT_REMOVED, type RawEvent as Raw, type TextField, type TextRow } from '../api/texts.ts';
+
+/** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
+type RawEvent = Raw<Event>;
 
 const exec = promisify(execFile);
 
@@ -34,9 +38,10 @@ export class Source {
   #token?: string;
   #account?: string;
   #preferredAccount?: string;
+  #pageSize: number;
 
   constructor(options: { local?: boolean; project?: string; localUrl?: string; account?: string;
-                        db?: string } = {}) {
+                        db?: string; pageSize?: number } = {}) {
     this.#local = options.local ?? false;
     // The events file, when the project runs without a cloud. This is what closes the loop
     // offline: without it, `sync` only works against the cloud store or against a server in
@@ -45,6 +50,10 @@ export class Source {
     // No hard-coded value: it comes from the project's holdrim.json, or from the environment.
     this.#project = options.project ?? process.env.HOLDRIM_PROJECT ?? '';
     this.#localUrl = options.localUrl ?? process.env.HOLDRIM_LOCAL_URL ?? 'http://localhost:8095';
+    // Not an adopter's setting — nothing here reads an environment variable for it. It exists so a
+    // test can force more than one page without writing hundreds of documents to prove pagination
+    // holds (round 2, finding D): the real cloud never sees anything but the default.
+    this.#pageSize = options.pageSize ?? 300;
     this.#preferredAccount = process.env.HOLDRIM_ACCOUNT ?? options.account;
   }
 
@@ -179,9 +188,18 @@ export class Source {
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      const rows = db.prepare(
-        'SELECT id, type, page, block, fingerprint, text, snapshot, author, happened_at, data' +
-        '  FROM events ORDER BY happened_at').all() as Record<string, any>[];
+      // `*`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no such
+      // columns at all, and naming them would fail the query outright rather than read the file's
+      // own, older shape — the same reason `hasPeople` below asks before it reads that table.
+      // `rowid`, same as the server's own `SqliteEventStore.list()` (store-sqlite.ts): a removal is
+      // always inserted after the event it names, so a tie inside one `happened_at` millisecond —
+      // `notBefore` clamping a removal to its target's own timestamp — has to keep breaking toward
+      // recorded order, not whatever the planner happens to pick, or the two readers of one file
+      // could disagree about which side of the tie a removal falls on. As store-sqlite.ts's own
+      // comment says of its identical clause: today's SQLite already hands ties back in rowid order,
+      // so dropping this changes nothing the suite below can see; naming it turns that accident into
+      // a promise. `rowid DESC` does fail it.
+      const rows = db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
       // A file written before the people table existed has no such table, and every author in it
       // is an address: an empty table resolves none of them, which is what they need. The read
       // is the same rule the server's store applies, through the same resolver.
@@ -190,12 +208,24 @@ export class Source {
         ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
           .map((p) => [p.id, p.email ?? null])
         : []);
-      return withAuthors(rows.map((row) => ({
+      const events = withAuthors(rows.map((row) => ({
         id: String(row.id), type: String(row.type), page: String(row.page),
         block: row.block ?? null, fingerprint: row.fingerprint ?? null, text: row.text ?? null,
-        snapshot: row.snapshot ?? null, author: String(row.author), when: String(row.happened_at),
+        snapshot: row.snapshot ?? null, textHash: row.text_hash ?? null, snapshotHash: row.snapshot_hash ?? null,
+        author: String(row.author), when: String(row.happened_at),
         data: row.data ? JSON.parse(String(row.data)) : null,
+        textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
       })), people);
+      // A file written before texts were extracted has no `texts` table either, and every row's
+      // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
+      // an empty people map gives an author (docs/PRIVACY.md, section 4).
+      const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
+      const texts = new Map(hasTexts
+        ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
+            { event: string; field: TextField; value: string; salt: string }[])
+          .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt } as TextRow])
+        : []);
+      return withTexts(events, texts);
     } finally {
       db.close();
     }
@@ -219,22 +249,61 @@ export class Source {
     // a person is made before their first event, so every author read above is in this read.
     const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
       [String(d.name).split('/').pop()!, (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null]));
-    return withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
+    const events = withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
+    // The texts after the events, as the server's Firestore store reads them, for the same reason.
+    const texts = new Map((await this.#collection(headers, 'texts')).map((d) => {
+      const f = d.fields ?? {};
+      return [textKey(f.event?.stringValue, f.field?.stringValue),
+        { value: f.value?.stringValue, salt: f.salt?.stringValue } as TextRow];
+    }));
+    // Round 2, finding A: these three used to be one Firestore transaction, the CLI's twin of the
+    // server's own (store-firestore.ts, `list`) — dropped for the same reason: a read-only
+    // transaction aborts after 270 seconds and is not retried, and events/texts only grow, so
+    // holding one open across a full scan of both eventually fails outright. `withTextsRetrying`
+    // (engine/api/texts.ts) is the one rule both readers now share: for a field a first pass calls
+    // tampered, ask once more, later, for the removal events that first pass could not have seen.
+    return withTextsRetrying(events, texts, async () => {
+      // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
+      const removed = await this.#collection(headers, 'events',
+        { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
+      return withAuthors(removed.map((d) => this.#fromFirestore(d)), people);
+    });
   }
 
-  /** Every document of one collection, over as many pages as the cloud answers in. */
-  async #collection(headers: Record<string, string>, name: string): Promise<Record<string, any>[]> {
-    const out: Record<string, any>[] = [];
-    let page: string | undefined;
-    do {
-      const url = `${this.#database()}/documents/${name}?pageSize=300${page ? `&pageToken=${page}` : ''}`;
-      const r = await fetch(url, { headers });
+  /**
+   * Every document of one collection, over as many pages as the cloud answers in, via
+   * `documents:runQuery` rather than the plain `documents.list` REST read — needed for the `where`
+   * the removals re-read above narrows by, which `documents.list` has no way to express. Ordered by
+   * document name so a cursor (`startAt` on the last name seen) can page it. `pageSize` is `#pageSize`
+   * unless a call needs its own — none here does; it exists for the constructor option of the same
+   * name, which only a test sets.
+   */
+  async #collection(headers: Record<string, string>, name: string, where?: Record<string, unknown>):
+    Promise<Record<string, any>[]> {
+    const docs: Record<string, any>[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const structuredQuery: Record<string, unknown> = {
+        from: [{ collectionId: name }],
+        orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+        limit: this.#pageSize,
+      };
+      if (where) structuredQuery.where = where;
+      if (after) structuredQuery.startAt = { values: [{ referenceValue: after }], before: false };
+      const r = await fetch(`${this.#database()}/documents:runQuery`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ structuredQuery }),
+      });
       if (!r.ok) throw await this.#cloudError(r, 'reading');
-      const body = (await r.json()) as { documents?: Record<string, any>[]; nextPageToken?: string };
-      out.push(...(body.documents ?? []));
-      page = body.nextPageToken;
-    } while (page);
-    return out;
+      const rows = (await r.json()) as { document?: Record<string, any> }[];
+      let onThisPage = 0;
+      for (const row of rows) {
+        if (row.document) { docs.push(row.document); after = row.document.name as string; onThisPage++; }
+      }
+      if (onThisPage < this.#pageSize) break; // fewer than the limit: nothing left to page for
+    }
+    return docs;
   }
 
   /** The project's database over REST, in the cloud or in the emulator the variable names. */
@@ -338,7 +407,7 @@ export class Source {
     return id;
   }
 
-  #fromFirestore(d: Record<string, any>): Event {
+  #fromFirestore(d: Record<string, any>): RawEvent {
     const f = d.fields ?? {};
     const s = (k: string) => f[k]?.stringValue ?? null;
     const data: Record<string, string> = {};
@@ -348,9 +417,14 @@ export class Source {
     return {
       id: String(d.name).split('/').pop()!,
       type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
-      text: s('text'), snapshot: s('snapshot'), author: s('author')!,
+      // Absent on a document from before texts were extracted, or one the CLI's own `add` wrote —
+      // that path writes straight to the cloud with no hash, a gap docs/PRIVACY.md, section 3 already
+      // names — and `text`/`snapshot` there already hold their own plain value: read as such.
+      text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
+      author: s('author')!,
       when: f.when?.timestampValue ?? '',
       data: Object.keys(data).length ? data : null,
+      textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
     };
   }
 }

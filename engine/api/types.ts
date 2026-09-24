@@ -1,3 +1,5 @@
+import type { Removed, TextField } from './texts.ts';
+
 /** A fact from the review. Only created — never altered, never deleted. */
 export interface Event {
   id: string;
@@ -17,19 +19,37 @@ export interface Event {
   // forces the reader to check the type — `string` would lie, because `related` already holds an
   // object.
   data?: { request?: string; state?: string; from?: string; [k: string]: unknown } | null;
+  // `text` and `snapshot` live outside the event, in a table of texts, one row per event and field
+  // (docs/PRIVACY.md, section 4; engine/api/texts.ts, `withTexts`). These four say what became of a
+  // field once its row is gone: `null` while the field is untouched — never given, still there, or
+  // from before texts were extracted. `<field>Removed` names who and when, for a field let go on
+  // purpose through `EventStore.removeText`. `<field>Tampered` is `true` for a field whose hash no
+  // longer matches any row and no such removal accounts for it — missing with nothing to say why,
+  // which reads as tampering, not as absence.
+  textRemoved?: Removed | null;
+  snapshotRemoved?: Removed | null;
+  textTampered?: boolean;
+  snapshotTampered?: boolean;
 }
 
-export type NewEvent = Omit<Event, 'id' | 'author' | 'when'>;
+export type NewEvent = Omit<Event, 'id' | 'author' | 'when' | 'textRemoved' | 'snapshotRemoved' | 'textTampered' | 'snapshotTampered'>;
 
 /**
  * The event as every store answers it, to an append and to a list alike: each optional field
  * present, and `null` when it was left out. Stores that each spread what they were given would
  * answer one shape to an append and another to a list a moment later.
+ *
+ * The four fields `withTexts` decides — `textRemoved`, `snapshotRemoved`, `textTampered`,
+ * `snapshotTampered` — start at "nothing to say" here, the same as every other optional field.
+ * `append` returns this shape untouched (a text just written cannot yet be removed or tampered
+ * with); `list` runs the whole page through `withTexts` afterwards, which sets them where a hash
+ * says there is something to say.
  */
 export function stored(event: NewEvent, id: string, author: string, when: string): Event {
   return {
     id, type: event.type, page: event.page, block: event.block ?? null, fingerprint: event.fingerprint ?? null,
     text: event.text ?? null, snapshot: event.snapshot ?? null, author, when, data: event.data ?? null,
+    textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
   };
 }
 
@@ -62,6 +82,14 @@ export interface PeopleTable {
 export interface EventStore extends PeopleTable {
   append(event: NewEvent, author: string): Promise<Event>;
   list(page?: string | null): Promise<Event[]>;
+  /**
+   * Removes one field's text — the row in the texts table, and only that — and records the removal
+   * as a new event of type `text_removed` (engine/api/texts.ts, `TEXT_REMOVED`), `by` as its author.
+   * The two happen together, or neither does: a text gone with no removal event, or a removal event
+   * with the text still there, is exactly the inconsistency `withTexts` cannot tell from tampering.
+   * Refuses with `noText` when the field was never given, or was already removed.
+   */
+  removeText(event: string, field: TextField, by: string): Promise<Event>;
   close(): Promise<void>;
 }
 

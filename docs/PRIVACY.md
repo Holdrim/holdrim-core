@@ -166,7 +166,7 @@ Said here so nobody promises it:
 | People disabled, never deleted | ✅ built |
 | `author` as an opaque id, a people table in every mode, one resolver | ✅ built — a person gets their row the first time they act |
 | The author's role, and on a ✓ whether it is a lock, written on the event, never recomputed | ⬜ 0.1.0 |
-| Free text and snapshot outside the event, salted hash inside, removals as events | ⬜ 0.1.0 |
+| Free text and snapshot outside the event, salted hash inside, removals as events | ✅ built — `EventStore.removeText`, not reachable through `POST /events` yet |
 | Commits without `Requested-by:`, ids in logs | ⬜ 0.1.0 |
 | Removing a person, documented procedure | ⬜ 0.1.0 |
 | Removing a person, from the people screen | ⬜ 0.1.0 |

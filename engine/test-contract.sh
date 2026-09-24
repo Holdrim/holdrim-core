@@ -124,6 +124,10 @@ expect "reviewer does NOT approve → 403" 403 "$(post $REVIEWER '{"type":"appro
 expect "owner approves → 201"          201 "$(post $OWNER '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc123"}')"
 expect "approval without fingerprint → 400" 400 "$(post $OWNER '{"type":"approval","page":"D01","block":"D01.1.4"}')"
 expect "unknown type → 400"            400 "$(post $OWNER '{"type":"delete","page":"D01"}')"
+# text_removed is written only by EventStore.removeText, in the same transaction as the row it
+# deletes (engine/api/texts.ts) — never by this general path, even signed in as the owner: a route
+# that accepted it could claim a removal with nothing to back it, no row actually gone.
+expect "text_removed via POST /events → 400, even as the owner" 400 "$(post $OWNER '{"type":"text_removed","page":"D01","data":{"event":"x","field":"text"}}')"
 # A body that parses as JSON but does not say so is what a form on another site can send without the
 # browser asking first. Refused before it is read, whoever it claims to come from.
 expect "an approval sent as text/plain → 415" 415 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: text/plain' -d '{"type":"approval","page":"D01","block":"D01.1.9","fingerprint":"forged"}' $B/api/events)"
