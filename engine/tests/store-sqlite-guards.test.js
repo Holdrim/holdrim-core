@@ -174,3 +174,36 @@ test('a foreign trigger is found under any spelling of the table, and its name c
     assert.ok(said.some((line) => line.includes(name)), `${name} has to be said`);
   }
 }));
+
+test('two boots repairing one file at once: the second waits for the first and then finds nothing to do', withFile(async (path) => {
+  await reopen(path);
+  outside(path, 'DROP TRIGGER events_no_delete; CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT 1; END;');
+  // The first boot, in a thread of its own: it takes the write lock, repairs, and holds on a moment
+  // before it commits, so the second boot is certain to read the file while it is still wrong.
+  const { Worker } = await import('node:worker_threads');
+  const first = new Worker(`
+    const { DatabaseSync } = require('node:sqlite');
+    const { workerData, parentPort } = require('node:worker_threads');
+    const db = new DatabaseSync(workerData.path);
+    db.exec('BEGIN IMMEDIATE');
+    parentPort.postMessage('locked');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    db.exec('DROP TRIGGER events_no_delete');
+    db.exec(workerData.create);
+    db.exec('COMMIT');
+    db.close();
+  `, { eval: true, workerData: { path, create: `CREATE TRIGGER events_no_delete ${GUARDS.events_no_delete}` } });
+  await new Promise((resolve) => first.once('message', resolve));
+  const said = [];
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA busy_timeout = 5000');
+  try {
+    // Without IMMEDIATE, this boot's read runs ahead and its write collides with the first one's;
+    // without the read again under the lock, it repairs from the stale view and says so.
+    assert.doesNotThrow(() => installGuards(db, GUARDS, (line) => said.push(line)));
+    assert.deepEqual(said, [], 'the first boot already repaired it: the second has nothing to replace');
+  } finally {
+    db.close();
+    await new Promise((resolve) => first.once('exit', resolve));
+  }
+}));
