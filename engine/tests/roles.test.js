@@ -113,10 +113,14 @@ test('mutating what capabilitiesOf returns changes nothing the next caller reads
   assert.equal(roles.can('lock', 'ana@example.org'), false, 'an admin\'s ✓ must not have just become a lock');
 });
 
-test('can(\'lock\', …) is isOwner, full stop — even a table entry that DID carry lock would not matter', () => {
+test('the owner locks and admin and member do not, whatever a caller does to what capabilitiesOf returned', () => {
   const roles = createRoles('owner@example.org', 'ana@example.org');
-  // Reaching into the table directly, the way a bug elsewhere in the process might, and putting
-  // `lock` on every role there is — `can` must still answer `lock` from identity alone.
+  // `capabilitiesOf` hands out a FRESH Set on every call (proved above), so this loop mutates three
+  // throwaway copies, never the table itself — it is here to show that `can('lock', …)` does not care
+  // either way: it never reads `capabilitiesOf` for `'lock'` at all (see `can`, in roles.js), so even
+  // a caller that DID manage to poison the table would still get isOwner's answer, not the table's.
+  // The table's own shape — that no role's entry carries `lock` in the first place — is the mapping
+  // test above ("the three shipped roles hold exactly the capabilities docs/ROLES.md gives them").
   for (const role of ['owner', 'admin', 'member']) capabilitiesOf(role).add('lock');
   assert.equal(roles.can('lock', 'owner@example.org'), true);
   assert.equal(roles.can('lock', 'ana@example.org'), false, 'admin must not lock, whatever the table says');
