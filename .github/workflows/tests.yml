@@ -72,8 +72,8 @@ jobs:
       - name: The panel bundle is up to date
         run: |
           npm run build:web
-          if ! git diff --quiet engine/web/panel-react.js; then
-            echo "✗ engine/web/panel-react.js is stale."
+          if [ -n "$(git status --porcelain -- engine/web/panel-react.js engine/web/generated)" ]; then
+            echo "✗ the panel bundle or Mermaid chunks are stale."
             echo "  Run and commit:  npm run build:web"
             exit 1
           fi
