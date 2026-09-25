@@ -198,6 +198,54 @@ test('features.pageRequests OFF hides the "ask for a page" form; on, or unset, i
   assert.match(on, /<form method="post" action="\/engine\/home"/);
 });
 
+// ---------------------------------------------------------------- the graph toggle (#38, docs/ROLES.md §7)
+
+test('features.graph OFF, or unset, draws no section and no script; on, both are there', () => {
+  const i18n = createI18n({ en: JSON.parse(readFileSync(`${ROOT}engine/locales/en.json`, 'utf8')) }, 'en');
+  const pages = [{ page: 'A01', href: '/a', title: 'First', tally: { valid: 0, stale: 0, broken: 0, none: 1 }, awaitingSync: 0 }];
+
+  // Unlike pageRequests, THIS toggle defaults to hidden: the section is brand new, so a caller that
+  // does not pass it — every other test in this file included — must keep seeing the home exactly
+  // as it read before #38, not suddenly grow a script nobody asked this call for.
+  const unset = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [] }, ENGINE_THEME, 'n');
+  assert.doesNotMatch(unset, /id="holdrim-graph"|home-graph\.js/, 'no value at all means off, unlike pageRequests');
+
+  const off = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], graphEnabled: false }, ENGINE_THEME, 'n');
+  assert.doesNotMatch(off, /id="holdrim-graph"/, 'the toggle hides the section entirely, not merely disables it');
+  assert.doesNotMatch(off, /<script/, 'and takes its script down with it — a CSP with no script-src must not be lying');
+
+  const on = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], graphEnabled: true }, ENGINE_THEME, 'n');
+  assert.match(on, /<div id="holdrim-graph"/);
+  assert.match(on, /<script type="module" src="\/engine\/web\/home-graph\.js" nonce="n">/,
+    'the same nonce this whole page was rendered with — never a second one, and never none');
+  // The legend names every traffic-light state PLUS the one graphOf invents for a dangling
+  // dependency (`missing`) — a reader who never opens a block still learns what ❓ means here.
+  for (const glyph of ['⚪', '🟢', '🟡', '🔴', '❓']) assert.ok(on.includes(glyph), `missing ${glyph} in the legend`);
+
+  // No pages at all: nothing to graph, whatever the toggle says — the same guard askForm uses.
+  const empty = renderHomePage(i18n, 'en', { projectName: 'P', pages: [], requests: [], graphEnabled: true }, ENGINE_THEME, 'n');
+  assert.doesNotMatch(empty, /id="holdrim-graph"/);
+});
+
+test('the graph\'s i18n blob is escaped for its attribute, not for the JSON inside it', () => {
+  const i18n = createI18n({ en: { 'home.graph.heading': 'x', 'home.graph.lede': 'x', 'home.graph.loading': 'x',
+    'home.graph.failed': 'x', 'home.graph.missing': 'x', 'home.graph.label': 'A "graph" & <friends>',
+    'home.graph.zoomIn': 'x', 'home.graph.zoomOut': 'x', 'home.graph.reset': 'x',
+    'home.light.valid': 'x', 'home.light.stale': 'x', 'home.light.broken': 'x', 'home.light.none': 'x' } }, 'en');
+  const pages = [{ page: 'A01', href: '/a', title: 'First', tally: { valid: 0, stale: 0, broken: 0, none: 1 }, awaitingSync: 0 }];
+  const html = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], graphEnabled: true }, ENGINE_THEME, 'n');
+  const attr = /data-graph-i18n="([^"]*)"/.exec(html)[1];
+  // Escaped enough to sit inside a double-quoted attribute (no bare `"`), and readable back out as
+  // exactly the sentence i18n gave — round-tripping through the browser's own entity decoding is
+  // what `container.dataset.graphI18n` does, so JSON.parse here stands in for it.
+  assert.ok(!attr.includes('"graph"'), 'a literal quote would end the attribute early');
+  // `&amp;` is decoded LAST: decoded first, a text holding a literal "&lt;" would come back as "<".
+  // `pageTitle` (home-page.ts) hand-rolls this same decode order for the same reason; a change to
+  // `forHtml`'s `ESCAPES` (login-page.ts) has to reach both.
+  assert.equal(JSON.parse(attr.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')).label,
+    'A "graph" & <friends>');
+});
+
 test('whoever may decide gets one plain form per request, with the cycle\'s destinations and nothing run', () => {
   const i18n = createI18n({ en: JSON.parse(readFileSync(`${ROOT}engine/locales/en.json`, 'utf8')) }, 'en');
   const row = (extra = {}) => ({ id: 'r1', page: 'A01', block: 'A01.1.1', href: '/a#A01.1.1', state: 'open', category: 'text',

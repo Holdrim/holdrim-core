@@ -426,6 +426,12 @@ const ALLOWED = [
   { file: 'engine/api/server.ts', text: 'pageRequestsEnabled: project.features.pageRequests, ask,',
     why: 'serveHome\'s prop for the "ask for a page" form; the form\'s POST is refused, if at all, ' +
       'by refusalOf like any other request' },
+  { file: 'engine/api/server.ts', text: 'res.writeHead(status, screenHeaders(nonce, project.features.graph));',
+    why: 'serveHome (#38): the home\'s OWN Content-Security-Policy, script-free unless graph is on ' +
+      '— never a role, never a capability, the same shape servePeople already reads its script flag from' },
+  { file: 'engine/api/server.ts', text: 'graphEnabled: project.features.graph,',
+    why: 'serveHome\'s prop for the graph section and its script; renderHomePage is the only other ' +
+      'place that reads it, and takes a plain boolean, never the toggle\'s own name' },
   { file: 'engine/api/server.ts',
     text: 'features: { comments: project.features.comments, pageRequests: project.features.pageRequests, bugCategory: project.features.bugCategory },',
     why: '/api/me telling the PANEL which of its own controls to draw (docs/ROLES.md, "The front ' +

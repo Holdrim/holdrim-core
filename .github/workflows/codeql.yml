@@ -45,11 +45,13 @@ jobs:
         with:
           languages: javascript-typescript
           build-mode: none
-          # The committed React bundle is generated code; its findings belong to React, and they
-          # would bury the engine's own.
+          # The committed bundles are generated code — the React panel, and the home screen's graph
+          # (#38) — and their findings belong to whatever they were built from, burying the
+          # engine's own.
           config: |
             paths-ignore:
               - engine/web/panel-react.js
+              - engine/web/home-graph.js
               - node_modules
 
       - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1

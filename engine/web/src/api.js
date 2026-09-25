@@ -33,6 +33,15 @@ export const fingerprintsOf = (ids) => call(`/fingerprints?ids=${ids.map(encodeU
 export const impactRadiusOf = (id) => call(`/impact-radius?id=${encodeURIComponent(id)}`).then((r) => r.ids);
 
 /**
+ * The documentation graph (#38): every block as a node, every `data-depends` as an edge — the same
+ * `graphOf` `holdrim graph` prints (engine/cli/graph.ts), read from the server rather than
+ * recomputed here. The home screen has no DOM of the blocks it did not render — unlike a doc page,
+ * it lists pages, not their content — so there is nothing on the page for a browser-side walk to
+ * start from even if one were wanted.
+ */
+export const fetchGraph = () => call('/graph');
+
+/**
  * The core, loaded once.
  *
  * ABSOLUTE path, not relative: this import stays out of the bundle (it is the core, which the

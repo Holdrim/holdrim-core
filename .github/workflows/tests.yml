@@ -78,6 +78,18 @@ jobs:
             exit 1
           fi
 
+      # The home screen's graph (#38) is a second bundle, committed the same way and for the same
+      # reason — and built by its own script, never folded into build:web, so a page that never
+      # turns the graph on never has this bundle's cost bundled into the one it does load.
+      - name: The graph bundle is up to date
+        run: |
+          npm run build:web-graph
+          if ! git diff --quiet engine/web/home-graph.js; then
+            echo "✗ engine/web/home-graph.js is stale."
+            echo "  Run and commit:  npm run build:web-graph"
+            exit 1
+          fi
+
       # Starts a real server and speaks HTTP to it. Unit tests never catch a route that stopped
       # existing, a cookie that lost its flags, or a guard that silently stopped guarding.
       - name: HTTP contract

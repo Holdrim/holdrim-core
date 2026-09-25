@@ -122,7 +122,9 @@ export function pageTitle(html: string, code: string): string {
     .replace(/<([a-z0-9]+)\b[^>]*class="[^"]*\bdoc-title__code\b[^"]*"[^>]*>[\s\S]*?<\/\1>/gi, '')
     .replace(/<[^>]+>/g, '')
     // `&amp;` last: decoded first, `&amp;lt;` would become `&lt;` and then `<` — a second decoding
-    // of text that asked for the literal characters.
+    // of text that asked for the literal characters. `engine/tests/home.test.js`'s graph i18n test
+    // hand-rolls this same decode order for the same reason; a change to `forHtml`'s `ESCAPES`
+    // (login-page.ts) has to reach both.
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
     .replace(/\s+/g, ' ').trim();
@@ -175,6 +177,8 @@ export const HOME_KEYS = [
   'home.requests.where', 'home.requests.what', 'home.requests.who', 'home.requests.decide',
   'home.triage.decision', 'home.triage.choose', 'home.triage.reason', 'home.triage.note', 'home.triage.submit', 'home.triage.why', 'home.triage.done', 'home.ask.heading',
   'home.ask.lede', 'home.ask.near', 'home.ask.what', 'home.ask.submit', 'home.ask.done',
+  'home.graph.heading', 'home.graph.lede', 'home.graph.loading', 'home.graph.failed',
+  'home.graph.missing', 'home.graph.label', 'home.graph.zoomIn', 'home.graph.zoomOut', 'home.graph.reset',
 ] as const;
 
 /**
@@ -209,6 +213,18 @@ export function renderHomePage(
      *  this is decoration, not the guard. Defaults to true: every caller from before this toggle
      *  existed, and every unit test that does not pass it, keeps seeing the form it always saw. */
     pageRequestsEnabled?: boolean;
+    /** `features.graph` (#38, docs/ROLES.md, section 7). This screen is the ONLY place that
+     *  decides whether the nonced `<script>` for the graph is written at all, the same way
+     *  `serveHome` decides the whole page's Content-Security-Policy from the same toggle
+     *  (`screenHeaders(nonce, project.features.graph)`, server.ts): a toggle that only hid the
+     *  MARKUP while the script still shipped would still ask the browser to fetch and run it, and
+     *  the page's own policy would then be lying about running none.
+     *
+     *  Defaults to false, the opposite of `pageRequestsEnabled` above — that field preserves a form
+     *  this screen always drew; this one is brand new, so a caller that does not pass it, every
+     *  existing unit test included, keeps seeing the home exactly as it read before #38: no
+     *  section, no script, nothing for a bare `script-src`-free policy to contradict. */
+    graphEnabled?: boolean;
     ask?: HomeOutcome;
   },
   theme: Theme, nonce: string,
@@ -301,6 +317,51 @@ export function renderHomePage(
     </form>
   </section>`;
 
+  // Pages and blocks as nodes, `data-depends` as edges, the traffic light as colour (#38) — drawn
+  // by `/engine/web/home-graph.js` from `/api/graph`, which calls the SAME `graphOf` `holdrim graph`
+  // already prints (engine/cli/graph.ts). Nothing here computes a second graph; this section only
+  // renders the chrome around it and, when there is nothing to draw (`!data.pages.length`, the same
+  // guard `askForm` uses), leaves it out rather than asking a browser to fetch an empty one.
+  //
+  // `raw` is `i18n.t` UN-escaped: it feeds a JSON blob, not the page's own text, and that blob is
+  // escaped ONCE, as a whole, when it is written into the attribute below. Escaping each string
+  // going in would double-escape it coming back out of `JSON.parse` in the browser.
+  const raw = (key: string) => i18n.t(lang, key);
+  // `home-graph__legend-item`, never `home-light`: the top summary's four cards carry THAT class,
+  // and a browser test counts them by it (`engine/test-browser.js`, "the home's four counts sit two
+  // by two") — five more elements with the same class, sitting lower on the page, would silently
+  // turn that count into "how many things happen to have this class", answering a question about
+  // this section instead of the one the test asks about that one. Same look, borrowed through a
+  // shared rule in the stylesheet below, never the shared class itself.
+  const legend = STATES.map((s) =>
+    `<li class="home-graph__legend-item"><span aria-hidden="true">${COLOURS[s]}</span> ${t(`home.light.${s}`)}</li>`).join('')
+    // `missing` is not a traffic-light state (engine/core/validity.js never names it) — it is what
+    // `graphOf` calls a `data-depends` that points at nothing, drawn as its own row so the legend
+    // does not silently claim every dangling reference is "not validated" instead.
+    + `<li class="home-graph__legend-item"><span aria-hidden="true">❓</span> ${t('home.graph.missing')}</li>`;
+  // One attribute, not one per string: `states` is itself a dictionary, one entry per
+  // traffic-light state plus `missing` — an attribute per STRING could not carry it without a
+  // further attribute per state, and a second copy of `STATES` to know which. One blob, composed
+  // once from `i18n.t` and escaped once as a whole, has no second list to fall out of step.
+  const graphI18n = forHtml(JSON.stringify({
+    label: raw('home.graph.label'), zoomIn: raw('home.graph.zoomIn'),
+    zoomOut: raw('home.graph.zoomOut'), reset: raw('home.graph.reset'),
+    states: {
+      broken: raw('home.light.broken'), stale: raw('home.light.stale'),
+      none: raw('home.light.none'), valid: raw('home.light.valid'), missing: raw('home.graph.missing'),
+    },
+  }));
+  const graphSection = !data.pages.length || !data.graphEnabled ? '' : `<section aria-labelledby="home-graph-heading">
+    <h2 id="home-graph-heading">${t('home.graph.heading')}</h2>
+    <p class="holdrim-muted">${t('home.graph.lede')}</p>
+    <ul class="home-lights home-graph__legend">${legend}</ul>
+    <div id="holdrim-graph" class="home-graph" data-graph-i18n="${graphI18n}">
+      <p class="holdrim-muted" data-graph-status="loading">${t('home.graph.loading')}</p>
+      <p class="holdrim-alert holdrim-alert--danger" role="alert" data-graph-status="failed" hidden>${t('home.graph.failed')}</p>
+    </div>
+  </section>
+  <script type="module" src="/engine/web/home-graph.js" nonce="${forHtml(nonce)}"></script>`;
+
   const head = STATES.map((s) => `<th class="holdrim-table__num" scope="col"><span aria-hidden="true">${COLOURS[s]}</span>`
     + `<span class="holdrim-visually-hidden">${t(`home.light.${s}`)}</span></th>`).join('');
 
@@ -320,11 +381,28 @@ ${themeCss(theme)}
 .home-triage input.holdrim-input { flex: 1 1 16rem; }
 .home-triage__hint { flex-basis: 100%; margin: 0; font-size: .85rem; }
 .home-lights { display: flex; flex-wrap: wrap; gap: var(--holdrim-space-4); list-style: none; padding: 0; margin: var(--holdrim-space-4) 0 0; }
-.home-light { background: var(--holdrim-surface-raised); border: 1px solid var(--holdrim-line); border-radius: var(--holdrim-radius-md); padding: var(--holdrim-space-3) var(--holdrim-space-4); }
+/* The graph's legend (below) borrows this look through the shared rule, never the shared CLASS —
+   see the comment on the legend's own markup for why the class itself has to stay its own. */
+.home-light, .home-graph__legend-item { background: var(--holdrim-surface-raised); border: 1px solid var(--holdrim-line); border-radius: var(--holdrim-radius-md); padding: var(--holdrim-space-3) var(--holdrim-space-4); }
 /* Two by two on a phone: one card per row would push the pages, the reason anybody opens this
    screen, below the fold. The width is base.css's phone breakpoint, which cannot be a custom
    property. */
 @media (max-width: 40rem) { .home-lights { display: grid; grid-template-columns: 1fr 1fr; gap: var(--holdrim-space-3); } }
+.home-graph { margin-top: var(--holdrim-space-4); }
+/* touch-action: none keeps a touch drag from also scrolling the PAGE behind the graph — without it
+   a pan on a phone fights the browser's own scroll for the same gesture. */
+.home-graph__svg { width: 100%; height: 24rem; display: block; border: 1px solid var(--holdrim-line);
+  border-radius: var(--holdrim-radius-md); background: var(--holdrim-surface-raised); touch-action: none; cursor: grab; }
+.home-graph__svg:active { cursor: grabbing; }
+.home-graph__node { cursor: pointer; }
+.home-graph__node rect { fill: var(--holdrim-surface); stroke: var(--holdrim-line-strong); stroke-width: 1; }
+.home-graph__node:hover rect, .home-graph__node:focus-visible rect { stroke: var(--holdrim-brand); stroke-width: 2; }
+.home-graph__node:focus-visible { outline: none; }
+/* The icon IS the colour (the same ⚪🟢🟡🔴 holdrim lights prints) — never a second palette invented
+   for this one diagram, which the theme's untrusted colour cannot reach either way. */
+.home-graph__node text { font-size: 15px; pointer-events: none; user-select: none; }
+.home-graph__edge { stroke: var(--holdrim-line-strong); stroke-width: 1; }
+.home-graph__controls { display: flex; gap: var(--holdrim-space-2); margin-top: var(--holdrim-space-2); }
 </style>
 </head>
 <body class="holdrim-screen">
@@ -346,6 +424,8 @@ ${pageRows}
       </tbody>
     </table>` : `<p class="holdrim-muted">${t('home.pages.empty')}</p>`}
   </section>
+
+  ${graphSection}
 
   ${askForm}
 

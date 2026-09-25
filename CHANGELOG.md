@@ -217,6 +217,15 @@ who ran the engine from `main` before it.
   setting to what it prints for a person — `holdrim list`, `holdrim show` and the brief `holdrim
   apply` hands the agent — except that it never reaches the accounts store, so `name` there falls
   back to the address, the same way it does for anyone with no name on record.
+- **The documentation graph on the home**, behind `features.graph` (on by default, same as
+  `holdrim graph`): every page and block as a node, `data-depends` as edges, the traffic light as
+  colour — the SAME `graphOf` `holdrim graph` already prints (`engine/cli/graph.ts`), never a second
+  walk of the pages, served as JSON from the new `GET /api/graph` (behind the same session check as
+  every other block-reading route, whatever the toggle says — a hidden screen never means a disabled
+  guard). Clicking a node opens its block; the view pans and zooms. No bundled library and no
+  React: a small hand-rolled SVG renderer and layout, `engine/web/home-graph.js`, its own bundle,
+  loaded by the home screen only, and only when the toggle is on — with the toggle off, the home
+  stays exactly as script-free as it always was, and its Content-Security-Policy says so.
 
 ### Security
 
