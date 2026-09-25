@@ -5,7 +5,7 @@ import { stored, type Event, type NewEvent, type EventStore, type Person } from 
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
   type TextField, type TamperReport } from './texts.ts';
-import { log } from './log.ts';
+import { log, jsonForTerminal } from './log.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -259,13 +259,15 @@ export function guardMismatches(db: DatabaseSync, guards: Record<string, string>
  * "replacing it" or "dropping it", the CLI before saying it repairs nothing. One sentence per kind,
  * so whoever greps a server log for a guard's name finds the CLI's line with the same words.
  *
- * The name is quoted as JSON because a foreign trigger's name is whatever whoever wrote the file
- * chose: raw, an escape sequence in it reaches the terminal and can clear the very warning it sits
- * in — and `show`, `impact` and `summary` exit 0, so that warning is all a person gets. Quoted, a
- * control character comes out as `\u001b`, the same for the server's log as for the CLI's stderr.
+ * The name is quoted, through `jsonForTerminal` (engine/api/log.ts, which says exactly what it
+ * escapes), because a foreign trigger's name is whatever whoever wrote the file chose: raw, an
+ * escape sequence in it reaches the terminal and can clear the very warning it sits in, and a
+ * bidirectional override can make it read as another name — and `show`, `impact` and `summary` exit
+ * 0, so that warning is all a person gets. The structured line goes through the same function, in
+ * `log()`, so neither of the two lines a mismatch prints can carry the name raw.
  */
 export function guardMismatchSaid(m: GuardMismatch): string {
-  const name = JSON.stringify(m.name);
+  const name = jsonForTerminal(m.name);
   switch (m.kind) {
     case 'missing': return `the database's guard ${name} is missing`;
     case 'changed': return `the database's guard ${name} was not the one this version installs`;

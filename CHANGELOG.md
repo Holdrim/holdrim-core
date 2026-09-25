@@ -150,8 +150,8 @@ who ran the engine from `main` before it.
   not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; `list` and
   `sync` exit non-zero when it is set; and `apply` (`--dry-run` included) and `state` refuse to
   act on such a file at all, before any brief, agent or event. Every guard warning, the server's
-  included, now quotes the trigger's name as JSON, so a name carrying control characters is
-  printed escaped.
+  included, now quotes the trigger's name as JSON, with control, C1 and bidirectional characters
+  escaped, and so does every structured log line.
 - **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
   tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
   field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite

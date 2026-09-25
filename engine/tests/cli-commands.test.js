@@ -514,19 +514,24 @@ test('list --db names every mismatch at once — foreign, missing and changed �
   assert.match(r.stderr, /the database's guard "texts_no_update" was not the one this version installs; read as it is/);
 });
 
-test('a foreign trigger\'s name reaches the terminal escaped, never as a raw control character', async (t) => {
+test('a foreign trigger\'s name reaches the terminal escaped, never as a raw control or bidi character', async (t) => {
   const dir = project(t);
   const { db, id } = await guardedDb(dir);
   // ESC [2K ESC [1A: erase the line and move up — enough to wipe the warning it sits in off the
-  // screen of `show`, which exits 0 and has nothing else to say that anything is wrong.
-  const name = 'x\x1b[2K\x1b[1A';
+  // screen of `show`, which exits 0 and has nothing else to say that anything is wrong. U+009B is
+  // the same CSI in one C1 character, which `JSON.stringify` alone leaves raw, and U+202E turns
+  // what follows around, so `exe.png` would read as `gnp.exe`.
+  const name = 'x\x1b[2K\x1b[1A\u009b2K‮gnp.exe';
   outside(db, `CREATE TRIGGER "${name}" BEFORE INSERT ON events BEGIN SELECT 1; END`);
   const r = runApart(['show', id.slice(0, 6), '--db', db], dir);
   assert.equal(r.code, 0, r.stderr);
-  assert.ok(!r.stderr.includes('\x1b'), 'no raw ESC byte on stderr');
-  assert.ok(r.stderr.includes('"x\\u001b[2K\\u001b[1A"'), 'the name, quoted, with the escapes spelled out');
+  for (const [raw, what] of [['\x1b', 'ESC'], ['\u009b', 'C1 CSI'], ['‮', 'right-to-left override']]) {
+    assert.ok(!r.stderr.includes(raw), `no raw ${what} on stderr, in either line`);
+  }
+  assert.ok(r.stderr.includes('"x\\u001b[2K\\u001b[1A\\u009b2K\\u202egnp.exe"'),
+    'the name, quoted, with the escapes spelled out');
   assert.deepEqual(guardLines(r.stderr).map((l) => [l.guard, l.kind]), [[name, 'foreign']],
-    'and the structured line still carries the name itself, for a program to read');
+    'and the structured line still parses back to the name itself, for a program to read');
 });
 
 // ------------------------------------------------ acting refuses where reading warns
