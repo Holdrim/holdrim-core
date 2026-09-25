@@ -49,22 +49,32 @@ if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then
   fi
 fi
 
-# Is this checkout behind origin/main? Skills, agents and hooks — this file among them, and
-# .claude/skills/crew/ which reads the handoff below — are loaded from THIS checkout, never fetched
-# from GitHub. A checkout that sits behind main can be missing any of them, which is exactly how
-# this check came to exist: a session's primary checkout was 21 commits behind, .claude/skills/crew/
-# did not exist there yet, and nothing told the session so before it went looking for a skill that
-# was not there. This hook only warns, never merges or switches branches itself: doing that behind
-# whoever is using this checkout, mid-edit or not, would be a far worse surprise than a stale
-# checkout that at least says so.
+# Is this checkout a stale COPY of origin/main? Skills, agents and hooks — this file among them,
+# and .claude/skills/crew/ which reads the handoff below — are loaded from THIS checkout, never
+# fetched from GitHub. A copy that sits behind main can be missing any of them, which is exactly
+# how this check came to exist: a session's primary checkout was on a branch named `main-buanui`,
+# 21 commits behind origin/main and with none of its own, so .claude/skills/crew/ did not exist
+# there yet and nothing told the session so before it went looking for a skill that was not there.
+# The check is on ancestry, not on the branch being named "main": that branch was not named "main"
+# — the harness had checked out a copy under a made-up name — so a name check would have missed the
+# very bug this exists for. It also deliberately does NOT warn on an ordinary feature branch that
+# is behind main: such a branch has commits of its own (ahead > 0), which is normal mid-review and
+# not what broke — warning on every one of those is noise people learn to ignore, and the one
+# case that matters (a same-as-main copy with skills missing) would drown in it.
+# This hook only warns, never merges or switches branches itself: doing that behind whoever is
+# using this checkout, mid-edit or not, would be a far worse surprise than a stale checkout that at
+# least says so.
 default_branch=main
 if fetch_err=$(git fetch origin "$default_branch" --quiet 2>&1); then
   # FETCH_HEAD, not refs/remotes/origin/main: the fetch above always sets it, whatever this
   # checkout's remote-tracking refspec happens to be, so the comparison holds even in a partial or
   # oddly configured clone.
+  ahead=$(git rev-list --count FETCH_HEAD..HEAD)
   behind=$(git rev-list --count HEAD..FETCH_HEAD)
-  if [ "$behind" -gt 0 ]; then
-    echo "WARNING: this checkout is $behind commit(s) behind origin/$default_branch. Skills, agents and hooks (including /crew) load from THIS checkout, so newer ones may simply be missing here." >&2
+  if [ "$ahead" -eq 0 ] && [ "$behind" -gt 0 ]; then
+    echo "WARNING: this checkout is a copy of origin/$default_branch, $behind commit(s) behind it and with no commits of its own. Skills, agents and hooks (including /crew) load from THIS checkout, so newer ones may simply be missing here." >&2
+    # ahead == 0 means there is no history of this checkout's own to lose, so the fast-forward
+    # below can never conflict — the only thing that could still block it is an uncommitted change.
     if [ -z "$(git status --porcelain)" ]; then
       echo "WARNING: working tree is clean; consider: git merge --ff-only origin/$default_branch" >&2
     fi
@@ -80,6 +90,9 @@ fi
 # this is the one channel guaranteed to reach every session — cloud or local, fresh or freshly
 # /cleared — including the one that started this: a checkout too old to even have the /crew skill
 # that would otherwise have said this instead.
+# Keep this in step with .claude/skills/crew/SKILL.md, step 2 ("Read the open issue labelled
+# handoff..."): the two say the same thing to two different readers, and only one of them is
+# guaranteed to load.
 echo "This project's crew keeps state in the open GitHub issue labelled 'handoff': read it and its"
 echo "comments (newest last) before acting on anything here. '/crew <role>' does that for you;"
 echo "without it, read the issue directly first."

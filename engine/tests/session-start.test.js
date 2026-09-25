@@ -27,7 +27,7 @@ const HOOK = join(ROOT, '.claude', 'hooks', 'session-start.sh');
  */
 function run(t, {
   remote = 'true', nodeVersion = '22.18.0', chromium = true, engines = '>=22.18', emulator = true, envFile = true,
-  fetchOk = true, behind = 0, dirty = false,
+  fetchOk = true, ahead = 0, behind = 0, dirty = false,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-hook-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -37,14 +37,20 @@ function run(t, {
   const log = join(dir, 'calls.log');
   writeFileSync(log, '');
   stub(dir, 'npm', `echo "npm $*" >> '${log}'`);
-  // Most git subcommands the hook runs (config, add, ...) only need to be logged. The three the
+  // Most git subcommands the hook runs (config, add, ...) only need to be logged. The ones the
   // staleness check depends on are given fake but controllable answers, because the real fetch,
   // rev-list and status would need a real `origin` this throwaway directory does not have.
+  // `rev-list --count` is called twice, once per direction (FETCH_HEAD..HEAD for "ahead", the
+  // reverse for "behind"); the stub tells them apart by the range in $3.
   stub(dir, 'git', [
     `echo "git $*" >> '${log}'`,
     'case "$1" in',
     `  fetch) ${fetchOk ? 'exit 0' : "echo 'fatal: could not resolve host' >&2; exit 1"} ;;`,
-    `  rev-list) echo ${behind} ;;`,
+    '  rev-list)',
+    '    case "$3" in',
+    `      FETCH_HEAD..HEAD) echo ${ahead} ;;`,
+    `      HEAD..FETCH_HEAD) echo ${behind} ;;`,
+    '    esac ;;',
     `  status) ${dirty ? "echo ' M some-file'" : 'true'} ;;`,
     '  *) exit 0 ;;',
     'esac',
@@ -158,27 +164,34 @@ test('an emulator with nowhere to send its variable says how to use it by hand',
 });
 
 test('a checkout already at origin/main gets no staleness warning', (t) => {
-  assert.doesNotMatch(run(t, { behind: 0 }).out, /behind origin\/main/);
+  assert.doesNotMatch(run(t, { ahead: 0, behind: 0 }).out, /origin\/main/);
 });
 
-test('a checkout behind origin/main is said out loud, naming how far', (t) => {
-  const { out } = run(t, { behind: 3 });
-  assert.match(out, /WARNING: this checkout is 3 commit\(s\) behind origin\/main/);
+test('a pure stale copy of main under another name is warned, naming how far behind', (t) => {
+  const { out } = run(t, { ahead: 0, behind: 3 });
+  assert.match(out, /WARNING: this checkout is a copy of origin\/main, 3 commit\(s\) behind it and with no commits of its own/);
+});
+
+test('a feature branch with commits of its own is not warned about, even when behind', (t) => {
+  // This is the case the check must stay quiet on: an ordinary branch, mid-review, that has not
+  // rebased yet. Warning here is exactly the noise that would make people stop reading the WARNING.
+  const { out } = run(t, { ahead: 2, behind: 5 });
+  assert.doesNotMatch(out, /origin\/main/);
 });
 
 test('the staleness warning runs on a developer machine too', (t) => {
-  const { out } = run(t, { remote: '', behind: 5 });
-  assert.match(out, /WARNING: this checkout is 5 commit\(s\) behind origin\/main/);
+  const { out } = run(t, { remote: '', ahead: 0, behind: 5 });
+  assert.match(out, /WARNING: this checkout is a copy of origin\/main, 5 commit\(s\) behind it/);
 });
 
-test('a clean checkout behind origin/main is offered the fast-forward', (t) => {
-  const { out } = run(t, { behind: 1, dirty: false });
+test('a clean stale copy is offered the fast-forward', (t) => {
+  const { out } = run(t, { ahead: 0, behind: 1, dirty: false });
   assert.match(out, /git merge --ff-only origin\/main/);
 });
 
-test('a dirty checkout behind origin/main is warned, not told to merge', (t) => {
-  const { out } = run(t, { behind: 1, dirty: true });
-  assert.match(out, /WARNING: this checkout is 1 commit/);
+test('a dirty stale copy is warned, not told to merge', (t) => {
+  const { out } = run(t, { ahead: 0, behind: 1, dirty: true });
+  assert.match(out, /WARNING: this checkout is a copy of origin\/main, 1 commit\(s\) behind it/);
   assert.doesNotMatch(out, /git merge --ff-only/);
 });
 
@@ -189,7 +202,7 @@ test('a fetch that fails is said out loud, and the session still starts', (t) =>
 });
 
 test('the staleness check never merges or switches branches itself', (t) => {
-  const { calls } = run(t, { behind: 2, dirty: false });
+  const { calls } = run(t, { ahead: 0, behind: 2, dirty: false });
   assert.doesNotMatch(calls, /^git merge/m);
   assert.doesNotMatch(calls, /^git checkout/m);
   assert.doesNotMatch(calls, /^git switch/m);
