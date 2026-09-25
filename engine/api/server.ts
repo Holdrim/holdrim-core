@@ -520,6 +520,11 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
   // No `blocks.has(id)` guard: an id nobody declares any more still answers correctly, because
   // `radiusOf` looks at what OTHER blocks point at, not at whether `id` itself is there — the same
   // reasoning `stateOf` already relies on for "red when the dependency vanishes, too".
+  //
+  // ⚠️ Every dependent is named, with no visibility filter — the same gap `/fingerprints` already
+  // has. Fine today, when a session only needs to be signed in at all; once grants can be scoped to
+  // pages or blocks (#33), this has to filter by what the viewer may see, or the radius becomes a
+  // way to learn the ids of blocks a scoped grant was meant to hide.
   if (req.method === 'GET' && route === '/impact-radius') {
     const id = url.searchParams.get('id') ?? '';
     const blocks = await readBlocks(projectRoot);

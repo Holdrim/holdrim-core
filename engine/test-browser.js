@@ -87,8 +87,9 @@ writeFileSync(join(site, 'pages', 'X01.html'), crossPage('a-text-it-no-longer-ha
   .replace('FP2', `data-validated-fingerprint="${own.get('X01.1.2').fingerprint}"`));
 
 // A same-page chain, for the impact radius: 1.3 depends on 1.2, which depends on 1.1. Selecting
-// 1.1 has to light BOTH — the case a single hop of `dependentsOf` alone gets wrong — and 1.4,
-// which depends on nothing, must never light up no matter what is selected.
+// 1.1 has to light BOTH — the case a single hop of `dependentsOf` alone gets wrong. 1.4 has no
+// dependent ON THIS PAGE, so it never lights up here — but R02.1.1, below, depends on it, which is
+// what proves the "N block(s) elsewhere" note, not just the on-page lights.
 const radiusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>R01</title>
 <link rel="stylesheet" href="/engine/web/panel.css">
 <!-- panel.css positions each button absolutely, against the nearest positioned ancestor — a
@@ -101,9 +102,19 @@ const radiusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><
 <p data-id="R01.1.1" data-code="1.1">The root of the chain.</p>
 <p data-id="R01.1.2" data-code="1.2" data-depends="R01.1.1">One hop from 1.1.</p>
 <p data-id="R01.1.3" data-code="1.3" data-depends="R01.1.2">Two hops from 1.1, through 1.2.</p>
-<p data-id="R01.1.4" data-code="1.4">Depends on nothing: never lit.</p>
+<p data-id="R01.1.4" data-code="1.4">Nothing on THIS page depends on this — R02.1.1 does.</p>
 </main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
 writeFileSync(join(site, 'pages', 'R01.html'), radiusPage);
+
+// The dependent that lives elsewhere. The panel's own DOM cannot light it — there is no element for
+// it on R01 — so it can only ever surface as a COUNT, which is exactly what the "elsewhere" note
+// exists to prove is not silently dropped.
+const elsewhereRadiusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>R02</title>
+<link rel="stylesheet" href="/engine/web/panel.css"></head><body><main>
+<h1 class="doc-title"><span class="doc-title__code">R02</span> Impact radius, elsewhere</h1>
+<p data-id="R02.1.1" data-code="1.1" data-depends="R01.1.4">On another page from what it depends on.</p>
+</main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
+writeFileSync(join(site, 'pages', 'R02.html'), elsewhereRadiusPage);
 
 // A page whose content tries to approve, in the name of whoever opens it, blocks of ANOTHER page
 // with their current fingerprints — the ✓ `holdrim sync` would turn into locks. Content is
@@ -427,9 +438,22 @@ try {
     expect('and the PREVIOUS selection is no longer lit', 0,
       await reader.page.locator('[data-id="R01.1.2"] .rv-num--radius').count());
 
+    // 1.4 has a dependent, R02.1.1 — but on ANOTHER page, with no element here for the panel to
+    // light. Forcing the count to zero (never asking, or dropping what the server answered) would
+    // still pass every check above; only reading this note proves the count itself is not silently
+    // dropped.
     await reader.page.locator('.rv-close').click();
-    await must('closing the panel clears the radius entirely',
-      () => reader.page.locator('.rv-num--radius').waitFor({ state: 'detached' }));
+    await block(reader.page, 'R01.1.4').click();
+    await must('a dependent elsewhere is named as a count, not silently dropped',
+      () => reader.page.getByText('1 more block(s)').waitFor());
+    expect('and nothing lights up here — 1.4 has no dependent on THIS page', 0,
+      await reader.page.locator('.rv-num--radius').count());
+
+    await reader.page.locator('.rv-close').click();
+    await must('closing the panel clears the radius, and the note, entirely', async () => {
+      await reader.page.locator('.rv-num--radius').waitFor({ state: 'detached' });
+      await reader.page.locator('.rv-radius-note').waitFor({ state: 'detached' });
+    });
     expect('and nothing failed', '', reader.problems.join(' | '));
   }
 

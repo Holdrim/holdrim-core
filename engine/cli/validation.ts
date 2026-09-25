@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, projectRoles, type Block } from './pages.ts';
-import { trafficLight, dependentsOf, COLOURS } from '../core/validity.js';
+import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
 import { Source } from './remote.ts';
@@ -434,6 +434,12 @@ export async function ifITouch(root: string, id: string) {
 
   const dependents = dependentsOf(id, blocks);
   const registry = loadRegistry(root);
+  const list = (ids: string[]) => {
+    for (const d of ids) {
+      const validated = registry[d] ? `✓ validated on ${registry[d].date}` : 'never validated';
+      console.log(`  ${d.padEnd(14)} ${validated}`);
+    }
+  };
 
   console.log(`\nIf you touch ${id}:\n`);
   if (!dependents.length) {
@@ -442,9 +448,17 @@ export async function ifITouch(root: string, id: string) {
     return 0;
   }
   console.log(`  ${dependents.length} block(s) will turn 🔴 and need a check:\n`);
-  for (const d of dependents) {
-    const validated = registry[d] ? `✓ validated on ${registry[d].date}` : 'never validated';
-    console.log(`  ${d.padEnd(14)} ${validated}`);
+  list(dependents);
+
+  // The traffic light itself only ever advances one hop per human confirmation (docs/IMPACT.md,
+  // "One hop, not the transitive closure") — this line does not change that. But BEFORE editing, a
+  // person benefits from seeing further than the light will paint today. `radiusOf` is the SAME
+  // walk the panel lights when a block is selected (engine/core/validity.js): the CLI and the panel
+  // answer "what could this touch" from the one function, not two.
+  const further = radiusOf(id, blocks).filter((d) => !dependents.includes(d));
+  if (further.length) {
+    console.log(`\n  ${further.length} more, worth checking too — reached through another block:\n`);
+    list(further);
   }
   console.log('');
   return 0;
