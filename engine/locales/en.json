@@ -155,6 +155,7 @@
   "panel.history.title": "What has happened here",
   "panel.moved": "the text is unchanged, but this moved: {list}",
   "panel.open": "Block {code}. Open review",
+  "panel.radius.elsewhere": "{n} more block(s), on other pages, also depend on this — directly or through another one.",
   "panel.recording": "recording…",
   "panel.request.from": "Request from {who}:",
   "panel.request.kind": "What it is",

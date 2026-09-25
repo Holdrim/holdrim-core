@@ -96,6 +96,13 @@ who ran the engine from `main` before it.
   every page, so a page needs no link of its own that an exported copy would leave dead.
   Only the owner's ✓ turns a block green, as only theirs becomes a lock: an admin's is recorded,
   and the panel shows it as an admin's.
+- **The impact radius.** Selecting a block lights every block that depends on it, directly or
+  through another — asked of the server (`GET /api/impact-radius`) and drawn on the page, since a
+  dependent three pages away has no element the panel can find on its own. `holdrim if-i-touch`
+  still names the ONE hop that would turn 🔴, as the traffic light itself does, and now also lists
+  the rest of the radius as worth checking too — the CLI and the panel share the one walk
+  (`radiusOf`, `engine/core/validity.js`) rather than each answering "what could this touch" its
+  own way.
 - **A page runs the panel and nothing else.** Every documentation page is served with a
   Content-Security-Policy whose nonce only the panel's tag carries, so a script written into the
   content — by a person, or by an agent following an instruction hidden in a document — cannot act

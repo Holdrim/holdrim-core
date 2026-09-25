@@ -198,6 +198,7 @@
     "GET /api/events",
     "GET /api/events/:param",
     "GET /api/fingerprints",
+    "GET /api/impact-radius",
     "GET /api/me",
     "GET /api/requests/open",
     "GET /api/users",
