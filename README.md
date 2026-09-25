@@ -245,6 +245,7 @@ From a clone of this repository it is `npm run cli -- lights`, or
 |---|---|
 | `lights` | the state of the whole documentation: 🟢 🟡 🔴 ⚪ |
 | `if-i-touch <id>` | what will need checking if you edit this |
+| `graph --json\|--mermaid\|--dot` | the dependency graph the traffic light reads, for a script or a diagram |
 | `index` | rebuilds the index: kinds, dependencies, what is missing |
 | `sync` | pulls in the ✓ given on the site |
 | `list` | approved requests, waiting to be applied |
