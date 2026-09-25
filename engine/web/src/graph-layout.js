@@ -33,8 +33,8 @@ const STEP = NODE + GAP;
  * input, AGENTS.md) out of this entirely — colour here is a character, never an interpolated value.
  *
  * @param {Record<string, string>} colours  `COLOURS` from engine/core/validity.js, passed in so
- *   this module stays free of an import a caller may not want (the pure unit tests, importing it
- *   directly, are exactly such a caller — see engine/tests/graph-layout.test.js).
+ *   this module stays free of an import a caller may not want — `engine/tests/graph-layout.test.js`
+ *   imports THIS FILE directly and hands it a literal palette of its own, never `COLOURS` itself.
  * @param {string} state
  */
 export function iconOf(colours, state) {

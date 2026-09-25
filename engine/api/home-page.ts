@@ -122,7 +122,9 @@ export function pageTitle(html: string, code: string): string {
     .replace(/<([a-z0-9]+)\b[^>]*class="[^"]*\bdoc-title__code\b[^"]*"[^>]*>[\s\S]*?<\/\1>/gi, '')
     .replace(/<[^>]+>/g, '')
     // `&amp;` last: decoded first, `&amp;lt;` would become `&lt;` and then `<` — a second decoding
-    // of text that asked for the literal characters.
+    // of text that asked for the literal characters. `engine/tests/home.test.js`'s graph i18n test
+    // hand-rolls this same decode order for the same reason; a change to `forHtml`'s `ESCAPES`
+    // (login-page.ts) has to reach both.
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
     .replace(/\s+/g, ' ').trim();
@@ -337,6 +339,10 @@ export function renderHomePage(
     // `graphOf` calls a `data-depends` that points at nothing, drawn as its own row so the legend
     // does not silently claim every dangling reference is "not validated" instead.
     + `<li class="home-graph__legend-item"><span aria-hidden="true">❓</span> ${t('home.graph.missing')}</li>`;
+  // One attribute, not one per string: `states` is itself a dictionary, one entry per
+  // traffic-light state plus `missing` — an attribute per STRING could not carry it without a
+  // further attribute per state, and a second copy of `STATES` to know which. One blob, composed
+  // once from `i18n.t` and escaped once as a whole, has no second list to fall out of step.
   const graphI18n = forHtml(JSON.stringify({
     label: raw('home.graph.label'), zoomIn: raw('home.graph.zoomIn'),
     zoomOut: raw('home.graph.zoomOut'), reset: raw('home.graph.reset'),

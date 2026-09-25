@@ -240,6 +240,8 @@ test('the graph\'s i18n blob is escaped for its attribute, not for the JSON insi
   // what `container.dataset.graphI18n` does, so JSON.parse here stands in for it.
   assert.ok(!attr.includes('"graph"'), 'a literal quote would end the attribute early');
   // `&amp;` is decoded LAST: decoded first, a text holding a literal "&lt;" would come back as "<".
+  // `pageTitle` (home-page.ts) hand-rolls this same decode order for the same reason; a change to
+  // `forHtml`'s `ESCAPES` (login-page.ts) has to reach both.
   assert.equal(JSON.parse(attr.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')).label,
     'A "graph" & <friends>');
 });
