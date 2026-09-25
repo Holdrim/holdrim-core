@@ -239,7 +239,8 @@ test('the graph\'s i18n blob is escaped for its attribute, not for the JSON insi
   // exactly the sentence i18n gave — round-tripping through the browser's own entity decoding is
   // what `container.dataset.graphI18n` does, so JSON.parse here stands in for it.
   assert.ok(!attr.includes('"graph"'), 'a literal quote would end the attribute early');
-  assert.equal(JSON.parse(attr.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')).label,
+  // `&amp;` is decoded LAST: decoded first, a text holding a literal "&lt;" would come back as "<".
+  assert.equal(JSON.parse(attr.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')).label,
     'A "graph" & <friends>');
 });
 
