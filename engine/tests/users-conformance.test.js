@@ -696,3 +696,42 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
     { skip: 'FIRESTORE_EMULATOR_HOST is not set, so nothing ran against Firestore. Start one with: '
       + 'eval "$(bash scripts/firestore-emulator.sh)", then re-run.' }, () => {});
 }
+
+// Round 1 review of #115 (MAJOR, proof): the "except" pagination has the same page boundary as
+// `deleteSessionsForEmail` above, but nothing exercised it — the "except" tests earlier in this file
+// open only a handful of sessions, and the pagination test just above drives `deleteSessionsForEmail`,
+// where nothing is ever excluded and `queued` always equals `page.size`. A mutant that reads
+// `queued === 400` instead of `page.size === 400` (`#deleteSessionPage`, users-firestore.ts) survived
+// every test that existed before this one — this is the test that catches it.
+forEachStore('the kept session survives even past a single delete page, and every other one is gone', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+
+  // Crafted, not random: `!` (0x21) sorts before every character `openSession`'s base64url ids use
+  // (`-0-9A-Za-z_`, all 0x2D or higher), and a plain `.where(...).limit(...)` query with no
+  // `orderBy` reads Firestore documents back in ascending id order — checked against the real
+  // emulator, not merely assumed. That lands this ONE session inside the FIRST page a paginated
+  // delete reads, which is the only place `#deleteSessionPage`'s "how many documents did the QUERY
+  // return" and "how many did this call actually delete" can ever come apart: with fewer sessions,
+  // or the kept one happening to fall on the always-short LAST page, the two numbers are always
+  // equal and a bug that confused them would pass unnoticed regardless of how many sessions exist.
+  // `insertSession` bypasses `openSession`'s random id on purpose, to CHOOSE where this one lands
+  // rather than hope for it; every store implements it, so this same test is portable to all three,
+  // even though only Firestore's delete has a page boundary to get wrong.
+  const mine = '!!!!!!!!the-kept-session';
+  const now = new Date();
+  await s.insertSession(mine, 'x@example.org', now.toISOString(),
+    new Date(now.getTime() + 12 * 3600_000).toISOString());
+  const others = [];
+  for (let i = 0; i < 401; i++) others.push(await s.openSession('x@example.org'));
+
+  await s.changePassword('x@example.org', 'a-new-long-password', mine);
+
+  assert.equal((await s.fromSession(mine)).email, 'x@example.org',
+    'the one session named to survive has to still be there once the account has more sessions '
+    + 'than a single delete page can hold');
+  const alive = (await Promise.all(others.map((id) => s.fromSession(id)))).filter(Boolean).length;
+  assert.equal(alive, 0,
+    'a loop that stops the moment it sees the kept session sitting in a FULL page would leave every '
+    + 'session past that page alive — this is the boundary a plain "a handful of sessions" test, or '
+    + 'one that never excludes anybody, cannot reach');
+});

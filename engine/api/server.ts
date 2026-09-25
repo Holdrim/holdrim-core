@@ -598,9 +598,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     // runs, not after: the value never changes mid-request, and reading it after would only be a
     // second place for the same cookie header to be misparsed.
     const ownSession = byPassword.sessionIdFrom(req.headers);
-    let result: { sessionsDropped: boolean };
+    let sessionsDropped: boolean;
     try {
-      result = await byPassword.users.changePassword(email, next, ownSession);
+      ({ sessionsDropped } = await byPassword.users.changePassword(email, next, ownSession));
     } catch (error) {
       // Translated HERE, at the edge, and only here: the store throws a key, never a sentence.
       const failure = UserInputError.from(error, 'api.password.invalid');
@@ -610,10 +610,10 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     // Same reasoning as the reset and the disable routes: the credential already changed either way,
     // but a failed drop means every OTHER session for this account may still be alive — reported the
     // same way theirs is, by id and at ERROR, never swallowed into a plain 200 nobody reads twice.
-    if (!result.sessionsDropped) {
+    if (!sessionsDropped) {
       log('ERROR', 'user_sessions_not_dropped', { person: await idForLog(email), reason: 'changing your own password' });
     }
-    return json(res, 200, { ok: true, ...(result.sessionsDropped ? {} : { sessionsDropped: false }) });
+    return json(res, 200, { ok: true, ...(sessionsDropped ? {} : { sessionsDropped }) });
   }
 
   if (req.method === 'GET' && route === '/me') {
