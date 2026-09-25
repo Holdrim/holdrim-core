@@ -11,9 +11,10 @@ export default [
   {
     ignores: [
       'node_modules/**',
-      // The panel bundle is generated and committed. Linting minified React output produces
+      // The panel and Mermaid chunks are generated and committed. Linting minified output produces
       // hundreds of errors about code nobody wrote and nobody will fix.
       'engine/web/panel-react.js',
+      'engine/web/generated/**',
     ],
   },
 

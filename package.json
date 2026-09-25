@@ -15,7 +15,7 @@
     "contract": "bash engine/test-contract.sh",
     "browser": "node engine/test-browser.js",
     "cli": "node engine/cli/holdrim.ts",
-    "build:web": "esbuild engine/web/src/entry.jsx --bundle --format=esm --jsx=automatic --minify --target=es2022 --outfile=engine/web/panel-react.js --external:/engine/core/fingerprint.js"
+    "build:web": "node scripts/build-web.js"
   },
   "dependencies": {
     "jose": "^6.0.0",
