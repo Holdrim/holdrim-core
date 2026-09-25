@@ -192,7 +192,7 @@
   "people.state.disabled": "Taken away",
   "people.state.mustChange": "Active · must choose a password",
   "people.title": "People",
-  "people.warn.sessionsNotDropped": "The old sessions for {email} could not be confirmed closed; they may still be signed in. Do not re-enable the account to retry — that brings them back. Use Reset instead; it drops them again.",
+  "people.warn.sessionsNotDropped": "The old sessions for {email} could not be confirmed closed; they may still be signed in. Do not re-enable the account to retry — that brings them back. Use {action} instead; it drops them again.",
   "people.warn.sessionsNotDropped.reset": "The old sessions for {email} could not be confirmed closed; they may still be signed in. Reset the password again to drop them.",
   "site.notFound": "not found",
   "site.pathOutside": "that path is outside the site"

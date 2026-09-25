@@ -776,8 +776,10 @@ try {
     // the redrawn row — still comes from the genuine answer, and the alert is the only thing this
     // is testing. `route.fetch()` performs the real request; the mutated body is what the page
     // actually reads.
-    const warned = (key, email) => JSON.parse(readFileSync(join(ROOT, 'engine', 'locales', 'en.json'), 'utf8'))[key]
-      .replace('{email}', email);
+    const enLocale = JSON.parse(readFileSync(join(ROOT, 'engine', 'locales', 'en.json'), 'utf8'));
+    // `{action}` stands for the button's own label — `people.reset` — never a hard-coded word, so
+    // this substitutes the same value the page does rather than restating it.
+    const warned = (key, email) => enLocale[key].replace('{email}', email).replace('{action}', enLocale['people.reset']);
     const withFailedDrop = async (route) => {
       const response = await route.fetch();
       const body = await response.json();
@@ -805,6 +807,11 @@ try {
     // warning here has to say not to take that retry, not the reset path's "try again".
     expect('and the disable path warns with its own, different wording',
       warned('people.warn.sessionsNotDropped', 'else@example.org'), dialogs.at(-1));
+    // The sentence used to say "Use Reset instead", a word that names no button on this row — the
+    // row's button reads "New password". This checks the alert carries the button's REAL label,
+    // not just that `warned()` above built the same string the page did from the same template.
+    expect('and names the button that actually drops the sessions',
+      true, dialogs.at(-1).includes(enLocale['people.reset']));
     await page.unroute('**/api/users/*/enabled', withFailedDrop);
   }
 

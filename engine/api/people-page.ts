@@ -96,7 +96,7 @@ export function renderPeoplePage(
   // Everything the script says, handed over as data. `<` is escaped so a translation containing
   // `</script>` cannot close the tag it lives in — the same guard the sign-in page uses.
   const texts = Object.fromEntries(['people.confirm.reset', 'people.confirm.disable', 'people.once', 'people.onceNew',
-    'people.noAnswer', 'people.warn.sessionsNotDropped', 'people.warn.sessionsNotDropped.reset']
+    'people.noAnswer', 'people.reset', 'people.warn.sessionsNotDropped', 'people.warn.sessionsNotDropped.reset']
     .map((k) => [k, i18n.t(lang, k)]));
 
   return `<!doctype html>
@@ -208,7 +208,9 @@ ${rows}
       // enable-then-disable, and the enable half of that is exactly what brings back the sessions
       // this warns about. So this message says not to take that retry, and points at Reset
       // instead — a reset drops them again, the same way the other branch's does.
-      if (data.sessionsDropped === false) alert(say('people.warn.sessionsNotDropped', { email }));
+      if (data.sessionsDropped === false) {
+        alert(say('people.warn.sessionsNotDropped', { email, action: TEXTS['people.reset'] }));
+      }
       location.reload();
     }
   });

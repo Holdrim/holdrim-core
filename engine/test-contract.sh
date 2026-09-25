@@ -633,7 +633,7 @@ NEW_OWNER_PASSWORD=$(echo "$OWN_RESET" | jfield password)
 expect "the owner still can, on themselves" 200 "$OWN_RESET_CODE"
 # Nothing failed here, so the answer must not carry the field that means it did — see the failure
 # phase far below, on its own broken store, for the one case where this is allowed to appear.
-expect "and the answer carries no failed drop" 1 "$(echo "$OWN_RESET" | has 'sessionsDropped":false'; echo $?)"
+expect "and the owner's own reset carries no failed drop" 1 "$(echo "$OWN_RESET" | has 'sessionsDropped":false'; echo $?)"
 expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset person)"
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
@@ -650,7 +650,7 @@ PASSWORD=$NEW_OWNER_PASSWORD
 DISABLE=$(as_owner -w '\n%{http_code}' -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)
 DISABLE_CODE=$(echo "$DISABLE" | tail -1); DISABLE=$(echo "$DISABLE" | sed '$d')
 expect "disabling somebody → 200"       200 "$DISABLE_CODE"
-expect "and the answer carries no failed drop" 1 "$(echo "$DISABLE" | has 'sessionsDropped":false'; echo $?)"
+expect "and the member's disable carries no failed drop" 1 "$(echo "$DISABLE" | has 'sessionsDropped":false'; echo $?)"
 expect "disabling is logged as the member's id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
 expect "and it is the owner who did it, not the member themselves" "$OWNER_ID" \
@@ -701,7 +701,7 @@ expect "this cookie is a live session too, not an empty jar → 200" 200 \
 RESET=$(as_owner -X POST $B/api/users/$MEMBER/password)
 NEW_PASSWORD=$(echo "$RESET" | jfield password)
 expect "a reset gives back a different password" 0 "$([ -n "$NEW_PASSWORD" ] && [ "$NEW_PASSWORD" != "$MEMBER_PASSWORD" ]; echo $?)"
-expect "and the answer carries no failed drop" 1 "$(echo "$RESET" | has 'sessionsDropped":false'; echo $?)"
+expect "and the member's reset carries no failed drop" 1 "$(echo "$RESET" | has 'sessionsDropped":false'; echo $?)"
 # Somebody OTHER than the owner of the account has seen this one — whoever ran the reset, and
 # whatever channel carried it over. The window has to be one login long.
 expect "and it demands a change"        true "$(echo "$RESET" | jfield user.mustChangePassword)"
