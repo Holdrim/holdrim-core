@@ -424,7 +424,10 @@ export class SqliteEventStore implements EventStore {
     }
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
-    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
+    // `authorId: personId`, the same value `withAuthors` would capture off this row a moment later,
+    // so a fresh append and the list right after it answer it identically (events-conformance.test.js,
+    // "the answer to an append is what a list says a moment later").
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId };
   }
 
   async removeText(event: string, field: TextField, by: string): Promise<Event> {
@@ -461,7 +464,7 @@ export class SqliteEventStore implements EventStore {
     return {
       id, type: TEXT_REMOVED, page: original.page, block: original.block ?? null, fingerprint: null,
       text: null, snapshot: null, textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-      author: personEmail(by), when, data,
+      author: personEmail(by), authorId: personId, when, data,
     };
   }
 

@@ -49,13 +49,22 @@ test('an author with no row reads as it is written: an old event\'s address, or 
   assert.equal(authorOf('p_cccccccccccccccccccccccc', people), 'p_cccccccccccccccccccccccc');
 });
 
-test('resolving a list changes the author and nothing else, and leaves the list it was given alone', () => {
+test('resolving a list changes the author, adds the id it resolved FROM, and nothing else', () => {
   const events = [{ id: 'e1', type: 'comment', author: ANA, text: 'x' }, { id: 'e2', type: 'comment', author: GONE, text: 'y' }];
   assert.deepEqual(withAuthors(events, people), [
-    { id: 'e1', type: 'comment', author: 'ana@example.org', text: 'x' },
-    { id: 'e2', type: 'comment', author: GONE, text: 'y' },
+    { id: 'e1', type: 'comment', author: 'ana@example.org', authorId: ANA, text: 'x' },
+    { id: 'e2', type: 'comment', author: GONE, authorId: GONE, text: 'y' },
   ]);
   assert.equal(events[0].author, ANA);
+});
+
+test('authorId is the value BEFORE resolution, for people.show: "id" — never the resolved address', () => {
+  // For a forgotten person the two happen to read the same (authorOf falls back to the id too), so
+  // this is the one case that tells them apart: authorId must stay ANA's id even though author, on
+  // the very same event, is resolved all the way to the e-mail.
+  const [resolved] = withAuthors([{ id: 'e1', type: 'comment', author: ANA, text: 'x' }], people);
+  assert.equal(resolved.author, 'ana@example.org');
+  assert.equal(resolved.authorId, ANA);
 });
 
 // ===================================================================== the events file

@@ -13,6 +13,13 @@ export interface Event {
   // the one resolver every reader uses; an id once the person is forgotten, and an e-mail as written
   // on an event from before ids. The e-mail was verified by whichever identity is in charge.
   author: string;
+  // The value `author` held BEFORE it was resolved to an address: the person's row id (`p_…`) for
+  // anyone the people table knows, or the address itself for an event written before authors were
+  // ids. Optional because `stored()` alone, with no store around it, has nothing to resolve — every
+  // reader that lists events sets it (`withAuthors`, engine/api/people.ts), and it is what lets
+  // `people.show: "id"` (docs/ROLES.md, "How a person appears") show a person without ever reading
+  // an address the setting was asked to hide.
+  authorId?: string;
   when: string;                // ISO, server clock
   // The same shape the core reads (engine/core/cycle.js, typedef EventData): `request` and
   // `state` on request_state, `commit` on the applied one, `category` on the request. `unknown`
@@ -32,7 +39,7 @@ export interface Event {
   snapshotTampered?: boolean;
 }
 
-export type NewEvent = Omit<Event, 'id' | 'author' | 'when' | 'textRemoved' | 'snapshotRemoved' | 'textTampered' | 'snapshotTampered'>;
+export type NewEvent = Omit<Event, 'id' | 'author' | 'authorId' | 'when' | 'textRemoved' | 'snapshotRemoved' | 'textTampered' | 'snapshotTampered'>;
 
 /**
  * The event as every store answers it, to an append and to a list alike: each optional field

@@ -439,6 +439,33 @@ test('list() prints no warning and exits clean when nothing is tampered', async 
 });
 
 /**
+ * `people.show` (docs/ROLES.md, "How a person appears"), applied at the one place `list()` prints a
+ * person: the default shows the address, exactly as every version before this one did, and a
+ * project's own `holdrim.json` can ask for the role instead — proved by what the printed line does
+ * and does not contain, not by calling `personLabel` directly, since it is not exported for that.
+ */
+test('list() shows the address by default, and the role when people.show asks for it', async (t) => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const events = [
+    { id: 'e1', type: 'request', page: 'A01', block: null, text: 'change this', author: 'owner@example.org',
+      when: '2026-01-01T00:00:00Z', data: { category: 'text' } },
+  ];
+  const log = console.log;
+  const printed = (root) => {
+    const said = [];
+    console.log = (line) => said.push(line);
+    return list(root, { events: async () => events }, { all: true }).finally(() => { console.log = log; }).then(() => said.join('\n'));
+  };
+
+  const byDefault = await printed(EXAMPLE);
+  assert.ok(byDefault.includes('owner@example.org'), 'the default keeps today\'s behaviour: the address');
+
+  const byRole = await printed(project(t, { people: { show: 'role' } }));
+  assert.ok(/\bowner\b/.test(byRole) && !byRole.includes('@'),
+    `people.show: "role" should print the role and never the address: ${byRole}`);
+});
+
+/**
  * `sync` asks the server's rule who the owner is. Two addresses read as one owner nobody matches
  * would sync nothing and say nothing, and the session would go on believing no ✓ was ever given.
  * The refusal has to come before the cloud is asked: the count proves it did.

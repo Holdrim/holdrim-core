@@ -635,6 +635,53 @@ expect "every toggle OFF: their open session dies at once → 401" 401 \
   "$(tas_member -o /dev/null -w '%{http_code}' $B/api/me)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PDATA"
 
+# ----------------------------------------------------------------------------- people.show
+# `npm test`'s `engine/tests/people-show.test.js` proves `readPeopleShow`/`personAs` in isolation, but
+# not that the SERVER actually applies the setting to what a real reader is sent — the same reasoning
+# the feature-toggle section above gives for needing a live process. `people.show: "role"` here, the
+# one value furthest from today's default, so a raw address surviving into the answer is easy to see.
+echo "people.show — how a person appears, docs/ROLES.md \"How a person appears\":"
+PSHOW_SITE="$WORK/people-show-site"
+cp -r "$SITE" "$PSHOW_SITE"
+node -e '
+  const fs = require("fs");
+  const path = process.argv[1];
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  config.people = { show: "role" };
+  fs.writeFileSync(path, JSON.stringify(config, null, 2));
+' "$PSHOW_SITE/holdrim.json"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$PSHOW_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/people-show.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+
+post $REVIEWER '{"type":"comment","page":"UC-01","text":"people-show marker from reviewer"}' >/dev/null
+post $LEAD '{"type":"comment","page":"UC-01","text":"people-show marker from lead"}' >/dev/null
+# One event by the marker text it carries, never by author: that field is exactly what this section
+# proves is no longer always the address.
+author_of() {
+  curl -s -H "X-Dev-Email: $1" "$B/api/events?page=UC-01" | \
+    node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).find(x=>x.text===process.argv[1]);console.log(e?e.author:'')})" "$2"
+}
+expect "people.show: role — another member sees the role" Admin \
+  "$(author_of $REVIEWER 'people-show marker from lead')"
+expect "and never the address"                     1 \
+  "$(author_of $REVIEWER 'people-show marker from lead' | has -F '@'; echo $?)"
+expect "the owner sees the real address regardless — the owner always sees names" "$LEAD" \
+  "$(author_of $OWNER 'people-show marker from lead')"
+expect "and so does an admin, a holder of \`people\`, about someone else's" "$REVIEWER" \
+  "$(author_of $LEAD 'people-show marker from reviewer')"
+expect "a person sees their own address on their own comment, whatever the setting" "$REVIEWER" \
+  "$(author_of $REVIEWER 'people-show marker from reviewer')"
+# The home is `serveHome`'s own wiring, not `requestsInProgress`'s (proved in isolation by
+# home.test.js): the setting has to actually reach it through a real server.
+new_request $LEAD '{"type":"request","page":"UC-01","text":"people-show home marker","data":{"category":"text"}}' >/dev/null
+expect "the home shows the role too, never the address" 0 \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/engine/home | has -F '>Admin<'; echo $?)"
+expect "and not the address, anywhere on the page" 1 \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/engine/home | has -F "$LEAD"; echo $?)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
 echo "local mode does NOT turn on outside development:"
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_AUDIENCE=/projects/0/x PORT=$PORT \
   HOLDRIM_SITE="$SITE" \

@@ -14,7 +14,13 @@ import { blockState, byWhen, day } from './state.js';
 import cycle from '../../cycle.json';
 import { t } from './i18n.js';
 
-const who = (email, me) => (email === me ? t('panel.you') : email);
+// `own`, never a raw address compared against one the panel was handed separately: the server
+// already answers "is this the viewer's own event" (docs/ROLES.md, "The front end obeys the
+// server"), and `author` on an event nobody wrote themselves is not necessarily an e-mail at all —
+// it is whatever the project's `people.show` says this reader may see (a name, a role, an opaque
+// id), and a panel that went on comparing it to `me` would break the day a project turned that
+// setting away from "email".
+const who = (own, author) => (own ? t('panel.you') : author);
 // Names from the dictionaries, in the reader's language; which states and categories exist, and in
 // what order, from the cycle's own table.
 const labelOf = (state) => t(`cycle.${state}`);
@@ -155,15 +161,15 @@ function AddDetails({ request, onRecord }) {
  * One request on this block, for whoever is looking: its state, always — the person who filed it is
  * the one who most needs to know where it stands — then what that person may do about it.
  */
-function Request({ request, me, canApprove, onRecord }) {
+function Request({ request, canApprove, onRecord }) {
   const s = request.status ?? {};
   return (
     <div className="rv-request" data-request={request.id}>
       <p>
-        {t('panel.request.from', { who: who(request.author, me) })} <em className={`rv-state rv-state--${s.state}`}>{labelOf(s.state)}</em>
+        {t('panel.request.from', { who: who(request.own, request.author) })} <em className={`rv-state rv-state--${s.state}`}>{labelOf(s.state)}</em>
       </p>
       {canApprove ? <Triage request={request} onDecide={onRecord} /> : null}
-      {(request.author === me || canApprove) && s.acceptsSupplement
+      {(request.own || canApprove) && s.acceptsSupplement
         ? <AddDetails request={request} onRecord={onRecord} />
         : null}
     </div>
@@ -181,14 +187,14 @@ function withCode(sentence, name, ids) {
 
 const DID = { approval: 'panel.did.approval', request: 'panel.did.request', comment: 'panel.did.comment' };
 
-function History({ events, me }) {
+function History({ events }) {
   if (!events.length) return null;
   return (
     <div className="rv-history">
       <h4 className="rv-history-title">{t('panel.history.title')}</h4>
       {[...events].sort(byWhen).map((e) => (
         <p key={e.id} className={`rv-h rv-h--${e.type === 'approval' ? 'approval' : 'request'}`}>
-          <span className="rv-state">{day(e.when)}</span> {who(e.author, me)}
+          <span className="rv-state">{day(e.when)}</span> {who(e.own, e.author)}
           {' '}{DID[e.type] ? t(DID[e.type]) : e.type}
           {e.text ? <>: {e.text}</> : null}
           {e.snapshot ? (
@@ -203,7 +209,7 @@ function History({ events, me }) {
   );
 }
 
-export default function Panel({ block, me, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {
+export default function Panel({ block, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {
   const dlg = useRef(null);
   const [tab, setTab] = useState(null);
   const [text, setText] = useState('');
@@ -276,7 +282,7 @@ export default function Panel({ block, me, canApprove, features = {}, events, ra
       <div className="rv-actions">
         {/* Not twice by the same person: an admin's ✓ does not turn the block green, and a button still
             on offer after it reads as "it did not take". */}
-        {canApprove && !situation.approved && !situation.seconded.some((e) => e.author === me) ? (
+        {canApprove && !situation.approved && !situation.seconded.some((e) => e.own) ? (
           <button type="button" onClick={() => send('approval')} disabled={sending}>
             {t('panel.approve')}
           </button>
@@ -329,10 +335,10 @@ export default function Panel({ block, me, canApprove, features = {}, events, ra
       {/* Every request's state for everyone; triage only for whoever can triage, and only while the
           request still has a destination. */}
       {situation.requests.map((r) => (
-        <Request key={r.id} request={r} me={me} canApprove={canApprove} onRecord={onRecord} />
+        <Request key={r.id} request={r} canApprove={canApprove} onRecord={onRecord} />
       ))}
 
-      <History events={situation.history} me={me} />
+      <History events={situation.history} />
 
       {/* Said where the person decides, because it is what makes a ✓ worth giving: it is theirs, by
           name, for good. */}

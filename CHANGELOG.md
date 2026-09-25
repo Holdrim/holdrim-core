@@ -167,6 +167,17 @@ who ran the engine from `main` before it.
   (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
   them, are the owner's to define and grant from a settings screen — a later piece — never a file a
   committer, or the agent applying an approved request, can edit.
+- **`people.show`**, `holdrim.json`'s new setting for how a person appears next to a comment, a
+  request or a ✓ (`docs/ROLES.md`, "How a person appears"): `name`, `email` (the default, today's
+  behaviour), `role` or `id`. An unknown value refuses to start the service, like a misspelled
+  feature toggle. Not authority — it decides what a reader is SENT, never what they may do, and
+  `holdrim.json` still refuses `owner`, `admins`, `locks`, `roles` and `grants` exactly as before.
+  The server applies it before the data leaves: the panel and the home draw whatever they are sent
+  and compute nothing themselves. Whatever the setting, the owner and whoever holds `people` always
+  see names, and a person always sees their own name on their own requests. The CLI applies the same
+  setting to what it prints for a person — `holdrim list`, `holdrim show` and the brief `holdrim
+  apply` hands the agent — except that it never reaches the accounts store, so `name` there falls
+  back to the address, the same way it does for anyone with no name on record.
 
 ### Security
 

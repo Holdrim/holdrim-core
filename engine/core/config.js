@@ -21,6 +21,7 @@
 
 import { HOME_SCREEN } from './screens.js';
 import { readFeatures } from './features.js';
+import { readPeopleShow } from './people-show.js';
 
 /**
  * The keys that would grant authority, refused in `holdrim.json`. `roles` and `grants` joined this
@@ -189,5 +190,13 @@ export function readConfig(root, io, env = {}) {
      * never reads, and louder than an invalid theme colour, which only warns and falls back.
      */
     features: readFeatures(file.features, root),
+
+    /**
+     * HOW A PERSON APPEARS (docs/ROLES.md, section 6; the closed list and the default live in
+     * `engine/core/people-show.js`, next to `features.js`'s own closed list). NOT authority — see
+     * that module's own warning — so it sits beside `theme`/`content`/`cloud` above, read from the
+     * file the same way, and `AUTHORITY_KEYS` above does not, and must not, ever name `people`.
+     */
+    peopleShow: readPeopleShow(file.people?.show, root),
   };
 }
