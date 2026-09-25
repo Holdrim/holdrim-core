@@ -90,6 +90,18 @@ test('what depends on a block — the question people ask before editing', () =>
   assert.deepEqual(dependentsOf('A.4.1', blocks), []);
 });
 
+test('dependentsOf sorts, regardless of the order blocks were declared in (#110)', () => {
+  // Z is declared in the file BEFORE B, so file order would print Z then B. If-i-touch prints this
+  // list next to radiusOf's, which already sorts (below) — two different orders would force a reader
+  // to reorder one list in their head to compare them.
+  const blocks = new Map([
+    block('A.1.1', 'aaa'),
+    block('Z.1.1', 'zzz', ['A.1.1']),
+    block('B.1.1', 'bbb', ['A.1.1']),
+  ]);
+  assert.deepEqual(dependentsOf('A.1.1', blocks), ['B.1.1', 'Z.1.1'], 'alphabetical, not file order');
+});
+
 test('the impact radius goes past one hop — that is the whole point of it', () => {
   // A straight chain: C depends on B, B depends on A. Touching A reaches both, not just B — this is
   // the case `dependentsOf` alone gets wrong, and the one this function exists to answer.

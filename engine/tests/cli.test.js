@@ -256,6 +256,34 @@ test('if-i-touch names the direct hop as red, and the rest of the chain as worth
 });
 
 /**
+ * The two lists `if-i-touch` prints — the direct hop, and the rest of the radius — used to come out
+ * in different orders: `dependentsOf` walked the blocks in file order, `radiusOf` sorted (#110). Z is
+ * declared BEFORE B here so file order and alphabetical order disagree, and both lists print two
+ * entries, so a lone item could not hide either fix or its absence.
+ */
+test('if-i-touch prints both lists in the same order, regardless of file order (#110)', async (t) => {
+  const tmp = project(t);
+  writeFileSync(join(tmp, 'p', 'X01.html'), '<main>'
+    + '<div data-id="X01.1.1" data-code="1.1">the rule</div>'
+    + '<div data-id="X01.1.4" data-code="1.4" data-depends="X01.1.1">Z: stands on the rule</div>'
+    + '<div data-id="X01.1.2" data-code="1.2" data-depends="X01.1.1">B: stands on the rule too</div>'
+    + '<div data-id="X01.1.5" data-code="1.5" data-depends="X01.1.4">further from Z</div>'
+    + '<div data-id="X01.1.3" data-code="1.3" data-depends="X01.1.2">further from B</div>'
+    + '</main>');
+
+  const lines = [];
+  const realLog = console.log;
+  console.log = (line) => lines.push(line);
+  try { await ifITouch(tmp, 'X01.1.1'); } finally { console.log = realLog; }
+  const out = lines.join('\n');
+
+  const direct = out.split('worth checking')[0];
+  assert.ok(direct.indexOf('X01.1.2') < direct.indexOf('X01.1.4'), 'direct hop: B before Z, not file order');
+  const further = out.split('worth checking')[1];
+  assert.ok(further.indexOf('X01.1.3') < further.indexOf('X01.1.5'), 'rest of the radius: same order');
+});
+
+/**
  * Picking the work back up cannot depend on the cloud. A `sync` that built the Source with no
  * project would send `projects//databases/…`, the cloud would answer with a 400 that says
  * nothing, and the session would open blind, with no scoreboard.
