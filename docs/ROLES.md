@@ -189,10 +189,15 @@ applies it before the data leaves: a reader who may not see names never receives
 
 | `people.show` | A reader is sent |
 |---|---|
-| `name` (default) | the person's name, or their e-mail when they have no name |
-| `email` | the address |
-| `role` | only the role the author acted under, as written on the event — "Approver" |
+| `name` | the person's name, or their e-mail when they have no name |
+| `email` (default) | the address, today's behaviour |
+| `role` | the person's current role — Owner, Admin or Member — looked up the same way `roles.roleOf` answers it anywhere else; localized for the panel and the home, the raw English key for the CLI |
 | `id` | the opaque id — for audits that must not see names |
+
+Nothing writes the role an event's author acted under onto the event itself, so `role` reads a
+person's role today, not the one they held at the time — a promotion or a demotion changes what
+every past event of theirs is shown as. Once an event carries that role, `role` will read it from
+there instead.
 
 The owner and whoever holds `people` are always sent names, because they are the ones who answer a
 person's request to be removed; and every person is sent their own name on their own requests.
@@ -275,5 +280,5 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Scopes actually consulted by `can`, with a page or block in hand | not built — the grammar is validated (`isValidScope`), nothing reads it yet |
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | An agent's own credential, refused for any ✓ | not built |
-| `people.show`, applied by the server | not built |
+| `people.show`, applied by the server | built (#31) — `engine/core/people-show.js`, `engine/api/server.ts`'s `personDisplay`/`authorDisplaysFor`, `engine/cli/requests.ts`'s `personLabel`. The CLI applies it too, though it can show no name and no id it has no accounts store to look either up in (docs/PRIVACY.md, section 1) — `personLabel` passes `id: null` as well as `name: null`, so both fall back to the address, the same as an event from before ids existed |
 | `features`, with both states tested | built — `engine/core/features.js`, `engine/api/server.ts`, `engine/cli/graph.ts`, `engine/web/src/Panel.jsx`, `engine/test-contract.sh` |

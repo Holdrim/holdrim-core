@@ -42,7 +42,6 @@ function dependedOnOf(el) {
 
 function App({ blocks, elsewhere, who }) {
   const [opened, setOpened] = useState(null);
-  const me = who.email;
   const canApprove = Boolean(who.canApprove);
   // Which of the panel's own controls this project has turned off (docs/ROLES.md, section 7),
   // as `/api/me` sent them. A caller from before this toggle existed sends no `features` at all,
@@ -128,7 +127,6 @@ function App({ blocks, elsewhere, who }) {
   return (
     <Panel
       block={opened}
-      me={me}
       canApprove={canApprove}
       features={features}
       events={events}

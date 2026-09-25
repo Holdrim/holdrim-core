@@ -87,6 +87,22 @@ test('only requests someone is still waiting on are listed, the oldest first, li
   assert.equal(rows[0].state, 'approved');
 });
 
+test('requestsInProgress shows the address by default — every caller from before people.show existed', () => {
+  const request = (id) => ({ id, type: 'request', page: 'A01', block: 'A01.1.1', author: 'r@x.org', when: '2026-09-22', text: id, data: {} });
+  const rows = requestsInProgress([request('r1')], () => 'open', new Map([['A01', '/pages/A01.html']]));
+  assert.equal(rows[0].author, 'r@x.org');
+});
+
+test('requestsInProgress shows whatever authorOf resolves the address to — docs/ROLES.md, "How a person appears"', () => {
+  const request = (id, author) => ({ id, type: 'request', page: 'A01', block: 'A01.1.1', author, when: '2026-09-22', text: id, data: {} });
+  const rows = requestsInProgress(
+    [request('r1', 'ana@example.org'), request('r2', 'bea@example.org')],
+    () => 'open', new Map([['A01', '/pages/A01.html']]),
+    (email) => (email === 'ana@example.org' ? 'Ana Silva' : email),
+  );
+  assert.deepEqual(rows.map((r) => r.author), ['Ana Silva', 'bea@example.org']);
+});
+
 test('the states the home treats as settled are states the cycle has', () => {
   const cycle = JSON.parse(readFileSync(`${ROOT}engine/cycle.json`, 'utf8'));
   for (const state of SETTLED) assert.ok(cycle.states[state], `${state} is not a state in cycle.json`);

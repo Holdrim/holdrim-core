@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { hashText, newSalt, textKey, withTexts, withTextsRetrying, reportTampered, suspectsOf,
-  noText, TEXT_REMOVED } from '../api/texts.ts';
+  noText, TEXT_REMOVED, resolveRemovedBy } from '../api/texts.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { MemoryEventStore } from '../api/store.ts';
 import { Source } from '../cli/remote.ts';
@@ -99,6 +99,33 @@ test('a hash, no matching row, and a TEXT_REMOVED event naming it: removed on pu
   assert.deepEqual(out.textRemoved, { by: 'owner@example.org', when: '2026-01-02T00:00:00.000Z' });
   assert.equal(out.text, null);
   assert.equal(out.textTampered, false, 'a removal that is accounted for is not tampering');
+});
+
+/**
+ * `resolveRemovedBy` — round 1 of the issue #31 review, finding 1. `withTexts` above records `by` as
+ * the resolved address, because `withAuthors` runs before it; a reader that sends `Removed` on to a
+ * viewer without also sending `by` through the same resolution `author` gets from `people.show`
+ * leaks the remover's raw e-mail to someone the setting was configured to hide it from.
+ */
+test('resolveRemovedBy sends `by` through the same displays map `author` uses', () => {
+  const removed = { by: 'owner@example.org', when: '2026-01-02T00:00:00.000Z' };
+  const displays = new Map([['owner@example.org', 'Admin']]);
+  assert.deepEqual(resolveRemovedBy(removed, displays), { by: 'Admin', when: '2026-01-02T00:00:00.000Z' },
+    'a plain member under people.show: "role" or "id" must see the resolved value, never the address');
+});
+
+test('resolveRemovedBy leaves a field that was never removed exactly as it was', () => {
+  const displays = new Map([['owner@example.org', 'Admin']]);
+  assert.equal(resolveRemovedBy(null, displays), null);
+  assert.equal(resolveRemovedBy(undefined, displays), undefined);
+});
+
+test('resolveRemovedBy keeps the address when the remover has no entry in displays', () => {
+  // Not expected in practice — `removeText` always writes an authored event for the remover to be
+  // resolved from — but a caller that could not resolve one must not turn `by` into `undefined`,
+  // the same fallback `author` itself already falls back to.
+  const removed = { by: 'ghost@example.org', when: '2026-01-02T00:00:00.000Z' };
+  assert.deepEqual(resolveRemovedBy(removed, new Map()), removed);
 });
 
 test('a removal dated before the event it names does not count, even placed after it in the list', () => {

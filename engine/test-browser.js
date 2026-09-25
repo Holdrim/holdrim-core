@@ -321,6 +321,12 @@ try {
     // The one who asked sees where it stands, and may add to it in the same thread while it waits.
     await must('the requester sees the request\'s state',
       () => reader.page.locator('.rv-request .rv-state--open').waitFor());
+    // Its own request is always "You" to the requester — docs/ROLES.md, "How a person appears": a
+    // person always sees their own name on their own requests, whatever people.show is set to. The
+    // panel decides this from `request.own`, the server's own answer, never from comparing e-mails
+    // itself (docs/ROLES.md, "The front end obeys the server").
+    await must('and it is always "You" to them, never the address',
+      () => reader.page.locator('.rv-request', { hasText: 'Request from You:' }).waitFor());
     await reader.page.getByRole('button', { name: 'Add details' }).click();
     await reader.page.locator('.rv-request .rv-form textarea').fill('in every sentence of section 1');
     // Twice, fast: a submit button with no guard would send the same details twice.

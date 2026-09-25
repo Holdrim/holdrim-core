@@ -31,6 +31,8 @@ import {
   type Event, type NewEvent, type EventStore,
 } from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
+import { personAs } from '../core/people-show.js';
+import { resolveRemovedBy, type Removed } from './texts.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -422,6 +424,72 @@ const asRead = (e: Event, threads: Map<string, Event[]>) => {
   return e;
 };
 
+/**
+ * What `viewer` is sent instead of `subject`'s own address — docs/ROLES.md, "How a person appears":
+ * the project's `people.show`, with the two overrides the design names applied here, once, so the
+ * panel, the home and the API's own two `/events` routes never re-decide them. `alwaysNamed` covers
+ * both: the owner and a holder of `people` (`roles.can('people', …)` already answers true for the
+ * owner — see `ROLE_CAPABILITIES` in engine/core/roles.js) see every name, and a person sees their
+ * own on their own requests, whatever the project chose.
+ *
+ * `id` is `authorId` (`withAuthors`, engine/api/people.ts) — the value `author` held before it was
+ * resolved to an address — so this never has to ask the store a second time for what the first read
+ * already had in hand.
+ */
+async function personDisplay(subject: string, id: string | undefined, viewer: string | null, lang: string): Promise<string> {
+  const alwaysNamed = viewer !== null && (subject === viewer || roles.can('people', viewer));
+  // Only asked when the answer could actually change: `alwaysNamed` and `people.show: "name"` are
+  // the only two paths `personAs` reads `name` on at all, and behind no password there is no account
+  // to find in the first place — an identity proxy holds no name Holdrim could show instead.
+  const needsName = alwaysNamed || project.peopleShow === 'name';
+  const user = needsName && byPassword ? await byPassword.users.find(subject) : null;
+  return personAs({
+    show: project.peopleShow, email: subject, id: id ?? null, name: user?.name ?? null,
+    role: i18n.t(lang, `people.role.${roles.roleOf(subject)}`), alwaysNamed,
+  });
+}
+
+/**
+ * `personDisplay` over a list of events, once per DISTINCT author rather than once per event: a
+ * page's history repeats the same few people, and a busy home page many more.
+ */
+async function authorDisplaysFor(
+  events: { author: string; authorId?: string }[], viewer: string | null, lang: string,
+): Promise<Map<string, string>> {
+  const distinct = new Map<string, string | undefined>();
+  for (const e of events) if (!distinct.has(e.author)) distinct.set(e.author, e.authorId);
+  const entries = await Promise.all(
+    [...distinct].map(async ([email, id]) => [email, await personDisplay(email, id, viewer, lang)] as const),
+  );
+  return new Map(entries);
+}
+
+/**
+ * The extra `{author, authorId}` pairs `authorDisplaysFor` needs so `resolveRemovedBy` (engine/api/
+ * texts.ts) can also resolve `e`'s `textRemoved.by`/`snapshotRemoved.by` — round 1 of the issue #31
+ * review, finding 1. `Removed.by` is already an address (`removalsOf`'s own comment says why), the
+ * same shape `author` is before `authorDisplaysFor` resolves it, so it needs the same treatment.
+ *
+ * `authorId` comes from `all` rather than a second store read: `removeText` (store-sqlite.ts) always
+ * writes the removal on the SAME page and block as the text it removes, so whichever event produced
+ * `Removed.by` is already in whatever list the caller has in hand — `all` for `/events?page=`, the
+ * whole-site `all` of `/events/:id` — under that exact `author` value. A remover with no match at
+ * all (impossible today, since `removeText` never leaves an event unauthored) is passed through with
+ * `authorId: undefined`, which `authorDisplaysFor` already reads as "no id to show instead of a
+ * name" — the same fallback an event from before ids existed gets.
+ */
+function removalSubjectsOf(
+  e: { textRemoved?: Removed | null; snapshotRemoved?: Removed | null },
+  all: { author: string; authorId?: string }[],
+): { author: string; authorId?: string }[] {
+  const subjects: { author: string; authorId?: string }[] = [];
+  for (const removed of [e.textRemoved, e.snapshotRemoved]) {
+    if (!removed) continue;
+    subjects.push({ author: removed.by, authorId: all.find((x) => x.author === removed.by)?.authorId });
+  }
+  return subjects;
+}
+
 // ---------------------------------------------------------------- the API routes
 /**
  * Records one event for `email`, after every check the cycle demands — or says, as a status and a
@@ -576,16 +644,36 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     // page), so the filtered query is enough — no need to scan the whole collection.
     const all = await events.list(page);
     const threads = cycle.threadsOf(all);
-    return json(res, 200, all.map((e) => asRead(e, threads)));
+    const lang = languageOf(req);
+    const displays = await authorDisplaysFor(all, email, lang);
+    // `own`, never a raw address the panel could compare `me` against: `author` below is already
+    // whatever `people.show` says this viewer may see, which for anyone but the viewer themselves is
+    // not necessarily an e-mail at all — docs/ROLES.md, "The front end obeys the server" (the panel
+    // computes nothing, `engine/web/src/Panel.jsx`'s own `.own` reads). `textRemoved`/`snapshotRemoved`
+    // go through the very same map: the remover's own event is on this page too (`removeText` writes
+    // it there), so `displays` already has their entry — no second resolve, and no raw address left
+    // inside `Removed` for a viewer `author` itself already hides it from.
+    return json(res, 200, all.map((e) => ({
+      ...asRead(e, threads), author: displays.get(e.author) ?? e.author,
+      textRemoved: resolveRemovedBy(e.textRemoved, displays), snapshotRemoved: resolveRemovedBy(e.snapshotRemoved, displays),
+      own: e.author === email,
+    })));
   }
 
   const oneEvent = route.match(/^\/events\/([A-Za-z0-9_-]+)$/);
   if (req.method === 'GET' && oneEvent) {
     const all = await events.list(null);
     const found = all.find((e) => e.id === oneEvent[1]);
-    return found
-      ? json(res, 200, asRead(found, cycle.threadsOf(all)))
-      : json(res, 404, { error: i18n.t(languageOf(req), 'api.event.notFound'), id: oneEvent[1] });
+    if (!found) return json(res, 404, { error: i18n.t(languageOf(req), 'api.event.notFound'), id: oneEvent[1] });
+    const lang = languageOf(req);
+    // Unlike the list route above, `all` here spans every page, so `[found]` alone would miss the
+    // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
+    const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], email, lang);
+    return json(res, 200, {
+      ...asRead(found, cycle.threadsOf(all)), author: displays.get(found.author) ?? found.author,
+      textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
+      own: found.author === email,
+    });
   }
 
   // The current fingerprint of blocks by id, read from the pages on disk. The panel computes the
@@ -1011,10 +1099,14 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   const pages = summarisePages(await readBlocks(projectRoot), loadRegistry(projectRoot), cfg.site, ownerApprovals,
     (path) => readFileSync(path, 'utf8'));
   const threads = cycle.threadsOf(all);
+  const viewer = await viewerOf(req);
+  // Resolved once for every request on the home, not once per row: `requestsInProgress` only reads
+  // this for `type: "request"` events, so those are all `authorDisplaysFor` ever needs to look at.
+  const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, lang);
   const requests = requestsInProgress(all,
     (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)),
-    new Map(pages.map((p) => [p.page, p.href])));
-  const viewer = await viewerOf(req);
+    new Map(pages.map((p) => [p.page, p.href])),
+    (email) => displays.get(email) ?? email);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the
   // same one the panel draws its buttons from. Nobody else is offered a form the server refuses.
   if (viewer && roles.can('approve', viewer)) {

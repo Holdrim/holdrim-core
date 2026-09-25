@@ -6,6 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolveAgent, brief, apply, KNOWN_AGENTS } from '../cli/agent.ts';
 import { readBlocks } from '../cli/pages.ts';
 
@@ -14,6 +16,22 @@ process.env.HOLDRIM_OWNER ??= 'owner@example.org';
 
 const none = () => false;
 const all = () => true;
+
+/**
+ * A throwaway project, the smallest that `brief` (via `impactOf`, `readBlocks`) can run against —
+ * `examples/hello-world` sets no `people.show` at all, so a mutation that reverted `brief`'s
+ * `personLabel` calls back to the raw `.author` would still pass every OTHER test in this file:
+ * the default ("email") prints the same address either way. Round 1 of the issue #31 review,
+ * finding 5.
+ */
+function project(t, config = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-agent-'));
+  mkdirSync(join(dir, 'p'));
+  writeFileSync(join(dir, 'holdrim.json'),
+    JSON.stringify({ content: { folders: ['p'], registry: 'r.json' }, ...config }));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
 
 test('a known name resolves to that CLI, and a whole command is taken as typed', () => {
   assert.deepEqual(resolveAgent('claude', undefined, none), ['claude', '-p']);
@@ -138,4 +156,28 @@ test('a request for a new page tells the agent to write one, shaped like its nei
   assert.match(text, /## Asked for\n\nExplain how a request is closed/);
   // And a request about an existing block says nothing of the kind.
   assert.doesNotMatch(await brief(EXAMPLE, await sourceWithARequest(), 'req0'), /NEW page/);
+});
+
+/**
+ * `people.show` (docs/ROLES.md, "How a person appears"), applied to the brief's own "Who:" and
+ * "Thread" lines — round 1 of the issue #31 review, finding 5: `examples/hello-world` sets no
+ * `people.show`, so every OTHER test in this file passes whether or not those two lines actually
+ * call `personLabel` at all, since the default ("email") prints the same address either way. Only a
+ * project that asks for something else can tell the two apart.
+ */
+test('the brief\'s Who and Thread lines route the author through people.show, not the raw address', async (t) => {
+  const root = project(t, { people: { show: 'role' } });
+  const source = {
+    events: async () => [
+      { id: 'req00003', type: 'request', page: 'A01', block: null, text: 'Explain how a day is closed',
+        author: 'reviewer@example.org', when: '2026-09-24T10:00:00Z', data: { category: 'page' } },
+      { id: 'st000004', type: 'request_state', page: 'A01', author: 'owner@example.org',
+        when: '2026-09-24T10:05:00Z', data: { request: 'req00003', state: 'approved', from: 'open' } },
+    ],
+  };
+  const text = await brief(root, source, 'req0');
+  assert.match(text, /Who:\s+member/, 'the Who line must carry the requester\'s role');
+  assert.match(text, /## Thread\n\n- .* owner\b/, 'the thread must carry the approver\'s role too');
+  assert.doesNotMatch(text, /reviewer@example\.org/, 'the requester\'s address must not appear anywhere');
+  assert.doesNotMatch(text, /owner@example\.org/, 'nor the approver\'s');
 });
