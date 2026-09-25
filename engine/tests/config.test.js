@@ -140,3 +140,39 @@ test('a holdrim.json naming an authority key refuses to load, and says where it 
   // Keys that merely look alike are the project's own notes, not authority.
   assert.doesNotThrow(() => readConfig('/p', file({ _owner: 'who approves is set by HOLDRIM_OWNER' })));
 });
+
+/**
+ * Round 2 of #29's review, finding 8: the test above only checks that the ONE named key's home
+ * appears somewhere in the message — it would not notice `named.map` silently becoming
+ * `AUTHORITY_KEYS.map`, which would print all FIVE homes on a file naming only one of them. This
+ * checks the other direction: with a single key named, the four it did NOT name are absent.
+ */
+test('the message names only the keys the file actually wrote, not every authority key that exists', () => {
+  let message = '';
+  try {
+    readConfig('/p', file({ owner: 'o@example.org' }));
+  } catch (e) {
+    message = e.message;
+  }
+  assert.ok(message.includes('"owner" comes from HOLDRIM_OWNER'), 'the named key is explained');
+  for (const untouched of ['"admins" comes from', '"locks" comes from', '"roles" comes from', '"grants" comes from']) {
+    assert.ok(!message.includes(untouched), `an untouched key's home leaked in: ${untouched}`);
+  }
+});
+
+/**
+ * Round 2 of #29's review, finding 10: `refuseAuthority`'s singular/plural branch
+ * (`named.length === 1 ? 'the key' : 'the keys'`) had no test reading either literal word — the
+ * existing test above only checks that both key names appear, which says nothing about "key" vs
+ * "keys". This pins both branches by their own wording.
+ */
+test('the refusal says "the key" for one, and "the keys" for more than one', () => {
+  const one = (() => { try { readConfig('/p', file({ owner: 'o@example.org' })); } catch (e) { return e.message; } })();
+  assert.ok(one.includes('Remove the key from the file.'), one);
+  assert.ok(!one.includes('Remove the keys'), one);
+  const two = (() => {
+    try { readConfig('/p', file({ owner: 'o@example.org', admins: 'a@example.org' })); } catch (e) { return e.message; }
+  })();
+  assert.ok(two.includes('Remove the keys from the file.'), two);
+  assert.ok(!two.includes('Remove the key from'), two);
+});

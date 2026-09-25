@@ -614,26 +614,40 @@ expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset by)"
 
-# ⚠️ LOCKS accounts are guarded like the owner's, on all three routes (docs/ROLES.md, section 3): a
-# password handed out for one is a lock handed out. Admin manages people in general (checked above)
-# and is still refused here, end to end — the escalation this closes is the same shape as the
-# owner's, just for whoever HOLDRIM_LOCKS names instead of HOLDRIM_OWNER.
+# ⚠️ HOLDRIM_LOCKS accounts are guarded like the owner's, on all four routes now (docs/ROLES.md, "the
+# `people` capability's own table entry: disable and re-enable — never … the account of anyone who
+# holds `lock`" — round 2 of #29's review, finding 1: round 1 guarded only re-enabling). Admin manages
+# people in general (checked above) and is still refused here, end to end — the escalation this
+# closes is the same shape as the owner's, just for whoever HOLDRIM_LOCKS names instead of
+# HOLDRIM_OWNER.
+#
+# None of the four messages say "holds a lock" or name HOLDRIM_LOCKS (round 2's finding 5): an admin
+# who may not act on this address must not learn FROM THE REFUSAL that it is one of the ones
+# HOLDRIM_LOCKS names — probing candidate addresses one at a time would otherwise reconstruct the
+# whole list from which ones come back 409. "reserved" is the generic word every one of the four
+# messages uses instead.
 expect "an admin cannot create a lock-holder's account → 409" 409 \
   "$(code_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users)"
-expect "and the message names HOLDRIM_LOCKS" 0 \
+expect "and the message does not name HOLDRIM_LOCKS" 1 \
   "$(as_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "it says the account is reserved instead" 0 \
+  "$(as_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | has 'is reserved'; echo $?)"
 LPASS=$(as_owner -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | jfield password)
 expect "the owner creates it → a real password" 0 "$([ -n "$LPASS" ] && echo 0 || echo 1)"
 expect "an admin cannot reset the lock-holder's password → 409" 409 "$(code_admin -X POST $B/api/users/$LOCKED/password)"
+expect "and the message says only the owner can reset it here" 0 \
+  "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'only the owner can reset that password here'; echo $?)"
 expect "the owner still can" 200 "$(code_owner -X POST $B/api/users/$LOCKED/password)"
-# Taking access away hands nobody a password, so it is NOT owner-only: an admin disables like any
-# other account, and the session dies at once, exactly as for a member.
-expect "an admin CAN disable the lock-holder — that direction hands out no password" 200 \
+# Round 1 reasoned that disabling hands out no password, so it left this direction open — missing
+# that an admin who can disable a lock-holder at will can silence their ✓ at the exact moment it
+# would matter, no password needed. Both directions are the owner's alone now.
+expect "an admin cannot disable the lock-holder either → 409" 409 \
   "$(code_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
 expect "an admin cannot give the access back → 409" 409 \
   "$(code_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
-expect "and the message names HOLDRIM_LOCKS too" 0 \
+expect "and neither message names HOLDRIM_LOCKS" 1 \
   "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "the owner CAN disable the lock-holder" 200 "$(code_owner -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
 expect "the owner re-enables it → 200" 200 "$(code_owner -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
 
 expect "disabling somebody → 200"       200 "$(code_owner -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)"

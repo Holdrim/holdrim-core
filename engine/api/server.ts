@@ -603,8 +603,14 @@ async function userRoutes(
     }
     // ⚠️ Their accounts are guarded like the owner's (docs/ROLES.md, section 3): a password handed
     // out for a HOLDRIM_LOCKS address is a lock handed out, whoever ends up holding it. Guarded on
-    // all three routes with the SAME question, `roles.isLockHolder` — see the reset and enabled
+    // all four routes with the SAME question, `roles.isLockHolder` — see the reset and enabled
     // routes below.
+    //
+    // The MESSAGE never says "holds a lock": an admin who may not create this address does not need
+    // to learn from the refusal that it is one of the ones `HOLDRIM_LOCKS` names — that list is meant
+    // to stay out of the product entirely (docs/ROLES.md, section 3, "the addresses stay out of git
+    // and out of the store"), and an admin who could probe candidate addresses one at a time would
+    // otherwise reconstruct it from which ones come back 409 (round 2 of #29's review, finding 5).
     if (roles.isLockHolder(address) && !roles.isOwner(email)) {
       json(res, 409, { error: say('api.users.lockHolderIsOwnerToCreate', { email: address }) });
       return true;
@@ -663,10 +669,13 @@ async function userRoutes(
     if (roles.isOwner(target) && target !== email) {
       return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
     }
-    // Same guard, extended to LOCKS (docs/ROLES.md, section 3): "the owner's alone", with no
+    // Same guard, extended to HOLDRIM_LOCKS (docs/ROLES.md, section 3): "the owner's alone", with no
     // exception for the lock-holder resetting themselves — unlike the owner's own guard above, which
     // exists so the owner is never locked out of their own recovery. A lock-holder has no comparable
     // need served by this admin-only route; `/change-password` is theirs already.
+    //
+    // The message does not say "holds a lock" here either — see the create route's own comment,
+    // above, for why (round 2 of #29's review, finding 5).
     if (roles.isLockHolder(target) && !roles.isOwner(email)) {
       return json(res, 409, { error: say('api.users.lockHolderPasswordIsOwnerToReset', { email: target }) }), true;
     }
@@ -704,11 +713,16 @@ async function userRoutes(
       json(res, 409, { error: say('api.users.ownerCannotBeDisabled', { email: target }) });
       return true;
     }
-    // ⚠️ RE-enabling a LOCKS address is the owner's alone too (docs/ROLES.md, section 3) — DISABLING
-    // one is not: taking access away hands nobody a password, and drops the session on its own.
-    // `body.enabled` here, not `!body.enabled` as above: the two guards protect opposite directions.
-    if (body.enabled && roles.isLockHolder(target) && !roles.isOwner(email)) {
-      json(res, 409, { error: say('api.users.lockHolderIsOwnerToEnable', { email: target }) });
+    // ⚠️ BOTH directions on a lock-holder's account are the owner's alone (docs/ROLES.md, "Capabilities
+    // are the engine's": the `people` capability's own entry reads "disable and re-enable — never …
+    // the account of anyone who holds `lock`"). Round 1 of this issue guarded only re-enabling, on the
+    // reasoning that disabling hands out no password — true, but it misses the other half: an admin
+    // who can disable a lock-holder at will can silence their ✓ at the exact moment it would matter,
+    // with no password needed to do it. One check now, not two: `roles.isLockHolder` does not care
+    // which direction `body.enabled` asks for, only who is asking (round 2 of #29's review, finding 1).
+    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+      const key = body.enabled ? 'api.users.lockHolderIsOwnerToEnable' : 'api.users.lockHolderIsOwnerToDisable';
+      json(res, 409, { error: say(key, { email: target }) });
       return true;
     }
     await users.setEnabled(target, body.enabled);
