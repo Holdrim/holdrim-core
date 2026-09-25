@@ -748,6 +748,49 @@ try {
     await owner.page.locator('#holdrim-graph [data-id="NOPE.1.1"]').click();
     await owner.page.waitForTimeout(200);
     expect('clicking the ❓ node does not navigate anywhere', beforeGhostClick, owner.page.url());
+
+    // The filters (#42), on the same 500+ block home: a prefix, a state, both, and back again. Every
+    // expected count comes from `/api/graph`'s own answer, above, never from a guess at which blocks
+    // this run happened to approve — the browser has to agree with the API, whatever the API says.
+    console.log('the graph\'s filters (#42):');
+    const drawnIds = () => owner.page.locator('#holdrim-graph [data-id]')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('data-id')));
+    const drawnEdges = () => owner.page.locator('#holdrim-graph .home-graph__edge').count();
+    const prefixBox = owner.page.locator('.home-graph__filters input[name="prefix"]');
+    const stateBox = (state) => owner.page.locator(`.home-graph__filters input[name="state"][value="${state}"]`);
+    const noMatch = owner.page.locator('.home-graph__empty');
+    const apiCount = (keep) => apiGraph.nodes.filter(keep).length;
+
+    expect('unfiltered, every node the API sent is drawn', apiGraph.nodes.length, (await drawnIds()).length);
+
+    await prefixBox.fill('S03');
+    const onS03 = await drawnIds();
+    expect('a page prefix leaves only that page\'s blocks', SCALE_BLOCKS_PER_PAGE, onS03.length);
+    expect('and every one drawn is on that page', true, onS03.every((id) => id.startsWith('S03.')));
+    // S03's own chain stays (block N → N-1); its every-tenth edge into S02 goes with S02.
+    expect('only edges with both ends still drawn remain', SCALE_BLOCKS_PER_PAGE - 1, await drawnEdges());
+
+    await stateBox('none').uncheck();
+    const s03Validated = apiCount((n) => n.page === 'S03' && n.state !== 'none');
+    expect('with "not validated" unticked too, both filters apply at once', s03Validated, (await drawnIds()).length);
+    expect('and when nothing is left, the home says so', s03Validated === 0, await noMatch.isVisible());
+
+    await prefixBox.fill('');
+    const noNone = await drawnIds();
+    expect('the prefix cleared, the state filter alone still holds',
+      apiCount((n) => n.state !== 'none'), noNone.length);
+    expect('no unvalidated block is drawn', false, noNone.includes('S01.1.1'));
+    expect('the dangling dependency stays, its own state still ticked', true, noNone.includes('NOPE.1.1'));
+
+    await stateBox('missing').uncheck();
+    expect('unticking "not defined" hides the ❓ node', false, (await drawnIds()).includes('NOPE.1.1'));
+
+    await stateBox('none').check();
+    await stateBox('missing').check();
+    expect('every box ticked again, the whole graph is back', apiGraph.nodes.length, (await drawnIds()).length);
+    expect('and the "nothing matches" line is gone', false, await noMatch.isVisible());
+    expect('filtering never navigated, and nothing threw', `${BASE}/engine/home | `,
+      `${owner.page.url()} | ${owner.problems.join(' | ')}`);
   }
 
   console.log('the panel obeys the project\'s feature toggles:');

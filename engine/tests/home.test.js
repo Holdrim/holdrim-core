@@ -227,6 +227,21 @@ test('features.graph OFF, or unset, draws no section and no script; on, both are
   assert.doesNotMatch(empty, /id="holdrim-graph"/);
 });
 
+test('the graph\'s legend is its state filter: one ticked box per state, plus a page prefix (#42)', () => {
+  const i18n = createI18n({ en: JSON.parse(readFileSync(`${ROOT}engine/locales/en.json`, 'utf8')) }, 'en');
+  const pages = [{ page: 'A01', href: '/a', title: 'First', tally: { valid: 0, stale: 0, broken: 0, none: 1 }, awaitingSync: 0 }];
+  const html = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], graphEnabled: true }, ENGINE_THEME, 'n');
+  // `home-graph.js` keeps no list of states: whatever boxes are here are what a reader can hide, so
+  // every state `/api/graph` can send — the four traffic-light keys and `missing` — needs one, and
+  // each starts ticked, or the graph would open already narrowed by a filter nobody chose.
+  const boxes = [...html.matchAll(/<input type="checkbox" name="state" value="([a-z]+)"( checked)?>/g)];
+  assert.deepEqual(boxes.map((m) => m[1]).sort(), ['broken', 'missing', 'none', 'stale', 'valid']);
+  assert.ok(boxes.every((m) => m[2]), 'every state starts shown');
+  assert.match(html, /<form class="home-graph__filters"[^>]*>[\s\S]*<input [^>]*name="prefix"/);
+  assert.match(html, /<p class="[^"]*home-graph__empty"[^>]*hidden>No block matches these filters\.<\/p>/,
+    'the "nothing matches" line is there, and hidden until a filter empties the graph');
+});
+
 test('the graph\'s i18n blob is escaped for its attribute, not for the JSON inside it', () => {
   const i18n = createI18n({ en: { 'home.graph.heading': 'x', 'home.graph.lede': 'x', 'home.graph.loading': 'x',
     'home.graph.failed': 'x', 'home.graph.missing': 'x', 'home.graph.label': 'A "graph" & <friends>',
