@@ -1,6 +1,8 @@
 import mermaid from 'mermaid';
 
 mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false,
+  // Flowcharts override the top-level default; without this SVG foreignObject survives.
+  flowchart: { htmlLabels: false },
   suppressErrorRendering: true });
 
 /**

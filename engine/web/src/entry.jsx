@@ -16,7 +16,6 @@ import { whoAmI, eventsOfPage, record, fingerprintOf, fingerprintsOf, impactRadi
 import { HOME_SCREEN } from '../../core/screens.js';
 import { blockState, trafficLightOf, foreignDependencies, summaryOf } from './state.js';
 import { t, speak } from './i18n.js';
-import { renderDiagrams } from './diagrams.js';
 
 const page = (document.querySelector('.doc-title__code')?.textContent ?? '').trim();
 
@@ -257,7 +256,11 @@ async function start() {
   where.setAttribute('data-review-ui', '');
   document.body.appendChild(where);
   createRoot(where).render(<App blocks={blocks} elsewhere={elsewhere} who={who} />);
-  await renderDiagrams(blocks);
+  // A plain documentation page should not download the 3 MB renderer.
+  if (blocks.some(({ el }) => el.querySelector('pre code.mermaid'))) {
+    const { renderDiagrams } = await import('./diagrams.js');
+    await renderDiagrams(blocks);
+  }
 }
 
 start().catch((e) => switchOff(e));
