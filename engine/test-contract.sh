@@ -552,6 +552,11 @@ expect "peopleScreen OFF: a member still gets 403 on an approval" 403 \
 #   cross-site (`sameOrigin`),
 #     both home forms           — below (MINOR X1/P1)
 #
+# The one guard shaped as neither of the above — `/api/change-password` (engine/api/server.ts),
+# whose `checked` refusal is its own `if`, not `userRoutes`' `manages()` nor `refusalOf` — was
+# missing from every list above and so from every check below it: changing your own password with
+# the wrong current one — below (MINOR PW).
+#
 # MAJOR (L1): none of the above is shaped as a `refusalOf` 403, but each is exactly the kind of
 # question `JSON.stringify(project).includes(...)` could answer instead of asking `roles.can` —
 # `asRead`'s `locks:` field, `serveHome`'s `ownerApprovals` count and `serveStatic`'s path guard,
@@ -576,6 +581,11 @@ expect "every toggle OFF: a non-owner triaging → refused" 403 \
 TSUPP=$(tas_admin -d '{"type":"request","page":"UC-01","text":"toggle supplement check"}' $B/api/events | jfield id)
 expect "every toggle OFF: a non-owner, non-author supplement → 403" 403 \
   "$(tas_member -o /dev/null -w '%{http_code}' -d "{\"type\":\"supplement\",\"page\":\"UC-01\",\"text\":\"me too\",\"data\":{\"request\":\"$TSUPP\"}}" $B/api/events)"
+# MINOR (PW): `/api/change-password` is neither a `userRoutes` route nor a `refusalOf` 403, so it
+# was never on the lists above and never asked here — the one server where a reflective read could
+# have swallowed its `checked` guard without a single check noticing.
+expect "every toggle OFF: changing your own password with the wrong current one → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"current":"the-wrong-password","next":"a-long-enough-password"}' $B/api/change-password)"
 
 # MAJOR (L1): `asRead`'s `locks:` field and `serveHome`'s `ownerApprovals` count both decide from
 # `roles.can('lock', ...)` — never from anything reflective — so this is the one place either could

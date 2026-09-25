@@ -25,7 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createScanner, SyntaxKind } from 'typescript/unstable/ast';
-import { transformSync } from 'esbuild';
+import { transformSync, build } from 'esbuild';
 import { readConfig } from '../core/config.js';
 import { readFeatures, FEATURE_DEFAULTS, FEATURE_KEYS } from '../core/features.js';
 import { CAPABILITIES } from '../core/roles.js';
@@ -265,8 +265,14 @@ function withoutComments(text) {
  * `engine/` is scanned, whatever its extension, unless `DENIED` names it or `NOT_CODE`, below, says
  * why its extension cannot hold a guard at all.
  */
+// Split out of `isSourceFile` so `bundledInputs`'s own check (below) can ask the same question of a
+// path esbuild resolved, which is never itself run through `NOT_CODE` — every input esbuild reports
+// is already something a JS/TS parser accepted, so asking `NOT_CODE` of it a second time would only
+// ever say no.
+const isDenied = (f) => DENIED.some((d) => (d.file ? f === d.file : f.startsWith(d.prefix)));
+
 function isSourceFile(f) {
-  return !NOT_CODE.test(f) && !DENIED.some((d) => (d.file ? f === d.file : f.startsWith(d.prefix)));
+  return !NOT_CODE.test(f) && !isDenied(f);
 }
 
 /**
@@ -316,6 +322,63 @@ const DENIED = [
   { file: 'engine/run-local.sh', why: 'a shell script, not JS/TS — no loader parses it, and no guard lives in it' },
   { file: 'engine/test-contract.sh', why: 'same reason: a shell script, and the file that already backstops a reflective read no source scan can see' },
 ];
+
+/**
+ * ROUND 5 (MAJOR TD1/EX1): `sourceFiles` above still asks `git ls-files` for a DIRECTORY LISTING —
+ * `-- engine`, one argument, decided by whoever wrote the call. Two things follow from that, both
+ * demonstrated: `engine/tests/` is dropped WHOLESALE by `DENIED`, on the theory that nothing there
+ * is ever loaded outside `node --test` — a theory this file never actually checked — and
+ * `examples/`, never named in the `git ls-files` argument at all, is not scanned no matter what it
+ * holds, even though the Dockerfile (`COPY examples ./examples`) ships it exactly as it ships
+ * `engine/`. A file `engine/tests/lib/gate.mts` exporting `(project) =>
+ * project.features.peopleScreen`, imported by the change-password guard in `server.ts`, passes
+ * every check above: it is real code, correctly scanned for a read of `features` by
+ * `offendersIn` — except `DENIED`'s own `engine/tests/` prefix excuses it from ever being asked, on
+ * the theory that only a fixture-builder lives there. The theory is the bug: `DENIED` describes
+ * what a directory is FOR, not what the running server actually loads from it.
+ *
+ * The fix does not touch `DENIED`'s reasoning — a test really does read `features` to build its own
+ * fixture, and that read is still not a guard — it adds a SECOND, independent way of finding what
+ * to scan: not "every file under a directory", but "every file the PRODUCT actually loads", asked
+ * of `esbuild`'s own module resolver rather than a directory argument someone chose. `entryPoints`
+ * below is every place `holdrim` actually STARTS a process from — the Dockerfile's `CMD` and
+ * `package.json`'s own `bin` — so a file only reachable by being IMPORTED from one of those, however
+ * far down the graph, is exactly as real a place for a guard to live as one `git ls-files` happens
+ * to list, and one under `examples/` is included on the same terms, with no separate argument naming
+ * that directory at all.
+ */
+const ENTRY_POINTS = ['engine/api/server.ts', 'engine/cli/holdrim.ts'];
+
+/**
+ * Every path `esbuild` actually resolves starting from `entryPoints`, walking real imports rather
+ * than listing a directory — the paths `sourceFiles`' `git ls-files` cannot see at all (a file under
+ * `examples/`) and the ones `DENIED` excuses `sourceFiles` from asking about on purpose (a file under
+ * `engine/tests/`), both included here on equal terms: this function does not know `DENIED` exists.
+ * `format: 'esm'` and not the default `cjs`: `engine/api/server.ts` has top-level `await`, which
+ * esbuild refuses to bundle as `cjs`. `packages: 'external'` leaves `node_modules` (`jose`,
+ * `react-dom`, the optional `@google-cloud/firestore`/`pg`) unresolved, the same as `npm install`
+ * leaves them at runtime — bundling them would make this about whether THEY read `features`, which
+ * they cannot, being outside `engine/` and `examples/` entirely. The extra `loader` entries make
+ * `.mts`/`.cts`/`.jsx` resolve the same way `loaderFor` (used by `stripperMismatch`, below) already
+ * treats them, so a production entry that reaches one is not silently skipped for want of a loader.
+ * @param {string[]} entryPoints
+ */
+async function bundledInputs(entryPoints) {
+  const result = await build({
+    entryPoints,
+    bundle: true,
+    write: false,
+    metafile: true,
+    outdir: 'out', // never touches disk: `write: false` above means esbuild only reports what it WOULD write
+    format: 'esm',
+    platform: 'node',
+    packages: 'external',
+    absWorkingDir: ROOT,
+    loader: { '.ts': 'ts', '.mts': 'ts', '.cts': 'ts', '.tsx': 'tsx', '.jsx': 'jsx' },
+    logLevel: 'silent',
+  });
+  return Object.keys(result.metafile.inputs);
+}
 
 /**
  * Any of the ways a toggle is read: `xxx.features` (however the object in front is named —
@@ -613,9 +676,52 @@ test('MTS: a read planted in a .mts file, a module kind the old extension list n
     'MTS — the planted read in a .mts file was found but not recognised as an offense');
 });
 
-test('every real read of features, across the engine, is on the allow-list', () => {
+test('MAJOR (TD1/EX1): nothing the product actually starts from sits under a DENIED prefix', async () => {
+  const offenders = (await bundledInputs(ENTRY_POINTS)).filter(isDenied);
+  assert.deepEqual(offenders, [],
+    'a file under a DENIED prefix — engine/tests/ or another one named there for a reason that has ' +
+    'nothing to do with what the server actually loads — is reachable from an entry point the ' +
+    'product actually runs (Dockerfile\'s CMD, package.json\'s "bin"): the exact shape of the ' +
+    'demonstrated mutant, engine/tests/lib/gate.mts exporting a plain project.features.peopleScreen ' +
+    'read, imported by the change-password guard in server.ts');
+});
+
+test('TD1/EX1: a production import from a DENIED directory is caught by the metafile, nothing written to disk', async () => {
+  // A file that never exists on disk — `write: false` above already proves no OUTPUT touches the
+  // tree, and this plugin proves the same of the INPUT: the path esbuild reports having loaded is
+  // handed back by `onLoad`, not read off a real `engine/tests/self-test/gate.mts` this test would
+  // otherwise have to create and remove, racing every other test in this file that walks the tree.
+  const target = join(ROOT, 'engine/tests/self-test/gate.mts');
+  const plugin = {
+    name: 'denied-fixture-self-test',
+    setup(b) {
+      b.onResolve({ filter: /^denied-fixture-self-test$/ }, () => ({ path: target, namespace: 'file' }));
+      b.onLoad({ filter: /self-test.gate\.mts$/, namespace: 'file' }, () => ({
+        contents: 'export default (project) => project.features.peopleScreen;',
+        loader: 'ts',
+      }));
+    },
+  };
+  const result = await build({
+    stdin: { contents: 'export { default } from "denied-fixture-self-test";', loader: 'js', resolveDir: ROOT },
+    bundle: true, write: false, metafile: true, outdir: 'out', format: 'esm', platform: 'node',
+    packages: 'external', plugins: [plugin], logLevel: 'silent',
+  });
+  const inputs = Object.keys(result.metafile.inputs);
+  assert.ok(inputs.includes('engine/tests/self-test/gate.mts'),
+    'setup — the plugin fixture did not reach the metafile the way a real import would');
+  assert.ok(inputs.some(isDenied),
+    'TD1/EX1 — an import from engine/tests/ was not flagged by the DENIED check the metafile scan runs');
+});
+
+test('every real read of features, across the engine, is on the allow-list', async () => {
+  // ROUND 5 (MAJOR TD1/EX1): union, not `sourceFiles()` alone — `bundledInputs` reaches a file under
+  // `examples/` (never in `sourceFiles`'s own `git ls-files -- engine`) exactly as it would a new
+  // directory under `engine/`, on the same "found by what loads it, not by what lists it" terms.
+  const files = new Set(sourceFiles());
+  for (const f of await bundledInputs(ENTRY_POINTS)) if (isSourceFile(f)) files.add(f);
   const offenders = [];
-  for (const file of sourceFiles()) {
+  for (const file of files) {
     for (const found of offendersIn(read(file), file)) offenders.push(`${file}:${found}`);
   }
   assert.deepEqual(offenders, [],
