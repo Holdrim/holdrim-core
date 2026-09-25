@@ -1,4 +1,4 @@
-import { Firestore, type DocumentData } from '@google-cloud/firestore';
+import { Firestore, type DocumentData, type WhereFilterOp } from '@google-cloud/firestore';
 import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
 
 /**
@@ -89,30 +89,35 @@ export class UsersFirestore extends UserStoreBase {
   }
 
   protected async deleteSessionsExpiredBefore(instant: string): Promise<void> {
-    // Expiry is an ISO string, so `<` on it is chronological order. Batched because Firestore
-    // takes at most 500 writes per commit, and a service left running for a month accumulates
-    // more dead sessions than that.
-    const stale = await this.#db.collection('sessions')
-      .where('expires_at', '<', instant).limit(400).get();
-    if (stale.empty) return;
-    const batch = this.#db.batch();
-    for (const doc of stale.docs) batch.delete(doc.ref);
-    await batch.commit();
+    // ONE page and no loop: this runs on its own schedule (see `purgeExpiredSessions`) and can
+    // afford to leave the rest for next time — a service left running for a month accumulates more
+    // dead sessions than one page, but the next sweep gets to them.
+    await this.#deleteSessionPage('expires_at', '<', instant);
   }
 
   protected async deleteSessionsForEmail(email: string): Promise<void> {
-    // Looped rather than one batch of 400 like the expiry purge above: that one is called again on
-    // its own schedule and can afford to leave the rest for next time, but this one guards a
-    // disable or a password reset — every session for the account has to be gone before the caller
-    // moves on, not "most of them, eventually".
-    for (;;) {
-      const page = await this.#db.collection('sessions')
-        .where('email', '==', email).limit(400).get();
-      if (page.empty) return;
-      const batch = this.#db.batch();
-      for (const doc of page.docs) batch.delete(doc.ref);
-      await batch.commit();
-    }
+    // Looped, unlike the purge above: this guards a disable or a password reset, and every session
+    // for the account has to be gone before the caller moves on — "most of them, eventually" is
+    // exactly the gap issue #113 was about, not an acceptable partial result here.
+    while (await this.#deleteSessionPage('email', '==', email));
+  }
+
+  /**
+   * Deletes one page of at most 400 sessions matching a single-field query, and reports whether
+   * the page was FULL — meaning the 400 limit decided where it stopped, not the data running out,
+   * so the caller cannot yet tell this was the last one and has to ask again.
+   *
+   * 400 and not Firestore's own ceiling of 500 writes per batch: it leaves room in a batch for
+   * whatever else Firestore or a client library adds around a commit, rather than sitting exactly
+   * on the edge of a limit that is not this file's to spend in full.
+   */
+  async #deleteSessionPage(field: string, op: WhereFilterOp, value: unknown): Promise<boolean> {
+    const page = await this.#db.collection('sessions').where(field, op, value).limit(400).get();
+    if (page.empty) return false;
+    const batch = this.#db.batch();
+    for (const doc of page.docs) batch.delete(doc.ref);
+    await batch.commit();
+    return page.size === 400;
   }
 
   async close(): Promise<void> {
