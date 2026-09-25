@@ -180,6 +180,30 @@ export interface TamperReport {
   event: string;
   field: TextField;
   kind: TamperKind;
+  /** `findingOf`'s answer: what an acknowledgement names (engine/api/tamper.ts). */
+  finding: string;
+}
+
+/**
+ * What identifies one finding, so the owner's acknowledgement of it (issue #107) quiets that finding
+ * and no other: sha256 of the event, the field, the case, and `observed` — what the reader actually
+ * found there. Keyed on the field alone, an acknowledgement would also swallow every LATER tampering
+ * of the same field, which is the one thing an alert that can be acknowledged must never do.
+ *
+ * `observed` is never a text, and never an unsalted hash of one (docs/PRIVACY.md, section 4: "an
+ * unsalted hash of a CPF would be the CPF") — this value is sent to the panel and written into an
+ * event that is never erased:
+ *
+ * - `overwritten`: the row's OWN hash, under the row's own salt — a new edit of the value is a new
+ *   hash, and the salt leaves with the row the day it is removed, so nothing here stays testable.
+ * - `double_removal`: the ids of every removal that claims the field — one more forgery, one more id.
+ * - `unaccounted`, `downgraded`: nothing beyond the case. There is no row to hash in the first, and
+ *   the second's value sits inline with no salt of its own; a change of case (a row put back and
+ *   edited, a hash restored and then stripped) is still a new finding, but the same case seen again
+ *   is the same finding.
+ */
+export function findingOf(event: string, field: TextField, kind: TamperKind, observed: string): string {
+  return createHash('sha256').update([event, field, kind, observed].join('\u0000'), 'utf8').digest('hex');
 }
 
 /**
@@ -205,7 +229,10 @@ export function reportTampered(report: TamperReport): void {
   // of what happened (`text_tampered`) — and `{ ...extra }` is spread AFTER it, so an `extra.event`
   // would silently overwrite that name with the tampered event's id, and an alert rule keyed on
   // `event: "text_tampered"` would stop matching on the very first real tampering it was written for.
-  log('CRITICAL', 'text_tampered', { eventId: report.event, field: report.field, kind: report.kind });
+  // `finding` too, so the line an operator greps and the acknowledgement a person gave (issue #107)
+  // can be matched to each other; it is logged on every read either way — acknowledging quiets the
+  // panel's banner, never this line.
+  log('CRITICAL', 'text_tampered', { eventId: report.event, field: report.field, kind: report.kind, finding: report.finding });
 }
 
 /**
@@ -276,6 +303,8 @@ interface Removals {
   valid: Map<string, Removed>;
   /** A key with a second valid removal — `removeText` can never produce one, so this is forgery. */
   duplicated: Set<string>;
+  /** Every valid removal's id, per key — what a `double_removal` finding is identified by (`findingOf`). */
+  ids: Map<string, string[]>;
 }
 
 function removalsOf<E extends { id: string; type: string; author: string; when: string;
@@ -285,6 +314,7 @@ function removalsOf<E extends { id: string; type: string; author: string; when: 
   const positionOf = new Map(events.map((e, i) => [e.id, i] as const));
   const valid = new Map<string, Removed>();
   const duplicated = new Set<string>();
+  const ids = new Map<string, string[]>();
   for (const [i, e] of events.entries()) {
     if (e.type !== TEXT_REMOVED) continue;
     const target = e.data?.event;
@@ -302,6 +332,7 @@ function removalsOf<E extends { id: string; type: string; author: string; when: 
     const targetEvent = events[targetIndex];
     if (i <= targetIndex || e.when < targetEvent.when) continue;
     const key = textKey(target, field);
+    ids.set(key, [...(ids.get(key) ?? []), e.id]);
     // `removeText` deletes the row it names, so it can never itself produce a second valid removal
     // of one field — the second call finds no row and refuses (`noText`). A second one here, however
     // correctly dated and ordered, is proof someone forged it: the first one found (round 3, finding
@@ -310,7 +341,7 @@ function removalsOf<E extends { id: string; type: string; author: string; when: 
     if (valid.has(key)) { duplicated.add(key); continue; }
     valid.set(key, { by: e.author, when: e.when });
   }
-  return { valid, duplicated };
+  return { valid, duplicated, ids };
 }
 
 function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, removed: Removals,
@@ -338,7 +369,8 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
         out[field] = null;
         out[`${field}Removed`] = null;
         out[`${field}Tampered`] = true;
-        reports?.push({ event: e.id as string, field, kind: 'downgraded' });
+        reports?.push({ event: e.id as string, field, kind: 'downgraded',
+          finding: findingOf(e.id as string, field, 'downgraded', '') });
         continue;
       }
       out[`${field}Removed`] = null;
@@ -363,7 +395,12 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
     out[`${field}Tampered`] = tampered;
     // `row` truthy here means it FAILED the hash check above — a row that is there but wrong, the
     // "overwritten" case; no row is either simply unaccounted for, or the double-removal forgery.
-    if (tampered) reports?.push({ event: e.id as string, field, kind: row ? 'overwritten' : duplicated ? 'double_removal' : 'unaccounted' });
+    if (tampered) {
+      const kind: TamperKind = row ? 'overwritten' : duplicated ? 'double_removal' : 'unaccounted';
+      const observed = kind === 'overwritten' ? hashText(row!.value, row!.salt)
+        : kind === 'double_removal' ? [...(removed.ids.get(key) ?? [])].sort().join(',') : '';
+      reports?.push({ event: e.id as string, field, kind, finding: findingOf(e.id as string, field, kind, observed) });
+    }
   }
   return out as unknown as E;
 }

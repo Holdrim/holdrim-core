@@ -42,12 +42,22 @@ Worth knowing before you run it:
   (SQLite only — see below) a hash stripped off a row that postdates when extraction began
   ([holdrim#91](https://github.com/Holdrim/holdrim-core/issues/91)) each log a CRITICAL
   `text_tampered` line (`reportTampered`, `engine/api/texts.ts`) the moment the server, or the CLI
-  reading the file or the cloud directly, resolves that field — every time, not once: there is no
-  acknowledgement yet to quiet it — and `holdrim list`/`sync` warn and exit non-zero on the same
-  finding. Nor does it watch on a schedule: it fires when a page, the panel or the CLI actually reads
-  the record, so one nobody ever re-reads raises nothing until somebody does. The panel's own banner
-  and an acknowledgement event for the owner to clear it — the rest of holdrim#91 — are not built yet;
-  today the alert is the log line and the CLI's exit code.
+  reading the file or the cloud directly, resolves that field — every time, not once, acknowledged or
+  not — and `holdrim list`/`sync` warn and exit non-zero on the same finding. Nor does it watch on a
+  schedule: it fires when a page, the panel or the CLI actually reads the record, so one nobody ever
+  re-reads raises nothing until somebody does. Every page the panel runs on shows a banner, with no
+  control that closes it, while any finding is open
+  ([holdrim#107](https://github.com/Holdrim/holdrim-core/issues/107)); the owner alone can
+  acknowledge one finding, which records a `tamper_acknowledged` event and takes that one line of the
+  banner down — never the log line, never the CLI's exit code, and never the text's own tampered
+  reading, which nothing repairs. A finding is its event, field and case plus what was found there (a
+  row's own salted hash, or the removals that claim it), so a new tampering of the same field is a
+  new finding and shows again; a case that has nothing more to it than its name (`unaccounted`,
+  `downgraded`), seen again after it was put right in between, is the same finding. The banner has a
+  weaker footing than the log line, said plainly: the log line comes from code a direct writer to the
+  store does not reach, while an acknowledgement is an event, and that same direct writer can insert
+  one naming the finding — the banner then goes quiet while the CRITICAL line keeps firing. Closing
+  that needs the events signed, like every other forgery this file names.
 
   What a direct writer can still make this alert miss differs by store, and neither is a new gap —
   both are the same one write access to the file or the project always had, made visible for the

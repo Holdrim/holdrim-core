@@ -12,7 +12,10 @@
 import { createRoot } from 'react-dom/client';
 import { useEffect, useState } from 'react';
 import Panel from './Panel.jsx';
-import { whoAmI, eventsOfPage, record, fingerprintOf, fingerprintsOf, impactRadiusOf, textOf } from './api.js';
+import TamperBanner from './Tamper.jsx';
+import {
+  whoAmI, eventsOfPage, record, fingerprintOf, fingerprintsOf, impactRadiusOf, textOf, tamperedFindings, acknowledgeFinding,
+} from './api.js';
 import { HOME_SCREEN } from '../../core/screens.js';
 import { blockState, trafficLightOf, foreignDependencies, summaryOf } from './state.js';
 import { t, speak } from './i18n.js';
@@ -152,6 +155,41 @@ function App({ blocks, elsewhere, who }) {
 }
 
 /**
+ * The tampered-text banner, fed by the server: which findings are open, and whether this reader may
+ * acknowledge one. After an acknowledgement it asks again rather than dropping the line itself — the
+ * server decides what is open, and a line the panel removed on its own would be a banner the panel,
+ * not the owner's recorded acknowledgement, had quieted.
+ */
+function Tampered({ first }) {
+  const [state, setState] = useState(first);
+  return (
+    <TamperBanner findings={state.findings} canAcknowledge={Boolean(state.canAcknowledge)}
+                  onAcknowledge={async (finding) => {
+                    await acknowledgeFinding(finding);
+                    setState(await tamperedFindings());
+                  }} />
+  );
+}
+
+/**
+ * Draws the banner at the top of the page — before the blocks are even looked for, so a page with
+ * none still says it. A check that could not run says so too: silence here would read as "nothing is
+ * tampered", which is the one reading a failed check cannot back.
+ */
+async function drawTampered() {
+  let first;
+  try { first = await tamperedFindings(); } catch (e) {
+    console.warn('[holdrim] tampered texts unavailable:', e);
+    return warn(t('panel.tamper.unavailable'));
+  }
+  const host = document.createElement('div');
+  host.className = 'rv-tamper-host';
+  host.setAttribute('data-review-ui', '');
+  document.body.prepend(host);
+  createRoot(host).render(<Tampered first={first} />);
+}
+
+/**
  * A link can open a block: `#A01.1.2`, which is how the project home links a request to its block.
  * Only once the events are in — a panel opened before them shows a block with no history.
  */
@@ -194,7 +232,10 @@ function unwarn(text) {
 function switchOff(reason) {
   if (reason) console.warn('[holdrim] panel switched off:', reason);
   document.body.classList.remove('rv-on');
-  document.querySelectorAll('[data-review-ui]').forEach((x) => x.remove());
+  // All but the tampered-text banner: a panel that cannot load a page's events is still a panel whose
+  // server said a text reads as tampered, and only the owner's acknowledgement takes a line of that
+  // down — never an unrelated fetch failing.
+  document.querySelectorAll('[data-review-ui]:not(.rv-tamper-host)').forEach((x) => x.remove());
 }
 
 async function start() {
@@ -205,6 +246,7 @@ async function start() {
   let who;
   try { who = await whoAmI(); } catch (e) { return switchOff(e); }
   await speak(who.language);
+  await drawTampered();
 
   const blocks = [];
   for (const el of document.querySelectorAll('main [data-id][data-code]')) {

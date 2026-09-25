@@ -156,14 +156,27 @@ who ran the engine from `main` before it.
   tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
   field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite
   only) — logs a CRITICAL `text_tampered` line from the one place every reader shares (`reportTampered`,
-  `engine/api/texts.ts`), EVERY time a read resolves it: there is no acknowledgement yet to quiet it
-  (a follow-up issue), so it repeats rather than go silent after its first sighting. `holdrim list
+  `engine/api/texts.ts`), EVERY time a read resolves it — the owner's acknowledgement, below, quiets
+  the panel's banner and never this line, so it repeats rather than go silent after its first
+  sighting. The line now carries the `finding` the acknowledgement names. `holdrim list
   --json` now carries a `tampered` key, and `holdrim list`/`sync` warn and exit non-zero when it is
   set. See SECURITY.md for what this can and cannot catch, store by store. No released version
   predates text extraction, so there is nothing to roll a pin back to yet — but once a later version
   exists, moving the pin back to one from before this alert would write fresh events with their text
   stored inline again, above where this version's own hashed rows begin, and every one of those reads
   as `downgraded` tampering the next time any version opens the same file.
+- **A banner on every page the panel runs on while a text reads as tampered, and an acknowledgement
+  for the owner.** `GET /api/tampered` answers every signed-in reader with the findings still open, as
+  ids and locale keys (`panel.tamper.<case>`), and the panel draws one line each, with no control that
+  closes it. The owner — only the owner: `admin` does not grant it, and an agent never can — sends
+  `POST /api/tampered/acknowledge` with one `finding`, and the server records a `tamper_acknowledged`
+  event on the tampered event's own page and block, built from its own read, never from the client's
+  body (`POST /events` refuses the type). A finding is the event, the field, the case and what was
+  found there, so a NEW tampering of an acknowledged field shows again. Acknowledging repairs nothing:
+  the text goes on reading as tampered, and its CRITICAL line on every read. There is no
+  `holdrim.json` toggle for the banner, on purpose: an alert the repository can switch off is one a
+  committer can hide. `EventStore.list` takes an optional second argument that collects the tampered
+  fields a read found; a store written against the interface keeps working without it.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a

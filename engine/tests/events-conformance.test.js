@@ -24,6 +24,7 @@ import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
 import { createRoles } from '../core/roles.js';
 import { hashText, newSalt, TEXT_REMOVED } from '../api/texts.ts';
+import { openFindings, acknowledgementOf } from '../api/tamper.ts';
 
 const stores = [
   { name: 'memory', open: async () => new MemoryEventStore() },
@@ -230,6 +231,42 @@ forEachStore('removing the text leaves the snapshot untouched, and the other way
   assert.equal(listed.snapshot, null);
   assert.equal(listed.snapshotRemoved.by, 'owner@example.org');
   assert.equal(listed.textRemoved, null);
+});
+
+// ===================================================================== tampered texts, as the banner reads them
+// Issue #107: every store hands the reports its read raised to a caller that asks, so the server
+// can say which findings are open with no detection of its own — and appending an acknowledgement
+// changes nothing about the text it names. A second, forged `text_removed` is the one tampering the
+// store's own API can reach in all three: `append` validates no type (`POST /events` does).
+forEachStore('a read hands its tampered fields to a caller that asks, and an acknowledgement repairs none of them', async (s) => {
+  const written = await s.append({ type: 'comment', page: 'A01', block: 'A01.1.1', text: 'a remark' }, 'r@example.org');
+  await tick();
+  await s.removeText(written.id, 'text', 'owner@example.org');
+  await tick();
+  await s.append({ type: TEXT_REMOVED, page: 'A01', block: 'A01.1.1', data: { event: written.id, field: 'text' } }, 'x@example.org');
+
+  const found = [];
+  const listed = await s.list('A01', found);
+  assert.deepEqual(found.map((r) => [r.event, r.field, r.kind]), [[written.id, 'text', 'double_removal']]);
+  assert.match(found[0].finding, /^[0-9a-f]{64}$/);
+  const [finding] = openFindings(found, listed);
+  assert.equal(finding.page, 'A01');
+
+  await tick();
+  await s.append(acknowledgementOf(finding), 'owner@example.org');
+  const again = [];
+  const after = await s.list('A01', again);
+  assert.equal(after.find((e) => e.id === written.id).textTampered, true, 'still tampered: acknowledging repairs nothing');
+  assert.deepEqual(again.map((r) => r.finding), [finding.finding], 'and still reported on every read');
+  assert.deepEqual(openFindings(again, after), [], 'only the banner is quiet');
+
+  // One more forged removal: the removals found are part of the finding, so this one is new.
+  await tick();
+  await s.append({ type: TEXT_REMOVED, page: 'A01', block: 'A01.1.1', data: { event: written.id, field: 'text' } }, 'x@example.org');
+  const third = [];
+  const open = openFindings(third, await s.list('A01', third));
+  assert.equal(open.length, 1);
+  assert.notEqual(open[0].finding, finding.finding);
 });
 
 // ===================================================================== a clock that steps back
