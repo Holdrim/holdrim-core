@@ -108,7 +108,7 @@ async function main() {
   });
 
   switch (command) {
-    case 'list':       await requests.list(root, source, { all: values.all, json: values.json }); return 0;
+    case 'list':       return (await requests.list(root, source, { all: values.all, json: values.json })) ? 1 : 0;
     case 'show':       await requests.show(root, source, requireArg(arg, 'show <id>')); return 0;
     case 'impact':     await requests.impact(root, source, requireArg(arg, 'impact <id>'), values.term ?? []); return 0;
     case 'summary':    await requests.summary(root, source); return 0;
@@ -118,7 +118,7 @@ async function main() {
                          { commit: values.commit, blocks: values.blocks }); return 0;
     case 'apply':      return agent.apply(root, source, requireArg(arg, 'apply <id>'),
                          { agent: values.agent, dryRun: values['dry-run'] });
-    case 'sync':       await validation.sync(root, source); return 0;
+    case 'sync':       return (await validation.sync(root, source)).tampered ? 1 : 0;
     case 'check':      return (await validation.check(root)) ? 1 : 0;
     case 'index':      await validation.rebuildIndex(root, values.db); return 0;
     case 'kinds':      await validation.listKinds(); return 0;

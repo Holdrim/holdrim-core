@@ -3,7 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED, type TextField } from './texts.ts';
+import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
+  type TextField, type TamperReport } from './texts.ts';
 import { log } from './log.ts';
 
 /**
@@ -423,7 +424,13 @@ export class SqliteEventStore implements EventStore {
       author: r.author!, when: r.happened_at!, data: r.data ? JSON.parse(r.data) : null,
       textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
     })), people);
-    return withTexts(events, texts);
+    // Reported here, not left to whoever reads `list`'s answer next: issue #91 wants every read that
+    // resolves a field to tampered to raise the alert, not only the one a person happens to be
+    // looking at.
+    const reports: TamperReport[] = [];
+    const out = withTexts(events, texts, reports);
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   async close(): Promise<void> { this.#db.close(); }

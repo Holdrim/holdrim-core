@@ -28,6 +28,22 @@ Worth knowing before you run it:
   People are disabled, never deleted, so every ✓ keeps the name of whoever gave it. What that
   means for personal data, and how a person is removed without breaking the trail:
   [`docs/PRIVACY.md`](docs/PRIVACY.md).
+- **A text that fails its own hash raises a CRITICAL alert — but only once something reads it.**
+  A row edited in place, a hash with no row and no valid removal, or two removals of the same field
+  ([holdrim#91](https://github.com/Holdrim/holdrim-core/issues/91)) each log a CRITICAL
+  `text_tampered` line (`reportTampered`, `engine/api/texts.ts`) the moment the server, or the CLI
+  reading the file or the cloud directly, resolves that field — and `holdrim list`/`sync` warn and
+  exit non-zero on the same finding. The comparison runs fresh from the CURRENT rows on every read, by
+  code the write access that forged the row does not reach, so that access is never, by itself, also
+  enough to make the comparison stop noticing: forging the evidence and silencing the alarm about it
+  are two different footholds, and the second is not implied by the first. What it cannot do: an
+  attacker who also drops and restores the SQLite guards, the same gap `sqlite_guard_missing` already
+  admits above, can delete an event and its texts row TOGETHER and leave nothing this check compares
+  against — an erasure, not a mismatch, and the panel already cannot tell an erased event from one
+  that was never made. Nor does it watch on a schedule: it fires when a page, the panel or the CLI
+  actually reads the record, so one nobody ever re-reads raises nothing until somebody does. The
+  panel's own banner and an acknowledgement event for the owner to clear it — the rest of
+  holdrim#91 — are not built yet; today the alert is the log line and the CLI's exit code.
 - **It serves your documentation over HTTP.** With password identity there is no edge protecting
   it: the guard is in the application. Without a session, every static page redirects to the login
   screen. That guard has a test in the HTTP contract suite, because its absence would be silent:

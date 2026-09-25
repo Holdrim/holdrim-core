@@ -3,7 +3,8 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
 import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
-import { textKey, withTexts, withTextsRetrying, TEXT_REMOVED, type RawEvent as Raw, type TextField, type TextRow } from '../api/texts.ts';
+import { textKey, withTexts, withTextsRetrying, reportTampered, TEXT_REMOVED,
+  type RawEvent as Raw, type TextField, type TextRow, type TamperReport } from '../api/texts.ts';
 
 /** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
 type RawEvent = Raw<Event>;
@@ -225,7 +226,14 @@ export class Source {
             { event: string; field: TextField; value: string; salt: string }[])
           .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt } as TextRow])
         : []);
-      return withTexts(events, texts);
+      // Read straight from the file, so this is one of the two CLI readers issue #91 names: the
+      // server, reading through the API, already raises this alert on its own; a person pointing
+      // `--db` at the file directly gets no such server in between, so this is the only place left
+      // for the alert to come from.
+      const reports: TamperReport[] = [];
+      const out = withTexts(events, texts, reports);
+      for (const r of reports) reportTampered(r);
+      return out;
     } finally {
       db.close();
     }
@@ -262,12 +270,17 @@ export class Source {
     // holding one open across a full scan of both eventually fails outright. `withTextsRetrying`
     // (engine/api/texts.ts) is the one rule both readers now share: for a field a first pass calls
     // tampered, ask once more, later, for the removal events that first pass could not have seen.
-    return withTextsRetrying(events, texts, async () => {
+    // The other CLI reader issue #91 names: reading the cloud directly, bypassing the server and
+    // therefore the alert it would otherwise have raised on this same event.
+    const reports: TamperReport[] = [];
+    const resolved = await withTextsRetrying(events, texts, async () => {
       // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
       const removed = await this.#collection(headers, 'events',
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
       return withAuthors(removed.map((d) => this.#fromFirestore(d)), people);
-    });
+    }, reports);
+    for (const r of reports) reportTampered(r);
+    return resolved;
   }
 
   /**

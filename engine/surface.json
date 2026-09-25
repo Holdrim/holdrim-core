@@ -180,6 +180,7 @@
     "requests[].textNow",
     "requests[].validated",
     "requests[].when",
+    "tampered",
     "toTriage"
   ],
   "http-routes": [

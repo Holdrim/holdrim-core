@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { readBlocks, sheetFiles } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, check } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
-import { setState, requests } from '../cli/requests.ts';
+import { setState, requests, queue, list } from '../cli/requests.ts';
 import { createRoles } from '../core/roles.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
@@ -232,7 +232,7 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
       author: 'reviewer@example.org', when: '2026-09-22T10:02:00Z', data: null },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false, tampered: false });
   const registry = loadRegistry(tmp);
   assert.ok(registry['A01.1.1'], 'the owner\'s ✓ for the current text locks');
   assert.equal(registry['A01.1.1'].date, '2026-09-22');
@@ -240,6 +240,99 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
   assert.equal(registry['A01.1.2'], undefined, 'a ✓ for an earlier text does not hold');
   assert.equal(registry['A02.1.1'], undefined, 'a reviewer\'s ✓ never locks');
   assert.match(readFileSync(join(tmp, 'pages', 'A01.html'), 'utf8'), /data-id="A01\.1\.1" data-validated="2026-09-22"/);
+});
+
+// ===================================================================== issue #91: the CLI's own alert
+// `list` and `sync` never re-derive WHICH of the three cases it was — that already went out through
+// `reportTampered`, wherever `events` was resolved — they only warn and exit non-zero once anything
+// in the read comes back tampered.
+
+test('sync warns and reports tampered when a field in the read comes back tampered', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const events = [
+    { id: 'e1', type: 'comment', page: 'A01', block: 'A01.1.1', author: 'r@example.org',
+      when: '2026-09-22T10:00:00Z', data: null, textTampered: true },
+  ];
+  const err = console.error;
+  const said = [];
+  console.error = (line) => said.push(line);
+  let r;
+  try {
+    r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
+  } finally {
+    console.error = err;
+  }
+  assert.equal(r.tampered, true);
+  assert.ok(said.some((line) => /CRITICAL/.test(line)), 'sync printed the warning, not only the flag');
+});
+
+test('sync does not warn, and reports tampered: false, when nothing comes back tampered', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const r = await sync(tmp, { events: async () => [] }, { owner: 'owner@example.org' });
+  assert.equal(r.tampered, false);
+});
+
+test('sync reports tampered: false when the cloud is unreachable, same as an ordinary offline read', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const sourceThatFails = { events: async () => { throw new Error('cloud is down'); } };
+  const r = await sync(tmp, sourceThatFails, { owner: 'who@example.org' });
+  assert.equal(r.tampered, false, 'offline, there is nothing to have read as tampered');
+});
+
+test('queue() names a tampered field with `tampered: true`, for `holdrim list --json` to carry', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const events = [
+    { id: 'e1', type: 'comment', page: 'A01', author: 'r@example.org', when: '2026-01-01T00:00:00Z',
+      data: null, snapshotTampered: true },
+  ];
+  const q = await queue(EXAMPLE, { events: async () => events }, true);
+  assert.equal(q.tampered, true);
+});
+
+test('queue() reports tampered: false when nothing in the read is tampered', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const q = await queue(EXAMPLE, { events: async () => [] }, true);
+  assert.equal(q.tampered, false);
+});
+
+test('list() prints the warning and its return says whether to exit non-zero', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const tampered = [
+    { id: 'e1', type: 'request', page: 'A01', block: 'A01.1.1', text: 'x', author: 'r@example.org',
+      when: '2026-01-01T00:00:00Z', data: { category: 'text' }, textTampered: true },
+  ];
+  const err = console.error;
+  const said = [];
+  console.error = (line) => said.push(line);
+  let exitWorthy;
+  try {
+    exitWorthy = await list(EXAMPLE, { events: async () => tampered }, {});
+  } finally {
+    console.error = err;
+  }
+  assert.equal(exitWorthy, true, 'holdrim.ts turns this into exit code 1');
+  assert.ok(said.some((line) => /CRITICAL/.test(line)));
+});
+
+test('list() prints no warning and exits clean when nothing is tampered', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const err = console.error;
+  const said = [];
+  console.error = (line) => said.push(line);
+  let exitWorthy;
+  try {
+    exitWorthy = await list(EXAMPLE, { events: async () => [] }, {});
+  } finally {
+    console.error = err;
+  }
+  assert.equal(exitWorthy, false);
+  assert.deepEqual(said, []);
 });
 
 /**

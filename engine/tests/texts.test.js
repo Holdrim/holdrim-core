@@ -12,10 +12,38 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hashText, newSalt, textKey, withTexts, withTextsRetrying, noText, TEXT_REMOVED } from '../api/texts.ts';
+import { hashText, newSalt, textKey, withTexts, withTextsRetrying, reportTampered, suspectsOf,
+  noText, TEXT_REMOVED } from '../api/texts.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
+import { MemoryEventStore } from '../api/store.ts';
 import { Source } from '../cli/remote.ts';
 import { freshFirestoreProject } from './helpers/firestore.js';
+
+// The plain `console.error` line AND the structured `log()` line `reportTampered` prints, captured
+// the way store-sqlite-guards.test.js captures `sqlite_guard_missing`: `log()` writes one JSON line
+// per call through `console.log`, which nothing else in this file calls with a JSON string, so a line
+// that parses and carries a `severity` is one of ours; anything else passes through untouched.
+function capturingReports(fn) {
+  return async (t) => {
+    const said = [];
+    const logged = [];
+    const err = console.error;
+    const info = console.log;
+    console.error = (line) => said.push(line);
+    console.log = (line) => {
+      const parsed = typeof line === 'string' ? tryParse(line) : undefined;
+      if (parsed && typeof parsed.severity === 'string') logged.push(parsed);
+      else info(line);
+    };
+    try {
+      await fn(t, said, logged);
+    } finally {
+      console.error = err;
+      console.log = info;
+    }
+  };
+}
+const tryParse = (line) => { try { return JSON.parse(line); } catch { return undefined; } };
 
 // The Source reads these before its own options; a developer's own would point these tests at
 // their real events file or account.
@@ -171,6 +199,187 @@ test('text and snapshot are resolved independently, and a list is resolved witho
 test('removeText refuses a field with no row, whether it was never given or already removed', () => {
   const err = noText('e1', 'text');
   assert.match(err.message, /no text to remove/);
+});
+
+// ===================================================================== reportTampered, issue #91
+// "Every read that resolves a field to tampered reports it once to a single place in the engine,
+// with the event id, the field, and which of the three cases it was."
+
+test('withTexts reports nothing when nothing is tampered, even with `reports` given', () => {
+  const salt = newSalt();
+  const hash = hashText('the real text', salt);
+  const reports = [];
+  withTexts([{ ...AN_EVENT, text: null, textHash: hash }],
+    new Map([[textKey('e1', 'text'), { value: 'the real text', salt }]]), reports);
+  assert.deepEqual(reports, [], 'a matching row is not tampering, and reports nothing');
+});
+
+test('withTexts reports "overwritten" for a row that is there but fails its own hash', () => {
+  const reports = [];
+  withTexts([{ ...AN_EVENT, text: null, textHash: hashText('the real text', newSalt()) }],
+    new Map([[textKey('e1', 'text'), { value: 'a forged text', salt: newSalt() }]]), reports);
+  assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'overwritten' }]);
+});
+
+test('withTexts reports "unaccounted" for a hash with no row and no removal', () => {
+  const reports = [];
+  withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', newSalt()) }], new Map(), reports);
+  assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'unaccounted' }]);
+});
+
+test('withTexts reports "double_removal" for a field two removals claim', () => {
+  const salt = newSalt();
+  const tampered = { ...AN_EVENT, text: null, textHash: hashText('gone', salt) };
+  const firstRemoval = { id: 'r1', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-02T00:00:00.000Z',
+    data: { event: 'e1', field: 'text' } };
+  const secondRemoval = { id: 'r2', type: TEXT_REMOVED, author: 'forger@example.org', when: '2026-01-03T00:00:00.000Z',
+    data: { event: 'e1', field: 'text' } };
+  const reports = [];
+  withTexts([tampered, firstRemoval, secondRemoval], new Map(), reports);
+  assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'double_removal' }]);
+});
+
+test('withTexts appends to `reports` rather than replacing it, and reports both fields when both are tampered',
+  () => {
+    const reports = [{ event: 'earlier', field: 'text', kind: 'overwritten' }];
+    withTexts([{ ...AN_EVENT, text: null, snapshot: null,
+      textHash: hashText('a', newSalt()), snapshotHash: hashText('b', newSalt()) }], new Map(), reports);
+    assert.deepEqual(reports, [
+      { event: 'earlier', field: 'text', kind: 'overwritten' },
+      { event: 'e1', field: 'text', kind: 'unaccounted' },
+      { event: 'e1', field: 'snapshot', kind: 'unaccounted' },
+    ]);
+  });
+
+test('reportTampered prints a human line AND a structured CRITICAL log line, never the text itself',
+  capturingReports(async (t, said, logged) => {
+    reportTampered({ event: 'e1', field: 'text', kind: 'overwritten' });
+    assert.equal(said.length, 1, 'exactly one human line');
+    assert.match(said[0], /CRITICAL/);
+    assert.match(said[0], /e1/);
+    assert.doesNotMatch(said[0], /the real text|a forged text/, 'never the text itself');
+    assert.equal(logged.length, 1, 'exactly one structured line');
+    // `event` stays the log's own stable NAME (never the tampered event's id, which is `eventId`) —
+    // an alert rule keyed on `event: "text_tampered"` has to keep matching no matter which event.
+    assert.deepEqual(logged[0], { severity: 'CRITICAL', event: 'text_tampered', time: logged[0].time,
+      eventId: 'e1', field: 'text', kind: 'overwritten' });
+  }));
+
+// ===================================================================== withTextsRetrying must not
+// cry wolf on a torn read it is about to correct — the false positive resolveOne's own comment warns
+// about, and the one this whole function exists to close.
+
+test('withTextsRetrying does not report a field the retry resolves as a genuine removal',
+  capturingReports(async (t, said, logged) => {
+    const salt = newSalt();
+    const tampered = { id: 'e1', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:00.000Z',
+      data: null, text: null, textHash: hashText('gone', salt) };
+    const removal = { id: 'r1', type: TEXT_REMOVED, author: 'owner@example.org', when: '2026-01-02T00:00:00.000Z',
+      data: { event: 'e1', field: 'text' } };
+    const reports = [];
+    const out = await withTextsRetrying([tampered], new Map(), async () => [removal], reports);
+    assert.equal(out[0].textTampered, false, 'the retry found the removal: this was never tampering');
+    assert.deepEqual(reports, [], 'so nothing is reported — a torn read resolved by retry is not an alert');
+    assert.deepEqual(said, [], 'and nothing is printed either');
+    assert.deepEqual(logged, []);
+  }));
+
+test('withTextsRetrying reports a field the retry could not explain either', () => {
+  const salt = newSalt();
+  const tampered = { id: 'e1', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:00.000Z',
+    data: null, text: null, textHash: hashText('gone', salt) };
+  const reports = [];
+  return withTextsRetrying([tampered], new Map(), async () => [], reports).then((out) => {
+    assert.equal(out[0].textTampered, true);
+    assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'unaccounted' }],
+      'genuinely nothing explains it, on the FINAL pass: this is the real answer, not a torn read');
+  });
+});
+
+test('withTextsRetrying never reports a tampered field that belongs to another page', () => {
+  // The same leak round 3, finding 1 already closes for the resolved EVENTS — a whole-project
+  // re-read can turn up a removal, or here a tampered field, that has nothing to do with the page
+  // this call was actually asked about.
+  const salt = newSalt();
+  const e1 = { id: 'e1', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:00.000Z',
+    data: null, text: null, textHash: hashText('gone', salt) }; // tampered, triggers the retry
+  // A second, unrelated event with its OWN tampered field, standing in for "something the
+  // whole-project re-read drags in that this caller never asked about" — outside `events`.
+  const foreign = { id: 'foreign', type: 'comment', author: 'r@example.org', when: '2026-01-01T00:00:01.000Z',
+    data: null, text: null, textHash: hashText('gone', newSalt()) };
+  const reports = [];
+  return withTextsRetrying([e1], new Map(), async () => [foreign], reports).then((out) => {
+    assert.deepEqual(out.map((e) => e.id), ['e1'], 'only the caller\'s own event comes back');
+    assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'unaccounted' }],
+      'the foreign event\'s own tampering is never this caller\'s to report');
+  });
+});
+
+// ===================================================================== the store reports too
+// One real call site each, on top of `withTexts`/`withTextsRetrying`'s own unit tests above: proof
+// that `list()` actually wires `reports` through to `reportTampered`, not only that the pure
+// functions could.
+
+test('[memory] list() raises the alert for a field it reads as tampered',
+  capturingReports(async (t, said, logged) => {
+    const store = new MemoryEventStore();
+    const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
+    await store.removeText(kept.id, 'text', 'owner@example.org');
+    // A duplicate, forged removal — `removeText` itself can never produce a second one — is the one
+    // case reachable through this store's own public surface without private-field surgery.
+    const forged = { type: TEXT_REMOVED, page: 'A01', data: { event: kept.id, field: 'text' } };
+    await store.append(forged, 'forger@example.org');
+    await store.list(null);
+    assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(kept.id)),
+      'list() printed the alert for the field the forged removal made tampered');
+    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.event === 'text_tampered' && l.eventId === kept.id
+      && l.field === 'text' && l.kind === 'double_removal'));
+  }));
+
+test('[sqlite] list() raises the alert for a row edited straight in the database', capturingReports(
+  async (t, said, logged) => {
+    const dir = mkdtempSync(join(tmpdir(), 'holdrim-tamper-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const path = join(dir, 'events.db');
+    const store = new SqliteEventStore(path);
+    const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+    await store.close();
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(path);
+    db.exec(`DROP TRIGGER IF EXISTS texts_no_update`);
+    db.prepare("UPDATE texts SET value = 'forged' WHERE event = ?").run(written.id);
+    db.close();
+    const reopened = new SqliteEventStore(path);
+    await reopened.list(null);
+    await reopened.close();
+    assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(written.id)));
+    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.event === 'text_tampered'
+      && l.eventId === written.id && l.field === 'text' && l.kind === 'overwritten'));
+  }));
+
+test('[sqlite] the CLI\'s own direct reader of the events file raises the alert too', capturingReports(
+  async (t, said, logged) => {
+    const dir = mkdtempSync(join(tmpdir(), 'holdrim-tamper-file-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const path = join(dir, 'events.db');
+    const store = new SqliteEventStore(path);
+    const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+    await store.close();
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(path);
+    db.exec(`DROP TRIGGER IF EXISTS texts_no_update`);
+    db.prepare("UPDATE texts SET value = 'forged' WHERE event = ?").run(written.id);
+    db.close();
+    // The CLI's `--db` reader (Source#fromFile), not the server: this is the one path issue #91
+    // means by "the events file" among the CLI's two direct readers.
+    await new Source({ db: path }).events();
+    assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(written.id)));
+    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.kind === 'overwritten'));
+  }));
+
+test('suspectsOf, exported for the CLI\'s own list/sync, reads the same pairs on a final resolved list', () => {
+  const out = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', newSalt()) }], new Map());
+  assert.deepEqual(suspectsOf(out), [{ event: 'e1', field: 'text' }]);
 });
 
 // ===================================================================== withTextsRetrying's own contract
