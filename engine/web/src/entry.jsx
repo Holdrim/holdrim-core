@@ -16,6 +16,7 @@ import { whoAmI, eventsOfPage, record, fingerprintOf, fingerprintsOf, textOf } f
 import { HOME_SCREEN } from '../../core/screens.js';
 import { blockState, trafficLightOf, foreignDependencies, summaryOf } from './state.js';
 import { t, speak } from './i18n.js';
+import { renderDiagrams } from './diagrams.js';
 
 const page = (document.querySelector('.doc-title__code')?.textContent ?? '').trim();
 
@@ -216,6 +217,7 @@ async function start() {
   where.setAttribute('data-review-ui', '');
   document.body.appendChild(where);
   createRoot(where).render(<App blocks={blocks} elsewhere={elsewhere} who={who} />);
+  await renderDiagrams(blocks);
 }
 
 start().catch((e) => switchOff(e));
