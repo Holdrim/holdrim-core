@@ -100,6 +100,21 @@ export class UsersFirestore extends UserStoreBase {
     await batch.commit();
   }
 
+  protected async deleteSessionsForEmail(email: string): Promise<void> {
+    // Looped rather than one batch of 400 like the expiry purge above: that one is called again on
+    // its own schedule and can afford to leave the rest for next time, but this one guards a
+    // disable or a password reset — every session for the account has to be gone before the caller
+    // moves on, not "most of them, eventually".
+    for (;;) {
+      const page = await this.#db.collection('sessions')
+        .where('email', '==', email).limit(400).get();
+      if (page.empty) return;
+      const batch = this.#db.batch();
+      for (const doc of page.docs) batch.delete(doc.ref);
+      await batch.commit();
+    }
+  }
+
   async close(): Promise<void> {
     await this.#db.terminate();
   }

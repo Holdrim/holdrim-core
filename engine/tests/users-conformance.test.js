@@ -346,6 +346,34 @@ forEachStore('disabling closes the door on a session that is already open', asyn
     'a revoked access has to mean the next request, or it means nothing');
 });
 
+forEachStore('disabling DELETES the session, not just refuses it while the flag is off', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = await s.openSession('x@example.org');
+  assert.equal((await s.fromSession(id)).email, 'x@example.org');
+
+  await s.setEnabled('x@example.org', false);
+  await s.setEnabled('x@example.org', true);
+  // This is issue #113: a cookie stolen before the disable must not come back to life the moment
+  // the account is restored. If the row survived the disable, re-enabling would make it valid
+  // again, because `fromSession` was the ONLY thing refusing it — the flag it checked is now back
+  // to `true`. The row has to be gone, not merely irrelevant for a while.
+  assert.equal(await s.fromSession(id), null,
+    're-enabling the account must not resurrect a session opened before the disable');
+});
+
+forEachStore('a password reset alone drops every open session for the account', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = await s.openSession('x@example.org');
+  assert.equal((await s.fromSession(id)).email, 'x@example.org');
+
+  // Nobody was disabled here — only the password changed. A cookie taken before the reset is
+  // exactly as exposed as the credential the reset was meant to invalidate, so it has to die with
+  // it, not go on working off a stolen password that no longer means anything.
+  await s.resetPassword('x@example.org');
+  assert.equal(await s.fromSession(id), null,
+    'a reset must drop existing sessions, not just replace the credential they were opened with');
+});
+
 forEachStore('an access given back works again, with the same password', async (s) => {
   await s.create('back@example.org', 'Back', 'a-long-enough-password');
   await s.setEnabled('back@example.org', false);

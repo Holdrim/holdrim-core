@@ -225,6 +225,12 @@ export abstract class UserStoreBase implements UserStore {
   protected abstract readSession(id: string): Promise<StoredSession | null>;
   protected abstract deleteSession(id: string): Promise<void>;
   protected abstract deleteSessionsExpiredBefore(instant: string): Promise<void>;
+  /**
+   * Every session open under this e-mail, gone. See `setEnabled` and `resetPassword` for why this
+   * exists as its own primitive rather than a loop of `deleteSession` calls at the call site: three
+   * databases with three ways to "delete where email = X" is still one rule, decided once, here.
+   */
+  protected abstract deleteSessionsForEmail(email: string): Promise<void>;
 
   abstract close(): Promise<void>;
 
@@ -308,7 +314,14 @@ export abstract class UserStoreBase implements UserStore {
     const chosen = this.#generatePassword();
     const salt = randomBytes(SALT_LENGTH);
     const hash = await this.#hash(chosen, salt);
-    await this.writeCredential(normalizeEmail(email), salt, hash, true);
+    const normalized = normalizeEmail(email);
+    await this.writeCredential(normalized, salt, hash, true);
+    // A reset means somebody OTHER than the account's owner has just seen a credential that used to
+    // be secret. A session opened under the OLD one is exactly as exposed as that password is — it
+    // was handed out over the same "somebody stole it" premise that made the reset worth doing — so
+    // it is dropped here, not left to ride out its remaining hours on the strength of a password
+    // that no longer means anything.
+    await this.deleteSessionsForEmail(normalized);
     return chosen;
   }
 
@@ -328,7 +341,19 @@ export abstract class UserStoreBase implements UserStore {
   }
 
   async setEnabled(email: string, enabled: boolean): Promise<void> {
-    await this.writeEnabled(normalizeEmail(email), enabled);
+    const normalized = normalizeEmail(email);
+    await this.writeEnabled(normalized, enabled);
+    // Only on the way OUT. Re-enabling opens no session by itself — the person has to sign in again
+    // — so there is nothing to drop, and dropping here would do nothing but cost a query on the
+    // path that gives access back.
+    //
+    // ⚠️ This is what turns "disabling drops the open session" from true for twelve hours into true
+    // for good. A stolen cookie is 401 the moment it is disabled either way — `fromSession` refuses
+    // it below — but that alone means "dead while disabled". Without THIS delete, the day the
+    // account is re-enabled the row is still there with a still-valid expiry, and the same stolen
+    // cookie is 200 again for whatever is left of its twelve hours: exactly the story issue #113
+    // reproduced, where disable → reset → re-enable ends with the thief still in.
+    if (!enabled) await this.deleteSessionsForEmail(normalized);
   }
 
   async rename(email: string, name: string): Promise<void> {
@@ -368,13 +393,16 @@ export abstract class UserStoreBase implements UserStore {
     // "now". A session that is dead in SQLite and alive in Postgres is not one product.
     if (!session || session.expiresAt < new Date().toISOString()) return null;
     const person = await this.find(session.email);
-    // ⚠️ Checked on EVERY request, not only at login. Without this, disabling someone would take
-    // effect whenever their cookie happened to expire — up to twelve hours of a person who has
-    // just been removed still reading, still commenting, still approving. "Their access was
-    // revoked" has to mean the next request, or it does not mean anything.
-    //
-    // The session row is deliberately left where it is: it expires on its own, and deleting it
-    // here would turn a read into a write on the hot path of every page load.
+    // ⚠️ Checked on EVERY request, not only at login — DEFENCE IN DEPTH, not the only guard any
+    // more. `setEnabled(false)` and `resetPassword` delete every session for the account (see
+    // both, in this file), so the row this call just read should not exist at all once somebody has
+    // been disabled or reset. This check is what still catches it when that deletion did not
+    // happen: a store whose `deleteSessionsForEmail` silently no-ops, a future write path that
+    // flips `enabled` without going through `setEnabled`, or the narrow window between a login's
+    // `check()` passing and its `openSession()` landing, racing a concurrent disable. Deleting the
+    // row was added because relying on THIS alone let a stolen cookie come back to life on
+    // re-enable — the row survived the disable, still valid, waiting — so the two now do different
+    // jobs: the delete makes "disabled" permanent, this makes a missed delete non-fatal.
     if (!person?.enabled) return null;
     return person;
   }
