@@ -180,6 +180,7 @@
   "people.state.disabled": "Retirado",
   "people.state.mustChange": "Ativo · precisa escolher uma senha",
   "people.title": "Pessoas",
+  "people.warn.sessionsNotDropped": "Não foi possível confirmar que as sessões antigas de {email} foram encerradas; elas podem continuar ativas. Tente de novo.",
   "site.notFound": "não encontrado",
   "site.pathOutside": "caminho fora do site"
 }

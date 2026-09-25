@@ -185,6 +185,7 @@
   "people.state.disabled": "Retirado",
   "people.state.mustChange": "Activo · debe elegir una contraseña",
   "people.title": "Personas",
+  "people.warn.sessionsNotDropped": "No se pudo confirmar que las sesiones anteriores de {email} se cerraran; puede que sigan activas. Inténtelo de nuevo.",
   "site.notFound": "no encontrado",
   "site.pathOutside": "esa ruta está fuera del sitio"
 }

@@ -469,39 +469,29 @@ forEachStore('a reset still changes the password when dropping sessions fails, a
   const first = await s.create('x@example.org', 'X', 'a-long-enough-password');
   s.deleteSessionsForEmail = async () => { throw new Error('boom'); };
 
-  const originalError = console.error;
-  const logged = [];
-  console.error = (...args) => logged.push(args.join(' '));
-  try {
-    const reset = await s.resetPassword('x@example.org');
-    // The write happens BEFORE the delete that just failed. A caller that let the failure through
-    // would answer 500 with no `user_password_reset` line ever written — the credential change
-    // happened regardless, and the one record of it would not exist.
-    assert.ok(reset, 'the credential change must go through even though the cleanup after it failed');
-    assert.equal(await s.check('x@example.org', first), null, 'the old password really did stop working');
-    assert.ok(logged.some((line) => line.includes('x@example.org')),
-      'a delete that fails silently leaves sessions alive with nothing in any log to show it');
-  } finally {
-    console.error = originalError;
-  }
+  const reset = await s.resetPassword('x@example.org');
+  // The write happens BEFORE the delete that just failed. A caller that let the failure through
+  // would answer 500 with no `user_password_reset` line ever written — the credential change
+  // happened regardless, and the one record of it would not exist.
+  assert.ok(reset.password, 'the credential change must go through even though the cleanup after it failed');
+  assert.equal(await s.check('x@example.org', first), null, 'the old password really did stop working');
+  // The store no longer decides how this is said out loud — it used to be a `console.error` with
+  // the e-mail in it, which was itself the bug (docs/PRIVACY.md: a log names a person by id, never
+  // an address). It only has to say, truthfully, that the drop did not happen — the route above
+  // turns that into the `ERROR` log line and the `sessionsDropped: false` the caller sees.
+  assert.equal(reset.sessionsDropped, false,
+    'a delete that fails has to say so, not report a success it did not have');
 });
 
 forEachStore('disabling still takes effect when dropping sessions fails, and says so loudly', async (s) => {
   await s.create('x@example.org', 'X', 'a-long-enough-password');
   s.deleteSessionsForEmail = async () => { throw new Error('boom'); };
 
-  const originalError = console.error;
-  const logged = [];
-  console.error = (...args) => logged.push(args.join(' '));
-  try {
-    await s.setEnabled('x@example.org', false);
-    assert.equal(await s.check('x@example.org', 'a-long-enough-password'), null,
-      'the account really is disabled even though the cleanup after it failed');
-    assert.ok(logged.some((line) => line.includes('x@example.org')),
-      'a delete that fails silently leaves the disable with nothing in any log to show it');
-  } finally {
-    console.error = originalError;
-  }
+  const result = await s.setEnabled('x@example.org', false);
+  assert.equal(await s.check('x@example.org', 'a-long-enough-password'), null,
+    'the account really is disabled even though the cleanup after it failed');
+  assert.equal(result.sessionsDropped, false,
+    'a delete that fails has to say so, not report a success it did not have');
 });
 
 forEachStore('an access given back works again, with the same password', async (s) => {
@@ -537,10 +527,11 @@ forEachStore('a reset hands over a new password and demands it be changed', asyn
   const first = await s.create('x@example.org', 'X', 'chosen-by-the-person', false);
   assert.equal((await s.check('x@example.org', first)).mustChangePassword, false);
 
-  const reset = await s.resetPassword('X@Example.ORG');
+  const { password: reset, sessionsDropped } = await s.resetPassword('X@Example.ORG');
   assert.notEqual(reset, first, 'a reset that handed back the same secret would reset nothing');
   assert.ok(reset.length >= 12, 'a password nobody chose still has to be hard');
   assert.equal(await s.check('x@example.org', first), null, 'the old password has to stop working');
+  assert.equal(sessionsDropped, true, 'nothing failed here, so the drop has to say it worked');
 
   // ⚠️ The change is demanded because somebody OTHER than the owner of the account has seen this
   // password — whoever ran the reset, and whatever channel carried it over.

@@ -963,4 +963,71 @@ HOLDRIM_EVENTS=firestore HOLDRIM_PROJECT=some-project HOLDRIM_OWNER=$OWNER HOLDR
 expect "it refuses to start → exits 1"  1 "$?"
 expect "and names the missing package"   0 "$(grep -q 'HOLDRIM_EVENTS=firestore needs the optional package @google-cloud/firestore' $WORK/no-firestore.log; echo $?)"
 
+# ------------------------------------------------------------------ when the session drop itself fails
+echo "when the delete behind a reset or a disable fails, not silently:"
+# A real failure of \`deleteSessionsForEmail\`, staged from OUTSIDE the store: a trigger on the
+# \`sessions\` table that raises for one specific address, added to the file BEFORE the server ever
+# opens it — so there is only ever one writer touching it, and nothing here races the server that is
+# about to run. The schema comes from opening it through UsersSqlite itself, not a copy of its SQL,
+# so this stays true if a column or an index there ever changes.
+BROKEN=broken@example.org
+FAIL_DIR=$(mktemp -d)
+# The owner's row is seeded here too, with a KNOWN password: `firstAccess` only runs while the
+# store is still EMPTY, and by the time the server opens this file it already holds Broken's row —
+# it would never mint the owner's account or print one to read back out of the log.
+node --input-type=module -e "
+import { UsersSqlite } from './engine/api/users-sqlite.ts';
+import { DatabaseSync } from 'node:sqlite';
+const path = process.argv[1] + '/users.db';
+const store = new UsersSqlite(path);
+await store.create(process.argv[2], 'Owner', process.argv[4], false);
+await store.create(process.argv[3], 'Broken', 'a-long-enough-password');
+await store.close();
+const db = new DatabaseSync(path);
+// A SQL string literal, single-quoted — NOT JSON.stringify's double quotes, which SQLite reads as
+// an unresolved COLUMN name and refuses on every delete, not only this one address's.
+const literal = \"'\" + process.argv[3].replace(/'/g, \"''\") + \"'\";
+db.exec('CREATE TRIGGER break_drop BEFORE DELETE ON sessions WHEN OLD.email = ' + literal
+  + ' BEGIN SELECT RAISE(ABORT, \\'boom\\'); END;');
+db.close();
+" "$FAIL_DIR" "$OWNER" "$BROKEN" "a-long-enough-password"
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_USERS_PATH=$FAIL_DIR/users.db HOLDRIM_EVENTS_PATH=$FAIL_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/fail-drop.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+FAIL_COOKIES=$WORK/cookies-fail-owner.txt
+curl -s -c $FAIL_COOKIES -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OWNER\",\"password\":\"a-long-enough-password\"}" $B/api/sign-in >/dev/null
+as_fail_owner() { curl -s -b $FAIL_COOKIES -H 'Content-Type: application/json' "$@"; }
+# The account needs an open session for a failed drop to mean anything — a row with nothing to
+# delete would pass every check below whether or not the trigger even ran.
+BROKEN_COOKIES=$WORK/cookies-broken.txt
+curl -s -c $BROKEN_COOKIES -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$BROKEN\",\"password\":\"a-long-enough-password\"}" $B/api/sign-in >/dev/null
+
+DISABLE=$(as_fail_owner -w '\n%{http_code}' -d '{"enabled":false}' $B/api/users/$BROKEN/enabled)
+DISABLE_CODE=$(echo "$DISABLE" | tail -1); DISABLE=$(echo "$DISABLE" | sed '$d')
+expect "disabling still takes effect → 200, not 500" 200 "$DISABLE_CODE"
+expect "and the answer says the drop failed"       false "$(echo "$DISABLE" | jfield sessionsDropped)"
+expect "the account really is disabled regardless" 401 \
+  "$(curl -s -b $BROKEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
+
+RESET=$(as_fail_owner -w '\n%{http_code}' -X POST $B/api/users/$BROKEN/password)
+RESET_CODE=$(echo "$RESET" | tail -1); RESET=$(echo "$RESET" | sed '$d')
+expect "a reset still hands back the new password → 200, not 500" 200 "$RESET_CODE"
+expect "and the answer says its own drop failed too" false "$(echo "$RESET" | jfield sessionsDropped)"
+expect "the credential still changed"          0 "$([ -n "$(echo "$RESET" | jfield password)" ] && echo 0 || echo 1)"
+
+# Both failures have to reach the log — silently is the exact bug this closes — and neither may
+# name the account by e-mail: docs/PRIVACY.md says a log names a person by id, and this is the one
+# line that used to carry the address instead, read straight out of \`console.error\` inside the
+# store. \`grep -c\` and not \`has\`: a MISSING line is as much a bug here as a line with the e-mail
+# in it, and the count catches both while \`has\` alone would only catch the second.
+expect "both are reported at ERROR severity, not swallowed" 2 \
+  "$(grep -c '\"event\":\"user_sessions_not_dropped\".*\"severity\":\"ERROR\"\|\"severity\":\"ERROR\".*\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log)"
+expect "and neither line carries the e-mail"     0 \
+  "$(grep '\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log | grep -Fc -e "$BROKEN")"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+rm -rf "$FAIL_DIR"
+
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

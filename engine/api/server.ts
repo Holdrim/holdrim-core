@@ -675,10 +675,18 @@ async function userRoutes(
     if (roles.isOwner(target) && target !== email) {
       return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
     }
-    const password = await users.resetPassword(target);
+    const { password, sessionsDropped } = await users.resetPassword(target);
     // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
     log('INFO', 'user_password_reset', await actedOn(target, email));
-    json(res, 200, { user: await users.find(target), password });
+    // ⚠️ The credential change is real either way — `password` is returned regardless — but a
+    // failed drop means the OLD sessions may still be alive, which is exactly the gap a reset
+    // exists to close. `idForLog`, never `target`: docs/PRIVACY.md says a log names a person by id,
+    // and this is the one line that used to carry the e-mail instead, from inside the store that
+    // had no id to reach for.
+    if (!sessionsDropped) {
+      log('ERROR', 'user_sessions_not_dropped', { person: await idForLog(target), reason: 'password reset' });
+    }
+    json(res, 200, { user: await users.find(target), password, ...(sessionsDropped ? {} : { sessionsDropped }) });
     return true;
   }
 
@@ -709,9 +717,15 @@ async function userRoutes(
       json(res, 409, { error: say('api.users.ownerCannotBeDisabled', { email: target }) });
       return true;
     }
-    await users.setEnabled(target, body.enabled);
+    const { sessionsDropped } = await users.setEnabled(target, body.enabled);
     log('INFO', 'user_enabled_changed', { ...await actedOn(target, email), enabled: body.enabled });
-    json(res, 200, { user: await users.find(target) });
+    // Same reasoning as the reset route just above: the disable itself already took, but a failed
+    // drop leaves the old sessions possibly alive, and that has to reach both the log — by id, not
+    // by the e-mail the store no longer has anywhere to put — and the person who asked.
+    if (!sessionsDropped) {
+      log('ERROR', 'user_sessions_not_dropped', { person: await idForLog(target), reason: 'disabling the account' });
+    }
+    json(res, 200, { user: await users.find(target), ...(sessionsDropped ? {} : { sessionsDropped }) });
     return true;
   }
 

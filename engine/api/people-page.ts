@@ -35,7 +35,7 @@ export const PEOPLE_KEYS = [
   'people.state.mustChange', 'people.state.disabled', 'people.create.heading', 'people.create.submit',
   'people.reset', 'people.disable', 'people.enable', 'people.confirm.reset', 'people.confirm.disable',
   'people.onceNew',
-  'people.once', 'people.noAnswer', 'nav.home', 'nav.people',
+  'people.once', 'people.noAnswer', 'people.warn.sessionsNotDropped', 'nav.home', 'nav.people',
 ] as const;
 
 /**
@@ -95,7 +95,7 @@ export function renderPeoplePage(
   // Everything the script says, handed over as data. `<` is escaped so a translation containing
   // `</script>` cannot close the tag it lives in — the same guard the sign-in page uses.
   const texts = Object.fromEntries(['people.confirm.reset', 'people.confirm.disable', 'people.once', 'people.onceNew',
-    'people.noAnswer'].map((k) => [k, i18n.t(lang, k)]));
+    'people.noAnswer', 'people.warn.sessionsNotDropped'].map((k) => [k, i18n.t(lang, k)]));
 
   return `<!doctype html>
 <html lang="${forHtml(lang)}">
@@ -189,11 +189,18 @@ ${rows}
     if (action === 'reset') {
       if (!confirm(say('people.confirm.reset', { email }))) return;
       const data = await post(path + '/password', {});
-      if (data) data.password ? showOnce(email, data.password) : fail(say('people.noAnswer'));
+      if (!data) return;
+      data.password ? showOnce(email, data.password) : fail(say('people.noAnswer'));
+      // The credential change went through regardless — \`data.password\` above already said so.
+      // This is a SEPARATE warning: the old sessions might still be alive, which \`alert\` states
+      // plainly rather than folding into the "once" box that is about the new password, not this.
+      if (data.sessionsDropped === false) alert(say('people.warn.sessionsNotDropped', { email }));
     } else {
       if (action === 'disable' && !confirm(say('people.confirm.disable', { email }))) return;
       const data = await post(path + '/enabled', { enabled: action === 'enable' });
-      if (data) location.reload();
+      if (!data) return;
+      if (data.sessionsDropped === false) alert(say('people.warn.sessionsNotDropped', { email }));
+      location.reload();
     }
   });
 

@@ -128,8 +128,13 @@ export interface UserStore {
   /**
    * Generates a new password, stores it and returns it to be shown ONCE. Demands a change, because
    * somebody other than its owner has seen it.
+   *
+   * `sessionsDropped` is `false` when the credential change went through but the delete of the
+   * account's old sessions failed — the caller decides what to do with that (log it, tell whoever
+   * asked), because this class knows neither a request nor a language. The password is returned
+   * regardless: the credential already changed, and withholding it would not undo that.
    */
-  resetPassword(email: string): Promise<string>;
+  resetPassword(email: string): Promise<{ password: string; sessionsDropped: boolean }>;
   find(email: string): Promise<User | null>;
   /**
    * Everyone, ordered by e-mail, disabled people included.
@@ -142,8 +147,14 @@ export interface UserStore {
    * to an HTTP response.
    */
   list(): Promise<User[]>;
-  /** Takes the access away, or gives it back. Never deletes: see the note on `User.enabled`. */
-  setEnabled(email: string, enabled: boolean): Promise<void>;
+  /**
+   * Takes the access away, or gives it back. Never deletes: see the note on `User.enabled`.
+   *
+   * `sessionsDropped` is `false` only when the flag flipped but the delete of the account's old
+   * sessions — the one that runs on the way OUT — failed. Giving the access back never attempts a
+   * delete, so it is always `true` there: nothing failed because nothing needed to happen.
+   */
+  setEnabled(email: string, enabled: boolean): Promise<{ sessionsDropped: boolean }>;
   /** Changes the display name. The e-mail is the identity and does not change. */
   rename(email: string, name: string): Promise<void>;
   /** True when nobody has been created yet: the first-access condition. */
@@ -310,7 +321,7 @@ export abstract class UserStoreBase implements UserStore {
    * the credential of a person whose ✓ is evidence in the record. Forcing the change makes that
    * window as short as one login.
    */
-  async resetPassword(email: string): Promise<string> {
+  async resetPassword(email: string): Promise<{ password: string; sessionsDropped: boolean }> {
     const chosen = this.#generatePassword();
     const salt = randomBytes(SALT_LENGTH);
     const hash = await this.#hash(chosen, salt);
@@ -321,8 +332,8 @@ export abstract class UserStoreBase implements UserStore {
     // was handed out over the same "somebody stole it" premise that made the reset worth doing — so
     // it is dropped here, not left to ride out its remaining hours on the strength of a password
     // that no longer means anything.
-    await this.#dropSessionsQuietly(normalized, 'a password reset');
-    return chosen;
+    const sessionsDropped = await this.#dropSessions(normalized);
+    return { password: chosen, sessionsDropped };
   }
 
   /**
@@ -340,12 +351,12 @@ export abstract class UserStoreBase implements UserStore {
     return (await this.readAllUsers()).map(profileOf);
   }
 
-  async setEnabled(email: string, enabled: boolean): Promise<void> {
+  async setEnabled(email: string, enabled: boolean): Promise<{ sessionsDropped: boolean }> {
     const normalized = normalizeEmail(email);
     await this.writeEnabled(normalized, enabled);
     // Only on the way OUT. Re-enabling opens no session by itself — the person has to sign in again
     // — so there is nothing to drop, and dropping here would do nothing but cost a query on the
-    // path that gives access back.
+    // path that gives access back. `true`: vacuously, nothing failed, because nothing ran.
     //
     // ⚠️ This is what turns "disabling drops the open session" from true for twelve hours into true
     // for good. A stolen cookie is 401 the moment it is disabled either way — `fromSession` refuses
@@ -353,11 +364,12 @@ export abstract class UserStoreBase implements UserStore {
     // account is re-enabled the row is still there with a still-valid expiry, and the same stolen
     // cookie is 200 again for whatever is left of its twelve hours: exactly the story issue #113
     // reproduced, where disable → reset → re-enable ends with the thief still in.
-    if (!enabled) await this.#dropSessionsQuietly(normalized, 'disabling the account');
+    if (!enabled) return { sessionsDropped: await this.#dropSessions(normalized) };
+    return { sessionsDropped: true };
   }
 
   /**
-   * Deletes every session for an e-mail, but never lets that failure reach the caller.
+   * Deletes every session for an e-mail, and says whether it worked — never by throwing.
    *
    * ⚠️ By the time this runs, `writeCredential` or `writeEnabled` has ALREADY committed — the
    * access change is real, whatever happens next. Letting a failed delete here reject the whole
@@ -370,17 +382,19 @@ export abstract class UserStoreBase implements UserStore {
    *
    * The failure is not allowed to vanish either: it means some number of that account's sessions
    * may still be alive, silently, which is a real gap in exactly the guarantee issue #113 exists
-   * for. `console.error` and not the request's own structured `log()`: this class knows no request,
-   * no actor and no i18n — the route above it holds all three, and `console.error` is the one
-   * channel reachable from here that every deployment already collects.
+   * for. It used to be `console.error` with the e-mail in the message — this class knows no
+   * request, no actor and no i18n, so it had no other channel to reach. That put the one thing
+   * docs/PRIVACY.md says a log must never carry (the address, where an id belongs) into the log,
+   * and told nobody who asked that anything had gone wrong. Both are fixed the same way: the
+   * failure is handed back as a plain boolean, so the route above — which HAS the request, the
+   * person's id and the JSON answer the caller reads — can log it and report it instead.
    */
-  async #dropSessionsQuietly(email: string, because: string): Promise<void> {
+  async #dropSessions(email: string): Promise<boolean> {
     try {
       await this.deleteSessionsForEmail(email);
-    } catch (error) {
-      console.error(
-        `holdrim: could not drop sessions for ${email} after ${because} — some may still be alive: `
-        + (error instanceof Error ? error.message : String(error)));
+      return true;
+    } catch {
+      return false;
     }
   }
 
