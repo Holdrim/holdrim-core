@@ -102,21 +102,47 @@ export class UsersFirestore extends UserStoreBase {
     while (await this.#deleteSessionPage('email', '==', email));
   }
 
+  protected async deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void> {
+    // Looped for the same reason as `deleteSessionsForEmail` above: every OTHER session has to be
+    // gone, not "most of them, eventually" (issue #115, the same gap #113 named for a disable or a
+    // reset). The kept id is excluded IN THIS FILE, after the query, rather than as a second `where`
+    // clause: Firestore's document id lives at `__name__`, and a query combining an equality filter
+    // on `email` with an inequality on `__name__` would need a composite index this project does not
+    // otherwise require, to exclude exactly one document a plain filter in JavaScript excludes for
+    // free.
+    while (await this.#deleteSessionPage('email', '==', email, keepSessionId));
+  }
+
   /**
-   * Deletes one page of at most 400 sessions matching a single-field query, and reports whether
-   * the page was FULL — meaning the 400 limit decided where it stopped, not the data running out,
-   * so the caller cannot yet tell this was the last one and has to ask again.
+   * Deletes one page of at most 400 sessions matching a single-field query — skipping `excludeId`
+   * when it is one of them — and reports whether the page was FULL — meaning the 400 limit decided
+   * where it stopped, not the data running out, so the caller cannot yet tell this was the last one
+   * and has to ask again.
+   *
+   * ⚠️ "Full" is judged by how many documents the QUERY returned, not by how many this call deleted:
+   * with `excludeId` set, a page can return 400 matches and delete only 399 of them, and the loop
+   * above still has to run again for whatever is past this page — reading the deleted count instead
+   * would stop one page early and leave a session alive that was never meant to survive. The
+   * excluded document itself never keeps the loop going by itself: once it is the only match left,
+   * the query returns exactly one document, and one is never 400.
    *
    * 400 and not Firestore's own ceiling of 500 writes per batch: it leaves room in a batch for
    * whatever else Firestore or a client library adds around a commit, rather than sitting exactly
    * on the edge of a limit that is not this file's to spend in full.
    */
-  async #deleteSessionPage(field: string, op: WhereFilterOp, value: unknown): Promise<boolean> {
+  async #deleteSessionPage(field: string, op: WhereFilterOp, value: unknown, excludeId?: string): Promise<boolean> {
     const page = await this.#db.collection('sessions').where(field, op, value).limit(400).get();
     if (page.empty) return false;
     const batch = this.#db.batch();
-    for (const doc of page.docs) batch.delete(doc.ref);
-    await batch.commit();
+    let queued = 0;
+    for (const doc of page.docs) {
+      if (doc.id === excludeId) continue;
+      batch.delete(doc.ref);
+      queued++;
+    }
+    // A batch with nothing in it is a Firestore round trip for no reason — the whole page was the
+    // one document being kept.
+    if (queued > 0) await batch.commit();
     return page.size === 400;
   }
 

@@ -106,6 +106,13 @@ export class UsersSqlite extends UserStoreBase {
     this.#db.prepare('DELETE FROM sessions WHERE email = ?').run(email);
   }
 
+  protected async deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void> {
+    // One statement: the caller's own row is excluded by the WHERE clause itself, so there is no
+    // moment where it is gone and not yet back (users.ts's comment on the abstract method says why
+    // that matters).
+    this.#db.prepare('DELETE FROM sessions WHERE email = ? AND id != ?').run(email, keepSessionId);
+  }
+
   async close(): Promise<void> {
     this.#db.close();
   }

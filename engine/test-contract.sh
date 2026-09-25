@@ -949,12 +949,35 @@ expect "an engine file runs nothing"   0 "$(curl -s -b $COOKIES -D- -o /dev/null
 expect "and /sign-in no longer has anything to do" 302 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' $B/sign-in)"
 # A current password that is not a string would reach `.normalize()` and answer 500; it is a wrong one.
 expect "a current password that is a number → 403, like any wrong one" 403 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"current":1,"next":"a-long-enough-password"}' $B/api/change-password)"
-expect "changing the password → 200"   200 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"current\":\"$PASSWORD\",\"next\":\"a-long-enough-password\"}" $B/api/change-password)"
+
+# Issue #115: a second session for the SAME owner, opened with the CURRENT password — the cookie a
+# stolen credential or a second signed-in tab would be — captured BEFORE the change, so a 401 on it
+# afterwards means the change dropped it, not that it never existed to begin with.
+SECOND_COOKIES=$WORK/cookies-owner-second.txt
+curl -s -c $SECOND_COOKIES -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OWNER\",\"password\":\"$PASSWORD\"}" $B/api/sign-in >/dev/null
+expect "that second session is live before the change → 200" 200 \
+  "$(curl -s -b $SECOND_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
+
+CHANGE=$(curl -s -b $COOKIES -w '\n%{http_code}' -H 'Content-Type: application/json' -d "{\"current\":\"$PASSWORD\",\"next\":\"a-long-enough-password\"}" $B/api/change-password)
+CHANGE_CODE=$(echo "$CHANGE" | tail -1); CHANGE=$(echo "$CHANGE" | sed '$d')
+expect "changing the password → 200"   200 "$CHANGE_CODE"
+# Same distinction as a reset's own answer, above: absent, not merely not-false — a route that always
+# sent the field, true on success, would pass a "not false" check and still be wrong on the common path.
+expect "and it carries no failed drop"  1 "$(echo "$CHANGE" | has 'sessionsDropped":false'; echo $?)"
+expect "and the field is not there at all on success" 1 "$(echo "$CHANGE" | has 'sessionsDropped'; echo $?)"
 expect "and the change is logged by id, not by e-mail" 0 \
   "$(grep '"event":"password_changed"' $WORK/password.log | grep -Fc -e "$OWNER")"
 expect "as the owner's own id, not merely something id-shaped" "$OWNER_ID" \
   "$(log_field $WORK/password.log password_changed person)"
 expect "and nothing is demanded any more" false "$(curl -s -b $COOKIES $B/api/me | jfield mustChangePassword)"
+# The whole point of #115: the OTHER session for this account is exactly as exposed as a stolen
+# password is, and dies with the change — while the session that CHOSE the new password is not the
+# one that pays for it.
+expect "the other session for this account is dropped by the change → 401" 401 \
+  "$(curl -s -b $SECOND_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
+expect "while the caller's own session survives the change it just made → 200" 200 \
+  "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 PASSWORD=a-long-enough-password
 
 # ----------------------------------------------------------------------------- managing people
@@ -1716,8 +1739,13 @@ const db = new DatabaseSync(path);
 // A SQL string literal, single-quoted — NOT JSON.stringify's double quotes, which SQLite reads as
 // an unresolved COLUMN name and refuses on every delete, not only this one address's.
 const literal = \"'\" + process.argv[3].replace(/'/g, \"''\") + \"'\";
+// The owner's own address is caught too, not only Broken's: issue #115's own drop
+// (\`deleteSessionsForEmailExcept\`) is still a DELETE on this same table, and the owner is the one
+// account below that calls \`/api/change-password\` on itself — Broken's account is disabled before
+// that point and has no session left to call it with.
+const ownerLiteral = \"'\" + process.argv[2].replace(/'/g, \"''\") + \"'\";
 db.exec('CREATE TRIGGER break_drop BEFORE DELETE ON sessions WHEN OLD.email = ' + literal
-  + ' BEGIN SELECT RAISE(ABORT, \\'boom\\'); END;');
+  + ' OR OLD.email = ' + ownerLiteral + ' BEGIN SELECT RAISE(ABORT, \\'boom\\'); END;');
 db.close();
 " "$FAIL_DIR" "$OWNER" "$BROKEN" "a-long-enough-password"
 HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=sqlite \
@@ -1747,15 +1775,30 @@ expect "a reset still hands back the new password → 200, not 500" 200 "$RESET_
 expect "and the answer says its own drop failed too" false "$(echo "$RESET" | jfield sessionsDropped)"
 expect "the credential still changed"          0 "$([ -n "$(echo "$RESET" | jfield password)" ] && echo 0 || echo 1)"
 
-# Both failures have to reach the log — silently is the exact bug this closes — and neither may
-# name the account by e-mail: docs/PRIVACY.md says a log names a person by id, and this is the one
+# Issue #115's own drop, staged on the SAME trigger: a second session for the owner, opened only so
+# the delete this fires has something in it to fail on — a row with nothing to delete would pass
+# whether or not the trigger even ran, same as the note on $BROKEN_COOKIES above.
+FAIL_SECOND_COOKIES=$WORK/cookies-fail-owner-second.txt
+curl -s -c $FAIL_SECOND_COOKIES -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OWNER\",\"password\":\"a-long-enough-password\"}" $B/api/sign-in >/dev/null
+CHANGE=$(as_fail_owner -w '\n%{http_code}' -d '{"current":"a-long-enough-password","next":"a-long-enough-new-password"}' $B/api/change-password)
+CHANGE_CODE=$(echo "$CHANGE" | tail -1); CHANGE=$(echo "$CHANGE" | sed '$d')
+expect "changing your own password still takes effect → 200, not 500" 200 "$CHANGE_CODE"
+expect "and the answer says this drop failed too"  false "$(echo "$CHANGE" | jfield sessionsDropped)"
+# The trigger really did abort the delete, not merely get reported as having done so: the OTHER
+# session survives, live, exactly the gap a failed \`deleteSessionsForEmailExcept\` leaves open.
+expect "and the other session really is still alive, not merely reported so" 200 \
+  "$(curl -s -b $FAIL_SECOND_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
+
+# All three failures have to reach the log — silently is the exact bug this closes — and none may
+# name an account by e-mail: docs/PRIVACY.md says a log names a person by id, and this is the one
 # line that used to carry the address instead, read straight out of \`console.error\` inside the
 # store. \`grep -c\` and not \`has\`: a MISSING line is as much a bug here as a line with the e-mail
 # in it, and the count catches both while \`has\` alone would only catch the second.
-expect "both are reported at ERROR severity, not swallowed" 2 \
+expect "all three are reported at ERROR severity, not swallowed" 3 \
   "$(grep -c '\"event\":\"user_sessions_not_dropped\".*\"severity\":\"ERROR\"\|\"severity\":\"ERROR\".*\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log)"
-expect "and neither line carries the e-mail"     0 \
-  "$(grep '\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log | grep -Fc -e "$BROKEN")"
+expect "and none of the three lines carries an e-mail"     0 \
+  "$(grep '\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log | grep -Ec -e "$BROKEN" -e "$OWNER")"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 rm -rf "$FAIL_DIR"
 

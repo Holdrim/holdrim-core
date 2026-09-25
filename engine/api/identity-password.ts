@@ -185,6 +185,19 @@ export class PasswordIdentity {
   }
 
   /**
+   * The session id on this request's cookie, or `undefined` with none. Public because
+   * `/change-password` needs it to name the one session it must NOT drop — issue #115: changing your
+   * own password must not sign out the tab you changed it from. Before this, that route and
+   * `/sign-out` each read the cookie their own way (`/sign-out`'s own regex, hard-coded to the
+   * string `holdrim_session` rather than the `SESSION_COOKIE` it could drift from); one method
+   * against the one constant is what keeps a future rename of the cookie from having two places to
+   * remember, this one included.
+   */
+  sessionIdFrom(headers: Record<string, string | string[] | undefined>): string | undefined {
+    return this.#readCookie(headers, SESSION_COOKIE);
+  }
+
+  /**
    * `SameSite=Strict` IS the CSRF defence here, and it is the only one: current browsers never
    * attach this cookie to a request started by another site, so a forged POST arrives with no
    * session and is refused like any anonymous call. There is no single-use token generator here
