@@ -48,6 +48,48 @@ test('session: it opens, it holds, and it stops holding on logout', async () => 
   assert.equal(await id.fromRequest({ cookie: `${SESSION_COOKIE}=${r.session}` }), null, 'a closed session is worth nothing');
 });
 
+/**
+ * The race issue #113's first fix missed: `signIn` reads the row, hashes, and checks `enabled`
+ * BEFORE it ever calls `openSession` — and a disable or a reset that deletes every session for the
+ * account can land in exactly that gap, after the read and before the insert. Its delete only ever
+ * reaches sessions that already exist, so a session inserted a moment later is not there to catch.
+ *
+ * `openSession` is overridden here, not `check`, because it is the seam `signIn` calls right after
+ * deciding the password is good — staging the race there reproduces "verified, then reset, then
+ * inserted" in one deterministic step, with no timers and no real concurrency needed.
+ */
+test('a sign-in racing a reset does not open a session the reset cannot reach', async () => {
+  const store = new UsersSqlite(':memory:');
+  const password = await store.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = new PasswordIdentity(store, { secure: false });
+
+  const realOpenSession = store.openSession.bind(store);
+  store.openSession = async (...args) => {
+    // The reset's own delete finds nothing here — this account has no session yet — which is
+    // exactly why the old fix alone was not enough.
+    await store.resetPassword('x@example.org');
+    return realOpenSession(...args);
+  };
+
+  const result = await id.signIn('x@example.org', password);
+  assert.equal(result, null, 'the password stopped matching before this session existed');
+});
+
+test('a sign-in racing a disable does not open a session the disable cannot reach', async () => {
+  const store = new UsersSqlite(':memory:');
+  const password = await store.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = new PasswordIdentity(store, { secure: false });
+
+  const realOpenSession = store.openSession.bind(store);
+  store.openSession = async (...args) => {
+    await store.setEnabled('x@example.org', false);
+    return realOpenSession(...args);
+  };
+
+  const result = await id.signIn('x@example.org', password);
+  assert.equal(result, null, 'the account stopped being enabled before this session existed');
+});
+
 test('the session cookie is not readable by JavaScript and does not travel to another site', () => {
   const id = new PasswordIdentity(new UsersSqlite(':memory:'), { secure: true });
   const header = id.sessionCookie('abc');
