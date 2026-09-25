@@ -189,10 +189,15 @@ applies it before the data leaves: a reader who may not see names never receives
 
 | `people.show` | A reader is sent |
 |---|---|
-| `name` (default) | the person's name, or their e-mail when they have no name |
-| `email` | the address |
-| `role` | only the role the author acted under, as written on the event — "Approver" |
+| `name` | the person's name, or their e-mail when they have no name |
+| `email` (default) | the address, today's behaviour |
+| `role` | the person's current role — Owner, Admin or Member — looked up the same way `roles.roleOf` answers it anywhere else; localized for the panel and the home, the raw English key for the CLI |
 | `id` | the opaque id — for audits that must not see names |
+
+Nothing writes the role an event's author acted under onto the event itself, so `role` reads a
+person's role today, not the one they held at the time — a promotion or a demotion changes what
+every past event of theirs is shown as. Once an event carries that role, `role` will read it from
+there instead.
 
 The owner and whoever holds `people` are always sent names, because they are the ones who answer a
 person's request to be removed; and every person is sent their own name on their own requests.
