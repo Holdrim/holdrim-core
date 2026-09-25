@@ -86,6 +86,25 @@ writeFileSync(join(site, 'pages', 'X01.html'), crossPage('a-text-it-no-longer-ha
   .replace('FP1', `data-validated-fingerprint="${own.get('X01.1.1').fingerprint}"`)
   .replace('FP2', `data-validated-fingerprint="${own.get('X01.1.2').fingerprint}"`));
 
+// A same-page chain, for the impact radius: 1.3 depends on 1.2, which depends on 1.1. Selecting
+// 1.1 has to light BOTH — the case a single hop of `dependentsOf` alone gets wrong — and 1.4,
+// which depends on nothing, must never light up no matter what is selected.
+const radiusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>R01</title>
+<link rel="stylesheet" href="/engine/web/panel.css">
+<!-- panel.css positions each button absolutely, against the nearest positioned ancestor — a
+     project's own sheet is what normally gives a block that. Without it every button anchors to
+     the same spot (the page itself) and the last one in the DOM sits on top of the rest, so clicks
+     meant for an earlier block land on that one instead. -->
+<style>[data-id] { position: relative; display: block; padding: 1.2rem 3rem 1.2rem 0; }</style>
+</head><body><main>
+<h1 class="doc-title"><span class="doc-title__code">R01</span> Impact radius</h1>
+<p data-id="R01.1.1" data-code="1.1">The root of the chain.</p>
+<p data-id="R01.1.2" data-code="1.2" data-depends="R01.1.1">One hop from 1.1.</p>
+<p data-id="R01.1.3" data-code="1.3" data-depends="R01.1.2">Two hops from 1.1, through 1.2.</p>
+<p data-id="R01.1.4" data-code="1.4">Depends on nothing: never lit.</p>
+</main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
+writeFileSync(join(site, 'pages', 'R01.html'), radiusPage);
+
 // A page whose content tries to approve, in the name of whoever opens it, blocks of ANOTHER page
 // with their current fingerprints — the ✓ `holdrim sync` would turn into locks. Content is
 // written by people and by agents; an agent that obeyed an instruction hidden in a document could
@@ -379,6 +398,38 @@ try {
     await must('and its panel does not call it validated in green over the red',
       () => reader.page.locator('.rv-panel .rv-badge--warning', { hasText: 'before the ground moved' }).waitFor());
     expect('no green badge on it', 0, await reader.page.locator('.rv-panel .rv-badge--repo').count());
+    expect('and nothing failed', '', reader.problems.join(' | '));
+  }
+
+  console.log('the impact radius:');
+  {
+    const reader = await person(OWNER);
+    await reader.page.goto(`${BASE}/pages/R01.html`);
+    await must('the panel turns on', () => reader.page.locator('[data-id="R01.1.4"] .rv-num').waitFor());
+
+    await block(reader.page, 'R01.1.1').click();
+    await must('one hop away lights up', () => reader.page.locator('[data-id="R01.1.2"] .rv-num--radius').waitFor());
+    await must('so does two hops away, THROUGH it — the whole point of a radius over one hop',
+      () => reader.page.locator('[data-id="R01.1.3"] .rv-num--radius').waitFor());
+    expect('the block itself does not light up', 0, await reader.page.locator('[data-id="R01.1.1"] .rv-num--radius').count());
+    expect('and the one nothing depends on stays dark', 0, await reader.page.locator('[data-id="R01.1.4"] .rv-num--radius').count());
+
+    // Selecting something ELSE has to clear the old radius, not just add to it — a light left over
+    // from the last selection would show a person a blast radius that is no longer the one they asked
+    // for.
+    await reader.page.locator('.rv-close').click();
+    await block(reader.page, 'R01.1.2').click();
+    await must('the new selection still lights what depends on it',
+      () => reader.page.locator('[data-id="R01.1.3"] .rv-num--radius').waitFor());
+    // 1.2 itself was lit a moment ago, under 1.1's radius. It must not still be, now that 1.2 is
+    // the block selected — a block never lights itself, and a light that survives the switch is
+    // exactly the stale one this test exists to catch.
+    expect('and the PREVIOUS selection is no longer lit', 0,
+      await reader.page.locator('[data-id="R01.1.2"] .rv-num--radius').count());
+
+    await reader.page.locator('.rv-close').click();
+    await must('closing the panel clears the radius entirely',
+      () => reader.page.locator('.rv-num--radius').waitFor({ state: 'detached' }));
     expect('and nothing failed', '', reader.problems.join(' | '));
   }
 

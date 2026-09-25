@@ -148,6 +148,7 @@
   "panel.history.title": "Lo que ha pasado aquí",
   "panel.moved": "el texto no cambió, pero esto sí: {list}",
   "panel.open": "Bloque {code}. Abrir revisión",
+  "panel.radius.elsewhere": "{n} bloque(s) más, en otras páginas, también dependen de esto — directa o indirectamente.",
   "panel.recording": "registrando…",
   "panel.request.from": "Solicitud de {who}:",
   "panel.request.kind": "Qué es",

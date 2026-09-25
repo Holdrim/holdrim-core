@@ -4,6 +4,7 @@ import { join, extname, normalize, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
+import { radiusOf } from '../core/validity.js';
 import { createRoles, rolesOf } from '../core/roles.js';
 import { overLimit, validCommit } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
@@ -509,6 +510,20 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     const blocks = await readBlocks(projectRoot);
     return json(res, 200, Object.fromEntries([...ids].filter((id) => blocks.has(id))
       .map((id) => [id, blocks.get(id)!.fingerprint])));
+  }
+
+  // What would need checking, transitively, before touching this block — the panel's "impact
+  // radius" (docs/IMPACT.md). Computed here, from the SAME `radiusOf` the CLI's `if-i-touch` is
+  // built on (engine/core/validity.js), because the panel only has the DOM of the page it is on:
+  // a dependent three pages away is invisible to it unless the server names it.
+  //
+  // No `blocks.has(id)` guard: an id nobody declares any more still answers correctly, because
+  // `radiusOf` looks at what OTHER blocks point at, not at whether `id` itself is there — the same
+  // reasoning `stateOf` already relies on for "red when the dependency vanishes, too".
+  if (req.method === 'GET' && route === '/impact-radius') {
+    const id = url.searchParams.get('id') ?? '';
+    const blocks = await readBlocks(projectRoot);
+    return json(res, 200, { ids: radiusOf(id, blocks) });
   }
 
   if (req.method === 'GET' && route === '/requests/open') {

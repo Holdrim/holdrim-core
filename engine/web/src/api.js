@@ -26,6 +26,13 @@ export const record = (event) => call('/events', event);
 export const fingerprintsOf = (ids) => call(`/fingerprints?ids=${ids.map(encodeURIComponent).join(',')}`);
 
 /**
+ * Every block that depends on this one, directly or through another — the panel's "impact radius"
+ * (docs/IMPACT.md). Asked of the server, not computed here: the browser only has the DOM of the
+ * page it is on, and a dependent three pages away is invisible to it otherwise.
+ */
+export const impactRadiusOf = (id) => call(`/impact-radius?id=${encodeURIComponent(id)}`).then((r) => r.ids);
+
+/**
  * The core, loaded once.
  *
  * ABSOLUTE path, not relative: this import stays out of the bundle (it is the core, which the

@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stateOf, trafficLight, dependentsOf } from '../core/validity.js';
+import { stateOf, trafficLight, dependentsOf, radiusOf } from '../core/validity.js';
 
 const block = (id, fingerprint, dependsOn = []) => [id, { id, fingerprint, dependsOn }];
 
@@ -88,4 +88,40 @@ test('what depends on a block — the question people ask before editing', () =>
   ]);
   assert.deepEqual(dependentsOf('A.1.1', blocks).sort(), ['A.2.1', 'A.3.1']);
   assert.deepEqual(dependentsOf('A.4.1', blocks), []);
+});
+
+test('the impact radius goes past one hop — that is the whole point of it', () => {
+  // A straight chain: C depends on B, B depends on A. Touching A reaches both, not just B — this is
+  // the case `dependentsOf` alone gets wrong, and the one this function exists to answer.
+  const blocks = new Map([
+    block('A.1.1', 'aaa'),
+    block('B.1.1', 'bbb', ['A.1.1']),
+    block('C.1.1', 'ccc', ['B.1.1']),
+    block('D.1.1', 'ddd'),               // unrelated: never appears
+  ]);
+  assert.deepEqual(radiusOf('A.1.1', blocks), ['B.1.1', 'C.1.1']);
+  assert.deepEqual(radiusOf('B.1.1', blocks), ['C.1.1']);
+  assert.deepEqual(radiusOf('C.1.1', blocks), []);
+  assert.deepEqual(radiusOf('D.1.1', blocks), []);
+});
+
+test('the impact radius is the union of every branch, deduplicated', () => {
+  // A.1.1 is reached two ways here — directly by A.2.1, and again through A.3.1, which ALSO depends
+  // on A.2.1 — and has to appear once, not twice.
+  const blocks = new Map([
+    block('A.1.1', 'aaa'),
+    block('A.2.1', 'bbb', ['A.1.1']),
+    block('A.3.1', 'ccc', ['A.1.1', 'A.2.1']),
+  ]);
+  assert.deepEqual(radiusOf('A.1.1', blocks), ['A.2.1', 'A.3.1']);
+});
+
+test('a dependency cycle terminates instead of spinning, and excludes the block itself', () => {
+  // A documentation graph is not guaranteed to be a DAG. A.1.1 -> B.1.1 -> A.1.1 must come back with
+  // B.1.1 alone: A.1.1 is the block being touched, not one of its own dependents.
+  const blocks = new Map([
+    block('A.1.1', 'aaa', ['B.1.1']),
+    block('B.1.1', 'bbb', ['A.1.1']),
+  ]);
+  assert.deepEqual(radiusOf('A.1.1', blocks), ['B.1.1']);
 });
