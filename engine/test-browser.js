@@ -713,7 +713,12 @@ try {
   await page.goto(`${SIGN_IN}/engine/home`);
   await page.locator('nav a[href="/engine/people"]').click();
   await must('the owner reaches it from the home', () => page.locator('#create').waitFor());
-  page.on('dialog', (d) => d.accept());
+  // Captured as well as accepted: the `confirm()` before a reset or a disable needs accepting for
+  // either action to run at all, and the `alert()` the two dialog tests below read from is the
+  // LAST one raised on the click that triggered it — there is nowhere else in this script that a
+  // `dialog` event's own text can be read from.
+  const dialogs = [];
+  page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
   await page.locator('#create input[name="name"]').fill('Someone New');
   await page.locator('#create input[name="email"]').fill('new@example.org');
   await page.locator('#create button[type="submit"]').click();
@@ -763,6 +768,53 @@ try {
   expect('on a phone the people screen does not scroll sideways', true,
     await page.evaluate(() => globalThis.document.documentElement.scrollWidth <= globalThis.innerWidth));
   await page.setViewportSize({ width: 1280, height: 900 });
+
+  console.log('the warning when the server cannot confirm the old sessions are gone:');
+  {
+    // Real requests all the way through: the route only substitutes the ONE field the store sets
+    // when its own delete of the old sessions fails, so what the page draws next — the password,
+    // the redrawn row — still comes from the genuine answer, and the alert is the only thing this
+    // is testing. `route.fetch()` performs the real request; the mutated body is what the page
+    // actually reads.
+    const enLocale = JSON.parse(readFileSync(join(ROOT, 'engine', 'locales', 'en.json'), 'utf8'));
+    // `{action}` stands for the button's own label — `people.reset` — never a hard-coded word, so
+    // this substitutes the same value the page does rather than restating it.
+    const warned = (key, email) => enLocale[key].replace('{email}', email).replace('{action}', enLocale['people.reset']);
+    const withFailedDrop = async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({ response, json: { ...body, sessionsDropped: false } });
+    };
+
+    dialogs.length = 0;
+    await page.route('**/api/users/*/password', withFailedDrop);
+    await page.locator('button[data-action="reset"][data-email="else@example.org"]').click();
+    // The reset path shows the new password via `showOnce` regardless of the drop's own outcome —
+    // `withFailedDrop` above kept the real `password` field, so this still has one to show.
+    await must('a reset that could not confirm the drop still shows the new password, once',
+      () => page.locator('#once', { hasText: 'else@example.org' }).locator('code').waitFor());
+    expect('and warns separately that the old sessions may still be alive',
+      warned('people.warn.sessionsNotDropped.reset', 'else@example.org'), dialogs.at(-1));
+    await page.unroute('**/api/users/*/password', withFailedDrop);
+
+    dialogs.length = 0;
+    await page.route('**/api/users/*/enabled', withFailedDrop);
+    await page.locator('button[data-action="disable"][data-email="else@example.org"]').click();
+    await must('disabling still redraws the row even when the drop could not be confirmed',
+      () => page.locator('button[data-action="enable"][data-email="else@example.org"]').waitFor());
+    // A DIFFERENT sentence from the reset one above: on a disabled row the obvious retry is
+    // enable-then-disable, and the enable half of that is what brings the sessions back — the
+    // warning here has to say not to take that retry, not the reset path's "try again".
+    expect('and the disable path warns with its own, different wording',
+      warned('people.warn.sessionsNotDropped', 'else@example.org'), dialogs.at(-1));
+    // The sentence used to say "Use Reset instead", a word that names no button on this row — the
+    // row's button reads "New password". This checks the alert carries the button's REAL label,
+    // not just that `warned()` above built the same string the page did from the same template.
+    expect('and names the button that actually drops the sessions',
+      true, dialogs.at(-1).includes(enLocale['people.reset']));
+    await page.unroute('**/api/users/*/enabled', withFailedDrop);
+  }
+
   expect('and nothing was refused on the way', '', problems.join(' | '));
 } catch (e) {
   console.log(`  FAIL ${e.message}`);

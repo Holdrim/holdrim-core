@@ -521,6 +521,18 @@ expect "but whoever created it does: the owner's id, not a stranger's" "$OWNER_I
 expect "the list is ordered by e-mail"  "$MEMBER $OWNER" "$(emails)"
 
 expect "the new person signs in → 200"  200 "$(mlogin "$MEMBER_PASSWORD")"
+# Issue #113: this is the cookie a thief would have stolen right now, before any of what follows —
+# disabling, resetting, re-enabling. Kept in a file of its own because $MCOOKIES gets overwritten by
+# every later `mlogin`, and a check run against THAT would pass for the wrong reason: a fresh
+# session, not survival of this one.
+STOLEN_COOKIES=$WORK/cookies-member-stolen.txt
+cp $MCOOKIES $STOLEN_COOKIES
+# An empty or malformed jar would pass every "→ 401" check below for a reason that has nothing to do
+# with the fix: curl sends no cookie, the server sees no session, and refuses it the same way it
+# would refuse a thief's. Proving the copy actually holds a LIVE session first is what makes a later
+# 401 mean "this session died", rather than "this file never had one to begin with".
+expect "the cookie just captured is a live session, not an empty jar → 200" 200 \
+  "$(curl -s -b $STOLEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "and it logs no person either — nobody has acted on anything yet" null \
   "$(log_field $WORK/password.log signed_in person)"
 expect "and is nobody special"          member "$(as_member $B/api/me | jfield role)"
@@ -619,11 +631,29 @@ expect "an admin cannot reset the owner → 409" 409 "$(code_admin -X POST $B/ap
 # and be the owner from then on, never touching the reset route the other guard protects.
 expect "an admin cannot create the owner → 409" 409 "$(code_admin -d "{\"email\":\"$OWNER\",\"name\":\"Not Me\"}" $B/api/users)"
 expect "and the message says it is provisioned at boot" 0 "$(as_admin -d "{\"email\":\"$OWNER\",\"name\":\"Not Me\"}" $B/api/users | has 'HOLDRIM_OWNER'; echo $?)"
-expect "the owner still can, on themselves" 200 "$(code_owner -X POST $B/api/users/$OWNER/password)"
+OWN_RESET=$(as_owner -w '\n%{http_code}' -X POST $B/api/users/$OWNER/password)
+OWN_RESET_CODE=$(echo "$OWN_RESET" | tail -1); OWN_RESET=$(echo "$OWN_RESET" | sed '$d')
+NEW_OWNER_PASSWORD=$(echo "$OWN_RESET" | jfield password)
+expect "the owner still can, on themselves" 200 "$OWN_RESET_CODE"
+# Nothing failed here, so the answer must not carry the field that means it did — see the failure
+# phase far below, on its own broken store, for the one case where this is allowed to appear.
+expect "and the owner's own reset carries no failed drop" 1 "$(echo "$OWN_RESET" | has 'sessionsDropped":false'; echo $?)"
+# Not merely "not false" — absent. A route that always sent the field, true on success and false
+# on failure, would still pass the check above and still be a caller reading the wrong thing on
+# the far more common path: success.
+expect "and the field is not there at all on success" 1 "$(echo "$OWN_RESET" | has 'sessionsDropped'; echo $?)"
 expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset person)"
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset by)"
+# A reset drops every session for the account, and makes no exception for "but I am the one who ran
+# it": the row it deletes cannot tell a self-reset apart from one that reached the account through a
+# stolen credential, and a special case here would be exactly the gap issue #113 was about. So the
+# owner's OWN cookie is dead too, until they sign back in with the password this reset just handed
+# them — the same login() every earlier check in this file relied on, now with a new secret.
+expect "and it drops the owner's own session too → 401" 401 "$(code_owner $B/api/me)"
+expect "signing back in with the password just generated → 200" 200 "$(login "$NEW_OWNER_PASSWORD")"
+PASSWORD=$NEW_OWNER_PASSWORD
 
 # ⚠️ HOLDRIM_LOCKS accounts are guarded like the owner's, on all four routes now (docs/ROLES.md, "the
 # `people` capability's own table entry: disable and re-enable — never … the account of anyone who
@@ -679,7 +709,12 @@ expect "and the enable message does not say the account holds a lock either" 1 \
 expect "the owner CAN disable the lock-holder" 200 "$(code_owner -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
 expect "the owner re-enables it → 200" 200 "$(code_owner -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
 
-expect "disabling somebody → 200"       200 "$(code_owner -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)"
+DISABLE=$(as_owner -w '\n%{http_code}' -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)
+DISABLE_CODE=$(echo "$DISABLE" | tail -1); DISABLE=$(echo "$DISABLE" | sed '$d')
+expect "disabling somebody → 200"       200 "$DISABLE_CODE"
+expect "and the member's disable carries no failed drop" 1 "$(echo "$DISABLE" | has 'sessionsDropped":false'; echo $?)"
+# Same distinction as the owner's own reset above: absent, not merely not-false.
+expect "and the field is not there at all on success either" 1 "$(echo "$DISABLE" | has 'sessionsDropped'; echo $?)"
 expect "disabling is logged as the member's id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
 expect "and it is the owner who did it, not the member themselves" "$OWNER_ID" \
@@ -696,7 +731,10 @@ expect "disabling is not deleting"      "$ADMIN $LOCKED $MEMBER $OWNER" "$(email
 # A missing field is not "false": read as falsy, a typo in the key would silently revoke somebody.
 expect "a body with no enabled → 400"   400 "$(code_owner -d '{}' $B/api/users/$MEMBER/enabled)"
 
-expect "giving the access back → 200"   200 "$(code_owner -d '{"enabled":true}' $B/api/users/$MEMBER/enabled)"
+ENABLE=$(as_owner -w '\n%{http_code}' -d '{"enabled":true}' $B/api/users/$MEMBER/enabled)
+ENABLE_CODE=$(echo "$ENABLE" | tail -1); ENABLE=$(echo "$ENABLE" | sed '$d')
+expect "giving the access back → 200"   200 "$ENABLE_CODE"
+expect "and it carries no failed drop either" 1 "$(echo "$ENABLE" | has 'sessionsDropped":false'; echo $?)"
 # Both the account touched and who touched it, by id — taking access away and giving it back alike.
 expect "changing who may sign in is logged by id, not by e-mail" 0 \
   "$(grep '"event":"user_enabled_changed"' $WORK/password.log | grep -Ec -e "$MEMBER" -e "$OWNER")"
@@ -704,21 +742,45 @@ expect "re-enabling is logged the same way: the member's id" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
 expect "and by the owner again"        "$OWNER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed by)"
+# Isolates the disable's own delete from the reset's, which happens later in this script and would
+# otherwise clean up the same row and hide a disable that forgot to: nothing has been reset yet at
+# this point, only disabled and given back, so a 200 here could only mean the session survived the
+# disable — the exact resurrection issue #113 was about.
+expect "and the session stolen before the disable is still dead now it is re-enabled" 401 \
+  "$(curl -s -b $STOLEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "and the same password works again → 200" 200 "$(mlogin "$MEMBER_PASSWORD")"
 # Every other `signed_in` assertion above expects `null`: the member's FIRST sign-in, before they had
 # ever acted on anything reviewable. A hard-coded `person: null` at the call site would pass every one
 # of those and still be wrong — this is the one that needs a real id, from someone who by now has one.
 expect "and a sign-in by someone who has acted logs their own id" "$MEMBER_ID" \
   "$(log_field $WORK/password.log signed_in person)"
+# A second cookie, opened fresh after the disable → enable round-trip and never itself disabled —
+# the control for the check below: a reset has to kill THIS one too, on its own, with no disabling
+# involved anywhere in its story.
+ACTIVE_COOKIES=$WORK/cookies-member-active.txt
+cp $MCOOKIES $ACTIVE_COOKIES
+expect "this cookie is a live session too, not an empty jar → 200" 200 \
+  "$(curl -s -b $ACTIVE_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 
 RESET=$(as_owner -X POST $B/api/users/$MEMBER/password)
 NEW_PASSWORD=$(echo "$RESET" | jfield password)
 expect "a reset gives back a different password" 0 "$([ -n "$NEW_PASSWORD" ] && [ "$NEW_PASSWORD" != "$MEMBER_PASSWORD" ]; echo $?)"
+expect "and the member's reset carries no failed drop" 1 "$(echo "$RESET" | has 'sessionsDropped":false'; echo $?)"
 # Somebody OTHER than the owner of the account has seen this one — whoever ran the reset, and
 # whatever channel carried it over. The window has to be one login long.
 expect "and it demands a change"        true "$(echo "$RESET" | jfield user.mustChangePassword)"
 expect "the old password stops working → 401" 401 "$(mlogin "$MEMBER_PASSWORD")"
+# The reset just run touched only $MCOOKIES's owner by e-mail, never $ACTIVE_COOKIES directly — this
+# is the session dying because the reset dropped it, not because anything logged it out by name.
+expect "a password reset alone kills a session nobody disabled" 401 \
+  "$(curl -s -b $ACTIVE_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "the new one gets in → 200"      200 "$(mlogin "$NEW_PASSWORD")"
+# The scenario issue #113 reproduced end to end: a lock-holder's cookie is stolen, the owner
+# disables the account, resets the password and gives the access back. Without dropping the
+# session on the disable AND on the reset, the row outlives all three and this is 200 again — the
+# thief still in, on an account everyone in the log above believes was cleaned up.
+expect "the cookie stolen before disable → reset → enable is still dead" 401 \
+  "$(curl -s -b $STOLEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "and it is not in the listing"   0 "$(as_owner $B/api/users | grep -Fc -e "$NEW_PASSWORD")"
 expect "nor in the log"                 0 "$(grep -Fc -e "$NEW_PASSWORD" $WORK/password.log)"
 expect "and a reset is logged by id, not by e-mail" 0 \
@@ -727,6 +789,12 @@ expect "crediting the member's own id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_password_reset person)"
 expect "and run by the owner, not the member resetting their own" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset by)"
+# Every disable, enable and reset above ran against a store where the delete never fails — the ONE
+# broken store lives in its own directory, started further below, with its own log file
+# (fail-drop.log), so this count reads only this normal server's log and only what happened before
+# that deliberate failure exists at all.
+expect "and this normal server never once reports a failed drop" 0 \
+  "$(grep -c '\"event\":\"user_sessions_not_dropped\"' $WORK/password.log)"
 # The current password, asked for by change-password, is the same secret sign-in guards: guessing it
 # with a session in hand has to meet the same wait. Six wrong, then the right one is still refused.
 mchange() { curl -s -b $MCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"current\":\"$1\",\"next\":\"a-long-enough-new-password\"}" $B/api/change-password; }
@@ -974,5 +1042,72 @@ HOLDRIM_EVENTS=firestore HOLDRIM_PROJECT=some-project HOLDRIM_OWNER=$OWNER HOLDR
   run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/no-firestore.log" 2>&1
 expect "it refuses to start → exits 1"  1 "$?"
 expect "and names the missing package"   0 "$(grep -q 'HOLDRIM_EVENTS=firestore needs the optional package @google-cloud/firestore' $WORK/no-firestore.log; echo $?)"
+
+# ------------------------------------------------------------------ when the session drop itself fails
+echo "when the delete behind a reset or a disable fails, not silently:"
+# A real failure of \`deleteSessionsForEmail\`, staged from OUTSIDE the store: a trigger on the
+# \`sessions\` table that raises for one specific address, added to the file BEFORE the server ever
+# opens it — so there is only ever one writer touching it, and nothing here races the server that is
+# about to run. The schema comes from opening it through UsersSqlite itself, not a copy of its SQL,
+# so this stays true if a column or an index there ever changes.
+BROKEN=broken@example.org
+FAIL_DIR=$(mktemp -d)
+# The owner's row is seeded here too, with a KNOWN password: `firstAccess` only runs while the
+# store is still EMPTY, and by the time the server opens this file it already holds Broken's row —
+# it would never mint the owner's account or print one to read back out of the log.
+node --input-type=module -e "
+import { UsersSqlite } from './engine/api/users-sqlite.ts';
+import { DatabaseSync } from 'node:sqlite';
+const path = process.argv[1] + '/users.db';
+const store = new UsersSqlite(path);
+await store.create(process.argv[2], 'Owner', process.argv[4], false);
+await store.create(process.argv[3], 'Broken', 'a-long-enough-password');
+await store.close();
+const db = new DatabaseSync(path);
+// A SQL string literal, single-quoted — NOT JSON.stringify's double quotes, which SQLite reads as
+// an unresolved COLUMN name and refuses on every delete, not only this one address's.
+const literal = \"'\" + process.argv[3].replace(/'/g, \"''\") + \"'\";
+db.exec('CREATE TRIGGER break_drop BEFORE DELETE ON sessions WHEN OLD.email = ' + literal
+  + ' BEGIN SELECT RAISE(ABORT, \\'boom\\'); END;');
+db.close();
+" "$FAIL_DIR" "$OWNER" "$BROKEN" "a-long-enough-password"
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_USERS_PATH=$FAIL_DIR/users.db HOLDRIM_EVENTS_PATH=$FAIL_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/fail-drop.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+FAIL_COOKIES=$WORK/cookies-fail-owner.txt
+curl -s -c $FAIL_COOKIES -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OWNER\",\"password\":\"a-long-enough-password\"}" $B/api/sign-in >/dev/null
+as_fail_owner() { curl -s -b $FAIL_COOKIES -H 'Content-Type: application/json' "$@"; }
+# The account needs an open session for a failed drop to mean anything — a row with nothing to
+# delete would pass every check below whether or not the trigger even ran.
+BROKEN_COOKIES=$WORK/cookies-broken.txt
+curl -s -c $BROKEN_COOKIES -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$BROKEN\",\"password\":\"a-long-enough-password\"}" $B/api/sign-in >/dev/null
+
+DISABLE=$(as_fail_owner -w '\n%{http_code}' -d '{"enabled":false}' $B/api/users/$BROKEN/enabled)
+DISABLE_CODE=$(echo "$DISABLE" | tail -1); DISABLE=$(echo "$DISABLE" | sed '$d')
+expect "disabling still takes effect → 200, not 500" 200 "$DISABLE_CODE"
+expect "and the answer says the drop failed"       false "$(echo "$DISABLE" | jfield sessionsDropped)"
+expect "the account really is disabled regardless" 401 \
+  "$(curl -s -b $BROKEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
+
+RESET=$(as_fail_owner -w '\n%{http_code}' -X POST $B/api/users/$BROKEN/password)
+RESET_CODE=$(echo "$RESET" | tail -1); RESET=$(echo "$RESET" | sed '$d')
+expect "a reset still hands back the new password → 200, not 500" 200 "$RESET_CODE"
+expect "and the answer says its own drop failed too" false "$(echo "$RESET" | jfield sessionsDropped)"
+expect "the credential still changed"          0 "$([ -n "$(echo "$RESET" | jfield password)" ] && echo 0 || echo 1)"
+
+# Both failures have to reach the log — silently is the exact bug this closes — and neither may
+# name the account by e-mail: docs/PRIVACY.md says a log names a person by id, and this is the one
+# line that used to carry the address instead, read straight out of \`console.error\` inside the
+# store. \`grep -c\` and not \`has\`: a MISSING line is as much a bug here as a line with the e-mail
+# in it, and the count catches both while \`has\` alone would only catch the second.
+expect "both are reported at ERROR severity, not swallowed" 2 \
+  "$(grep -c '\"event\":\"user_sessions_not_dropped\".*\"severity\":\"ERROR\"\|\"severity\":\"ERROR\".*\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log)"
+expect "and neither line carries the e-mail"     0 \
+  "$(grep '\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log | grep -Fc -e "$BROKEN")"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+rm -rf "$FAIL_DIR"
 
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

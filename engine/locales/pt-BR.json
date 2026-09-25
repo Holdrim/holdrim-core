@@ -163,7 +163,7 @@
   "panel.unavailable": "Não foi possível carregar o estado da revisão. Recarregue a página.",
   "panel.you": "Você",
   "people.confirm.disable": "Retirar o acesso de {email}? As aprovações continuam, assinadas com o nome da pessoa.",
-  "people.confirm.reset": "Gerar uma nova senha para {email}? A atual deixa de funcionar agora.",
+  "people.confirm.reset": "Gerar uma nova senha para {email}? A atual deixa de funcionar agora, e toda sessão aberta na conta também — inclusive a sua, se for você.",
   "people.create.heading": "Dar acesso a alguém",
   "people.create.submit": "Criar acesso",
   "people.disable": "Retirar acesso",
@@ -184,6 +184,8 @@
   "people.state.disabled": "Retirado",
   "people.state.mustChange": "Ativo · precisa escolher uma senha",
   "people.title": "Pessoas",
+  "people.warn.sessionsNotDropped": "Não foi possível confirmar que as sessões antigas de {email} foram encerradas; elas podem continuar ativas. Não reative a conta para tentar de novo — isso as traria de volta. Use {action} em vez disso; isso as encerra de novo.",
+  "people.warn.sessionsNotDropped.reset": "Não foi possível confirmar que as sessões antigas de {email} foram encerradas; elas podem continuar ativas. Redefina a senha de novo para encerrá-las.",
   "site.notFound": "não encontrado",
   "site.pathOutside": "caminho fora do site"
 }
