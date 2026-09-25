@@ -824,19 +824,29 @@ BASELINE_DIR=$(mktemp -d)
 BASELINE_ADMIN=baseline-admin@example.org
 BASELINE_MEMBER=baseline-member@example.org
 BASELINE_FP=$(cli_fingerprint A01.1.1)
+# The admin's unwritten ✓ needs its block's REAL fingerprint, not a placeholder (s4b, round 4's
+# review): the home's "awaiting sync" count (below) only ever looks at approvals whose fingerprint
+# matches the block's CURRENT one — a mismatched one, like the placeholder every other seeded ✓ here
+# still uses, is skipped there regardless of what `isLocked` says about it, so a bug that made this ✓
+# lock would pass unnoticed however it was seeded. It also sits on a DIFFERENT page than the owner's
+# (A02, not A01): both landing on one page would let a bug swap WHICH of the two counts — the admin's
+# in, the owner's now out, since neither is owner any more once HOLDRIM_OWNER moves — while the
+# PAGE's total stays "1" either way, hiding the very thing this seeds to catch. On separate pages,
+# the owner's page must always read "1" and the admin's must never read anything at all.
+BASELINE_FP2=$(cli_fingerprint A02.1.2)
 SEEDED=$(node --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
 const store = new SqliteEventStore(process.argv[1]);
-const [owner, admin, member, fp] = process.argv.slice(2);
+const [owner, admin, member, fp, fp2] = process.argv.slice(2);
 // A genuine pre-version ✓, never written on: locks only via legacyLock, and only for the OWNER.
 const ownerNull = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: fp, data: null }, owner);
-const adminNull = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'x', data: null }, admin);
+const adminNull = await store.append({ type: 'approval', page: 'A02', block: 'A02.1.2', fingerprint: fp2, data: null }, admin);
 // The forgeries the finding reproduced: a field this version never wrote, on an event this old.
 const adminForged = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.3', fingerprint: 'x', data: { locks: 'true' } }, admin);
 const memberForged = await store.append({ type: 'request', page: 'A02', block: 'A02.1.1', fingerprint: 'x', text: 'a forged request', data: { authorCouldTriage: 'true' } }, member);
 console.log(JSON.stringify({ ownerNull: ownerNull.id, adminNull: adminNull.id, adminForged: adminForged.id, memberForged: memberForged.id }));
 await store.close();
-" "$BASELINE_DIR/events.db" "$OWNER" "$BASELINE_ADMIN" "$BASELINE_MEMBER" "$BASELINE_FP")
+" "$BASELINE_DIR/events.db" "$OWNER" "$BASELINE_ADMIN" "$BASELINE_MEMBER" "$BASELINE_FP" "$BASELINE_FP2")
 OWNER_NULL_ID=$(echo "$SEEDED" | jfield ownerNull)
 ADMIN_NULL_ID=$(echo "$SEEDED" | jfield adminNull)
 ADMIN_FORGED_ID=$(echo "$SEEDED" | jfield adminForged)
@@ -848,10 +858,24 @@ HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 event_of() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$1"; }
 home_waiting() { curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | has -F 'not yet in the repository'; echo $?; }
+# s4b (round 4's review): the OWNER'S and the ADMIN'S unwritten ✓s are seeded on DIFFERENT pages (A01,
+# A02) exactly so each page's own row can be read apart from the other's — `summarisePages` tallies
+# `awaitingSync` per PAGE, and once HOLDRIM_OWNER moves to the admin, `roles.can('lock', …)` recomputed
+# live (round 1's rule, s4b reverts to it) flips FROM the owner TO the admin: a check on the TOTAL
+# count across both pages would read "1" either way and never notice the swap. Per page, the answer
+# must never move: the owner's page always "1", the admin's page never any count at all.
+home_page_row() { curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | grep "pages/$1.html\">"; }
+home_page_awaiting() { home_page_row "$1" | grep -oE '[0-9]+ approved on the site, not yet in the repository'; }
 # Decision B (round 1's review): a genuinely unwritten ✓ from before the field existed at all.
 expect "the owner's unwritten pre-version ✓ locks via the baseline"       true  "$(event_of $OWNER_NULL_ID | jfield locks)"
 expect "an admin's unwritten pre-version ✓ does not"                      false "$(event_of $ADMIN_NULL_ID | jfield locks)"
 expect "and the home counts the owner's as waiting for the repository"    0     "$(home_waiting)"
+# s4b: reverting `ownerApprovals` (server.ts) to round 1's rule — an absent `locks` recomputed LIVE as
+# `roles.can('lock', author)` — agrees with the correct answer here, since the admin is not yet owner
+# in THIS boot either way (`roles.can('lock', admin)` is false regardless). The real proof is after
+# the handover below; this is the "before" half a total count could never anchor.
+expect "the owner's own page reads exactly 1 awaiting sync"                "1 approved on the site, not yet in the repository" "$(home_page_awaiting A01)"
+expect "and the admin's real-fingerprint ✓, on its OWN page, counts toward NOTHING" "" "$(home_page_awaiting A02)"
 # Round 2's review, CRITICAL: the forged fields must not fare any better than the unwritten ones above.
 expect "an admin's FORGED pre-version locks:true does not lock either"    false "$(event_of $ADMIN_FORGED_ID | jfield locks)"
 expect "a member's FORGED pre-version authorCouldTriage:true starts at triage, straight into nobody's queue" \
@@ -871,6 +895,15 @@ expect "yet the old owner's pre-version ✓ still locks (the baseline is frozen)
 expect "and the now-owner's own pre-version ✓ still does not"              false "$(event_of $ADMIN_NULL_ID | jfield locks)"
 expect "nor does their forged locks:true, even as owner now"               false "$(event_of $ADMIN_FORGED_ID | jfield locks)"
 expect "and the forged request still starts at triage"                     open  "$(event_of $MEMBER_FORGED_ID | jfield status.state)"
+# s4b, the real proof: round 1's rule would recompute `roles.can('lock', …)` LIVE — the admin IS the
+# owner now, so their own page would newly count their old, real-fingerprint ✓ as "awaiting sync",
+# while the OWNER, no longer holding `lock` live, would drop OUT of theirs. A check on the TOTAL
+# across both pages would still read "1" — one swapped for the other — and miss exactly this; reading
+# each page on its own is what catches the swap.
+expect "the owner's page still reads exactly 1, even once the admin is owner (s4b)" \
+  "1 approved on the site, not yet in the repository" "$(home_page_awaiting A01)"
+expect "and the admin's page still counts nothing, even as owner now (s4b)" \
+  "" "$(home_page_awaiting A02)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$BASELINE_DIR"
 
 echo "the local runner pins its own environment, even when the caller's shell has one:"
