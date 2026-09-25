@@ -158,6 +158,22 @@ who ran the engine from `main` before it.
   exists, moving the pin back to one from before this alert would write fresh events with their text
   stored inline again, above where this version's own hashed rows begin, and every one of those reads
   as `downgraded` tampering the next time any version opens the same file.
+- **`holdrim`'s `--db` reader now checks the SQLite guards too (issue #108).** Only the server
+  noticed a trigger `GUARDS` (`engine/api/store-sqlite.ts`) names being missing or replaced, and
+  only on its next boot; reading a `--db` file directly got no such check, so dropping a guard was
+  enough — nobody had to restore it afterwards to keep reading as if nothing had changed.
+  `Source#fromFile` now runs the identical, read-only comparison (`guardMismatches`, pulled out of
+  `installGuards` so both share one check, not two) on every read. Read-only here, so nothing is
+  repaired — warned instead: a WARNING per guard, the same `sqlite_guard_missing` line the server
+  logs, every time a command reads the file, not once. `holdrim list --json` gains a `guardsTampered`
+  key, kept separate from `tampered` (a text failing its own hash is a different finding, and a
+  caller may need to tell them apart); `holdrim list` and `sync` warn and exit non-zero when it is
+  set, the same way they already do for `tampered`; `show`, `impact` and `summary` still print the
+  WARNING but do not change their exit code. Warn, not refuse: the CLI's own reaction now matches the
+  server's — `installGuards` does not refuse to boot over a missing guard either, it repairs and
+  warns — and a hard refusal here would also stop `show`/`impact`/`summary` from reading a file whose
+  guards are merely older than this version expects, which is not by itself an attack. SECURITY.md
+  corrected: it described the gap as "drops and restores", which was not the whole story for the CLI.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a

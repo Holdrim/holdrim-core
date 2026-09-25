@@ -7,8 +7,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { SqliteEventStore, installGuards, GUARDS } from '../api/store-sqlite.ts';
+import { SqliteEventStore, installGuards, guardMismatches, GUARDS } from '../api/store-sqlite.ts';
 import { ONLY_LOSES } from '../api/people.ts';
+import { Source } from '../cli/remote.ts';
 
 const approval = { type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null };
 
@@ -608,3 +609,121 @@ test('two boots repairing one file at once: the second waits for the first and t
     await new Promise((resolve) => first.once('exit', resolve));
   }
 }));
+
+// ================================================== issue #108, the CLI's own read-only check
+// `installGuards` above repairs and warns; `Source#fromFile` (the CLI's `--db` reader,
+// engine/cli/remote.ts) opens the same file READ ONLY and can only warn — but it has to run the
+// IDENTICAL comparison (`guardMismatches`), not a second copy of it, or the two could disagree about
+// what "the guards are right" means. `capturingCli` mirrors `withFile`'s own console-capturing shape,
+// for `console.error` (the CLI's plain line) instead of `console.warn` (the server's).
+function capturingCli(fn) {
+  return async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'holdrim-cli-guards-'));
+    const said = [];
+    const logged = [];
+    const err = console.error;
+    const info = console.log;
+    console.error = (line) => said.push(line);
+    console.log = (line) => {
+      const parsed = typeof line === 'string' ? tryParse(line) : undefined;
+      if (parsed && typeof parsed.severity === 'string') logged.push(parsed);
+      else info(line);
+    };
+    try {
+      await fn(join(dir, 'events.db'), said, logged);
+    } finally {
+      console.error = err;
+      console.log = info;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+test('guardMismatches itself is read-only: calling it never changes what the database holds',
+  withFile(async (path, said, logged) => {
+    await reopen(path); // installs every guard once, normally
+    outside(path, 'DROP TRIGGER events_no_low_rowid;');
+    const db = new DatabaseSync(path, { readOnly: true });
+    const before = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name).sort();
+    const { mismatches, firstInstall } = guardMismatches(db);
+    db.close();
+    assert.deepEqual(mismatches, [{ name: 'events_no_low_rowid', kind: 'missing' }]);
+    assert.equal(firstInstall, false);
+    // Reading it twice more, on the connection that could not write even if the code tried to,
+    // proves the read alone changed nothing for `installGuards` to find different afterwards.
+    const db2 = new DatabaseSync(path, { readOnly: true });
+    const after = db2.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name).sort();
+    db2.close();
+    assert.deepEqual(after, before, 'a read-only comparison must not itself drop or create a trigger');
+    assert.deepEqual(said, [], 'guardMismatches says nothing on its own — only its callers decide what to say');
+    assert.deepEqual(logged, []);
+  }));
+
+test('the CLI\'s --db reader (Source#fromFile) drops each guard in turn and sees it, one by one — issue #108\'s own reproduction', async () => {
+  for (const guard of Object.keys(GUARDS)) {
+    await capturingCli(async (path, said, logged) => {
+      const store = new SqliteEventStore(path);
+      // The issue's own repro: an unhashed request with a forged low rowid, once its guard is gone.
+      const written = await store.append(approval, 'owner@example.org');
+      await store.close();
+      outside(path, `DROP TRIGGER ${guard};`);
+      const source = new Source({ db: path });
+      const events = await source.events();
+      assert.equal(events.length, 1, `${guard}: the event is still handed back — this is a warning, not a refusal`);
+      assert.equal(events[0].id, written.id);
+      assert.equal(source.guardsTampered, true, `${guard}: guardsTampered has to be true once it is dropped`);
+      assert.ok(said.some((line) => line.includes(guard)), `${guard}: the CLI has to name it, out loud`);
+      assert.ok(logged.some((l) => l.severity === 'WARNING' && l.event === 'sqlite_guard_missing' && l.guard === guard),
+        `${guard}: and log it structurally too, the same event installGuards logs`);
+    })();
+  }
+});
+
+test('the CLI\'s --db reader says nothing and reports guardsTampered: false when every guard is intact',
+  capturingCli(async (path, said, logged) => {
+    const store = new SqliteEventStore(path);
+    await store.append(approval, 'owner@example.org');
+    await store.close();
+    const source = new Source({ db: path });
+    await source.events();
+    assert.equal(source.guardsTampered, false);
+    assert.deepEqual(said, []);
+    assert.deepEqual(logged, []);
+  }));
+
+test('the CLI\'s --db reader does not mistake a genuinely brand-new, empty file for a guard gone missing',
+  capturingCli(async (path, said) => {
+    // Never opened by any store at all: guardMismatches' own `firstInstall` exemption, the same one
+    // installGuards relies on, has to hold here too, or pointing `--db` at a file nothing has written
+    // to yet would warn about every guard before a single event was ever recorded.
+    const db = new DatabaseSync(path);
+    db.exec(`
+      CREATE TABLE events (id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT,
+        fingerprint TEXT, text TEXT, snapshot TEXT, text_hash TEXT, snapshot_hash TEXT,
+        author TEXT NOT NULL, happened_at TEXT NOT NULL, data TEXT);
+      CREATE TABLE people (id TEXT PRIMARY KEY, email TEXT);
+      CREATE TABLE texts (event TEXT, field TEXT, value TEXT, salt TEXT);
+    `);
+    db.close();
+    const source = new Source({ db: path });
+    const events = await source.events();
+    assert.deepEqual(events, []);
+    assert.equal(source.guardsTampered, false, 'a file that never had a guard installed is not one going missing');
+    assert.deepEqual(said, []);
+  }));
+
+test('a foreign trigger alone does not flag guardsTampered for the CLI\'s --db reader: that is the next server boot\'s business, not a read-only one\'s',
+  capturingCli(async (path, said, logged) => {
+    const store = new SqliteEventStore(path); // installs every real guard, untouched
+    await store.append(approval, 'owner@example.org');
+    await store.close();
+    // A trigger this version does not install, left standing — installGuards would drop it and
+    // warn on the server's own next boot; it weakens nothing GUARDS names, so the CLI's read-only
+    // reader, which never fires it, leaves it for that boot rather than calling it "tampered" too.
+    outside(path, "CREATE TRIGGER x_ignore BEFORE INSERT ON events WHEN NEW.type = 'approval' BEGIN SELECT RAISE(IGNORE); END;");
+    const source = new Source({ db: path });
+    await source.events();
+    assert.equal(source.guardsTampered, false, 'a foreign trigger is not one of GUARDS gone missing or changed');
+    assert.deepEqual(said, []);
+    assert.deepEqual(logged, []);
+  }));

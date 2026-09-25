@@ -5,6 +5,7 @@ import type { Event } from '../api/types.ts';
 import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
 import { textKey, withTexts, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent as Raw, type TextField, type TextRow, type TamperReport } from '../api/texts.ts';
+import { log } from '../api/log.ts';
 
 /** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
 type RawEvent = Raw<Event>;
@@ -83,6 +84,12 @@ export class Source {
   #account?: string;
   #preferredAccount?: string;
   #pageSize: number;
+  // Set by `#fromFile` alone — issue #108: the SQLite guards "Nothing is erased" rests on are a
+  // property of the file itself, so only the `--db` reader can see them; the cloud and the local
+  // server have no equivalent trigger to check (SECURITY.md already scopes the downgrade check the
+  // same way, "SQLite only"). Read AFTER `events()` resolves, the same order `suspectsOf(events)`
+  // already requires of a text-tampering check.
+  #guardsTampered = false;
 
   constructor(options: { local?: boolean; project?: string; localUrl?: string; account?: string;
                         db?: string; pageSize?: number } = {}) {
@@ -99,6 +106,18 @@ export class Source {
     // holds (round 2, finding D): the real cloud never sees anything but the default.
     this.#pageSize = options.pageSize ?? 300;
     this.#preferredAccount = process.env.HOLDRIM_ACCOUNT ?? options.account;
+  }
+
+  /**
+   * Set only once `events()` has actually run `#fromFile` and found the store's guards are not what
+   * this version installs — `false` for every other path, and for a `--db` file `events()` has not
+   * yet read. `requests.ts#queue` and `validation.ts#sync` are the two callers that turn this into a
+   * non-zero exit, the same way they already do for `suspectsOf(events).length > 0` (issue #91); the
+   * others (`show`, `impact`, `summary`) never read it — the WARNING is already on the log by the
+   * time `events()` resolves, whoever called it.
+   */
+  get guardsTampered(): boolean {
+    return this.#guardsTampered;
   }
 
   /**
@@ -238,12 +257,13 @@ export class Source {
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
-    const { extractionBoundary, rollbackQuietly } = await import('../api/store-sqlite.ts');
+    const { extractionBoundary, guardMismatches, rollbackQuietly } = await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
     let rows: Record<string, any>[];
     let people: Map<string, string | null>;
     let texts: Map<string, TextRow>;
     let boundary: number | null;
+    let droppedOrChanged: string[];
     try {
       db.exec('BEGIN DEFERRED');
       try {
@@ -282,6 +302,19 @@ export class Source {
         const hasHashColumns = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[])
           .some((c) => c.name === 'text_hash');
         boundary = hasHashColumns ? extractionBoundary(db) : null;
+        // Issue #108: the same comparison `installGuards` (store-sqlite.ts) repairs from, run here
+        // read-only. `'foreign'` is left out on purpose — an extra trigger this version does not
+        // install cannot itself weaken one that GUARDS names (the CLI never writes, so it cannot be
+        // tricked into a silent INSERT the way a write connection could); it is the server's own
+        // business at its next boot, not this reader's. `'missing'` and `'replaced'` are the two
+        // shapes of "a guard `GUARDS` names is not, right now, what this version would install" —
+        // exactly what the issue's own reproduction (`DROP TRIGGER events_no_low_rowid`) drops. The
+        // `firstInstall` exemption for `'missing'` matches `installGuards` for the same reason: a
+        // brand-new, still-empty file has never had a guard to lose.
+        const { mismatches, firstInstall } = guardMismatches(db);
+        droppedOrChanged = mismatches
+          .filter((m) => m.kind !== 'foreign' && !(m.kind === 'missing' && firstInstall))
+          .map((m) => m.name);
         db.exec('COMMIT');
       } catch (err) {
         // Round 3 of the #91 review, MINOR: a ROLLBACK that itself throws — the transaction was
@@ -294,6 +327,24 @@ export class Source {
         // the helper's own comment for why.
         rollbackQuietly(db);
         throw err;
+      }
+      // Warn, don't refuse (issue #108's own decision, recorded in the PR this closes): the server's
+      // own reaction to the identical finding, `installGuards` above, is not to refuse to boot —
+      // it repairs and logs a WARNING. This reader cannot repair (read-only), so it can only do the
+      // second half, loudly, for every command that reads a `--db` file — `list`/`show`/`impact`/
+      // `summary`/`sync` alike, whichever one happens to call `events()`. `#guardsTampered` is a
+      // SEPARATE flag from the text-tampering one `suspectsOf` computes (not folded into it): the two
+      // are different findings — a text edited in place is not the same claim as a guard gone — and
+      // `list --json`'s own `guardsTampered` field lets a caller tell them apart, the way `tampered`
+      // alone could not.
+      if (droppedOrChanged.length) {
+        this.#guardsTampered = true;
+        for (const guard of droppedOrChanged) {
+          console.error(`⚠ WARNING: this database's guard ${guard} is not what this version installs. `
+            + 'Read-only here, so nothing was repaired — the file was most likely written to outside '
+            + 'the product. See SECURITY.md, and start a server of this version against it to repair it.');
+          log('WARNING', 'sqlite_guard_missing', { guard });
+        }
       }
       const events = withAuthors(rows.map((row) => ({
         id: String(row.id), type: String(row.type), page: String(row.page),

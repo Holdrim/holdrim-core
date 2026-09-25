@@ -249,7 +249,8 @@ export async function mark(root: string, registry: Registry, id: string, when: s
 }
 
 /** Brings into the repository the ✓ the owner gave on the site. Only theirs: a reviewer's approval does not lock. */
-export async function sync(root: string, source: Pick<Source, 'events'>, options: { owner?: string } = {}) {
+export async function sync(root: string, source: Pick<Source, 'events'> & { guardsTampered?: boolean },
+                           options: { owner?: string } = {}) {
   // The server's own rule, not a second copy of it: one e-mail, compared the way the server
   // compares it, and zero or two refused before the cloud is even asked. A comparison written here
   // would drift from it — a space around the address, and the owner's ✓ would lock nothing; two
@@ -279,12 +280,17 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
     const registry = loadRegistry(root);
     console.log(`⚠ could not reach the cloud, so no new ✓ from the site came in:\n  ${(e as Error).message}`);
     console.log(`  Going on with the registry in the repository: ${Object.keys(registry).length} validated (a frozen snapshot).`);
-    return { added: 0, unchanged: 0, expired: 0, offline: true, tampered: false };
+    return { added: 0, unchanged: 0, expired: 0, offline: true, tampered: false, guardsTampered: false };
   }
   // Which of the three cases it was already went out through `reportTampered`, wherever `events` was
   // resolved — this is only the flag `sync` warns from and exits non-zero on (issue #91).
   const tampered = suspectsOf(events).length > 0;
   if (tampered) warnOfTampering();
+  // A separate finding from `tampered` above (issue #108): `Source#fromFile`, the `--db` reader,
+  // already printed its own WARNING per guard the moment `source.events()` found one missing or
+  // changed — this only carries the flag through to `sync`'s own exit code, the same way `tampered`
+  // does. `false` for the cloud and the local server, which have no such trigger to compare.
+  const guardsTampered = source.guardsTampered ?? false;
   const approvals = events.filter((e) => e.type === 'approval');
   // Read from what the server wrote when the ✓ was GIVEN, never recomputed from who holds `lock`
   // NOW (docs/ROLES.md §3): this call runs in a SEPARATE process from the server, so a stale
@@ -330,7 +336,7 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
   }
   saveRegistry(root, registry);
   console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${Object.keys(registry).length} validated in all`);
-  return { added, unchanged, expired, offline: false, tampered };
+  return { added, unchanged, expired, offline: false, tampered, guardsTampered };
 }
 
 /**

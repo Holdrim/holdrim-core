@@ -135,14 +135,64 @@ export const GUARDS: Record<string, string> = {
     BEGIN SELECT RAISE(ABORT, 'a text is not deleted without a text_removed event naming it'); END`,
 };
 
+/** One trigger on `events`, `people` or `texts` that does not match what `guards` would install. */
+export type GuardMismatch = { name: string; kind: 'missing' | 'replaced' | 'foreign' };
+
+/**
+ * The comparison `installGuards` repairs from, pulled out on its own and READ-ONLY — no `BEGIN`, no
+ * `DROP`, no `CREATE` — so it runs identically on the write connection that repairs (`installGuards`
+ * below) and on the read-only one that only reports (`Source#fromFile`, the CLI's `--db` reader,
+ * `engine/cli/remote.ts`, issue #108: "reuse the server's existing check, do not write a second copy
+ * of it"). A trigger the file holds that is not in `guards` is `'foreign'`; one `guards` names that
+ * the file holds under different SQL is `'replaced'`; one `guards` names that the file does not hold
+ * at all is `'missing'`.
+ *
+ * `firstInstall` is handed back rather than folded into the list, because what it means differs by
+ * caller: `installGuards` uses it to decide whether a `'missing'` entry is worth a word (see its own
+ * long comment — a file that has never held a guard AND holds no row yet is not one going missing);
+ * the CLI reader applies the identical rule for the identical reason, or reading a brand-new,
+ * still-empty `--db` file would warn about every guard "missing" before a single event was ever
+ * written to it. `'foreign'` and `'replaced'` are reported regardless of `firstInstall`: a foreign
+ * trigger, or a same-named one that already does something else, cannot be "not installed yet" —
+ * something has to have written it.
+ */
+export function guardMismatches(db: DatabaseSync, guards: Record<string, string> = GUARDS):
+    { mismatches: GuardMismatch[]; firstInstall: boolean } {
+  // SQLite keeps the text as written, spacing included.
+  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+  const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
+  // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
+  const rows = db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people', 'texts')"
+  ).all() as { name: string; sql: string }[];
+  const byName = new Map(rows.map((r) => [r.name, r]));
+  // Neither half alone is enough: a fresh file can hold a foreign trigger (still reported below,
+  // just not as one of OUR guards missing) before it ever holds a row, and an old, real database
+  // can hold rows with none of our guards on it at all — see installGuards's own long comment.
+  const noGuardOfOursHeld = !rows.some((r) => want.has(r.name));
+  const holdsNoRow = () =>
+    !db.prepare('SELECT 1 FROM events LIMIT 1').get() &&
+    !db.prepare('SELECT 1 FROM people LIMIT 1').get() &&
+    !db.prepare('SELECT 1 FROM texts LIMIT 1').get();
+  const firstInstall = noGuardOfOursHeld && holdsNoRow();
+  const mismatches: GuardMismatch[] = [];
+  for (const r of rows) if (!want.has(r.name)) mismatches.push({ name: r.name, kind: 'foreign' });
+  for (const [name, sql] of want) {
+    const r = byName.get(name);
+    if (r && flat(r.sql) === flat(sql)) continue;
+    mismatches.push({ name, kind: r ? 'replaced' : 'missing' });
+  }
+  return { mismatches, firstInstall };
+}
+
 /**
  * Puts the guards in place, exactly as written in `guards`, and nothing else on the two tables.
  * `CREATE TRIGGER IF NOT EXISTS` alone looks only at the name: a guard swapped for a same-named one
  * that does nothing, or a second trigger that answers RAISE(IGNORE) to every ✓, would stay in place
  * on every boot and the lock would be off without a word. So every trigger on `events` and `people`
- * is compared with this list: one that differs is replaced, one that is not on it is dropped, and
- * both are said out loud. The same path carries a guard whose text changed between versions onto a
- * database an older version made.
+ * is compared with this list (`guardMismatches` above): one that differs is replaced, one that is
+ * not on it is dropped, and both are said out loud. The same path carries a guard whose text changed
+ * between versions onto a database an older version made.
  *
  * A guard from `guards` that is not held at all is put back the same way — but only said out loud
  * once the database is not a first install. That is NOT "at least one guard is already held": a
@@ -167,52 +217,31 @@ export const GUARDS: Record<string, string> = {
  */
 export function installGuards(db: DatabaseSync, guards: Record<string, string> = GUARDS,
                               warn: (line: string) => void = console.warn): void {
-  // SQLite keeps the text as written, spacing included.
-  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+  if (guardMismatches(db, guards).mismatches.length === 0) return;
   const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
-  // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
-  const held = () => db.prepare(
-    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people', 'texts')"
-  ).all() as { name: string; sql: string }[];
-  const inPlace = (rows: { name: string; sql: string }[]) =>
-    rows.length === want.size &&
-    rows.every((r) => want.has(r.name) && flat(r.sql) === flat(want.get(r.name)!));
-  if (inPlace(held())) return;
   // The name comes from the file, so it is quoted: unquoted, a trigger named
   // `x; DROP TRIGGER events_no_delete` would drop a guard and keep itself.
   const drop = (name: string) => db.exec(`DROP TRIGGER IF EXISTS "${name.replace(/"/g, '""')}"`);
   db.exec('BEGIN IMMEDIATE');
   try {
     // Read again under the lock: another process may have repaired it while this one waited.
-    const rows = held();
-    const byName = new Map(rows.map((r) => [r.name, r]));
-    // Neither half alone is enough: a fresh file can hold a foreign trigger (still reported below,
-    // just not as one of OUR guards missing) before it ever holds a row, and an old, real database
-    // can hold rows with none of our guards on it at all — see the long comment above the function.
-    const noGuardOfOursHeld = !rows.some((r) => want.has(r.name));
-    const holdsNoRow = () =>
-      !db.prepare('SELECT 1 FROM events LIMIT 1').get() &&
-      !db.prepare('SELECT 1 FROM people LIMIT 1').get() &&
-      !db.prepare('SELECT 1 FROM texts LIMIT 1').get();
-    const firstInstall = noGuardOfOursHeld && holdsNoRow();
-    for (const r of rows) {
-      if (want.has(r.name)) continue;
-      warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
-      drop(r.name);
-    }
-    for (const [name, sql] of want) {
-      const r = byName.get(name);
-      if (r && flat(r.sql) === flat(sql)) continue;
-      if (r) {
-        warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);
-        drop(r.name);
+    const { mismatches, firstInstall } = guardMismatches(db, guards);
+    for (const m of mismatches) {
+      if (m.kind === 'foreign') {
+        warn(`holdrim: the database holds a trigger this version does not install, ${m.name}; dropping it`);
+        drop(m.name);
+        continue;
+      }
+      if (m.kind === 'replaced') {
+        warn(`holdrim: the database's guard ${m.name} was not the one this version installs; replacing it`);
+        drop(m.name);
       } else if (!firstInstall) {
         // Only the name goes out — never a row's contents — so this line is safe wherever the log
         // ends up, unlike an event's own text or a person's e-mail (docs/PRIVACY.md).
-        warn(`holdrim: the database's guard ${name} is missing; installing it`);
-        log('WARNING', 'sqlite_guard_missing', { guard: name });
+        warn(`holdrim: the database's guard ${m.name} is missing; installing it`);
+        log('WARNING', 'sqlite_guard_missing', { guard: m.name });
       }
-      db.exec(sql);
+      db.exec(want.get(m.name)!);
     }
     db.exec('COMMIT');
   } catch (err) {

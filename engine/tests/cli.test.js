@@ -294,7 +294,7 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
       author: 'reviewer@example.org', when: '2026-09-22T10:02:00Z', data: { locks: 'false' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false, tampered: false });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false, tampered: false, guardsTampered: false });
   const registry = loadRegistry(tmp);
   assert.ok(registry['A01.1.1'], 'the owner\'s ✓ for the current text locks');
   assert.equal(registry['A01.1.1'].date, '2026-09-22');
@@ -454,6 +454,65 @@ test('list() prints no warning and exits clean when nothing is tampered', async 
   assert.deepEqual(said, []);
 });
 
+// ===================================================================== issue #108, "guardsTampered"
+// `Source#fromFile` (engine/cli/remote.ts) is the one that actually runs the guard comparison and
+// prints the WARNING — engine/tests/store-sqlite-guards.test.js proves that, against a real SQLite
+// file. What belongs here is only the wiring on top: a source reporting `guardsTampered` has to move
+// `queue`, `list` and `sync` the same way one reporting a tampered field already does, WITHOUT this
+// file printing a second warning of its own — `Source#fromFile` already did, the moment it read.
+
+test('queue() carries guardsTampered from the source, separately from tampered', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const source = { events: async () => [], guardsTampered: true };
+  const q = await queue(EXAMPLE, source, true);
+  assert.equal(q.guardsTampered, true);
+  assert.equal(q.tampered, false, 'a guard gone missing is not the same finding as a text failing its hash');
+});
+
+test('queue() reports guardsTampered: false for a source that never sets it (the cloud, the local server)', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const q = await queue(EXAMPLE, { events: async () => [] }, true);
+  assert.equal(q.guardsTampered, false);
+});
+
+test('list() exits non-zero on guardsTampered alone, printing no warning of its own', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const err = console.error;
+  const said = [];
+  console.error = (line) => said.push(line);
+  let exitWorthy;
+  try {
+    exitWorthy = await list(EXAMPLE, { events: async () => [], guardsTampered: true }, {});
+  } finally {
+    console.error = err;
+  }
+  assert.equal(exitWorthy, true, 'holdrim.ts turns this into exit code 1, same as a tampered text');
+  assert.deepEqual(said, [], 'the WARNING was already Source#fromFile\'s to print, not list()\'s to repeat');
+});
+
+test('list --json carries guardsTampered as its own key', async () => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const logged = [];
+  const info = console.log;
+  console.log = (line) => logged.push(line);
+  try {
+    await list(EXAMPLE, { events: async () => [], guardsTampered: true }, { json: true });
+  } finally {
+    console.log = info;
+  }
+  const printed = JSON.parse(logged[0]);
+  assert.equal(printed.guardsTampered, true);
+});
+
+test('sync exits non-zero on guardsTampered alone', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const r = await sync(tmp, { events: async () => [], guardsTampered: true }, { owner: 'owner@example.org' });
+  assert.equal(r.guardsTampered, true);
+  assert.equal(r.tampered, false);
+});
+
 /**
  * The lock a ✓ carries is read from what the server wrote when it was GIVEN, never recomputed from
  * whoever holds HOLDRIM_OWNER when `sync` happens to run (docs/ROLES.md §3, "written at the moment,
@@ -476,7 +535,7 @@ test('sync locks a ✓ from what was written on it, even once somebody else is H
   // This process's own HOLDRIM_OWNER has since moved on — a handover, or a stale shell variable.
   // Recomputing "is this the CURRENT owner?" would read the ✓ above as no lock at all.
   const r = await sync(tmp, { events: async () => events }, { owner: 'newowner@example.org' });
-  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 0, offline: false, tampered: false });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 0, offline: false, tampered: false, guardsTampered: false });
   assert.ok(loadRegistry(tmp)['A01.1.1'], 'the ✓ locks from what was written, not from today\'s owner');
 });
 

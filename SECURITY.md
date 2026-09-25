@@ -16,11 +16,17 @@ Worth knowing before you run it:
   `DELETE` through triggers — but only from a program that does not first drop them, and not
   `INSERT`: someone with write access to the file can `DROP TRIGGER` before touching a row, or
   simply insert a forged event, so the triggers stop mistakes and ordinary tools, not that person.
-  (A dropped trigger is reinstalled on the next boot, and that boot names it in a warning
-  [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89). That catches a guard left
-  dropped, not a person who puts it back: dropping a guard, changing rows and recreating it by its
-  exact text leaves nothing this check can see, and neither does emptying every table. Only signed
-  events close that.) For an event's own text, moved
+  (A dropped trigger is reinstalled the next time a server of this version boots against the file,
+  and that boot names it in a warning [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89).
+  Reading the file directly with `holdrim ... --db <file>` — the agent's tool, with no server in
+  between — cannot repair it, since that reader opens the file read-only on purpose, but it runs the
+  identical comparison and warns just as loudly, every time it reads
+  ([holdrim#108](https://github.com/Holdrim/holdrim-core/issues/108)); before that, a guard dropped
+  and left dropped was invisible to it, so the drop alone was enough — nobody had to restore
+  anything to keep reading as if nothing had changed. Either way, this only catches a guard left
+  dropped or changed, not a person who puts it back: dropping a guard, changing rows and recreating
+  it by its exact text leaves nothing this check can see, and neither does emptying every table.
+  Only signed events close that.) For an event's own text, moved
   out of the event into its own table, a forged removal dated and ordered after the text it targets
   can still pass as a genuine one; a backdated one cannot (docs/PRIVACY.md, section 4). Closing this
   for every kind of forgery, or for a trigger dropped outright, needs the events themselves signed —

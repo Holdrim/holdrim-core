@@ -165,7 +165,7 @@ export function personLabel(show: ReturnType<typeof ofProject>['peopleShow'], ro
  * The agent's queue: what the owner approved and nobody applied yet, with everything an agent
  * needs to act — as data. `--json` is the contract other tools read; the table is for a person.
  */
-export async function queue(root: string, source: Pick<Source, 'events'>, all: boolean) {
+export async function queue(root: string, source: Pick<Source, 'events'> & { guardsTampered?: boolean }, all: boolean) {
   checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
@@ -179,6 +179,13 @@ export async function queue(root: string, source: Pick<Source, 'events'>, all: b
     // was actually resolved (the server, or one of `Source`'s two direct readers) — this is only
     // the flag `list` warns from and exits non-zero on (issue #91's "same warning").
     tampered: suspectsOf(events).length > 0,
+    // A SEPARATE finding, not folded into `tampered` above: a guard `GUARDS` (store-sqlite.ts)
+    // names being missing or changed is not the same claim as a text failing its own hash, and
+    // `list --json`'s own contract should let a reader (an agent parsing the queue, say) tell the
+    // two apart. Only `Source#fromFile`, the `--db` reader, ever sets it — `guardsTampered` reads
+    // `false` for the cloud and the local server, which have no equivalent trigger to compare
+    // (issue #108). Read AFTER `source.events()`, which is what actually runs the comparison.
+    guardsTampered: source.guardsTampered ?? false,
     requests: showing.map((r) => {
       const block = r.block ? blocks.get(r.block) : undefined;
       return {
@@ -209,16 +216,21 @@ export function warnOfTampering() {
     + 'server log (or run this again where the log is written) for which event and field.');
 }
 
-export async function list(root: string, source: Pick<Source, 'events'>, options: { all?: boolean; json?: boolean } = {}) {
+export async function list(root: string, source: Pick<Source, 'events'> & { guardsTampered?: boolean },
+                           options: { all?: boolean; json?: boolean } = {}) {
   const cycle = loadCycle();
   const q = await queue(root, source, options.all ?? false);
-  if (options.json) { console.log(JSON.stringify(q, null, 2)); if (q.tampered) warnOfTampering(); return q.tampered; }
+  // `q.guardsTampered` needs no warning of its own here: `Source#fromFile` already printed one line
+  // per guard the moment `source.events()` found it, the same way `reportTampered` already did for
+  // `q.tampered` before `queue` ever runs — this only has to fold it into the exit code.
+  const exitWorthy = q.tampered || q.guardsTampered;
+  if (options.json) { console.log(JSON.stringify(q, null, 2)); if (q.tampered) warnOfTampering(); return exitWorthy; }
   if (q.tampered) warnOfTampering();
 
   if (!q.requests.length) {
     console.log(`no requests ${options.all ? 'recorded' : 'approved and waiting to be applied'}.` +
       (q.toTriage && !options.all ? ` (${q.toTriage} waiting for the owner's triage)` : ''));
-    return q.tampered;
+    return exitWorthy;
   }
   const { peopleShow } = ofProject(root);
   const roles = projectRoles(root);
@@ -229,7 +241,7 @@ export async function list(root: string, source: Pick<Source, 'events'>, options
       `${formatWhen(r.when)}  ${personLabel(peopleShow, roles, r.author)}${changed}`);
     console.log(`          “${r.text.replace(/\n/g, ' ').slice(0, 140)}”`);
   }
-  return q.tampered;
+  return exitWorthy;
 }
 
 export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
