@@ -1,10 +1,11 @@
 /**
- * The cloud session hook, checked.
+ * The session-start hook, checked.
  *
- * `.claude/hooks/session-start.sh` runs before every cloud session and nothing else runs it, so each
- * of its guards could be deleted with all five proofs still green. It is driven here the way Claude
- * Code starts it, with `npm`, `npx`, `git` and `node` replaced by stubs on the PATH: the real ones
- * would reinstall `node_modules` and rewrite this repository's git config.
+ * `.claude/hooks/session-start.sh` runs before every session — cloud and local, fresh and
+ * `/clear`ed — and nothing else runs it, so each of its guards could be deleted with all five
+ * proofs still green. It is driven here the way Claude Code starts it, with `npm`, `npx`, `git` and
+ * `node` replaced by stubs on the PATH: the real ones would reinstall `node_modules`, rewrite this
+ * repository's git config, and reach an actual `origin` this test does not control.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,6 +27,7 @@ const HOOK = join(ROOT, '.claude', 'hooks', 'session-start.sh');
  */
 function run(t, {
   remote = 'true', nodeVersion = '22.18.0', chromium = true, engines = '>=22.18', emulator = true, envFile = true,
+  fetchOk = true, behind = 0, dirty = false,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-hook-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -35,7 +37,18 @@ function run(t, {
   const log = join(dir, 'calls.log');
   writeFileSync(log, '');
   stub(dir, 'npm', `echo "npm $*" >> '${log}'`);
-  stub(dir, 'git', `echo "git $*" >> '${log}'`);
+  // Most git subcommands the hook runs (config, add, ...) only need to be logged. The three the
+  // staleness check depends on are given fake but controllable answers, because the real fetch,
+  // rev-list and status would need a real `origin` this throwaway directory does not have.
+  stub(dir, 'git', [
+    `echo "git $*" >> '${log}'`,
+    'case "$1" in',
+    `  fetch) ${fetchOk ? 'exit 0' : "echo 'fatal: could not resolve host' >&2; exit 1"} ;;`,
+    `  rev-list) echo ${behind} ;;`,
+    `  status) ${dirty ? "echo ' M some-file'" : 'true'} ;;`,
+    '  *) exit 0 ;;',
+    'esac',
+  ].join('\n'));
   stub(dir, 'npx', `echo "npx $*" >> '${log}'; exit ${chromium ? 0 : 1}`);
   stub(dir, 'node', nodeVersion === null ? 'exit 127' : [
     `if [ "$1" = -v ]; then echo v${nodeVersion}; exit 0; fi`,
@@ -54,14 +67,31 @@ function run(t, {
   };
   const r = spawnSync('bash', [HOOK], { env, encoding: 'utf8' });
   return {
-    code: r.status, out: r.stderr, calls: readFileSync(log, 'utf8'), sessionEnv: readFileSync(sessionEnv, 'utf8'),
+    code: r.status, out: r.stderr, stdout: r.stdout,
+    calls: readFileSync(log, 'utf8'), sessionEnv: readFileSync(sessionEnv, 'utf8'),
   };
 }
 
-test('on a developer machine it does nothing at all', (t) => {
+test('on a developer machine the heavy setup does not run', (t) => {
   const { code, calls } = run(t, { remote: '' });
   assert.equal(code, 0);
-  assert.equal(calls, '');
+  assert.doesNotMatch(calls, /^npm ci/m);
+  assert.doesNotMatch(calls, /^git config core\.hooksPath/m);
+  assert.doesNotMatch(calls, /^npx /m);
+});
+
+test('the handoff note reaches the session on stdout, cloud or local', (t) => {
+  for (const remote of ['true', '']) {
+    const { stdout } = run(t, { remote });
+    assert.match(stdout, /handoff/, remote || 'local');
+    assert.match(stdout, /\/crew/, remote || 'local');
+  }
+});
+
+test('the handoff note still prints when an earlier optional step warns', (t) => {
+  const { out, stdout } = run(t, { emulator: false });
+  assert.match(out, /WARNING: no Firestore emulator/);
+  assert.match(stdout, /handoff/);
 });
 
 test('it installs what the lockfile says, never re-resolving it', (t) => {
@@ -125,4 +155,42 @@ test('no emulator is said out loud, names the tests that will skip, and the sess
 test('an emulator with nowhere to send its variable says how to use it by hand', (t) => {
   const { out } = run(t, { envFile: false });
   assert.match(out, /WARNING: the Firestore emulator is running.*Run: export FIRESTORE_EMULATOR_HOST=127\.0\.0\.1:8433/);
+});
+
+test('a checkout already at origin/main gets no staleness warning', (t) => {
+  assert.doesNotMatch(run(t, { behind: 0 }).out, /behind origin\/main/);
+});
+
+test('a checkout behind origin/main is said out loud, naming how far', (t) => {
+  const { out } = run(t, { behind: 3 });
+  assert.match(out, /WARNING: this checkout is 3 commit\(s\) behind origin\/main/);
+});
+
+test('the staleness warning runs on a developer machine too', (t) => {
+  const { out } = run(t, { remote: '', behind: 5 });
+  assert.match(out, /WARNING: this checkout is 5 commit\(s\) behind origin\/main/);
+});
+
+test('a clean checkout behind origin/main is offered the fast-forward', (t) => {
+  const { out } = run(t, { behind: 1, dirty: false });
+  assert.match(out, /git merge --ff-only origin\/main/);
+});
+
+test('a dirty checkout behind origin/main is warned, not told to merge', (t) => {
+  const { out } = run(t, { behind: 1, dirty: true });
+  assert.match(out, /WARNING: this checkout is 1 commit/);
+  assert.doesNotMatch(out, /git merge --ff-only/);
+});
+
+test('a fetch that fails is said out loud, and the session still starts', (t) => {
+  const { code, out } = run(t, { fetchOk: false });
+  assert.equal(code, 0);
+  assert.match(out, /WARNING: could not fetch origin\/main/);
+});
+
+test('the staleness check never merges or switches branches itself', (t) => {
+  const { calls } = run(t, { behind: 2, dirty: false });
+  assert.doesNotMatch(calls, /^git merge/m);
+  assert.doesNotMatch(calls, /^git checkout/m);
+  assert.doesNotMatch(calls, /^git switch/m);
 });
