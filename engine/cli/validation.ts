@@ -7,6 +7,7 @@ import { trafficLight, dependentsOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
 import { Source } from './remote.ts';
+import { LOCKS_FIELD, writtenBoolean } from '../api/types.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -279,7 +280,12 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
     return { added: 0, unchanged: 0, expired: 0, offline: true };
   }
   const approvals = events.filter((e) => e.type === 'approval');
-  const theOwners = approvals.filter((e) => roles.can('lock', e.author));
+  // Read from what the server wrote when the ✓ was GIVEN, never recomputed from who holds `lock`
+  // NOW (docs/ROLES.md §3): this call runs in a SEPARATE process from the server, so a stale
+  // HOLDRIM_OWNER left in this shell — or a real handover since — must not decide a past ✓
+  // differently than the server did when it recorded it. `undefined` (a ✓ from before this field
+  // existed) falls back to the roles this call was given, exactly as every version before this one.
+  const theOwners = approvals.filter((e) => writtenBoolean(e.data, LOCKS_FIELD) ?? roles.can('lock', e.author));
   if (approvals.length !== theOwners.length) {
     console.log(`  · ${approvals.length - theOwners.length} approval(s) by somebody else ignored: only the owner's ✓ locks`);
   }

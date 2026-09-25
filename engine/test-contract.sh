@@ -674,6 +674,13 @@ rm -f $MCOOKIES
 # response, and be the owner from then on.
 #
 # The check above the reset route never sees this path: the attacker never resets anything.
+#
+# The same restart is also the one place this suite can prove issue #35 without waiting for LOCKS
+# (docs/ROLES.md §3): HOLDRIM_OWNER is the only way authority moves today, sessions and events both
+# persist in $DATA_DIR across it, and $OWNER's own cookie ($COOKIES) is still a valid SESSION after
+# the restart — signing in does not stop just because the person it names is no longer the owner.
+LOCK_ID=$(curl -s -b $COOKIES "$B/api/events?page=D01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.type==='approval'&&e.block==='D01.1.4'&&e.author===process.argv[1]).id))" "$OWNER")
+expect "the owner's ✓ locks, before any handover" true "$(curl -s -b $COOKIES $B/api/events/$LOCK_ID | jfield locks)"
 HANDOVER=newowner@example.org
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$HANDOVER HOLDRIM_ADMINS=$ADMIN HOLDRIM_IDENTITY=password \
@@ -686,6 +693,12 @@ expect "the new owner has no account yet" 1 "$(as_admin $B/api/users | has -F "$
 expect "and no first-access was printed" 0 "$(grep -c 'FIRST ACCESS' $WORK/handover.log)"
 expect "an admin still cannot create it → 409" 409 "$(code_admin -d "{\"email\":\"$HANDOVER\",\"name\":\"Taking Over\"}" $B/api/users)"
 expect "so nobody signed in as the new owner" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"email\":\"$HANDOVER\",\"password\":\"anything-at-all\"}" $B/api/sign-in)"
+# The handover itself: $OWNER is no longer HOLDRIM_OWNER in THIS process, and a `roles.can('lock', …)`
+# recomputed here would say their past ✓ is not a lock any more. It has to still read as one, from
+# what was written on it when it was given — otherwise every ✓ anybody ever gave un-locks the moment
+# the owner hands over, which is the exact bug this issue closes.
+expect "the old owner is no longer treated as owner"   member "$(curl -s -b $COOKIES $B/api/me | jfield role)"
+expect "and their PAST ✓ still locks, mid-handover"    true "$(curl -s -b $COOKIES $B/api/events/$LOCK_ID | jfield locks)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$ADMIN HOLDRIM_IDENTITY=password \
@@ -888,6 +901,12 @@ expect "HOLDRIM_OWNER alone: it comes up, and names the owner" owner "$(curl -s 
 expect "and HOLDRIM_ADMINS names the admin"        admin "$(curl -s -H "X-Dev-Email: $LEAD" $B/api/me | jfield role)"
 ADMIN_REQUEST=$(new_request $LEAD '{"type":"request","page":"A01","block":"A01.1.1","fingerprint":"x","text":"an admin asks"}')
 expect "the server starts the admin's request approved" approved "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$ADMIN_REQUEST" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status.state))")"
+# The fact itself, not only its effect: the state above could, in principle, still be a recompute
+# that happens to agree because nothing has been revoked yet. This is what proves the server wrote
+# the CAPABILITY the admin held at that instant onto the event (docs/ROLES.md §3) — the fact
+# `holdrim list` reads instead of asking its own HOLDRIM_ADMINS about a request filed somewhere else.
+expect "and the admin's capability at that instant is ON the event, not only its effect" true \
+  "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$ADMIN_REQUEST" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).data.authorCouldTriage))")"
 expect "and so does the CLI, from the same variables" approved "$(HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_LOCAL_URL=$B node engine/cli/holdrim.ts list --all --json --local --root "$SITE" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).requests.find(r=>r.id===process.argv[1])?.state))" "$ADMIN_REQUEST")"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 TWO=$(mktemp -d); cp "$SITE/holdrim.json" "$TWO/holdrim.json"

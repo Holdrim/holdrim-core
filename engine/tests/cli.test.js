@@ -243,6 +243,59 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
 });
 
 /**
+ * The lock a ✓ carries is read from what the server wrote when it was GIVEN, never recomputed from
+ * whoever holds HOLDRIM_OWNER when `sync` happens to run (docs/ROLES.md §3, "written at the moment,
+ * read forever after") — the exact bug the issue's own comment names: a contributor with read access
+ * to the store running `HOLDRIM_OWNER=<self> holdrim sync` must not lock their own past ✓.
+ */
+test('sync locks a ✓ from what was written on it, even once somebody else is HOLDRIM_OWNER', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const events = [
+    // Given while owner@example.org held HOLDRIM_OWNER, and written as a lock then.
+    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
+  ];
+  // This process's own HOLDRIM_OWNER has since moved on — a handover, or a stale shell variable.
+  // Recomputing "is this the CURRENT owner?" would read the ✓ above as no lock at all.
+  const r = await sync(tmp, { events: async () => events }, { owner: 'newowner@example.org' });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 0, offline: false });
+  assert.ok(loadRegistry(tmp)['A01.1.1'], 'the ✓ locks from what was written, not from today\'s owner');
+});
+
+test('sync does not lock a ✓ written as no lock, even once its author becomes the owner', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const events = [
+    // Given by an admin, not a lock at the time — written as such.
+    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+      author: 'admin@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'false' } },
+  ];
+  // Now, in THIS process, that same address is HOLDRIM_OWNER. A recompute would lock it.
+  const r = await sync(tmp, { events: async () => events }, { owner: 'admin@example.org' });
+  assert.equal(r.added, 0, 'an admin\'s ✓ does not retroactively lock by becoming the owner later');
+});
+
+test('sync falls back to today\'s roles for a ✓ from before the lock bit existed', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const events = [
+    // No `locks` field at all: an event from before this change. History is not rewritten, so this
+    // must still read exactly as it always did — recomputed from the roles `sync` is given.
+    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: null },
+  ];
+  const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
+  assert.equal(r.added, 1, 'an old ✓ with no written bit still locks when its author is the owner now');
+});
+
+/**
  * `sync` asks the server's rule who the owner is. Two addresses read as one owner nobody matches
  * would sync nothing and say nothing, and the session would go on believing no ✓ was ever given.
  * The refusal has to come before the cloud is asked: the count proves it did.
@@ -464,6 +517,35 @@ test('a request\'s history comes from its own thread, oldest first, whatever ord
   ], createRoles('owner@y.org', ''));
   assert.deepEqual(found.history.map((e) => e.id), ['m1', 'm2', 'm3']);
   assert.equal(found.state, 'applied');
+});
+
+/**
+ * The state a request starts in is read from what was written on it when it was FILED, never
+ * recomputed from whether its author can triage TODAY (docs/ROLES.md §3, "the same holds for a
+ * request") — the second finding in the issue's own comment: `holdrim list --all --json` deciding
+ * this from its own HOLDRIM_ADMINS would let an untriaged request read as approved the moment its
+ * author is granted `triage`, with no triage event ever recorded.
+ */
+test('a request starts where it was written to start, not from whether its author can triage now', () => {
+  const [grantedSince] = requests([
+    { id: 'q', type: 'request', page: 'A01', author: 'later-admin@x.org', when: '2026-09-22T10:00:00Z',
+      data: { authorCouldTriage: 'false' } },
+  ], createRoles('owner@y.org', 'later-admin@x.org')); // now an admin — was not, when this was filed
+  assert.equal(grantedSince.state, 'open', 'granting triage afterwards must not retroactively approve it');
+
+  const [revokedSince] = requests([
+    { id: 'q', type: 'request', page: 'A01', author: 'former-admin@x.org', when: '2026-09-22T10:00:00Z',
+      data: { authorCouldTriage: 'true' } },
+  ], createRoles('owner@y.org', '')); // no longer an admin
+  assert.equal(revokedSince.state, 'approved', 'revoking triage afterwards must not retroactively un-approve it');
+});
+
+test('a request with no written field falls back to today\'s roles — an old request is not rewritten', () => {
+  const [found] = requests([
+    // No `data.authorCouldTriage` at all: a request from before this field existed.
+    { id: 'q', type: 'request', page: 'A01', author: 'admin@x.org', when: '2026-09-22T10:00:00Z', data: null },
+  ], createRoles('owner@y.org', 'admin@x.org'));
+  assert.equal(found.state, 'approved', 'an old request still reads from the roles it is given');
 });
 
 test('the request list is linear in its history: 30 000 requests read in well under a second', () => {

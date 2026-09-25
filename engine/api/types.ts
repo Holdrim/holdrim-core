@@ -53,6 +53,40 @@ export function stored(event: NewEvent, id: string, author: string, when: string
   };
 }
 
+// ---------------------------------------------------------------- authority, written at record time
+//
+// docs/ROLES.md §3, "written at the moment, read forever after": what an event's author was allowed
+// to do is a fact about the INSTANT the server recorded it, so it is written onto `data` then, by
+// `recordEvent` (server.ts) — never recomputed later from whoever holds a grant NOW, which is what
+// let a revoked admin's request quietly read as pre-approved, and an owner's handover quietly un-lock
+// their past ✓s. The two names below are shared so `server.ts`, `validation.ts` (`holdrim sync`) and
+// `requests.ts` (the agent's CLI) write and read the exact same keys, never three that merely look
+// alike.
+
+/** On an `approval` event: whether it was a lock at the moment it was given. */
+export const LOCKS_FIELD = 'locks';
+/** On a `request` event: whether its author could already triage it at the moment it was filed —
+ *  the fact `cycle.currentState`'s `authorIsAdmin` parameter needs, named for the CAPABILITY it asks
+ *  about (docs/ROLES.md, "the engine asks about capabilities, never about names"), not for a role. */
+export const AUTHOR_COULD_TRIAGE_FIELD = 'authorCouldTriage';
+
+/**
+ * A boolean the server wrote into an event's `data` at record time, or `undefined` for an event from
+ * before that field existed — every caller falls back to asking today's roles for one of those,
+ * exactly as every reader did before this existed: there is no rewrite of history, so an old event
+ * still reads (docs/ROLES.md §3).
+ *
+ * Written and read as the STRINGS `'true'`/`'false'`, never a JS `boolean`: every other value already
+ * inside `data` (`state`, `category`, `commit`, `from`, …) is a string, and a bare boolean would
+ * round-trip fine through SQLite and the in-memory store but come back `undefined` from the CLI's own
+ * Firestore reader (`engine/cli/remote.ts`, `#fromFirestore`, which reads only `.stringValue`) —
+ * silently falling back to the very recompute this field exists to stop, and nothing would say so.
+ */
+export function writtenBoolean(data: Event['data'], key: string): boolean | undefined {
+  const v = (data as Record<string, unknown> | null | undefined)?.[key];
+  return v === 'true' ? true : v === 'false' ? false : undefined;
+}
+
 /** A row of the people table. `email` is null once the person was forgotten; the id stays. */
 export interface Person {
   id: string;

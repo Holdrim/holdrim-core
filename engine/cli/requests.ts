@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createCycle } from '../core/cycle.js';
 import { readBlocks, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
-import type { Event } from '../api/types.ts';
+import { AUTHOR_COULD_TRIAGE_FIELD, writtenBoolean, type Event } from '../api/types.ts';
 
 /**
  * The agent's tool: read the change requests reviewers made on the site, see the context, measure
@@ -76,9 +76,15 @@ export function requests(events: Event[], roles: Pick<ReturnType<typeof projectR
   const threads = cycle.threadsOf(events);
   return events.filter((e) => e.type === 'request').map((r) => {
     const thread = threads.get(r.id) ?? [];
+    // Read from what the server wrote when the request was FILED, never recomputed from whether its
+    // author can triage TODAY (docs/ROLES.md §3): this runs in the agent's own process, against
+    // whatever HOLDRIM_ADMINS its shell happens to hold, and a request granted `triage` afterwards
+    // must not read as pre-approved with no triage event to show for it. `undefined` (a request from
+    // before this field existed) falls back to `roles`, exactly as every version before this one.
+    const authorCouldTriage = writtenBoolean(r.data, AUTHOR_COULD_TRIAGE_FIELD) ?? roles.can('triage', r.author);
     return {
       ...r,
-      state: cycle.currentState(r.id, thread, roles.can('triage', r.author)),
+      state: cycle.currentState(r.id, thread, authorCouldTriage),
       history: thread.filter((e) => e.type !== 'request').sort((a, b) => a.when.localeCompare(b.when)),
     };
   });
