@@ -9,7 +9,7 @@ import { createRoles } from '../core/roles.js';
 import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
-import { warnOfTampering } from './requests.ts';
+import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -280,15 +280,18 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     const registry = loadRegistry(root);
     console.log(`⚠ could not reach the cloud, so no new ✓ from the site came in:\n  ${(e as Error).message}`);
     console.log(`  Going on with the registry in the repository: ${Object.keys(registry).length} validated (a frozen snapshot).`);
-    return { added: 0, unchanged: 0, expired: 0, offline: true, tampered: false, guardsTampered: false };
+    return { added: 0, unchanged: 0, expired: 0, offline: true, tampered: false };
   }
+  // `sync` acts: it writes the owner's ✓ into approvals.json and data-validated into the pages. So
+  // on a file whose guards are broken it refuses, as `apply` and `state` do, before one approval is
+  // read — with `events_no_update` dropped, an approval's fingerprint can be rewritten to today's
+  // text, and a sync that went on would lock what the owner never saw. Outside the `try` above on
+  // purpose: in it, the refusal would read as "could not reach the cloud" and sync would go on.
+  refuseToActOnBrokenGuards(source);
   // Which of the three cases it was already went out through `reportTampered`, wherever `events` was
   // resolved — this is only the flag `sync` warns from and exits non-zero on (issue #91).
   const tampered = suspectsOf(events).length > 0;
   if (tampered) warnOfTampering();
-  // Already said, guard by guard, by the reader that compared them (`Source#fromFile`); carried
-  // here only so the CLI exits non-zero on it, as `list` does (holdrim#108).
-  const guardsTampered = source.guardsTampered ?? false;
   const approvals = events.filter((e) => e.type === 'approval');
   // Read from what the server wrote when the ✓ was GIVEN, never recomputed from who holds `lock`
   // NOW (docs/ROLES.md §3): this call runs in a SEPARATE process from the server, so a stale
@@ -334,7 +337,7 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
   }
   saveRegistry(root, registry);
   console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${Object.keys(registry).length} validated in all`);
-  return { added, unchanged, expired, offline: false, tampered, guardsTampered };
+  return { added, unchanged, expired, offline: false, tampered };
 }
 
 /**

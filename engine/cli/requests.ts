@@ -215,11 +215,13 @@ export function warnOfTampering() {
 }
 
 /**
- * What `apply` and `state` do on a file whose guards are not as this version installs them: refuse,
- * before a brief is written, an agent is started or an event appended. Reading warns and goes on
- * (holdrim#108): the owner has to be able to look at the file they are judging. Acting is another
- * matter. With `events_no_update` dropped, a rejection can be rewritten into an approval in `data`,
- * where no text hash sees it, and an agent that went ahead would apply work the owner refused.
+ * What `sync`, `apply` and `state` do on a file whose guards are not as this version installs them:
+ * refuse, before a lock is written, a brief built, an agent started or an event appended. Reading
+ * warns and goes on (holdrim#108): the owner has to be able to look at the file they are judging.
+ * Acting is another matter. With `events_no_update` dropped, a rejection can be rewritten into an
+ * approval in `data`, and an old ✓'s fingerprint onto today's text, where no text hash sees either:
+ * an agent that went ahead would apply work the owner refused, and a sync would lock a text the
+ * owner never saw.
  * The reader has already named each guard; this only stops the act, and says how to get going again.
  */
 export function refuseToActOnBrokenGuards(source: Partial<Pick<Source, 'guardsTampered'>>): void {
