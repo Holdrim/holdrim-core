@@ -107,10 +107,14 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   handed out with it; disabling and re-enabling do not, but an admin who could disable a lock-holder
   at will could still silence their ✓ at the exact moment it would matter — round 2 of #29's own review
   found round 1 had guarded only re-enabling. Guarding one route leaves the others open, as `AGENTS.md`
-  already says of the owner's. None of the four refusals name `HOLDRIM_LOCKS` or say "holds a lock":
-  the addresses stay out of the product the way they stay out of git and the store, above — an admin
-  who could tell a lock-holder's account apart from an ordinary 409 could reconstruct the whole list
-  by probing candidate addresses one at a time.
+  already says of the owner's. None of the four refusals name `HOLDRIM_LOCKS` or say "holds a lock" —
+  but that wording does NOT stop an admin from telling a lock-holder's account apart from an ordinary
+  one: the lock-holder check runs before the ordinary conflict, so even the STATUS CODE the refusal
+  carries differs, and the refusal necessarily shows the address is reserved regardless of what its
+  text says. That is acceptable because the lock markers already in the event history name the
+  holders anyway (round 3 of #29's own review, finding 5: round 2's wording overclaimed this). What
+  the message withholds is only the MECHANISM — that the reservation comes from `HOLDRIM_LOCKS`
+  specifically — never the reservation itself.
 - **A lock comes from a session, and it fails closed.** A ✓ is a lock only when the latest
   credential issued or reset for that account by anyone but the person was issued by the owner, and
   the session was opened after it with a credential the person set themselves after that issuance —

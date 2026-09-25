@@ -173,6 +173,35 @@ test('isValidScope rejects a single-letter family — "P0*" is a family, "P*" is
   assert.equal(isValidScope('P0*'), true, 'two characters before the star is still accepted');
 });
 
+/**
+ * Round 3 of #29's review, finding 1: most of `SCOPE_BLOCK_FORMAT` had no test that could fail —
+ * the tests above exercise its overall shape, but the anchors, the segment cardinality and the
+ * namespace's own grammar were never individually pinned. Each string below is one thing that shape
+ * must NOT be — a script tag hiding in a segment, an anchor missing so a suffix or prefix of the
+ * string is enough, a namespace with no real name in front of its colon, a segment that is empty,
+ * missing or one too many — and together they kill every mutant the finding names:
+ *   - `P03.1<script>`            segment char class widened to `[^.]`
+ *   - `<script>P03.1`            `^` removed (a valid SUFFIX would then be enough)
+ *   - `<script>:P03.1`           namespace body widened to `[^.]*`
+ *   - `.:P03.1`                  root's first-char letter requirement made optional
+ *   - `P03.1 x`, `P03.1\n<x>`,
+ *     `P03.<b>`                  segment char class widened to `[^.]`
+ *   - `P03.`, `P03..1`           segment `{1,8}` loosened to `{0,8}` (an empty segment)
+ *   - `.1`, `-.1`                root's first-char letter requirement made optional
+ *   - `1ab:P03.1`                namespace first char widened to allow digits, or body → `[^.]*`
+ *   - `P03.1.2.3.4.5.6.7.8.9`    `$` removed, or the segment count `{1,8}` loosened to `{1,}`
+ * (ten segments, one past the eight `SCOPE_BLOCK_FORMAT` allows).
+ */
+test('isValidScope rejects every one of these — each pins one piece of SCOPE_BLOCK_FORMAT\'s grammar', () => {
+  const bad = [
+    'P03.1<script>', '<script>P03.1', '<script>:P03.1', '.:P03.1',
+    'P03.1 x', 'P03.1\n<x>', 'P03.<b>',
+    'P03.', 'P03..1', '.1', '-.1',
+    '1ab:P03.1', 'P03.1.2.3.4.5.6.7.8.9',
+  ];
+  for (const scope of bad) assert.equal(isValidScope(scope), false, JSON.stringify(scope));
+});
+
 // ------------------------------------------------------------------ HOLDRIM_LOCKS
 /**
  * `parseLocks` is the one place `HOLDRIM_LOCKS` becomes data, and `createRoles` calls it once, at
@@ -207,6 +236,19 @@ test('parseLocks refuses an entry with no address before the colon', () => {
  */
 test('parseLocks refuses an entry whose address is not one, by the same check account creation uses', () => {
   for (const bad of ['notanemail', 'a name with spaces', 'a@b@c', '@example.org', 'ana@']) {
+    assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
+  }
+});
+
+/**
+ * Round 3 of #29's review, finding 3: before this, `isEmailAddress` alone decided the question, and
+ * it is deliberately lenient (its own comment) because account creation shares it — `<ana@x>`,
+ * `"ana"@x` and `ana@x.` all passed it, though none is a bare address a mail server would ever
+ * deliver to. `parseLocks` asks a second, stricter question of its own now; `isEmailAddress` and
+ * account creation are untouched — `engine/tests/email.test.js` still proves the lenient side.
+ */
+test('parseLocks refuses what isEmailAddress alone would let through: display forms, quoting, a trailing dot', () => {
+  for (const bad of ['<ana@x>', '"ana"@x', 'ana@x.']) {
     assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
   }
 });

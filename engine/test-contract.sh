@@ -621,11 +621,12 @@ expect "and by the owner too — acting on themselves" "$OWNER_ID" \
 # closes is the same shape as the owner's, just for whoever HOLDRIM_LOCKS names instead of
 # HOLDRIM_OWNER.
 #
-# None of the four messages say "holds a lock" or name HOLDRIM_LOCKS (round 2's finding 5): an admin
-# who may not act on this address must not learn FROM THE REFUSAL that it is one of the ones
-# HOLDRIM_LOCKS names — probing candidate addresses one at a time would otherwise reconstruct the
-# whole list from which ones come back 409. "reserved" is the generic word every one of the four
-# messages uses instead.
+# None of the four messages say "holds a lock" or name HOLDRIM_LOCKS (round 2's finding 5). This does
+# NOT stop an admin from telling a lock-holder's account apart — the refusal necessarily shows that
+# the address is reserved, and the lock-holder check runs before the ordinary "already taken" one, so
+# even the STATUS CODE differs; the lock markers already in the event history name the holders anyway
+# (round 3 of #29's review, finding 5). What "reserved" withholds is only the MECHANISM — that the
+# reservation is HOLDRIM_LOCKS specifically, and not something else the deployment did.
 expect "an admin cannot create a lock-holder's account → 409" 409 \
   "$(code_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users)"
 expect "and the message does not name HOLDRIM_LOCKS" 1 \
@@ -637,15 +638,26 @@ expect "the owner creates it → a real password" 0 "$([ -n "$LPASS" ] && echo 0
 expect "an admin cannot reset the lock-holder's password → 409" 409 "$(code_admin -X POST $B/api/users/$LOCKED/password)"
 expect "and the message says only the owner can reset it here" 0 \
   "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'only the owner can reset that password here'; echo $?)"
+expect "and the reset message does not name HOLDRIM_LOCKS" 1 \
+  "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'HOLDRIM_LOCKS'; echo $?)"
 expect "the owner still can" 200 "$(code_owner -X POST $B/api/users/$LOCKED/password)"
 # Round 1 reasoned that disabling hands out no password, so it left this direction open — missing
 # that an admin who can disable a lock-holder at will can silence their ✓ at the exact moment it
 # would matter, no password needed. Both directions are the owner's alone now.
 expect "an admin cannot disable the lock-holder either → 409" 409 \
   "$(code_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
+# Round 3 of #29's review, finding 2: this used to check only the STATUS code on this route — a
+# swapped or collapsed ternary in server.ts (picking the Enable text for a disable request, or
+# always picking one of the two) still answers 409 and would have slipped past every check here.
+expect "and the disable message says only the owner can disable it here" 0 \
+  "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'only the owner can disable it here'; echo $?)"
+expect "and the disable message does not name HOLDRIM_LOCKS" 1 \
+  "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
 expect "an admin cannot give the access back → 409" 409 \
   "$(code_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
-expect "and neither message names HOLDRIM_LOCKS" 1 \
+expect "and the enable message says only the owner can give it back" 0 \
+  "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'only the owner can give that access back'; echo $?)"
+expect "and the enable message does not name HOLDRIM_LOCKS either" 1 \
   "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
 expect "the owner CAN disable the lock-holder" 200 "$(code_owner -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
 expect "the owner re-enables it → 200" 200 "$(code_owner -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"

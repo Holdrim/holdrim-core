@@ -126,10 +126,11 @@ who ran the engine from `main` before it.
   `HOLDRIM_OWNER`: `"ana@example.org:P0*; bea@example.org:F12"`, an e-mail, a colon and a scope per
   entry — a page, a page family (`"P0*"`) or a block id, validated the same way an event's own `page`
   and `block` are. A malformed entry refuses to start, exactly like a malformed `HOLDRIM_OWNER`. Their
-  accounts are guarded like the owner's: creating, resetting or re-enabling one is the owner's alone,
-  on all three routes. `can('lock', …)` does not trust one yet — it still asks only whether the caller
-  is the owner — because doing so safely needs the session-and-credential-history rule `docs/ROLES.md`
-  section 3 describes, which is not built.
+  accounts are guarded like the owner's: creating, resetting, disabling and re-enabling one — all four
+  routes — is the owner's alone, and none of the four refusals names `HOLDRIM_LOCKS`, so an admin who
+  may not act on the address is not told the mechanism that reserved it. `can('lock', …)` does not
+  trust one yet — it still asks only whether the caller is the owner — because doing so safely needs
+  the session-and-credential-history rule `docs/ROLES.md` section 3 describes, which is not built.
 - **`holdrim.json` refuses `roles` and `grants` too**, alongside `owner`, `admins` and `locks`
   (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
   them, are the owner's to define and grant from a settings screen — a later piece — never a file a

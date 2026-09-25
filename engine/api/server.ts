@@ -606,11 +606,13 @@ async function userRoutes(
     // all four routes with the SAME question, `roles.isLockHolder` — see the reset and enabled
     // routes below.
     //
-    // The MESSAGE never says "holds a lock": an admin who may not create this address does not need
-    // to learn from the refusal that it is one of the ones `HOLDRIM_LOCKS` names — that list is meant
-    // to stay out of the product entirely (docs/ROLES.md, section 3, "the addresses stay out of git
-    // and out of the store"), and an admin who could probe candidate addresses one at a time would
-    // otherwise reconstruct it from which ones come back 409 (round 2 of #29's review, finding 5).
+    // The MESSAGE never says "holds a lock" or names `HOLDRIM_LOCKS`. That does NOT stop an admin
+    // from telling this account apart from an ordinary one — the refusal necessarily shows the
+    // address is reserved, and this check runs before "already taken" below, so even the STATUS
+    // CODE differs; the lock markers already in the event history name the holders anyway. What the
+    // message withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically
+    // — never the fact of the reservation itself, which the 409 already gives away (round 3 of #29's
+    // review, finding 5; round 2's finding 5 first wrote this check, overclaiming what it hides).
     if (roles.isLockHolder(address) && !roles.isOwner(email)) {
       json(res, 409, { error: say('api.users.lockHolderIsOwnerToCreate', { email: address }) });
       return true;

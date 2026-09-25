@@ -158,18 +158,38 @@ export function isValidScope(scope) {
  *
  * The address is normalized, and checked, by `engine/core/email.js` — the ONE module both this file
  * and `engine/api/users.ts` import it from (round 2 of #29's review, findings 2 and 6: this used to
- * repeat `users.ts`'s `normalizeEmail` by hand, with no shape check at all, so `<ana@x>` — a name, a
- * bracket and an `@`, nothing a mail server would ever deliver to — parsed as a lock-holder because
- * nothing here asked `isEmailAddress`, only `users.ts`'s own create route did, for a NEW account, far
- * too late to stop a `HOLDRIM_LOCKS` typo from silently locking nobody).
+ * repeat `users.ts`'s `normalizeEmail` by hand, with no shape check at all).
  *
- * Anything that does not fit — no colon, an address `isEmailAddress` refuses, a scope `isValidScope`
- * refuses — throws: a malformed entry here is a lock silently never granted, which is worse than a
- * service that will not start, the same reasoning `HOLDRIM_OWNER`'s own parsing already follows.
+ * `isEmailAddress` alone is not enough here, though, and round 2 was wrong to claim it was: it stays
+ * DELIBERATELY lenient (see its own comment) because `engine/api/users.ts`'s create route uses the
+ * very same function for a brand new account, where refusing a real but unusual address is the worse
+ * mistake. `<ana@x>`, `"ana"@x` and `ana@x.` all still pass it — a display form's angle brackets, a
+ * quoted local part, and a domain with a trailing dot are each something a real mail system might
+ * hand you, just not the bare address `HOLDRIM_LOCKS` needs. A `HOLDRIM_LOCKS` typo is a different
+ * failure than a rejected sign-up, though: it does not fail loudly, it silently locks NOBODY, forever,
+ * with nothing in the product to notice it by. So `parseLocks` asks a second, stricter question of
+ * its own, below — `RESERVED_EMAIL_CHARS` and the trailing-dot check — on top of `isEmailAddress`,
+ * never inside it: `isEmailAddress` keeps meaning what it means for account creation, unmoved.
+ *
+ * Anything that does not fit — no colon, an address `isEmailAddress` or this file's own check
+ * refuses, a scope `isValidScope` refuses — throws: a malformed entry here is a lock silently never
+ * granted, which is worse than a service that will not start, the same reasoning `HOLDRIM_OWNER`'s
+ * own parsing already follows.
  *
  * Naming the owner in it is harmless: the owner already holds `lock` from `isOwner` alone (below),
  * so nothing here treats that address specially.
- *
+ */
+/**
+ * Characters `isEmailAddress` lets through on purpose (its own comment: it is not an RFC 5322
+ * parse) but a bare address never legitimately carries: the angle brackets and parentheses of a
+ * DISPLAY form (`Ana <ana@x>`, a comment inside `(not ana) ana@x`), a quoted local part (`"ana"@x`),
+ * and the two separators this file's own grammar already gives a meaning to elsewhere (`,` and `;`,
+ * round 3 of #29's review, finding 3). None of the four is something `parseLocks` should have to
+ * guess the intent of — `HOLDRIM_LOCKS` is typed by whoever deploys, not pasted from a mail client.
+ */
+const RESERVED_EMAIL_CHARS = /[<>"()[\],;]/;
+
+/**
  * @param {string|undefined|null} raw
  * @returns {{email: string, scope: string}[]}
  */
@@ -195,6 +215,14 @@ export function parseLocks(raw) {
       throw new Error(
         `HOLDRIM_LOCKS names "${rawEmail}", which is not an e-mail address — the same check ` +
         '`engine/api/users.ts` applies when an account is created.');
+    }
+    // Stricter than `isEmailAddress` on purpose — see this function's own comment for why account
+    // creation cannot ask this same question.
+    if (RESERVED_EMAIL_CHARS.test(email) || email.endsWith('.')) {
+      throw new Error(
+        `HOLDRIM_LOCKS names "${rawEmail}", which is not an e-mail address a mail server would ever ` +
+        'deliver to: account creation stays lenient about this, but a HOLDRIM_LOCKS typo does not ' +
+        'fail loudly the way a rejected sign-up does — it silently locks nobody, forever.');
     }
     if (!isValidScope(scope)) {
       throw new Error(

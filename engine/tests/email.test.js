@@ -39,3 +39,20 @@ test('isEmailAddress: the empty field and the obvious typo, nothing more exotic'
   assert.equal(isEmailAddress('a@b@c'), false, 'two of them is not an address');
   assert.equal(isEmailAddress('a'.repeat(MAX_EMAIL_LENGTH) + '@example.org'), false, 'past RFC 5321');
 });
+
+/**
+ * Round 3 of #29's review, finding 6: the check above proves something WELL past the limit is
+ * refused, which a `>` that should have been `>=` — or the wrong number entirely — would still pass.
+ * This pins the boundary itself, against the literal `320` RFC 5321 sets, not against
+ * `MAX_EMAIL_LENGTH` — asserting a fixture built FROM the constant against the constant itself would
+ * pass whatever the constant said, catching neither mutant this is aimed at: a `320` → `321` mutant
+ * moves the fixture's own length right along with it, and the test would still see its own moved
+ * boundary land exactly where it looks.
+ */
+test('isEmailAddress: exactly 320 characters is accepted, 321 is refused', () => {
+  const domain = '@example.org';
+  const at320 = 'a'.repeat(320 - domain.length) + domain;
+  assert.equal(at320.length, 320, 'the fixture itself must sit exactly on the boundary');
+  assert.equal(isEmailAddress(at320), true, 'exactly 320 is still a real address');
+  assert.equal(isEmailAddress(`a${at320}`), false, 'one character past it, 321, is refused');
+});
