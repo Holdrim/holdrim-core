@@ -18,7 +18,12 @@ const PAGE_FORMAT = /^[A-Za-z][A-Za-z0-9-]{0,7}$/;
 const ID_FORMAT = /^[A-Za-z0-9._:-]+$/;
 const COMMIT_FORMAT = /^[0-9a-f]{7,40}$/;
 
-const short = (v) => (String(v ?? '').length <= 20 ? String(v ?? '') : String(v).slice(0, 20) + '…');
+// Exported: `server.ts`'s `refusalOf` echoes a caller-controlled category back in a 400 body, and
+// that value is not yet bounded by anything below when it gets there — an unbounded echo is how a
+// 200 KB category once became a 200 KB error body. Truncating it here, the one place this codebase
+// already truncates an unbounded value for an error message, keeps the two truncations from silently
+// drifting to different lengths.
+export const short = (v) => (String(v ?? '').length <= 20 ? String(v ?? '') : String(v).slice(0, 20) + '…');
 const longerThan = (v, max) => String(v ?? '').length > max;
 
 /**

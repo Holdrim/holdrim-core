@@ -169,6 +169,21 @@ expect "a request categorised as bug → 201" 201 "$(post $REVIEWER '{"type":"re
 # gate the right spelling would have.
 expect "an unknown category → 400"    400 "$(post $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":"Bug"}}')"
 expect "and the message names it"       0 "$(body $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":"Bug"}}' | has 'Bug'; echo $?)"
+# MINOR 6: a single-element JSON array stringifies to exactly its element (`String(['bug']) ===
+# 'bug'`), so a body naming `"category":["bug"]` used to pass the OLD check — which asked
+# `String(category)`, never `typeof category`. The STATUS alone does not prove the fix: overLimit's
+# unrelated "a data value has to be text or a number" check refuses an array too, further down, so a
+# check that only asked for 400 would still pass with the typeof check deleted — refused for the
+# wrong reason, by a check that has nothing to do with categories. The MESSAGE says which one fired:
+# only the category check, run BEFORE overLimit, says "unknown request category".
+expect "a category smuggled as an array is refused AS AN UNKNOWN CATEGORY, not merely as non-scalar" 0 \
+  "$(body $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":["bug"]}}' | has 'unknown request category'; echo $?)"
+# And the 400 body itself stays small: an unbounded category echoed whole is how a 200 KB category
+# once became a 200 KB error body.
+BIGCAT=$(node -e "console.log('x'.repeat(5000))")
+expect "an oversized category is truncated in the error, not echoed whole" 0 \
+  "$(body $REVIEWER "{\"type\":\"request\",\"page\":\"D02\",\"text\":\"x\",\"data\":{\"category\":\"$BIGCAT\"}}" \
+    | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).error.length < 100 ? 0 : 1))")"
 # The race guard is written INTO the record: `from` names the state the change departed from.
 expect "the record says where it came from" approved "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=D02" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type==='request_state').pop();console.log(e.data.from)})")"
 
@@ -385,16 +400,23 @@ expect "and bugCategory, left on, still works"       201 \
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 echo "feature toggles — the screen goes dark, the guard behind it does not:"
-# peopleScreen OFF, this time under password identity: the /api/users* routes are what the finding
-# calls "still enforces its guard" — proved here as more than "the owner gets 201", which is all the
-# old matrix checked. A member and an admin get the SAME refusals they would with the screen on.
-POFF_SITE="$WORK/peoplescreen-off-site"
+# Every built toggle off, this time under password identity: the /api/users* routes are what the
+# finding calls "still enforces its guard" — proved here as more than "the owner gets 201", which is
+# all the old matrix checked. A member and an admin get the SAME refusals they would with every
+# toggle on.
+#
+# MINOR 5 (D5): `JSON.stringify(project).includes('"peopleScreen":true')` never writes the word
+# `features`, so no scan of the SOURCE (engine/tests/features.test.js) can refuse it by name — that
+# file says so, in its own header comment, and points here instead. peopleScreen alone used to be the
+# only toggle turned off on this server; every OTHER built toggle is off here too now, so a guard that
+# secretly asked "is anything on" rather than "does roles.can say yes" has nowhere left to hide.
+POFF_SITE="$WORK/every-toggle-off-site"
 cp -r "$SITE" "$POFF_SITE"
 node -e '
   const fs = require("fs");
   const path = process.argv[1];
   const config = JSON.parse(fs.readFileSync(path, "utf8"));
-  config.features = { peopleScreen: false };
+  config.features = { comments: false, pageRequests: false, bugCategory: false, peopleScreen: false };
   fs.writeFileSync(path, JSON.stringify(config, null, 2));
 ' "$POFF_SITE/holdrim.json"
 PDATA=$(mktemp -d)
@@ -442,6 +464,14 @@ expect "peopleScreen OFF: a member still gets 403 creating an access" 403 \
   "$(tas_member -o /dev/null -w '%{http_code}' -d '{"email":"other@example.org","name":"Other"}' $B/api/users)"
 expect "peopleScreen OFF: a member still gets 403 on an approval" 403 \
   "$(tas_member -o /dev/null -w '%{http_code}' -d '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc"}' $B/api/events)"
+# MINOR 5 (D5), the three guards not already checked anywhere with every toggle off:
+expect "every toggle OFF: a member enabling or disabling an access → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"enabled":false}' $B/api/users/$TADMIN/enabled)"
+expect "every toggle OFF: an admin disabling the owner → 409" 409 \
+  "$(tas_admin -o /dev/null -w '%{http_code}' -d '{"enabled":false}' $B/api/users/$OWNER/enabled)"
+TTRIAGE=$(tas_member -d '{"type":"request","page":"UC-01","text":"toggle triage check"}' $B/api/events | jfield id)
+expect "every toggle OFF: a non-owner triaging → refused" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d "{\"type\":\"request_state\",\"page\":\"UC-01\",\"text\":\"x\",\"data\":{\"request\":\"$TTRIAGE\",\"state\":\"approved\"}}" $B/api/events)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PDATA"
 
 echo "local mode does NOT turn on outside development:"

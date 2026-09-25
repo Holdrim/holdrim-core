@@ -9,12 +9,22 @@
  *      input/output pair, so it is proved the way `engine/tests/roles-boundary.test.js` proves its
  *      own boundary: by reading the real files and checking that the guard code is exactly what it
  *      should be, with nothing from `features` anywhere near it.
+ *
+ * What this file's TEXT scan cannot see, and does not try to: `JSON.stringify(project).
+ * includes('"peopleScreen":true')` never writes the word `features`, so no scan of the SOURCE can
+ * refuse it by name — the read is real, but nothing here names it. That is what
+ * `engine/test-contract.sh`'s "every guard, with every built toggle off at once" section is for
+ * instead: a BEHAVIOURAL backstop that boots a real server with every toggle off and asserts the
+ * guards this file cannot watch — enabling or disabling an access, disabling the owner, triaging —
+ * still answer exactly as they do with every toggle on. A text scan proves the shape of the source;
+ * that section proves the shape of the ANSWER, which a reflective read cannot change either way.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { createScanner, SyntaxKind } from 'typescript/unstable/ast';
 import { readConfig } from '../core/config.js';
 import { readFeatures, FEATURE_DEFAULTS, FEATURE_KEYS } from '../core/features.js';
 import { CAPABILITIES } from '../core/roles.js';
@@ -134,76 +144,146 @@ test('engine/core/roles.js never mentions features: capabilities and the lock ca
     '(HOLDRIM_OWNER, HOLDRIM_ADMINS) alone, never from holdrim.json\'s features block');
 });
 
-/**
- * Comments and the insides of strings and template literals, blanked to spaces — never removed, so
- * a real offense keeps the line number it was found on. A doc comment that SAYS `features.voice`,
- * or a path like `'./features.js'`, is prose and an import target, not a read reaching a guard, and
- * must not force an allow-list entry for every sentence that happens to name the toggle.
- *
- * A smaller version of the stripper `engine/tests/roles-boundary.test.js` writes for the same
- * reason — copied in shape, not imported: the two files scan for different patterns, and sharing
- * the helper would make one depend on the other staying correct for a job it does not have.
- * Unlike that one, this does not need to walk a template literal's `${…}` interpolation back into
- * code: nothing this scan looks for currently sits inside one, and the day it does, a self-test
- * below is where that gets fixed, not a silent gap here.
- */
+// Comments, blanked to spaces — never removed, so a real offense keeps the line number it was found
+// on. A doc comment that SAYS `features.voice`, or a path like `'./features.js'`, is prose and an
+// import target, not a read reaching a guard, and must not force an allow-list entry for every
+// sentence that happens to name the toggle.
+//
+// ROUND 3 (D2b): the hand-rolled, character-at-a-time version this replaced walked a slash-star as
+// "open a block comment, blank to the next star-slash" with no idea that a `/` can also open a
+// REGEX — so a guard written as `if (/backslash-slash-star-slash/.test(email) && !manages() &&
+// project.features.peopleScreen) return forbidden();` (a real, demonstrated mutant) had its regex's
+// own slash-star read as a comment opener, everything up to the FILE's next star-slash blanked along
+// with it, and the guard it wrapped simply vanished from what this scan ever saw. The same version
+// blanked a template literal WHOLE, `${…}` interpolation and all (D1: a property written as
+// `project` + a backtick-quoted `features` is a read hiding behind the same backtick a real template
+// uses for prose), and read a backtick INSIDE that supposed regex as if it opened a template — for
+// the same reason each time: it never knew what KIND of token it was looking at, only what character
+// started it.
+//
+// A real JS/TS tokeniser knows the difference, because knowing it is what a `/` or a backtick MEANS
+// in the grammar the language actually has — a distinction no amount of cleverness with
+// `String.indexOf` reconstructs without becoming that tokeniser's own disambiguation rules by hand,
+// worse and unproven. So this walks the file with the `typescript` package's own scanner (a
+// devDependency already) instead of a hand-rolled one, and blanks only what the SCANNER calls a
+// comment: a regex literal, a template literal and everything inside its `${…}` interpolations, and
+// a template used as a property key, are all just ordinary tokens to it, copied through UNCHANGED —
+// never blanked, because none of them is a comment, and a read hiding inside one is a read this scan
+// must still see.
+//
+// `reScanSlashToken`, `reScanTemplateToken` and the scanner's own comment-kind tokens are its tools
+// for exactly this: distinguishing a regex from division, and stepping back INTO a template's
+// literal text after a `${…}` interpolation closes, are the two places a bare "read character by
+// character" tokeniser cannot tell what it is looking at without the same grammar the real scanner
+// already has. `NO_REGEX_AFTER`, below, is the one piece of context the scanner does not carry for
+// us: whether a bare `/` can start a regex depends on what came before it (`(` — yes; an identifier
+// — no, it is division), the same "goal symbol" disambiguation every JS engine makes. The set named
+// here errs towards TREATING `/` AS DIVISION only where getting it backwards could make a real regex
+// swallow the rest of the file looking for a `/` that is not there — the ONE mistake this function
+// must not make twice.
+const NO_REGEX_AFTER = new Set([
+  SyntaxKind.Identifier, SyntaxKind.NumericLiteral, SyntaxKind.BigIntLiteral, SyntaxKind.StringLiteral,
+  SyntaxKind.NoSubstitutionTemplateLiteral, SyntaxKind.TemplateTail, SyntaxKind.RegularExpressionLiteral,
+  SyntaxKind.CloseParenToken, SyntaxKind.CloseBracketToken, SyntaxKind.CloseBraceToken,
+  SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken,
+  SyntaxKind.ThisKeyword, SyntaxKind.SuperKeyword, SyntaxKind.TrueKeyword, SyntaxKind.FalseKeyword,
+  SyntaxKind.NullKeyword,
+]);
+const regexAllowedAfter = (prevKind) => prevKind === undefined || !NO_REGEX_AFTER.has(prevKind);
+
 function withoutComments(text) {
-  let out = '';
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    if (c === '\'' || c === '"') {
-      let j = i + 1;
-      while (j < n && text[j] !== c && text[j] !== '\n') j += (text[j] === '\\' && j + 1 < n) ? 2 : 1;
-      if (j < n && text[j] === c) j++;
-      out += text.slice(i, j);
-      i = j;
-      continue;
+  const out = text.split('');
+  // A comment's newlines are kept, everything else in it turned to a space — the same shape the old
+  // version produced, so a real offense still reports the line it is actually on.
+  const blank = (pos, end) => { for (let i = pos; i < end; i++) if (out[i] !== '\n') out[i] = ' '; };
+
+  const scanner = createScanner(/* skipTrivia */ false);
+  scanner.setText(text);
+  // Depths of `{`/`}` opened SINCE the innermost `${` still open, one entry per interpolation
+  // currently inside — a nested object literal or block inside `${…}` opens and closes its own
+  // braces, and only the one that brings its own entry back to zero is the interpolation's actual
+  // close, the point at which the scanner has to be told to read TEMPLATE TEXT again, not more code.
+  const templateDepths = [];
+  let prevKind;
+
+  for (;;) {
+    let kind = scanner.scan();
+    if (kind === SyntaxKind.EndOfFile) break;
+
+    if (kind === SyntaxKind.SingleLineCommentTrivia || kind === SyntaxKind.MultiLineCommentTrivia) {
+      blank(scanner.getTokenStart(), scanner.getTokenEnd());
+      continue; // trivia is not a token a real read or a real regex ever follows
     }
-    if (c === '`') {
-      let j = i + 1;
-      while (j < n && text[j] !== '`') j += (text[j] === '\\' && j + 1 < n) ? 2 : 1;
-      if (j < n) j++;
-      out += text.slice(i, j).replace(/[^\n]/g, ' ');
-      i = j;
-      continue;
+    if (kind === SyntaxKind.WhitespaceTrivia || kind === SyntaxKind.NewLineTrivia) continue;
+
+    if ((kind === SyntaxKind.SlashToken || kind === SyntaxKind.SlashEqualsToken) && regexAllowedAfter(prevKind)) {
+      kind = scanner.reScanSlashToken();
     }
-    if (text.slice(i, i + 2) === '/*') {
-      const end = text.indexOf('*/', i + 2);
-      const stop = end === -1 ? n : end + 2;
-      out += text.slice(i, stop).replace(/[^\n]/g, ' ');
-      i = stop;
-      continue;
+
+    if (kind === SyntaxKind.OpenBraceToken && templateDepths.length) {
+      templateDepths[templateDepths.length - 1]++;
+    } else if (kind === SyntaxKind.CloseBraceToken && templateDepths.length) {
+      if (templateDepths[templateDepths.length - 1] === 0) {
+        // This `}` is the interpolation's own close: re-read from here as template text, not code.
+        kind = scanner.reScanTemplateToken(false);
+        templateDepths.pop();
+        // A `TemplateMiddle` ends in a fresh `${` — one more interpolation is now open.
+        if (kind === SyntaxKind.TemplateMiddle) templateDepths.push(0);
+      } else {
+        templateDepths[templateDepths.length - 1]--;
+      }
+    } else if (kind === SyntaxKind.TemplateHead) {
+      templateDepths.push(0);
     }
-    if (text.slice(i, i + 2) === '//') {
-      const end = text.indexOf('\n', i);
-      const stop = end === -1 ? n : end;
-      out += text.slice(i, stop).replace(/[^\n]/g, ' ');
-      i = stop;
-      continue;
-    }
-    out += c;
-    i++;
+
+    prevKind = kind;
   }
-  return out;
+  return out.join('');
 }
 
-/** Every tracked or new `.ts`/`.js`/`.jsx` file under the given paths — a file nobody committed yet
- *  is still a place a read could be hiding the moment it exists, the same reasoning
- *  `engine/tests/surface.test.js` uses for a variable. The bundle is left out: it is BUILT from
- *  `engine/web/src`, so scanning it would only repeat those reads, or, stale, report ones the
- *  sources no longer have. */
-function sourceFiles(...paths) {
-  return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...paths],
-    { cwd: ROOT, encoding: 'utf8' }).split('\n')
-    .filter((f) => /\.(ts|js|jsx)$/.test(f) && f !== 'engine/web/panel-react.js');
+/**
+ * ROUND 3 (D4): the demonstrated mutant was a brand-new `engine/lib/gate.js`, exporting
+ * `(project) => project.features.peopleScreen`, wired into `server.ts` — and it passed every gate,
+ * because the old scan only ever looked inside FOUR named directories. The Dockerfile copies all of
+ * `engine/`, so a fifth one is exactly as real a place for a guard to live as the four this used to
+ * trust by name.
+ *
+ * The fix inverts which list has to be kept up to date: every `.ts`/`.js`/`.jsx`/`.mjs`/`.cjs` file
+ * under `engine/` is scanned, a file nobody committed yet included — the same reasoning
+ * `engine/tests/surface.test.js` uses for a variable — and `DENIED`, below, is the closed, EXPLAINED
+ * set of places that are not a guard a toggle could reach. A new directory is scanned the moment it
+ * exists; only `DENIED` naming it, on purpose, with why, takes it back out — the opposite of the old
+ * shape, where a new directory had to be ADDED to be seen at all.
+ */
+function isSourceFile(f) {
+  return /\.(ts|js|jsx|mjs|cjs)$/.test(f) && !DENIED.some((d) => (d.file ? f === d.file : f.startsWith(d.prefix)));
 }
 
-/** Everywhere the engine's SOURCE is allowed to look at a project's toggles at all: `engine/tests`
- *  is excluded on purpose — a test reads `project.features` to set up its own fixture, and that is
- *  not a guard a toggle could reach, it is the toggle being tested. */
-const SCANNED = ['engine/api', 'engine/cli', 'engine/core', 'engine/web/src'];
+/** Every tracked or new file under `engine/`, minus `DENIED` — see the comment on `isSourceFile`. */
+function sourceFiles() {
+  return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', 'engine'],
+    { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(isSourceFile);
+}
+
+/**
+ * Every place under `engine/` that is NOT scanned for a read of `features`, named once with why —
+ * the same shape `ALLOWED` gives an individual LINE. Leaving one of these out is a test failure
+ * (`the boundary itself`, below, via `sourceFiles`), never a silent gap: the default for anywhere
+ * not named here is SCANNED.
+ */
+const DENIED = [
+  { prefix: 'engine/tests/',
+    why: 'a test reads project.features to build its own fixture — the toggle being tested, never a ' +
+      'guard a toggle could reach. This file lives here too, and scans itself no more than it scans ' +
+      'any other fixture-builder next to it.' },
+  { file: 'engine/test-browser.js',
+    why: 'the same reason as engine/tests/: it writes a features block into a FIXTURE holdrim.json ' +
+      'to drive the browser suite, and it is not under engine/tests/ only because it drives an actual ' +
+      'browser instead of node:test' },
+  { file: 'engine/web/panel-react.js',
+    why: 'the BUILT bundle, generated from engine/web/src — scanning it only repeats those reads, or, ' +
+      'stale, reports ones the sources no longer have' },
+];
 
 /**
  * Any of the ways a toggle is read: `xxx.features` (however the object in front is named —
@@ -258,6 +338,16 @@ const ALLOWED = [
       'of holdrim.json already goes through' },
   { file: 'engine/core/features.js', text: 'export function readFeatures(configured, root) {',
     why: 'the closed list\'s own definition — the one file allowed to know every toggle\'s name' },
+  { file: 'engine/core/features.js',
+    text: '`${root}/holdrim.json\'s "features" must be an object of true/false, one per known toggle: ` +',
+    why: 'PROSE for a person reading a boot error, quoting the key they misconfigured — not a read, ' +
+      'the same reason engine/cli/graph.ts\'s refusal message is allowed below' },
+  { file: 'engine/core/features.js',
+    text: '`${root}/holdrim.json names ${unknown.map((k) => `"${k}"`).join(\', \')} under "features", ` +',
+    why: 'same reasoning: the boot error naming which key was misspelled, for a person to read' },
+  { file: 'engine/core/features.js',
+    text: '`${root}/holdrim.json\'s "features.${key}" must be true or false; got ` +',
+    why: 'same reasoning: the boot error naming which toggle got a non-boolean value' },
   { file: 'engine/web/src/Panel.jsx',
     text: 'const categoriesOf = (features) => Object.keys(cycle.request_categories)',
     why: 'which categories to offer — filtering, never a guard: the server refuses a category it ' +
@@ -283,13 +373,20 @@ const ALLOWED = [
  * Every offense `text` holds once `file`'s own allow-listed lines are blanked out of it — the same
  * function real files and synthetic self-test snippets both go through, so a fix made only for the
  * real files could not silently stop applying to the cases the self-tests below prove it catches.
+ *
+ * ROUND 3 (D3): `replaceAll` used to blank EVERY copy of an entry's text, so a real, allow-listed
+ * line copied next to a brand-new read exempted that new read too, for free — the copy IS the
+ * entry's exact text, byte for byte. An entry is allowed to excuse ONE line, the one it names, so
+ * only its FIRST match is blanked; a second copy is left standing, and since every `ALLOWED` text
+ * mentions `features` by construction, the line it sits on trips `FEATURE_READ` below like any other
+ * unlisted read — no separate "count the copies" check needed, the scan that already runs catches it.
  * @param {string} text
  * @param {string|null} file  a path from `ALLOWED`, or null for a synthetic snippet with no allowance
  */
 function offendersIn(text, file = null) {
   let scanned = withoutComments(text);
   for (const entry of ALLOWED.filter((a) => a.file === file)) {
-    scanned = scanned.replaceAll(entry.text, entry.text.replace(/[^\n]/g, ' '));
+    scanned = scanned.replace(entry.text, entry.text.replace(/[^\n]/g, ' '));
   }
   const found = [];
   scanned.split('\n').forEach((line, i) => {
@@ -306,16 +403,42 @@ function staleEntries() {
 }
 
 test('the boundary itself: the scanned paths hold real reads, and nothing is stale', () => {
-  const files = sourceFiles(...SCANNED);
+  const files = sourceFiles();
   assert.ok(files.includes('engine/api/server.ts'), 'the file scan read the wrong files');
   assert.ok(!files.includes('engine/tests/features.test.js'), 'this file scans, but is not scanned');
+  assert.ok(!files.includes('engine/web/panel-react.js'), 'the built bundle scans, but is not scanned');
+  // D4's own mutant, replayed as a claim about the DISCOVERY rule rather than a fixture on disk: a
+  // path in a directory nobody named — `engine/lib/gate.js`, exactly the mutant demonstrated — has
+  // to read as scanned BY DEFAULT, the opposite of the old ALLOW-list of four directories, where a
+  // fifth directory was invisible until someone added it.
+  assert.ok(isSourceFile('engine/lib/gate.js'),
+    'D4 — a new directory under engine/ is not scanned by default; only DENIED may take one back out');
   assert.deepEqual(staleEntries(), [], 'an ALLOWED entry no longer matches its file — the code it ' +
     'named moved or was reworded, and the exception it granted may now be hiding something else');
 });
 
+test('D4: a read planted in a brand-new directory, not only the four the old scan trusted, is caught', () => {
+  // The demonstrated mutant, replayed for real: a NEW engine/lib-self-test/gate.js, on disk, found by
+  // the same `git ls-files` this scan runs for the real files below — not a stand-in for it.
+  const dir = join(ROOT, 'engine/lib-self-test');
+  const target = join(dir, 'gate.js');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(target, 'export default (project) => project.features.peopleScreen;\n');
+  try {
+    const files = sourceFiles();
+    assert.ok(files.includes('engine/lib-self-test/gate.js'),
+      'D4 — a file in a brand-new directory under engine/ was not found by the file scan at all');
+    const offenders = offendersIn(read('engine/lib-self-test/gate.js'), 'engine/lib-self-test/gate.js');
+    assert.ok(offenders.some((f) => f.includes('project.features.peopleScreen')),
+      'D4 — the planted read in the new directory was found but not recognised as an offense');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('every real read of features, across the engine, is on the allow-list', () => {
   const offenders = [];
-  for (const file of sourceFiles(...SCANNED)) {
+  for (const file of sourceFiles()) {
     for (const found of offendersIn(read(file), file)) offenders.push(`${file}:${found}`);
   }
   assert.deepEqual(offenders, [],
@@ -357,6 +480,47 @@ test('S13: a brand-new condition reading a toggle next to a guard is caught, by 
   const found = offendersIn(planted, 'engine/api/server.ts');
   assert.ok(found.some((f) => f.includes('project.features.peopleScreen')),
     'S13 — a new condition reading project.features.peopleScreen — was not caught');
+});
+
+test('S14 (D2b): a regex literal containing /* does not blind the scan to the guard right after it', () => {
+  const real = read('engine/api/server.ts');
+  const marker = "const manages = () => roles.can('people', email);";
+  assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
+  // The demonstrated mutant, verbatim: `/\/*/ ` is a real regex (it matches a literal "/*"), and the
+  // old hand-rolled stripper read its embedded `/*` as an OPENING block comment instead, blanking
+  // everything up to the file's next `*/` — which swallowed this very guard whole.
+  const planted = real.replace(marker,
+    `${marker}\n  if (/\\/*/.test(email) && !manages() && project.features.peopleScreen) return forbidden();`);
+  const found = offendersIn(planted, 'engine/api/server.ts');
+  assert.ok(found.some((f) => f.includes('project.features.peopleScreen')),
+    'S14 — a guard hidden behind a /* inside a regex literal was not caught');
+});
+
+test('D2b: a comment that legitimately follows a real regex literal is still blanked', () => {
+  // The other side of S14: fixing the regex must not turn OFF real comment recognition right after
+  // one. `/features\//` is a genuine regex (matching a literal "features/"), and what follows it on
+  // the same line is a genuine comment that also happens to name the toggle — it must not survive.
+  const found = offendersIn('const re = /features\\//; // a real comment naming features too');
+  assert.deepEqual(found, ['1: const re = /features\\//;']);
+});
+
+test('D2b: a read hidden inside a template literal\'s ${…} interpolation is caught', () => {
+  const found = offendersIn('const msg = `blocked: ${project.features.peopleScreen}`;');
+  assert.ok(found.length, 'a read inside a template literal\'s interpolation slipped through');
+});
+
+test('D1: a template-literal property key (project[`features`]) is not blanked away with the rest of the backtick', () => {
+  const found = offendersIn('if (project[`features`].peopleScreen) return forbidden();');
+  assert.ok(found.length,
+    'D1 — a template literal used as a property key was blanked whole, hiding the read inside it');
+});
+
+test('D3: an ALLOWED line copied a second time in the same file is not exempted twice', () => {
+  const line = 'const peopleScreenOn = () => project.features.peopleScreen;';
+  const planted = `${line}\n// copied here too, on purpose, to see whether the second copy is still watched\n${line}`;
+  const found = offendersIn(planted, 'engine/api/server.ts');
+  assert.ok(found.some((f) => f.includes('project.features.peopleScreen')),
+    'D3 — the ALLOWED line, copied a second time in the same file, was silently exempted both times');
 });
 
 test('a comment that merely names a toggle is not mistaken for a read of one', () => {

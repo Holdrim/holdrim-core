@@ -5,7 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { createRoles, rolesOf } from '../core/roles.js';
-import { overLimit, validCommit } from '../core/limits.js';
+import { overLimit, validCommit, short } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
 import { SqliteEventStore } from './store-sqlite.ts';
@@ -329,13 +329,26 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
   }
   // Checked before the feature gate below: `gatingFeatureOf` matches `data.category` by EXACT
   // string — `"Bug"` or `"page "` would silently side-step whichever toggle the real spelling would
-  // have gated, because nothing else validates it is one of `cycle.json`'s own categories. `String`,
-  // not a bare compare: `data.category` is `unknown` (the core's own typedef, `engine/core/cycle.js`),
-  // and a category is never required — a request naming none still goes on to the checks below.
+  // have gated, because nothing else validates it is one of `cycle.json`'s own categories.
+  //
+  // ⚠️ `typeof category !== 'string'` is checked FIRST, never folded into `String(category)` the way
+  // this used to read. `gatingFeatureOf` compares the RAW value (`data.category === 'page'`), never a
+  // stringified one — and `String([...])` joins a single-element array with nothing in between, so a
+  // JSON body naming `"category":["page"]` used to pass THIS check (`String(['page']) === 'page'`)
+  // while `gatingFeatureOf` read the very same value and saw neither `'page'` nor `'bug'`: the gate
+  // stayed null, and a request shaped exactly like a page request reached the store with pageRequests
+  // off, never having asked it. Requiring a real string closes the gap by construction: the two
+  // checks now agree on the same value instead of two different ones that merely print the same.
+  // `data.category` is `unknown` (the core's own typedef, `engine/core/cycle.js`), and a category is
+  // never required — a request naming none still goes on to the checks below.
+  //
+  // `short`, not the raw value, in the message: `category` is caller-controlled and unbounded until
+  // `overLimit` runs, further down — echoing it whole here is how a 200 KB category once became a
+  // 200 KB error body.
   const category = incoming.data?.category;
   if (incoming.type === 'request' && category !== undefined
-      && !Object.hasOwn(cycle.table.request_categories ?? {}, String(category))) {
-    return { status: 400, body: { error: say('api.request.unknownCategory', { category: String(category) }) } };
+      && (typeof category !== 'string' || !Object.hasOwn(cycle.table.request_categories ?? {}, category))) {
+    return { status: 400, body: { error: say('api.request.unknownCategory', { category: short(category) }) } };
   }
   // Checked before anything role-shaped: a feature that is off refuses everyone, owner included —
   // it is not a permission, and answering 403 either way keeps the two indistinguishable to whoever
