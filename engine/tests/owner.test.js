@@ -169,10 +169,18 @@ function cliView({ dir, db, ids }, variables) {
  * still refuse under `fileRefusals`, by accident, but run in SILENCE against a project with no owner
  * at all, or two, under `ownerRefusals` — exactly where this drives them. `state` is included because
  * it, alone of the four, WRITES an event once past the check.
+ *
+ * `state` targets `applying`, not `rejected` (round 4's review, MINOR r5): OWNER's own request is
+ * seeded already `approved` (ADMIN_START), so `applying` is a transition the agent MAY make and
+ * `setState` accepts — right up to the actual `source.add` write. `rejected` is not an agent state at
+ * all, so `setState` would refuse it on that ground ALONE, with `checkAuthority` never in question:
+ * a `checkAuthority` removed from `setState` would still throw before the write (a different message,
+ * from the `cycle.agentStates.includes` check further down), and the probe would never reach the one
+ * thing worth proving here — that no event gets written to a project with no real owner.
  */
 function otherCommandsRefuse(p, env, needs) {
   const id = p.ids[OWNER];
-  for (const args of [['show', id], ['impact', id], ['summary'], ['state', id, 'rejected', 'no']]) {
+  for (const args of [['show', id], ['impact', id], ['summary'], ['state', id, 'applying', 'no']]) {
     const r = cli([...args, '--db', p.db], p.dir, env);
     assert.notEqual(r.code, 0, `${args[0]} ran without refusing:\n${r.out}`);
     assert.match(r.out, needs, args[0]);
