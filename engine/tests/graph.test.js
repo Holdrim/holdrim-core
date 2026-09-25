@@ -7,6 +7,10 @@
  * (engine/core/validity.js), and `engine/tests/validity.test.js` already proves every one of its
  * cases. Testing it again here would be the second copy of the computation this module's own
  * comment warns against, wearing a different file name.
+ *
+ * What IS tested at length here is the two renderers' own grammars — Mermaid's label escaping and
+ * reserved words, DOT's string escaping — because a diagram that a real block id can break is a
+ * diagram nobody can trust with real content.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -70,9 +74,9 @@ test('Mermaid groups blocks by page and marks the state with the SAME emoji `lig
   const blocks = new Map([block('A01.1.1', 'A01', 'rule', ['B01.1.1']), block('B01.1.1', 'B01', 'text')]);
   const out = toMermaid(graphOf(blocks, {}));
   assert.match(out, /^flowchart TD/);
-  assert.match(out, /subgraph A01\["A01"\]/);
-  assert.match(out, /A01_1_1\["⚪ A01\.1\.1"\]/, 'a dot in the id would break Mermaid\'s own grammar');
-  assert.match(out, /A01_1_1 --> B01_1_1/);
+  assert.match(out, /subgraph p1\["A01"\]/);
+  assert.match(out, /n1\["⚪ A01\.1\.1"\]/, 'the label carries the real id; the node\'s OWN id is synthetic');
+  assert.match(out, /n1 --> n2/, 'A01.1.1 is node 1 and its dependency B01.1.1 is node 2, in sorted order');
 });
 
 test('DOT clusters by page and quotes ids, so a dot in them is not read as DOT syntax', () => {
@@ -82,6 +86,100 @@ test('DOT clusters by page and quotes ids, so a dot in them is not read as DOT s
   assert.match(out, /subgraph "cluster_A01" \{/);
   assert.match(out, /"A01\.1\.1" \[label="⚪ A01\.1\.1"\];/);
   assert.match(out, /"A01\.1\.1" -> "A01\.2\.1";/);
+});
+
+// ---------------------------------------------------------------- a dangling data-depends
+
+test('a dependency that names no real block is a node of its own, state "missing" — not silence, not a crash', () => {
+  const blocks = new Map([block('A01.1.1', 'A01', 'rule', ['A01.9.9'])]);
+  const graph = graphOf(blocks, {});
+  const ghost = graph.nodes.find((n) => n.id === 'A01.9.9');
+  assert.ok(ghost, 'the dangling target got a node');
+  assert.equal(ghost.state, 'missing');
+  assert.equal(ghost.page, 'A01', 'its page is read off its own id, the way a real block\'s is');
+  // The edge itself is unchanged — still one edge, still pointing at the name that was declared.
+  assert.deepEqual(graph.edges, [{ from: 'A01.1.1', to: 'A01.9.9' }]);
+});
+
+test('a missing node draws differently, not just in a different colour, in Mermaid and in DOT', () => {
+  const blocks = new Map([block('A01.1.1', 'A01', 'rule', ['A01.9.9'])]);
+  const graph = graphOf(blocks, {});
+  assert.match(toMermaid(graph), /\{\{"❓ A01\.9\.9"\}\}/, 'a hexagon, not the usual box');
+  assert.match(toDot(graph), /"A01\.9\.9" \[label="❓ A01\.9\.9", style=dashed\];/);
+});
+
+// ---------------------------------------------------------------- Mermaid's own grammar
+
+test('Mermaid never uses the real id as ITS id — two ids that would sanitise the same do not merge', () => {
+  // Stripped of everything but letters, digits and underscore, "A.1" and "A_1" both become "A_1".
+  // If the renderer ever went back to doing that, this is the test that would catch it.
+  const blocks = new Map([block('A.1', 'A', 'text'), block('A_1', 'A', 'text')]);
+  const out = toMermaid(graphOf(blocks, {}));
+  const declared = [...out.matchAll(/^\s*n\d+\[/gm)];
+  assert.equal(declared.length, 2, 'two distinct ids must produce two distinct node declarations');
+  assert.match(out, /"⚪ A\.1"/);
+  assert.match(out, /"⚪ A_1"/);
+});
+
+test('a page or an id that IS a Mermaid keyword does not break the diagram', () => {
+  // "end" closes a subgraph in Mermaid's own grammar. A page named exactly that must never become
+  // the subgraph's id — only its label, where the word means nothing special.
+  const blocks = new Map([block('end', 'end', 'text')]);
+  const out = toMermaid(graphOf(blocks, {}));
+  assert.doesNotMatch(out, /subgraph end\[/, 'the keyword must never be used as an id');
+  assert.match(out, /subgraph p1\["end"\]/, 'it is only ever the label');
+  assert.match(out, /n1\["⚪ end"\]/);
+  // The diagram still has to close its subgraph with the real keyword — that "end" is Mermaid's
+  // syntax, not a node called "end", and the two must not be confused for one another.
+  assert.match(out, /^\s*end\s*$/m);
+});
+
+test('a quote, a backslash, angle brackets and a hash in an id cannot break a Mermaid label', () => {
+  const blocks = new Map([block('A"1<2>#3\\4', 'A', 'text')]);
+  const out = toMermaid(graphOf(blocks, {}));
+  assert.match(out, /"⚪ A#quot;1#lt;2#gt;#35;3#92;4"/);
+});
+
+// ---------------------------------------------------------------- DOT's own grammar
+
+test('a quote in an id is escaped in DOT', () => {
+  const blocks = new Map([block('A"1', 'A', 'text')]);
+  const out = toDot(graphOf(blocks, {}));
+  assert.match(out, /"A\\"1" \[label="⚪ A\\"1"\];/);
+});
+
+test('a trailing backslash in an id does not eat the closing quote in DOT', () => {
+  // Escaping the quote alone turns `A\` into `"A\"` — an ODD number of backslashes before the
+  // closing quote, which DOT reads as an escaped quote, not the end of the string. The backslash
+  // itself has to be escaped first.
+  const blocks = new Map([block('A\\', 'A', 'text')]);
+  const out = toDot(graphOf(blocks, {}));
+  assert.match(out, /"A\\\\" \[label="⚪ A\\\\"\];/);
+});
+
+// ---------------------------------------------------------------- every state, rendered
+
+test('stale and broken render with their own emoji in both Mermaid and DOT', () => {
+  const blocks = new Map([
+    block('A01.1.1', 'A01', 'text', [], 'NEW'),                        // text changed → stale
+    block('A01.1.2', 'A01', 'rule', ['A01.1.3'], 'same'),               // ground moved → broken
+    block('A01.1.3', 'A01', 'contract', [], 'MOVED'),
+  ]);
+  const registry = {
+    'A01.1.1': { fingerprint: 'old' },
+    'A01.1.2': { fingerprint: 'same', dependsOn: { 'A01.1.3': 'was-this' } },
+  };
+  const graph = graphOf(blocks, registry);
+  assert.equal(graph.nodes.find((n) => n.id === 'A01.1.1').state, 'stale');
+  assert.equal(graph.nodes.find((n) => n.id === 'A01.1.2').state, 'broken');
+
+  const mermaid = toMermaid(graph);
+  assert.match(mermaid, /"🟡 A01\.1\.1"/);
+  assert.match(mermaid, /"🔴 A01\.1\.2"/);
+
+  const dot = toDot(graph);
+  assert.match(dot, /label="🟡 A01\.1\.1"/);
+  assert.match(dot, /label="🔴 A01\.1\.2"/);
 });
 
 test('an empty documentation is a graph with no nodes and no edges, in every format', () => {

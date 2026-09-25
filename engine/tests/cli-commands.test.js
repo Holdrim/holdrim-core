@@ -149,12 +149,17 @@ test('graph prints the SAME dependencies and states `lights` and `if-i-touch` re
   const edge = json.edges.find((e) => e.from === 'R02.2.2' && e.to === 'R02.2.1');
   assert.ok(edge, 'the edge data-depends="R02.2.1" on R02.2.2 is in the graph');
   const node = json.nodes.find((n) => n.id === 'R02.2.2');
-  assert.ok(node && ['valid', 'stale', 'broken', 'none'].includes(node.state));
+  assert.ok(node && ['valid', 'stale', 'broken', 'none', 'missing'].includes(node.state));
   assert.ok(json.edges.length > 0);
 
+  // Mermaid never uses the real id as ITS id (engine/cli/graph.ts), so the edge is found by tracing
+  // the synthetic ids the two labels were given, not by grepping for the block ids themselves.
   const mermaid = run(['graph', '--root', cashRegister, '--mermaid'], ROOT).out;
   assert.match(mermaid, /^flowchart TD/);
-  assert.match(mermaid, /R02_2_2 --> R02_2_1/);
+  const from = mermaid.match(/(n\d+)\["[^"]*R02\.2\.2"\]/)?.[1];
+  const to = mermaid.match(/(n\d+)\["[^"]*R02\.2\.1"\]/)?.[1];
+  assert.ok(from && to, 'both ends of the edge got a labelled node');
+  assert.match(mermaid, new RegExp(`${from} --> ${to}`));
 
   const dot = run(['graph', '--root', cashRegister, '--dot'], ROOT).out;
   assert.match(dot, /^digraph holdrim \{/);
