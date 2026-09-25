@@ -517,6 +517,12 @@ expect "but whoever created it does: the owner's id, not a stranger's" "$OWNER_I
 expect "the list is ordered by e-mail"  "$MEMBER $OWNER" "$(emails)"
 
 expect "the new person signs in → 200"  200 "$(mlogin "$MEMBER_PASSWORD")"
+# Issue #113: this is the cookie a thief would have stolen right now, before any of what follows —
+# disabling, resetting, re-enabling. Kept in a file of its own because $MCOOKIES gets overwritten by
+# every later `mlogin`, and a check run against THAT would pass for the wrong reason: a fresh
+# session, not survival of this one.
+STOLEN_COOKIES=$WORK/cookies-member-stolen.txt
+cp $MCOOKIES $STOLEN_COOKIES
 expect "and it logs no person either — nobody has acted on anything yet" null \
   "$(log_field $WORK/password.log signed_in person)"
 expect "and is nobody special"          member "$(as_member $B/api/me | jfield role)"
@@ -615,11 +621,22 @@ expect "an admin cannot reset the owner → 409" 409 "$(code_admin -X POST $B/ap
 # and be the owner from then on, never touching the reset route the other guard protects.
 expect "an admin cannot create the owner → 409" 409 "$(code_admin -d "{\"email\":\"$OWNER\",\"name\":\"Not Me\"}" $B/api/users)"
 expect "and the message says it is provisioned at boot" 0 "$(as_admin -d "{\"email\":\"$OWNER\",\"name\":\"Not Me\"}" $B/api/users | has 'HOLDRIM_OWNER'; echo $?)"
-expect "the owner still can, on themselves" 200 "$(code_owner -X POST $B/api/users/$OWNER/password)"
+OWN_RESET=$(as_owner -w '\n%{http_code}' -X POST $B/api/users/$OWNER/password)
+OWN_RESET_CODE=$(echo "$OWN_RESET" | tail -1); OWN_RESET=$(echo "$OWN_RESET" | sed '$d')
+NEW_OWNER_PASSWORD=$(echo "$OWN_RESET" | jfield password)
+expect "the owner still can, on themselves" 200 "$OWN_RESET_CODE"
 expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset person)"
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset by)"
+# A reset drops every session for the account, and makes no exception for "but I am the one who ran
+# it": the row it deletes cannot tell a self-reset apart from one that reached the account through a
+# stolen credential, and a special case here would be exactly the gap issue #113 was about. So the
+# owner's OWN cookie is dead too, until they sign back in with the password this reset just handed
+# them — the same login() every earlier check in this file relied on, now with a new secret.
+expect "and it drops the owner's own session too → 401" 401 "$(code_owner $B/api/me)"
+expect "signing back in with the password just generated → 200" 200 "$(login "$NEW_OWNER_PASSWORD")"
+PASSWORD=$NEW_OWNER_PASSWORD
 
 expect "disabling somebody → 200"       200 "$(code_owner -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)"
 expect "disabling is logged as the member's id, not the owner's" "$MEMBER_ID" \
@@ -646,12 +663,23 @@ expect "re-enabling is logged the same way: the member's id" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
 expect "and by the owner again"        "$OWNER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed by)"
+# Isolates the disable's own delete from the reset's, which happens later in this script and would
+# otherwise clean up the same row and hide a disable that forgot to: nothing has been reset yet at
+# this point, only disabled and given back, so a 200 here could only mean the session survived the
+# disable — the exact resurrection issue #113 was about.
+expect "and the session stolen before the disable is still dead now it is re-enabled" 401 \
+  "$(curl -s -b $STOLEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "and the same password works again → 200" 200 "$(mlogin "$MEMBER_PASSWORD")"
 # Every other `signed_in` assertion above expects `null`: the member's FIRST sign-in, before they had
 # ever acted on anything reviewable. A hard-coded `person: null` at the call site would pass every one
 # of those and still be wrong — this is the one that needs a real id, from someone who by now has one.
 expect "and a sign-in by someone who has acted logs their own id" "$MEMBER_ID" \
   "$(log_field $WORK/password.log signed_in person)"
+# A second cookie, opened fresh after the disable → enable round-trip and never itself disabled —
+# the control for the check below: a reset has to kill THIS one too, on its own, with no disabling
+# involved anywhere in its story.
+ACTIVE_COOKIES=$WORK/cookies-member-active.txt
+cp $MCOOKIES $ACTIVE_COOKIES
 
 RESET=$(as_owner -X POST $B/api/users/$MEMBER/password)
 NEW_PASSWORD=$(echo "$RESET" | jfield password)
@@ -660,7 +688,17 @@ expect "a reset gives back a different password" 0 "$([ -n "$NEW_PASSWORD" ] && 
 # whatever channel carried it over. The window has to be one login long.
 expect "and it demands a change"        true "$(echo "$RESET" | jfield user.mustChangePassword)"
 expect "the old password stops working → 401" 401 "$(mlogin "$MEMBER_PASSWORD")"
+# The reset just run touched only $MCOOKIES's owner by e-mail, never $ACTIVE_COOKIES directly — this
+# is the session dying because the reset dropped it, not because anything logged it out by name.
+expect "a password reset alone kills a session nobody disabled" 401 \
+  "$(curl -s -b $ACTIVE_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "the new one gets in → 200"      200 "$(mlogin "$NEW_PASSWORD")"
+# The scenario issue #113 reproduced end to end: a lock-holder's cookie is stolen, the owner
+# disables the account, resets the password and gives the access back. Without dropping the
+# session on the disable AND on the reset, the row outlives all three and this is 200 again — the
+# thief still in, on an account everyone in the log above believes was cleaned up.
+expect "the cookie stolen before disable → reset → enable is still dead" 401 \
+  "$(curl -s -b $STOLEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "and it is not in the listing"   0 "$(as_owner $B/api/users | grep -Fc -e "$NEW_PASSWORD")"
 expect "nor in the log"                 0 "$(grep -Fc -e "$NEW_PASSWORD" $WORK/password.log)"
 expect "and a reset is logged by id, not by e-mail" 0 \
