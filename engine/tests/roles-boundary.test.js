@@ -8,7 +8,7 @@
  * would silently stop working the day either of those lands, with nothing here to say so — which is
  * exactly the bug this file exists to catch before it is written.
  *
- * Two shapes are refused, neither tied to a particular operator:
+ * Refused, neither tied to a particular operator nor to the line the value sits on:
  *   - the role's name as a STRING LITERAL, anywhere — `===`, `!==`, `==`, a `switch`'s `case`, an
  *     array's `.includes(...)`, a backtick template, or a comparison split over two lines all put
  *     the same quoted word in the source, and the word is what gives the check away, not the
@@ -16,6 +16,15 @@
  *   - an object literal read with `roleOf(...)` as the key (`{ admin: true }[roleOf(e)]`), which asks
  *     the same question as a string comparison — "is this admin?" — without writing the name inside
  *     quotes at all.
+ *   - a call to `roleOf(` itself, anywhere it is not one of `ALLOWED`'s named, explained call sites —
+ *     because the two shapes above only catch what a DECISION looks like, and a decision made through
+ *     a variable (`const role = data.roleOf(p.email)`, then `rank[role] === 0` three lines down, or
+ *     `roleOf(e).startsWith('adm')`, with no full literal in sight) puts neither shape on the line that
+ *     matters. Closing where the value comes FROM, not only what surrounds it, is what catches those.
+ *   - such a variable used, anywhere else in the file, as a lookup key, an (in)equality operand, an
+ *     `.includes(...)` argument, a `.startsWith`/`.endsWith` prefix or suffix check, or a regex's
+ *     `.test(...)` — `decidesOn`, below — even when the `roleOf(` call that produced it is itself one
+ *     of the named, allowed ones.
  *
  * Read as text, like `engine/tests/surface.test.js` reads for `HOLDRIM_*` variables: there is no
  * single function every such comparison calls, so nothing can be imported and inspected instead.
@@ -56,6 +65,54 @@ const LITERAL = new RegExp(`(['"\`])(${ROLE_NAMES.join('|')})\\1`);
 const COMPUTED_LOOKUP = /\[[^[\]]*\broleOf\(/;
 
 /**
+ * A call to `roleOf(` itself, anywhere outside `roles.js`. `LITERAL` and `COMPUTED_LOOKUP` both read
+ * what surrounds a value, never where it came from — so `const role = data.roleOf(p.email);` followed,
+ * lines later, by `rank[role] === 0` or `return M[role]` puts neither a quoted role name nor a
+ * `roleOf(` call inside a bracket on the line that actually decides anything, and both checks above
+ * wave it through. The only place the role's name enters a caller's hands AT ALL is this call, so
+ * closing the hole means closing THIS, not every shape a later line could hide a decision in: only
+ * `ALLOWED`'s named call sites may make it, and any other occurrence — a brand-new call, or one of
+ * `roleOf(e).startsWith('adm')`, `/^adm/.test(roleOf(e))`, `roleOf(e) === roleOf(owner)` — is refused
+ * by the same rule that refuses a literal, without needing a shape of its own.
+ */
+const ROLEOF_CALL = /\broleOf\(/;
+
+/**
+ * A variable bound, anywhere in the file, to a call whose text contains `roleOf(` — `const role =
+ * data.roleOf(p.email)` binds `role`. `ROLEOF_CALL` alone would still miss a decision made on the
+ * SAME variable further down the file, at an allow-listed call site's own name (`role`, `rank`, …):
+ * this is what `staleEntries`'s reasoning about drift would call the same bug moved one hop away from
+ * the call, and it needs its own tracking rather than a cleverer regex on a single line.
+ */
+function roleOfBindings(text) {
+  const names = new Set();
+  const bind = /\b(?:const|let|var)\s+(\w+)\s*=[^\n;]*\broleOf\(/g;
+  let m;
+  while ((m = bind.exec(text))) names.add(m[1]);
+  return names;
+}
+
+/**
+ * A regex matching `name` used the way a role's name decides something: as a computed lookup key
+ * (`table[name]`), compared for (in)equality in either order, checked with `.includes(name)`, matched
+ * by a prefix or suffix (`name.startsWith(...)`), or handed to a regex's `.test(name)`. The same
+ * shapes `LITERAL` and `COMPUTED_LOOKUP` catch for a literal or a direct call, generalised to whatever
+ * a caller named the variable it stashed the value in — `'adm' + 'in'` built to dodge `LITERAL`'s
+ * quoted match still trips this the moment it sits on either side of `===`.
+ */
+function decidesOn(name) {
+  const n = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(
+    `\\[\\s*${n}\\s*\\]` +
+    `|\\b${n}\\s*(===|==|!==|!=)` +
+    `|(===|==|!==|!=)\\s*${n}\\b` +
+    `|\\.includes\\(\\s*${n}\\s*\\)` +
+    `|\\b${n}\\.(startsWith|endsWith)\\(` +
+    `|\\.test\\(\\s*${n}\\s*\\)`,
+  );
+}
+
+/**
  * Real, needed uses of one of these words, or this shape, that are not a decision made from a
  * role's name — named ONCE, here, with why, instead of teaching the scan to tell them apart from the
  * inside. That cleverness is exactly what a real offender would hide behind next.
@@ -84,14 +141,73 @@ const ALLOWED = [
   { file: 'engine/core/cycle.js', text: "const owner = ownedBy('owner');", why: 'same cycle vocabulary as above' },
   { file: 'engine/core/cycle.js', text: "ownedBy: table.states[state]?.owned_by ?? 'owner',",
     why: 'same cycle vocabulary as above' },
+  { file: 'engine/api/server.ts', text: 'role: roles.roleOf(email),',
+    why: 'the /api/me response\'s DISPLAY field, read by nothing this process does — a client may ' +
+      'show it, never branch a server decision on it' },
+  { file: 'engine/api/server.ts', text: 'roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),',
+    why: 'handed to the people page for its own display column and sort order only; `isOwner` travels ' +
+      'alongside it as the separate boolean `actionsFor` takes, exactly so the page is never left to ' +
+      'derive "is this the owner" by comparing the role it was given' },
+  { file: 'engine/api/people-page.ts', text: 'const role = data.roleOf(p.email);',
+    why: 'the row\'s DISPLAY label and the key into `people.role.*` translations — never compared or ' +
+      'looked up by; see `decidesOn`, which would still catch it if a later line started to' },
 ];
 
-/** Comments are prose about the code, not the code — this file's own comments say the very patterns
- *  it looks for, and must not trip over themselves. Block comments are blanked, not removed, so a
- *  real offender's line number still points at the real file: deleting the newlines inside one would
- *  shift every line after it. */
+/**
+ * Comments are prose about the code, not the code — this file's own comments say the very patterns
+ * it looks for, and must not trip over themselves. Block comments are blanked, not removed, so a
+ * real offender's line number still points at the real file: deleting the newlines inside one would
+ * shift every line after it.
+ *
+ * A string or template literal is walked past whole, its contents never read as a comment opener:
+ * the old version read a slash-star inside a path like `'docs/*'` as one anyway, and kept scanning
+ * for the matching close mark anywhere later in the file — inside another string, such as one holding
+ * a slash-star-star-slash, or inside a real comment — blanking everything in between, including real
+ * code with a real offense. Reading a path or a regex source as a comment opener is a much bigger
+ * hole than the one this file exists to close, so strings are skipped outright rather than taught to
+ * look less like comments. A template literal's interpolation is walked back INTO code, with its
+ * brace depth tracked, so a comment marker genuinely inside an interpolated expression is still
+ * caught.
+ */
 function withoutComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' ')).replace(/^\s*\/\/.*$/gm, '');
+  let out = '';
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '\'' || c === '"') {
+      let j = i + 1;
+      while (j < n && text[j] !== c && text[j] !== '\n') j += (text[j] === '\\' && j + 1 < n) ? 2 : 1;
+      if (j < n && text[j] === c) j++;
+      out += text.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (c === '`') {
+      let j = i + 1;
+      let depth = 0;
+      while (j < n) {
+        if (text[j] === '\\' && j + 1 < n) { j += 2; continue; }
+        if (depth === 0 && text[j] === '`') { j++; break; }
+        if (depth === 0 && text[j] === '$' && text[j + 1] === '{') { depth++; j += 2; continue; }
+        if (depth > 0 && text[j] === '}') { depth--; j++; continue; }
+        j++;
+      }
+      out += text.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (text.slice(i, i + 2) === '/*') {
+      const end = text.indexOf('*/', i + 2);
+      const stop = end === -1 ? n : end + 2;
+      out += text.slice(i, stop).replace(/[^\n]/g, ' ');
+      i = stop;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out.replace(/^\s*\/\/.*$/gm, '');
 }
 
 /** Blanks out `file`'s allow-listed snippets, leaving their length and any newline they hold — so an
@@ -113,12 +229,28 @@ function stripAllowed(text, file) {
  * @param {string|null} file  a path from `ALLOWED`, or null for a synthetic snippet with no allowance
  */
 function offendersIn(text, file = null) {
-  const scanned = stripAllowed(withoutComments(text), file);
+  const withoutStrayComments = withoutComments(text);
+  const scanned = stripAllowed(withoutStrayComments, file);
+  const lines = scanned.split('\n');
   const found = [];
-  for (const [lineNumber, line] of scanned.split('\n').entries()) {
+  for (const [lineNumber, line] of lines.entries()) {
     if (LITERAL.test(line)) found.push(`${lineNumber + 1}: ${line.trim()}  (a role's name, quoted)`);
     if (COMPUTED_LOOKUP.test(line)) {
       found.push(`${lineNumber + 1}: ${line.trim()}  (an object indexed by roleOf(), not asked with can)`);
+    }
+    if (ROLEOF_CALL.test(line)) {
+      found.push(`${lineNumber + 1}: ${line.trim()}  (calls roleOf() outside its allowed call sites)`);
+    }
+  }
+  // Bindings are read from BEFORE the allow-list strip: an allow-listed call still stashes the role
+  // in a variable, and that variable deciding something two lines later is exactly the gap this
+  // closes — stripping the call itself must not also erase the fact that it happened.
+  for (const name of roleOfBindings(withoutStrayComments)) {
+    const decides = decidesOn(name);
+    for (const [lineNumber, line] of lines.entries()) {
+      if (decides.test(line)) {
+        found.push(`${lineNumber + 1}: ${line.trim()}  (decides something using "${name}", bound from roleOf())`);
+      }
     }
   }
   return found;
@@ -179,6 +311,94 @@ test('catches a decision hiding behind an object literal keyed by roleOf(), with
 test('does not flag the one allow-listed instance of the lookup shape it otherwise refuses', () => {
   assert.deepEqual(offendersIn('rank[data.roleOf(a.email)] - rank[data.roleOf(b.email)]',
     'engine/api/people-page.ts'), []);
+});
+
+test('does not flag any of the allow-listed roleOf() call sites themselves', () => {
+  assert.deepEqual(offendersIn('role: roles.roleOf(email),', 'engine/api/server.ts'), []);
+  assert.deepEqual(offendersIn('roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),',
+    'engine/api/server.ts'), []);
+  assert.deepEqual(offendersIn('const role = data.roleOf(p.email);', 'engine/api/people-page.ts'), []);
+});
+
+// -------------------------------------------------- a decision made through a variable, not the call
+// `roleOf(` alone, or the surrounding shape alone, misses the case AGENTS.md's finding names: the
+// value leaves the call, sits in a variable for a while, and something further down decides on the
+// variable instead. Each test below is one way that happens; `decidesOn` and `ROLEOF_CALL` together
+// are what closes all of them, not a shape written for each individually.
+
+test('catches a role stashed in a variable and then used as a lookup key, even through the allowed call', () => {
+  const found = offendersIn(
+    'const role = data.roleOf(p.email);\nconst actions = rank[role] === 0 ? [] : ["reset"];',
+    'engine/api/people-page.ts');
+  assert.ok(found.some((f) => f.includes('rank[role]')),
+    'rank[role] === 0, decided from a role stashed by the ALLOW-LISTED call, slipped through');
+});
+
+test('catches a role read into a fresh variable and used as a lookup key on a later line', () => {
+  const found = offendersIn('function f(e) {\n  const r = roles.roleOf(e);\n  return M[r];\n}', null);
+  assert.ok(found.length, 'a role stashed in a fresh variable and used as a lookup key slipped through');
+});
+
+test('catches two roleOf() calls compared to each other, with no variable and no quoted name at all', () => {
+  const found = offendersIn('if (roles.roleOf(e) === roles.roleOf(roles.owner)) return true;', null);
+  assert.ok(found.length, 'comparing two direct roleOf() calls to each other slipped through');
+});
+
+test('catches a role name matched by a prefix instead of a full comparison', () => {
+  const found = offendersIn("if (roles.roleOf(e).startsWith('adm')) return true;", null);
+  assert.ok(found.length, "a .startsWith('adm') prefix check on a role name slipped through");
+});
+
+test('catches a role name matched by a regex instead of a literal comparison', () => {
+  const found = offendersIn('if (/^adm/.test(roles.roleOf(e))) return true;', null);
+  assert.ok(found.length, 'a regex .test() against a role name slipped through');
+});
+
+test('catches a role compared against a name built from concatenated pieces, no full literal in sight', () => {
+  const found = offendersIn(
+    "const role = data.roleOf(p.email);\nif (role === 'adm' + 'in') return true;",
+    'engine/api/people-page.ts');
+  assert.ok(found.length,
+    "\"adm\" + \"in\", compared against a role stashed in a variable, dodged LITERAL and slipped through");
+});
+
+test('planting rank[role] === 0 into the real people-page.ts is caught, by name', () => {
+  const real = readFileSync(join(ROOT, 'engine/api/people-page.ts'), 'utf8');
+  const marker = 'actionsFor(p, data.isOwner(p.email))';
+  assert.ok(real.includes(marker), 'the real line this test plants its evasion next to moved or was reworded');
+  const planted = real.replace(marker, 'actionsFor(p, rank[role] === 0)');
+  const found = offendersIn(planted, 'engine/api/people-page.ts');
+  assert.ok(found.some((f) => f.includes('rank[role]')),
+    'planting rank[role] === 0 into the real people-page.ts was not caught');
+});
+
+test('planting a new, un-allow-listed roleOf() call into the real server.ts is caught, by name', () => {
+  const real = readFileSync(join(ROOT, 'engine/api/server.ts'), 'utf8');
+  const marker = 'role: roles.roleOf(email),';
+  assert.ok(real.includes(marker), 'the real line this test plants its evasion next to moved or was reworded');
+  const planted = real.replace(marker,
+    `${marker}\n      impersonatingOwner: roles.roleOf(email) === roles.roleOf(roles.owner),`);
+  const found = offendersIn(planted, 'engine/api/server.ts');
+  assert.ok(found.some((f) => f.includes('roleOf() outside its allowed call sites')),
+    'planting a brand-new roleOf() call into the real server.ts was not caught');
+});
+
+// ---------------------------------------------------------- the comment stripper and string literals
+
+test('does not treat a slash-star inside a string literal as an opening comment mark', () => {
+  const found = offendersIn(
+    "const path = 'docs/*';\nif (roles.roleOf(e) === 'admin') return true;\nconst other = 'x/**/y';",
+    null);
+  assert.ok(found.length,
+    "a real offense after a string holding an unmatched '/*' was hidden by the old comment stripper");
+});
+
+test('does not let a template literal\'s contents look like a comment either', () => {
+  const found = offendersIn(
+    "const path = `docs/*`;\nif (roles.roleOf(e) === 'admin') return true;",
+    null);
+  assert.ok(found.length,
+    "a real offense after a template literal holding an unmatched '/*' was hidden by the old comment stripper");
 });
 
 test('a stale allow-list entry — text no longer in its file — is caught, not silently kept', () => {
