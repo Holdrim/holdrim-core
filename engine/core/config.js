@@ -9,13 +9,13 @@
  * one exception is `language`, below, where HOLDRIM_LANGUAGE counts only when the file names none.
  *
  * ⚠️ AUTHORITY IS NOT IN THE FILE AT ALL. Who the owner and the admins are comes from HOLDRIM_OWNER
- * and HOLDRIM_ADMINS, who else holds `lock` comes from HOLDRIM_LOCKS, and a project's own roles and
- * who holds them come from the owner, at a settings screen (not yet built) — none of the four is
- * ever read from this file (docs/ROLES.md, "Authority comes from the deployment only"). The file
- * travels with the repository, and whoever can commit to it — a contributor, or the agent applying
- * an approved request — is not whoever deploys it: with a fallback to the file, editing one line
- * would name a new owner, a new lock-holder or a new role at the next deploy, or at the next
- * `holdrim sync` on somebody's machine.
+ * and HOLDRIM_ADMINS, who else holds `lock` comes from HOLDRIM_LOCKS, who is an agent comes from
+ * HOLDRIM_AGENTS, and a project's own roles and who holds them come from the owner, at a settings
+ * screen (not yet built) — none of the five is ever read from this file (docs/ROLES.md, "Authority
+ * comes from the deployment only"). The file travels with the repository, and whoever can commit
+ * to it — a contributor, or the agent applying an approved request — is not whoever deploys it:
+ * with a fallback to the file, editing one line would name a new owner, a new lock-holder or a new
+ * role at the next deploy, or at the next `holdrim sync` on somebody's machine.
  * @module
  */
 
@@ -35,7 +35,7 @@ import { readPeopleShow } from './people-show.js';
  * would sit in the file looking authoritative while the variable decided — and the day someone
  * read the file to find out who the owner is, it would answer wrong.
  */
-const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'roles', 'grants'];
+const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'agents', 'roles', 'grants'];
 
 /**
  * Where each authority key actually lives — docs/ROLES.md, "Where everything lives" (section 5) —
@@ -49,6 +49,7 @@ const AUTHORITY_HOMES = {
   owner: 'HOLDRIM_OWNER (one e-mail), set where Holdrim runs',
   admins: 'HOLDRIM_ADMINS (comma separated), set where Holdrim runs',
   locks: 'HOLDRIM_LOCKS, set where Holdrim runs',
+  agents: 'HOLDRIM_AGENTS, set where Holdrim runs',
   roles: 'the owner, from the settings screen — not built yet, and never this file',
   grants: 'the owner, from the settings screen — not built yet, and never this file',
 };
@@ -116,6 +117,10 @@ export function readConfig(root, io, env = {}) {
     // like the two above and for the same reason. `rolesOf` (engine/core/roles.js) parses and
     // validates it; `can('lock', …)` does not consult it yet (see `roles.js`'s own comment on why).
     locks: env.HOLDRIM_LOCKS ?? '',
+    // Who is an agent (docs/ROLES.md, section 4) — the environment only, like the three above: the
+    // file is exactly what the agent applying an approved request can edit, and removing itself
+    // from this list is the one edit it must never be able to make count.
+    agents: env.HOLDRIM_AGENTS ?? '',
     project: env.HOLDRIM_PROJECT ?? cloud.project ?? null,
     account: env.HOLDRIM_ACCOUNT ?? cloud.account ?? null,
     region: cloud.region ?? null,

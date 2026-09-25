@@ -111,7 +111,9 @@ Each has a test. If you change the code around one, run the contract test and re
   and every reader uses what was written, never a recomputation from who holds `lock` now — an owner
   who hands over must not silently un-lock every ✓ they gave before. An agent may *close* an impact
   — "this change did not reach here" — and never *approve* — "this text is correct", and never gives
-  a ✓ at all.
+  a ✓ at all. An address in `HOLDRIM_AGENTS` is refused `triage`, `approve`, `lock` and `people` by
+  `can` before any grant is read, a grant naming one refuses to start, and every event records
+  `data.asAgent` (`engine/core/roles.js`, `engine/api/server.ts`).
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
   known format; interpolating a raw string lets `red; } body { display:none } /*` through.
 

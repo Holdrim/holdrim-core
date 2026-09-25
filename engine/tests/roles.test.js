@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope,
+  parseAgents, AGENT_NEVER, rolesOf, refuseGrantsToAgents,
 } from '../core/roles.js';
 
 test('exactly one owner: zero or two refuse to start', () => {
@@ -335,4 +336,89 @@ test('the owner locks and admin and member do not, whatever a caller does to wha
   assert.equal(roles.can('lock', 'owner@example.org'), true);
   assert.equal(roles.can('lock', 'ana@example.org'), false, 'admin must not lock, whatever the table says');
   assert.equal(roles.can('lock', 'carl@example.org'), false, 'member must not lock, whatever the table says');
+});
+
+// ---------------------------------------------------------------- agents (docs/ROLES.md, section 4)
+const AGENT = 'agent@example.org';
+
+test('HOLDRIM_AGENTS: ";" separated, normalized, and checked as strictly as HOLDRIM_LOCKS', () => {
+  assert.deepEqual(parseAgents(' Agent@Example.org ; ci@example.org;; '), [AGENT, 'ci@example.org']);
+  assert.deepEqual(parseAgents(undefined), []);
+  assert.throws(() => parseAgents(`${AGENT},ci@example.org`), /separated by ";", not ","/);
+  for (const bad of ['not-an-address', '<agent@example.org>', 'agent@example.org.']) {
+    assert.throws(() => parseAgents(bad), /HOLDRIM_AGENTS names .* not an e-mail address/, bad);
+  }
+  assert.throws(() => createRoles('owner@example.org', '', '', 'nobody'), /HOLDRIM_AGENTS names "nobody"/,
+    'and createRoles refuses to start on it, like a bad owner');
+});
+
+test('isAgent is asked by identity, case-insensitively, and marks nobody else', () => {
+  const roles = createRoles('owner@example.org', '', '', AGENT);
+  assert.equal(roles.isAgent('  AGENT@example.ORG '), true);
+  assert.equal(roles.isAgent('owner@example.org'), false);
+  assert.equal(roles.isAgent('someone@example.org'), false);
+});
+
+test('the capabilities an agent never holds are exactly triage, approve, lock and people', () => {
+  assert.deepEqual([...AGENT_NEVER].sort(), ['approve', 'lock', 'people', 'triage']);
+  for (const c of AGENT_NEVER) assert.ok(CAPABILITIES.includes(c), c);
+});
+
+/**
+ * The layer `can` holds on its own. `createRoles` is built directly, bypassing `rolesOf`'s start-up
+ * refusal on purpose: the grant naming the agent HERE is exactly the one that refusal exists to stop,
+ * and this proves `can` refuses it anyway, before the grant is read. As the owner, the agent is
+ * granted every capability, `lock` included, by `isOwner` — the strongest grant there is — so each
+ * refusal below can only come from the agent check, and one named test per capability says which
+ * one a mutation dropped.
+ */
+for (const capability of ['triage', 'approve', 'lock', 'people']) {
+  test(`can refuses an agent ${capability}, even when a grant names it the owner`, () => {
+    const roles = createRoles(AGENT, '', `${AGENT}:A01`, AGENT);
+    assert.equal(roles.isOwner(AGENT), true, 'the grant is really there');
+    assert.equal(roles.can(capability, AGENT), false);
+  });
+}
+
+test('can refuses an agent that HOLDRIM_ADMINS names, and the admin beside it keeps everything', () => {
+  const roles = createRoles('owner@example.org', `${AGENT},ana@example.org`, '', AGENT);
+  for (const c of ['triage', 'approve', 'people']) {
+    assert.equal(roles.can(c, AGENT), false, `the agent, ${c}`);
+    assert.equal(roles.can(c, 'ana@example.org'), true, `the admin, ${c}`);
+  }
+});
+
+test('an agent keeps read, comment and request: it is refused deciding, not taking part', () => {
+  const roles = createRoles(AGENT, '', '', AGENT);
+  for (const c of ['read', 'comment', 'request']) assert.equal(roles.can(c, AGENT), true, c);
+  // The owner-not-an-agent case still holds every capability: the check keys on the identity alone.
+  const plain = createRoles('owner@example.org', '', '', AGENT);
+  for (const c of CAPABILITIES) assert.equal(plain.can(c, 'owner@example.org'), true, c);
+});
+
+/**
+ * The other layer, on its own: `rolesOf`, the one way from configuration to roles for the server's
+ * boot and every CLI command, refuses a grant that names an agent. One case per variable, since each
+ * is its own branch.
+ */
+const grantsToAgents = [
+  { variable: 'HOLDRIM_OWNER', config: { owner: AGENT, admins: '', locks: '', agents: AGENT } },
+  { variable: 'HOLDRIM_ADMINS', config: { owner: 'owner@example.org', admins: AGENT, locks: '', agents: AGENT } },
+  { variable: 'HOLDRIM_LOCKS', config: { owner: 'owner@example.org', admins: '', locks: `${AGENT}:A01`, agents: AGENT } },
+];
+for (const { variable, config } of grantsToAgents) {
+  test(`rolesOf refuses to start when ${variable} names an agent`, () => {
+    assert.throws(() => rolesOf(config),
+      new RegExp(`${variable} names ${AGENT}, which HOLDRIM_AGENTS marks as an agent`));
+  });
+}
+
+test('rolesOf starts when no grant names an agent, and names every grant that does', () => {
+  const roles = rolesOf({ owner: 'owner@example.org', admins: 'ana@example.org', locks: 'bea@example.org:A01', agents: AGENT });
+  assert.equal(roles.isAgent(AGENT), true);
+  assert.throws(() => refuseGrantsToAgents(createRoles('owner@example.org', AGENT, `${AGENT}:A01`, AGENT), `${AGENT}:A01`),
+    /HOLDRIM_ADMINS names agent@example.org, HOLDRIM_LOCKS names agent@example.org, which/);
+  // The owner is in `admins` by consequence; naming them once, as the owner, is the honest message.
+  assert.throws(() => rolesOf({ owner: AGENT, admins: '', locks: '', agents: AGENT }),
+    (e) => !/HOLDRIM_ADMINS/.test(e.message));
 });

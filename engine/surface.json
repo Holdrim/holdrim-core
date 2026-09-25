@@ -13,6 +13,7 @@
     "public": [
       "HOLDRIM_ACCOUNT",
       "HOLDRIM_ADMINS",
+      "HOLDRIM_AGENTS",
       "HOLDRIM_AUDIENCE",
       "HOLDRIM_DEV_EMAIL",
       "HOLDRIM_ENVIRONMENT",

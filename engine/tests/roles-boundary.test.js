@@ -132,7 +132,7 @@ const ALLOWED = [
   { file: 'engine/cli/remote.ts', text: "this.#token = 'owner'",
     why: '"owner" is the Firestore EMULATOR\'s own word for a caller its security rules do not ' +
       'apply to (see the comment above it), never a Holdrim role' },
-  { file: 'engine/core/config.js', text: "const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'roles', 'grants'];",
+  { file: 'engine/core/config.js', text: "const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'agents', 'roles', 'grants'];",
     why: 'holdrim.json KEY NAMES refused at the door, not a person\'s role' },
   { file: 'engine/core/cycle.js', text: "ownerStates: ownedBy('owner'),",
     why: 'the CYCLE\'s own vocabulary (cycle.json) — which side of a transition owns it, "owner" or ' +

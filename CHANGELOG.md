@@ -189,6 +189,19 @@ who ran the engine from `main` before it.
   may not act on the address is not told the mechanism that reserved it. `can('lock', …)` does not
   trust one yet — it still asks only whether the caller is the owner — because doing so safely needs
   the session-and-credential-history rule `docs/ROLES.md` section 3 describes, which is not built.
+- **`HOLDRIM_AGENTS` marks who is an agent** (`docs/ROLES.md`, section 4), next to `HOLDRIM_LOCKS`:
+  `"agent@example.org; ci@example.org"`, `;` separated, each address checked the same strict way. An
+  address listed there is refused triage, a ✓, a lock and `people` whatever else it is granted —
+  asked before `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or any role is even read — and it can still comment,
+  request, and move a request through the agent's own states. The service refuses to start, and every
+  `holdrim` command refuses to run, when `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or `HOLDRIM_LOCKS` names an
+  address `HOLDRIM_AGENTS` also names, and `holdrim.json` refuses an `agents` key like the other
+  authority keys. Every event the server records now carries `data.asAgent` (`"true"` or `"false"`),
+  written from who the server saw, never from the request body: what reads the database directly
+  finds the new key on every event from this version on. What it does not cover yet: the CLI's direct
+  write to the cloud still bypasses the server and writes no `asAgent`, and an agent that signs in
+  as a person, or with an address not listed, is that person to the server — the agent's own
+  credential is a later change.
 - **`holdrim.json` refuses `roles` and `grants` too**, alongside `owner`, `admins` and `locks`
   (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
   them, are the owner's to define and grant from a settings screen — a later piece — never a file a
