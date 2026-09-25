@@ -125,6 +125,20 @@ const elsewhereRadiusPage = `<!doctype html><html lang="en"><head><meta charset=
 </main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
 writeFileSync(join(site, 'pages', 'R02.html'), elsewhereRadiusPage);
 
+// A dangling `data-depends` (#38, round 1's review, MAJOR 2): M01.1.1 names NOPE.1.1, which no
+// block on this site answers to. `graphOf` (engine/cli/graph.ts) turns that into its own node,
+// state `missing`, and `/api/graph` (server.ts) has to answer that node's `href` with `null` — a
+// browser has nowhere to open a block that is not there. Checked below, in "the documentation
+// graph on the home": once over HTTP, where `null` and the STRING "null" are easy to conflate, and
+// once in the browser, where clicking the ❓ node has to do nothing rather than throw or navigate
+// to the literal word "null".
+const missingDependencyPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>M01</title>
+<link rel="stylesheet" href="/engine/web/panel.css"></head><body><main>
+<h1 class="doc-title"><span class="doc-title__code">M01</span> A dangling dependency</h1>
+<p data-id="M01.1.1" data-code="1.1" data-depends="NOPE.1.1">Depends on a block that does not exist.</p>
+</main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
+writeFileSync(join(site, 'pages', 'M01.html'), missingDependencyPage);
+
 // The documentation graph (#38) has to hold up at 500+ blocks, and no page anybody would actually
 // write gets there — so this one is generated. Eight pages of seventy blocks each: a chain within
 // every page (block N depends on N-1), and every tenth block also depends on the block at the same
@@ -716,6 +730,24 @@ try {
     await owner.page.locator('#holdrim-graph [data-id="A01.1.2"]').click();
     await must('clicking a node opens the block, at its page and its own anchor',
       () => owner.page.waitForURL((u) => u.pathname === '/pages/A01.html' && u.hash === '#A01.1.2'));
+
+    // A dangling data-depends (M01.1.1 → NOPE.1.1, above): the API's own answer for it, checked
+    // over HTTP so a `null` turned into the string "null" — still truthy, still a value `expect`
+    // below would call a pass — is caught here instead of only in the browser.
+    const apiGraph = await fetch(`${BASE}/api/graph`, { headers: { 'X-Dev-Email': OWNER } }).then((r) => r.json());
+    const missingNode = apiGraph.nodes.find((n) => n.id === 'NOPE.1.1');
+    expect('a dangling dependency becomes its own node, state missing', 'missing', missingNode?.state);
+    expect('and it has no href — there is no block behind it to open', null, missingNode?.href);
+
+    // And in the browser: `home-graph.js` only calls `location.assign` when a node's `href` is
+    // truthy (`if (node?.href) …`), so the one honest way to prove that guard still holds is a
+    // click that leaves the page exactly where it was, not a click that throws.
+    await owner.page.goto(`${BASE}/engine/home`);
+    await owner.page.locator('#holdrim-graph .home-graph__svg').waitFor();
+    const beforeGhostClick = owner.page.url();
+    await owner.page.locator('#holdrim-graph [data-id="NOPE.1.1"]').click();
+    await owner.page.waitForTimeout(200);
+    expect('clicking the ❓ node does not navigate anywhere', beforeGhostClick, owner.page.url());
   }
 
   console.log('the panel obeys the project\'s feature toggles:');
