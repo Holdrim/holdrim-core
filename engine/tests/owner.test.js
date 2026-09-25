@@ -55,9 +55,12 @@ const AUTHORITY = /authority is set by the deployment, never by the repository/;
  *  checked per key, since the refusal names the actual destination and not the same two variables
  *  for every key alike (#29's rework: `roles` and `grants` have no variable at all yet). */
 const HOME_OF = {
-  owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS',
+  owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS', agents: 'HOLDRIM_AGENTS',
   roles: 'the settings screen', grants: 'the settings screen',
 };
+
+/** Each variable `environment` sets, by the name a case gives it. */
+const VARIABLES = { owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS', agents: 'HOLDRIM_AGENTS' };
 
 /**
  * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding a
@@ -96,13 +99,13 @@ async function project(t, extra = {}, variables = { owner: OWNER }) {
   return { dir, db, ids, events };
 }
 
-/** The environment with the two variables exactly as the case says: set, or absent. */
-function environment({ owner, admins }) {
+/** The environment with the authority variables exactly as the case says: set, or absent. */
+function environment(variables) {
   const env = { ...process.env };
-  delete env.HOLDRIM_OWNER;
-  delete env.HOLDRIM_ADMINS;
-  if (owner !== undefined) env.HOLDRIM_OWNER = owner;
-  if (admins !== undefined) env.HOLDRIM_ADMINS = admins;
+  for (const [key, name] of Object.entries(VARIABLES)) {
+    delete env[name];
+    if (variables[key] !== undefined) env[name] = variables[key];
+  }
   return env;
 }
 
@@ -123,9 +126,10 @@ function cli(args, dir, env) {
  * ever read — that refusal is what this function's `try` still proves.
  */
 function serverView({ dir, ids, events }, variables) {
-  const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
+  const names = Object.values(VARIABLES);
+  const before = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const env = environment(variables);
-  for (const key of ['HOLDRIM_OWNER', 'HOLDRIM_ADMINS']) {
+  for (const key of names) {
     if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key];
   }
   try {
@@ -138,8 +142,9 @@ function serverView({ dir, ids, events }, variables) {
   } catch (e) {
     return { refused: e.message };
   } finally {
-    if (before.owner === undefined) delete process.env.HOLDRIM_OWNER; else process.env.HOLDRIM_OWNER = before.owner;
-    if (before.admins === undefined) delete process.env.HOLDRIM_ADMINS; else process.env.HOLDRIM_ADMINS = before.admins;
+    for (const name of names) {
+      if (before[name] === undefined) delete process.env[name]; else process.env[name] = before[name];
+    }
   }
 }
 
@@ -224,6 +229,8 @@ const fileRefusals = [
   // A revoked admin, still listed in the file: their requests would read as approved.
   { name: 'an admin named only in holdrim.json', variables: { owner: OWNER }, file: { admins: [ADMIN] } },
   { name: 'lock-holders named in holdrim.json', variables: { owner: OWNER }, file: { locks: `${OTHER}:A01` } },
+  // The edit the agent applying a request could make to stop being one: refused like the rest.
+  { name: 'agents named in holdrim.json', variables: { owner: OWNER }, file: { agents: [] } },
   // #29's rework: a project's own roles and grants refuse exactly like the three above — they are
   // events from the settings screen, by the owner, never a key in the file (docs/ROLES.md,
   // "Authority comes from the deployment only").
@@ -249,6 +256,40 @@ for (const c of fileRefusals) {
     otherCommandsRefuse(p, environment(c.variables), AUTHORITY);
   });
 }
+
+/**
+ * A grant that names an agent (docs/ROLES.md, section 4): the service and every CLI command refuse to
+ * start, from `rolesOf`, the one resolution both share. Each variable is its own case, since each is
+ * its own branch of `refuseGrantsToAgents` (engine/core/roles.js).
+ */
+const agentGrants = [
+  { name: 'HOLDRIM_OWNER', variables: { owner: OTHER, agents: OTHER } },
+  { name: 'HOLDRIM_ADMINS', variables: { owner: OWNER, admins: OTHER, agents: OTHER } },
+  { name: 'HOLDRIM_LOCKS', variables: { owner: OWNER, locks: `${OTHER}:A01`, agents: OTHER } },
+];
+
+for (const c of agentGrants) {
+  test(`the CLI and the server both refuse: ${c.name} naming an agent`, async (t) => {
+    const p = await project(t);
+    const needs = new RegExp(`${c.name} names ${OTHER}, which HOLDRIM_AGENTS marks as an agent`);
+    const server = serverView(p, c.variables);
+    assert.match(server.refused ?? `booted with ${server.owner}`, needs, 'the server');
+    const cliAnswer = cliView(p, c.variables);
+    assert.match(cliAnswer.refused ?? `ran with ${cliAnswer.owner}`, needs, 'the CLI, list');
+    assert.match(cliAnswer.syncRefused, needs, 'the CLI, sync');
+    assert.equal(readFileSync(join(p.dir, 'approvals.json'), 'utf8').trim(), '{}', 'and sync locked nothing');
+    otherCommandsRefuse(p, environment(c.variables), needs);
+  });
+}
+
+test('an agent granted nothing runs like anyone else, on both sides', async (t) => {
+  // The refusal above is about a grant, not about HOLDRIM_AGENTS being set at all.
+  const variables = { owner: OWNER, agents: OTHER };
+  const p = await project(t, {}, variables);
+  const expected = { owner: OWNER, states: { [OWNER]: ADMIN_START, [OTHER]: STRANGER_START, [ADMIN]: STRANGER_START } };
+  assert.deepEqual(serverView(p, variables), expected, 'the server');
+  assert.deepEqual(cliView(p, variables), expected, 'the CLI');
+});
 
 const ownerRefusals = [
   { name: 'no owner anywhere', variables: {}, got: 0 },

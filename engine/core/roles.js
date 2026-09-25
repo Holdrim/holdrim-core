@@ -32,6 +32,10 @@
  * the environment, same as `owner` and `admins`, because a forged lock is the one thing signed events
  * (phase E) have not closed yet. `can('lock', …)` does not consult it in this change — see `can`'s own
  * comment for why.
+ *
+ * `HOLDRIM_AGENTS` (`parseAgents`) marks who is an agent, also from the environment. It grants
+ * nothing: it takes `AGENT_NEVER` away from those addresses, in `can`, before any grant is read, and
+ * `rolesOf` refuses to start when a grant names one of them.
  * @module
  */
 import { PAGE_FORMAT } from './limits.js';
@@ -195,6 +199,33 @@ export function isValidScope(scope) {
 const RESERVED_EMAIL_CHARS = /[<>"()[\],;]/;
 
 /**
+ * One address from a variable that names people by address alone — `HOLDRIM_LOCKS` and
+ * `HOLDRIM_AGENTS` — normalized, and held to `parseLocks`'s stricter question (its own comment says
+ * why `isEmailAddress` alone is not enough). One function for both, so the two variables can never
+ * disagree about what an address is: an address one of them accepted and the other normalized
+ * differently would name two people where the deployment meant one.
+ * @param {string} variable  the variable's name, for the message
+ * @param {string} rawEmail  as written, trimmed
+ */
+function strictAddress(variable, rawEmail) {
+  const email = normalizeEmail(rawEmail);
+  if (!isEmailAddress(email)) {
+    throw new Error(
+      `${variable} names "${rawEmail}", which is not an e-mail address — the same check ` +
+      '`engine/api/users.ts` applies when an account is created.');
+  }
+  // Stricter than `isEmailAddress` on purpose — see `parseLocks`'s own comment for why account
+  // creation cannot ask this same question.
+  if (RESERVED_EMAIL_CHARS.test(email) || email.endsWith('.')) {
+    throw new Error(
+      `${variable} names "${rawEmail}", which is not an e-mail address a mail server would ever ` +
+      `deliver to: account creation stays lenient about this, but a ${variable} typo does not ` +
+      'fail loudly the way a rejected sign-up does — it silently matches nobody, forever.');
+  }
+  return email;
+}
+
+/**
  * @param {string|undefined|null} raw
  * @returns {{email: string, scope: string}[]}
  */
@@ -211,24 +242,11 @@ export function parseLocks(raw) {
         'and a scope, like "ana@example.org:P0*". Entries are separated by ";".');
     }
     const rawEmail = entry.slice(0, colon).trim();
-    const email = normalizeEmail(rawEmail);
     const scope = entry.slice(colon + 1).trim();
     if (!rawEmail) {
       throw new Error(`HOLDRIM_LOCKS has "${entry}", which names no e-mail before the colon.`);
     }
-    if (!isEmailAddress(email)) {
-      throw new Error(
-        `HOLDRIM_LOCKS names "${rawEmail}", which is not an e-mail address — the same check ` +
-        '`engine/api/users.ts` applies when an account is created.');
-    }
-    // Stricter than `isEmailAddress` on purpose — see this function's own comment for why account
-    // creation cannot ask this same question.
-    if (RESERVED_EMAIL_CHARS.test(email) || email.endsWith('.')) {
-      throw new Error(
-        `HOLDRIM_LOCKS names "${rawEmail}", which is not an e-mail address a mail server would ever ` +
-        'deliver to: account creation stays lenient about this, but a HOLDRIM_LOCKS typo does not ' +
-        'fail loudly the way a rejected sign-up does — it silently locks nobody, forever.');
-    }
+    const email = strictAddress('HOLDRIM_LOCKS', rawEmail);
     if (!isValidScope(scope)) {
       throw new Error(
         `HOLDRIM_LOCKS grants ${email} the scope "${scope}", which is none of a page, a page family ` +
@@ -239,11 +257,53 @@ export function parseLocks(raw) {
 }
 
 /**
+ * `HOLDRIM_AGENTS`, parsed once at start: `"agent@example.org; ci@example.org"` — the addresses the
+ * deployment marks as agents (docs/ROLES.md, section 4). Separated by `;` and checked by the same
+ * `strictAddress` as `HOLDRIM_LOCKS`, and read from the environment only, for the reason every other
+ * authority variable is: a committer, or the agent itself applying an approved request, could
+ * otherwise delete one line of `holdrim.json` and stop being an agent at the next deploy.
+ *
+ * A malformed entry throws rather than being skipped: an agent this list silently failed to name is
+ * an agent the engine treats as a person, with whatever that person's grants hold.
+ *
+ * The comma gets its own message because `HOLDRIM_ADMINS` uses one: whoever copies that variable's
+ * shape would otherwise be told only that `a@x,b@x` is "not an e-mail address", which is true and
+ * says nothing about what to type instead.
+ * @param {string|undefined|null} raw
+ * @returns {string[]} normalized addresses
+ */
+export function parseAgents(raw) {
+  const entries = String(raw ?? '').split(';').map((s) => s.trim()).filter(Boolean);
+  return entries.map((entry) => {
+    if (entry.includes(',')) {
+      throw new Error(`HOLDRIM_AGENTS has "${entry}": entries are separated by ";", not ",".`);
+    }
+    return strictAddress('HOLDRIM_AGENTS', entry);
+  });
+}
+
+/**
+ * What an agent may never do, whatever it is granted (docs/ROLES.md, section 4): decide a request,
+ * give a ✓, turn a ✓ into a lock, or manage people. `can` refuses these for an agent BEFORE it reads
+ * the owner, `HOLDRIM_ADMINS` or a role's capabilities — so a grant that names an agent, which
+ * `rolesOf` already refuses at start, still hands it none of them if that refusal is ever bypassed
+ * or broken. An agent may close an impact ("this change did not reach here"); it never says a text
+ * is correct (AGENTS.md).
+ */
+export const AGENT_NEVER = Object.freeze(['triage', 'approve', 'lock', 'people']);
+
+/**
  * @param {string|undefined|null} owner  ONE e-mail. Zero or more than one is a config error.
  * @param {string|undefined|null} admins comma-separated e-mails; may be empty.
  * @param {string|undefined|null} [locksRaw] `HOLDRIM_LOCKS`, in `parseLocks`'s format
+ * @param {string|undefined|null} [agentsRaw] `HOLDRIM_AGENTS`, in `parseAgents`'s format
+ *
+ * Builds roles even when a grant names an agent: refusing that is `rolesOf`'s job, at start
+ * (`refuseGrantsToAgents`), and `can` denies it again here on its own. Two layers, each proved by a
+ * test that fails when that layer alone is removed — a refusal inside this function would make the
+ * second layer impossible to construct, and so impossible to prove.
  */
-export function createRoles(owner, admins, locksRaw) {
+export function createRoles(owner, admins, locksRaw, agentsRaw) {
   const split = (s) => String(s ?? '').split(',').map(normalizeEmail).filter(Boolean);
 
   const list = [...new Set(split(owner))];
@@ -268,6 +328,10 @@ export function createRoles(owner, admins, locksRaw) {
   // a config error, and a config error refuses to start rather than surfacing the first time
   // something asks about it.
   const lockHolders = new Set(parseLocks(locksRaw).map((l) => l.email));
+  // Validated at construction for the same reason as `lockHolders`, just above.
+  const agents = new Set(parseAgents(agentsRaw));
+  /** Whether `e` is marked as an agent by the deployment — an identity check, like `isOwner`. */
+  const isAgent = (e) => agents.has(normalized(e));
 
   /** Whether `e` is THE owner — an identity check, not a capability. Defined once, here, so `can`
    *  and the returned `isOwner` are provably the same question asked the same way. */
@@ -293,6 +357,12 @@ export function createRoles(owner, admins, locksRaw) {
      * Not yet read by `can('lock', …)` — see the comment there for why.
      */
     isLockHolder: (e) => lockHolders.has(normalized(e)),
+    /**
+     * Whether `e` is named in `HOLDRIM_AGENTS` — who they ARE, not what they may do. `can` asks it
+     * first, and `recordEvent` (engine/api/server.ts) writes its answer onto every event, so the
+     * trail says an agent wrote it however the agent's grants later change.
+     */
+    isAgent,
     /** The role `e` holds, for display only — the people screen's column, `/api/me`'s `role` field.
      *  Never compared against a string by a caller: that is exactly the check `can` replaces. */
     roleOf,
@@ -317,6 +387,10 @@ export function createRoles(owner, admins, locksRaw) {
       if (!CAPABILITIES.includes(capability)) {
         throw new Error(`"${capability}" is not a capability engine/core/roles.js knows: ${CAPABILITIES.join(', ')}.`);
       }
+      // FIRST, before `isOwner` and before any role's capabilities: an agent is refused these on
+      // who it is, so no grant — the owner's, `HOLDRIM_ADMINS`, a future role — is ever consulted
+      // for them. Asked after a grant, the grant would already have answered.
+      if (AGENT_NEVER.includes(capability) && isAgent(e)) return false;
       if (capability === 'lock') return isOwner(e);
       return capabilitiesOf(roleOf(e)).has(capability);
     },
@@ -330,11 +404,39 @@ export function createRoles(owner, admins, locksRaw) {
  * whose ✓ becomes a lock, so the two cannot be allowed to answer it differently: a CLI that read
  * the owner one way while the server read it another would lock nothing the owner approved, or
  * triage as the owner someone the server does not know as one. Where the three values come from —
- * HOLDRIM_OWNER, HOLDRIM_ADMINS and HOLDRIM_LOCKS, and never holdrim.json — is `readConfig`'s to
+ * HOLDRIM_OWNER, HOLDRIM_ADMINS, HOLDRIM_LOCKS and HOLDRIM_AGENTS, and never holdrim.json — is `readConfig`'s to
  * say, once; this adds no rule of its own, so there is no second copy of it to drift.
  *
- * @param {{ owner: string|null, admins: string, locks?: string }} config  as `readConfig` returns it
+ * @param {{ owner: string|null, admins: string, locks?: string, agents?: string }} config  as `readConfig` returns it
  */
 export function rolesOf(config) {
-  return createRoles(config.owner, config.admins, config.locks);
+  const roles = createRoles(config.owner, config.admins, config.locks, config.agents);
+  refuseGrantsToAgents(roles, config.locks);
+  return roles;
+}
+
+/**
+ * Refuses to start when `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or `HOLDRIM_LOCKS` names an address that
+ * `HOLDRIM_AGENTS` marks as an agent. `can` would deny the agent anyway (`AGENT_NEVER`); this is the
+ * louder layer, so a deployment that contradicts itself is told at start instead of finding out the
+ * day the owner's ✓ is quietly not a lock because the owner's address was also listed as an agent.
+ *
+ * Called by `rolesOf`, the one way from configuration to roles for the server's boot and every CLI
+ * command, so both refuse alike.
+ * @param {ReturnType<typeof createRoles>} roles
+ * @param {string|undefined|null} locksRaw
+ */
+export function refuseGrantsToAgents(roles, locksRaw) {
+  const named = [];
+  if (roles.isAgent(roles.owner)) named.push(['HOLDRIM_OWNER', roles.owner]);
+  for (const admin of roles.admins) {
+    // `admins` carries the owner too (the owner is an admin by consequence); named once, above.
+    if (admin !== roles.owner && roles.isAgent(admin)) named.push(['HOLDRIM_ADMINS', admin]);
+  }
+  for (const { email } of parseLocks(locksRaw)) if (roles.isAgent(email)) named.push(['HOLDRIM_LOCKS', email]);
+  if (named.length === 0) return;
+  throw new Error(
+    named.map(([variable, email]) => `${variable} names ${email}`).join(', ') +
+    ', which HOLDRIM_AGENTS marks as an agent. An agent is never granted a ✓, a lock, triage or ' +
+    'people (docs/ROLES.md, section 4): remove the address from one of the two.');
 }

@@ -104,15 +104,17 @@ test('a file that is not JSON counts as no file, not as a crash', () => {
 test('the owner, the admins and the lock-holders come from the environment, and only from it', () => {
   const c = readConfig('/p', file({ name: 'Handbook' }), {
     HOLDRIM_OWNER: 'env@example.org', HOLDRIM_ADMINS: 'a@example.org,b@example.org',
-    HOLDRIM_LOCKS: 'c@example.org:P0*',
+    HOLDRIM_LOCKS: 'c@example.org:P0*', HOLDRIM_AGENTS: 'agent@example.org',
   });
   assert.equal(c.owner, 'env@example.org');
   assert.equal(c.admins, 'a@example.org,b@example.org');
   assert.equal(c.locks, 'c@example.org:P0*');
+  assert.equal(c.agents, 'agent@example.org');
   const none = readConfig('/p', file({ name: 'Handbook' }));
   assert.equal(none.owner, null, 'no variable, no owner: the service then refuses to start');
   assert.equal(none.admins, '');
   assert.equal(none.locks, '');
+  assert.equal(none.agents, '', 'nobody is an agent unless HOLDRIM_AGENTS says so');
 });
 
 /**
@@ -122,11 +124,11 @@ test('the owner, the admins and the lock-holders come from the environment, and 
  */
 test('a holdrim.json naming an authority key refuses to load, and says where it lives instead', () => {
   const home = {
-    owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS',
+    owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS', agents: 'HOLDRIM_AGENTS',
     roles: 'the settings screen', grants: 'the settings screen',
   };
   for (const [key, value] of [['owner', 'file@example.org'], ['admins', ['a@example.org']],
-    ['locks', 'a@example.org:A01'], ['owner', null],
+    ['locks', 'a@example.org:A01'], ['owner', null], ['agents', []],
     ['roles', { 'clinical-lead': ['triage'] }], ['grants', { 'x@example.org': [{ role: 'clinical-lead' }] }]]) {
     for (const env of [{}, { HOLDRIM_OWNER: 'env@example.org', HOLDRIM_ADMINS: 'x@example.org' }]) {
       assert.throws(() => readConfig('/p', file({ name: 'Handbook', [key]: value }), env),
@@ -155,7 +157,7 @@ test('the message names only the keys the file actually wrote, not every authori
     message = e.message;
   }
   assert.ok(message.includes('"owner" comes from HOLDRIM_OWNER'), 'the named key is explained');
-  for (const untouched of ['"admins" comes from', '"locks" comes from', '"roles" comes from', '"grants" comes from']) {
+  for (const untouched of ['"admins" comes from', '"locks" comes from', '"agents" comes from', '"roles" comes from', '"grants" comes from']) {
     assert.ok(!message.includes(untouched), `an untouched key's home leaked in: ${untouched}`);
   }
 });

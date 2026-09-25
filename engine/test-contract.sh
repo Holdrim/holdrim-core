@@ -34,6 +34,8 @@ ROOT=$(cd "$(dirname "$0")" && pwd); cd "$ROOT/.."
 PORT=${PORT:-$((19000 + RANDOM % 9000))}; B=http://127.0.0.1:$PORT; FAILURES=0
 export OWNER=owner@example.org; export REVIEWER=reviewer@example.org
 LEAD=lead@example.org
+# Marked as an agent by HOLDRIM_AGENTS on the first server below (docs/ROLES.md, section 4).
+AGENT=agent@example.org
 SITE="$PWD/examples/hello-world"
 
 expect() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1 — expected $2, got $3"; FAILURES=$((FAILURES+1)); fi; }
@@ -125,7 +127,7 @@ state()   { post "$1" "{\"type\":\"request_state\",\"page\":\"D02\",\"text\":\"$
 # header would end up identified — which is the right behaviour for opening the browser, but it
 # would hide the test that proves that with NO identity at all the response is 401.
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_DEV_EMAIL= PORT=$PORT \
-  HOLDRIM_SITE="$SITE" \
+  HOLDRIM_SITE="$SITE" HOLDRIM_AGENTS=$AGENT \
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/tests.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 echo "boot:"
@@ -323,6 +325,26 @@ expect "and the served .locks agrees: still no lock"                     false \
 FORGED_REQUEST=$(body $REVIEWER '{"type":"request","page":"A02","text":"a forged request","data":{"authorCouldTriage":"true"}}')
 expect "a member's forged authorCouldTriage is overwritten by the server" false "$(echo "$FORGED_REQUEST" | jfield data.authorCouldTriage)"
 expect "and it starts at triage like any other"                          open "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$(echo "$FORGED_REQUEST" | jfield id)" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status.state))")"
+
+echo "an agent is marked on what it writes, and never approves (docs/ROLES.md, section 4):"
+# `data.asAgent` comes from who the server saw, on every event: a comment is the plainest thing an
+# agent may write, and the one no other written field (`locks`, `authorCouldTriage`) rides along on.
+AGENT_COMMENT=$(body $AGENT '{"type":"comment","page":"A02","text":"this change did not reach here"}')
+expect "an agent may comment → and it is marked as an agent's"          true "$(echo "$AGENT_COMMENT" | jfield data.asAgent)"
+expect "a person's comment is marked as not an agent's"                  false \
+  "$(body $REVIEWER '{"type":"comment","page":"A02","text":"a person"}' | jfield data.asAgent)"
+# Spread in the wrong order, a client's own field would win: both directions are forgeries worth
+# refusing — a person passing as the agent, and the agent passing as a person.
+expect "a person's forged asAgent:true is overwritten"                   false \
+  "$(body $REVIEWER '{"type":"comment","page":"A02","text":"forged","data":{"asAgent":"true"}}' | jfield data.asAgent)"
+expect "the agent's forged asAgent:false is overwritten"                 true \
+  "$(body $AGENT '{"type":"comment","page":"A02","text":"forged","data":{"asAgent":"false"}}' | jfield data.asAgent)"
+expect "the agent's own request is marked too"                           true \
+  "$(body $AGENT '{"type":"request","page":"A02","text":"from the agent"}' | jfield data.asAgent)"
+expect "an agent gives no ✓ → 403"                                       403 \
+  "$(post $AGENT '{"type":"approval","page":"A02","block":"A02.1.3","fingerprint":"abc123"}')"
+expect "and /api/me offers it none"                                      "false false" \
+  "$(curl -s -H "X-Dev-Email: $AGENT" $B/api/me | jfield canApprove) $(curl -s -H "X-Dev-Email: $AGENT" $B/api/me | jfield canTriage)"
 
 echo "asking for a page from the home:"
 # A plain form, no script: what a person who is not a developer uses to say "this is missing". It
@@ -1736,5 +1758,21 @@ expect "and neither line carries the e-mail"     0 \
   "$(grep '\"event\":\"user_sessions_not_dropped\"' $WORK/fail-drop.log | grep -Fc -e "$BROKEN")"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 rm -rf "$FAIL_DIR"
+
+echo "a grant that names an agent refuses to start (docs/ROLES.md, section 4):"
+# The louder of the two layers: `can` would deny the agent anyway (engine/tests/roles.test.js proves
+# that one alone), but a deployment that contradicts itself is told so before it serves anything.
+# One boot per variable, since each is its own branch of `refuseGrantsToAgents`.
+for GRANT in "HOLDRIM_OWNER=$AGENT" "HOLDRIM_ADMINS=$AGENT" "HOLDRIM_LOCKS=$AGENT:A01"; do
+  VARIABLE=${GRANT%%=*}
+  # In a subshell, so nothing exported here outlives the one boot; `$GRANT` last, so the owner case
+  # replaces the plain owner exported before it.
+  REFUSED=$(export HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER \
+    HOLDRIM_DEV_EMAIL= PORT=$PORT HOLDRIM_SITE="$SITE" HOLDRIM_AGENTS=$AGENT "$GRANT"
+    run_for 10 node engine/api/server.ts 2>&1); REFUSED_EXIT=$?
+  expect "$VARIABLE naming an agent: the server exits 1"   1 "$REFUSED_EXIT"
+  expect "$VARIABLE naming an agent: and says which"       0 \
+    "$(echo "$REFUSED" | has "$VARIABLE names $AGENT, which HOLDRIM_AGENTS marks as an agent"; echo $?)"
+done
 
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

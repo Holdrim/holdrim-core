@@ -213,6 +213,7 @@ anyone else.
 |---|---|
 | `HOLDRIM_OWNER` | who approves. Their ✓ is what becomes a lock |
 | `HOLDRIM_ADMINS` | e-mails, comma separated |
+| `HOLDRIM_AGENTS` | the agents' e-mails, `;` separated: never a ✓, a lock, triage or people, whatever they are granted, and the service refuses to start if a grant names one |
 | `HOLDRIM_OWNER_NAME` | the owner's display name on their first access (default: `Owner`) |
 | `HOLDRIM_SITE` | the root of the documentation project, where its `holdrim.json` is (default: the engine's own folder; the image sets `/app/examples/hello-world`) |
 | `HOLDRIM_EVENTS` | where the events live: `sqlite`, `memory` or `firestore` (default: `sqlite`; `memory` in local mode) |

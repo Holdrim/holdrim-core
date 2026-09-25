@@ -62,6 +62,8 @@ holdrim — the agent's tool for the Holdrim method
                                   every command that asks who the owner is, and read from here
                                   only — holdrim.json may not name it, as on the server
     HOLDRIM_ADMINS              the admins, comma separated: their requests need no triage
+    HOLDRIM_AGENTS              the agents' addresses, ";" separated: never triage, a ✓, a lock or
+                                  people, and every command refuses if a grant names one
     HOLDRIM_PROJECT             the Firestore project, in the cloud
     HOLDRIM_ACCOUNT             pins the gcloud account (default: the first one to issue a token)
     HOLDRIM_EVENTS_PATH         the SQLite events file, when there is no cloud

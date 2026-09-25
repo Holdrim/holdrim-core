@@ -151,11 +151,30 @@ current authority after 0.1.0. The
 Refusing an agent by the name it writes is not enough: `agent via <account>` is chosen by the CLI,
 and an agent that reaches the server another way arrives as whoever it borrowed from. So:
 
-- **An agent has a credential of its own**, with a fixed set of capabilities no role can extend:
-  `read`, `comment`, `request`, and moving a request through the states the agent owns (`applying`,
-  `waiting`, `applied`). Never `triage`, `approve`, `people` or a ✓, whatever its account holds, and a
-  request it files always starts at triage — never at the state an admin's request starts in. The CLI's direct path to the cloud goes (`docs/PRIVACY.md`, section 3), and
-  the agent writes through the API with that credential.
+- **Who is an agent is set by the deployment, in `HOLDRIM_AGENTS`**, next to `HOLDRIM_LOCKS`:
+  addresses separated by `;`, checked as strictly as a `HOLDRIM_LOCKS` entry, read from the
+  environment only (a `holdrim.json` naming `agents` refuses to start, since the file is what the
+  agent applying a request can edit). Being an agent is a property of the identity, like being the
+  owner, never a capability a role grants or withholds.
+- **An agent never holds `triage`, `approve`, `lock` or `people`**, whatever else it is granted.
+  `can` asks whether the identity is an agent FIRST, before `isOwner`, `HOLDRIM_ADMINS` or any
+  role's capabilities, so no grant is read for those four at all. What an agent keeps is `read`,
+  `comment`, `request`, and moving a request through the states the agent owns (`applying`,
+  `waiting`, `applied`). A request it files starts at triage, since `authorCouldTriage` is written
+  from `can('triage', …)`.
+- **A grant that names an agent refuses to start.** `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or
+  `HOLDRIM_LOCKS` naming an address `HOLDRIM_AGENTS` also names stops the service and every CLI
+  command, from `rolesOf`, the one resolution both share. `can` still denies on its own, so either
+  layer holds if the other is ever broken, and each has a test that fails without it.
+- **Every event says whether its author was an agent.** `recordEvent` writes `data.asAgent`
+  (`"true"` or `"false"`) on every event from the identity the server saw, replacing whatever the
+  client sent — written at the moment, read forever after, like `locks` in section 3.
+- **Next: an agent has a credential of its own** — a token the owner issues, so the server knows an
+  agent by how it signed in, not only by an address the deployment listed. It becomes a second
+  source of the same identity flag `can` already asks, and with it the agent writes through the API
+  and the CLI's direct path to the cloud goes (`docs/PRIVACY.md`, section 3). Until then, an agent
+  that signs in as a person, or under an address `HOLDRIM_AGENTS` does not name, is that person to
+  the server, and the CLI's direct write to the cloud writes no `asAgent` at all.
 - **A ✓ that is a lock is given in an interactive session** — a person signed in, in a browser —
   never with a token.
 - **What remains open, said plainly:** an agent running on a person's machine that reuses that
@@ -170,6 +189,7 @@ and an agent that reaches the server another way arrives as whoever it borrowed 
 | The owner | `HOLDRIM_OWNER` | whoever deploys | today's rule |
 | Who holds `admin` | `HOLDRIM_ADMINS` | whoever deploys | it exists before anyone signs in |
 | Who holds `lock`, and where | `HOLDRIM_LOCKS` | whoever deploys | a forgery must not reach a lock |
+| Who is an agent | `HOLDRIM_AGENTS` | whoever deploys | the agent can edit the repository, never the deployment |
 | Role definitions | events, from the settings screen | the owner | a click, with a trail |
 | Grants of the project's roles | events, from the settings screen | the owner | a click, with a trail |
 | How a person appears, feature toggles | `holdrim.json` | the repository | decide nothing about authority |
@@ -230,7 +250,7 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | An admin grants themselves `lock` | `lock` is not granted by anyone in the product: only `HOLDRIM_LOCKS`, set by whoever deploys |
 | A committer, or the agent applying an approved request, adds a lock-holder or names a new owner | Authority is read from the environment only, and a `holdrim.json` that names any refuses to start |
 | An admin prepares an account before it is promoted, and keeps its session | A credential changed by anyone but the owner or the person leaves the account unable to lock until the owner issues again |
-| An agent triages, or files a request that starts approved | Its credential never holds `triage`, and the starting state written on its requests is always triage |
+| An agent triages, or files a request that starts approved | `can` refuses an agent `triage` before any grant is read, and the starting state written on its requests is therefore always triage |
 | Granting someone triage decides their open requests after the fact | A request's starting state is written when it is filed and never recomputed |
 | An admin resets an unguarded account, then changes its password through the self-service route | The test reads the whole history: the latest issuance or reset by anyone but the person must be the owner's |
 | An admin keeps a session open across the owner's re-issue of a lock-holder's password | A lock needs a session opened with a credential the person set after the owner's latest issuance; each issuance drops every session |
@@ -241,7 +261,8 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | An admin probes candidate addresses to reconstruct the `HOLDRIM_LOCKS` list from which ones 409 | Not stopped, and not meant to be: the 409 itself already shows an address is reserved. What the refusal withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically — which is acceptable because the lock markers already in the event history name the holders anyway |
 | Someone with `people` makes themselves or an accomplice an approver | Only the owner grants roles |
 | A direct writer to the store forges a grant | Buys a role without `lock`, never `people` over a lock-holder; closed by signed events |
-| An agent approves its own text | An agent's credential is refused for any ✓; a lock ✓ needs an interactive session. Reuse of a person's session is the open gap in section 4 |
+| An agent approves its own text | An identity `HOLDRIM_AGENTS` names is refused any ✓ and any lock by `can`, before any grant is read; a lock ✓ needs an interactive session. Reuse of a person's session, and an agent signing in under an unlisted address, are the open gaps in section 4 |
+| A misconfigured grant hands an agent a lock: `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or `HOLDRIM_LOCKS` names it | The service and the CLI refuse to start; and `can` would deny it anyway, the agent check coming before the grant |
 | A revoked lock-holder's past ✓s are re-read as not locks | The lock is written on the event when given |
 | A scope meant for one page covers others | Scopes are exact, an explicit `*`, or block ids |
 | A role named `<script>` | Names and scopes validated against known shapes |
@@ -279,6 +300,9 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Roles and grants as events, from a settings screen, by the owner | not built |
 | Scopes actually consulted by `can`, with a page or block in hand | not built — the grammar is validated (`isValidScope`), nothing reads it yet |
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
-| An agent's own credential, refused for any ✓ | not built |
+| Agents marked by the deployment (`HOLDRIM_AGENTS`), refused `triage`, `approve`, `lock` and `people` before any grant is read | built (#30) — `engine/core/roles.js`'s `parseAgents`, `isAgent`, `AGENT_NEVER` and `can` |
+| A grant naming an agent refusing to start, on the server and in the CLI | built (#30) — `refuseGrantsToAgents`, called by `rolesOf`; `holdrim.json` refuses `agents` too |
+| Every event marked with whether its author was an agent | built (#30) — `data.asAgent`, written by `recordEvent` (`engine/api/server.ts`); not by the CLI's direct write to the cloud, which bypasses the server |
+| An agent's own credential (a token the owner issues), and the agent writing through the API only | not built — the next step of section 4 |
 | `people.show`, applied by the server | built (#31) — `engine/core/people-show.js`, `engine/api/server.ts`'s `personDisplay`/`authorDisplaysFor`, `engine/cli/requests.ts`'s `personLabel`. The CLI applies it too, though it can show no name and no id it has no accounts store to look either up in (docs/PRIVACY.md, section 1) — `personLabel` passes `id: null` as well as `name: null`, so both fall back to the address, the same as an event from before ids existed |
 | `features`, with both states tested | built — `engine/core/features.js`, `engine/api/server.ts`, `engine/cli/graph.ts`, `engine/web/src/Panel.jsx`, `engine/test-contract.sh` |

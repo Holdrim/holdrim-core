@@ -77,6 +77,10 @@ export const LOCKS_FIELD = 'locks';
  *  the fact `cycle.currentState`'s `authorIsAdmin` parameter needs, named for the CAPABILITY it asks
  *  about (docs/ROLES.md, "the engine asks about capabilities, never about names"), not for a role. */
 export const AUTHOR_COULD_TRIAGE_FIELD = 'authorCouldTriage';
+/** On EVERY event the server records: whether its author was an agent (`HOLDRIM_AGENTS`) when it was
+ *  recorded — docs/ROLES.md §4. Written as `'false'` too, not only `'true'`, so a client's own
+ *  `data.asAgent` never survives either way, and a missing key means only "from before this field". */
+export const AS_AGENT_FIELD = 'asAgent';
 
 /**
  * A boolean the server wrote into an event's `data` at record time. Three answers, not two:

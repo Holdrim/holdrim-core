@@ -27,7 +27,7 @@ import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { IapIdentity } from './identity-iap.ts';
 import {
-  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, ensureLockBaseline, isLocked, authorCouldTriage,
+  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, AS_AGENT_FIELD, ensureLockBaseline, isLocked, authorCouldTriage,
   type Event, type NewEvent, type EventStore,
 } from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
@@ -557,6 +557,10 @@ async function recordEvent(
   } else if (incoming.type === 'request') {
     incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(roles.can('triage', email)) };
   }
+  // Every event, not only the ones an agent may not write: the trail has to say an agent closed an
+  // impact or moved a request (docs/ROLES.md §4), and it has to say so from the identity the server
+  // saw, never from a `data.asAgent` the client sent — spread LAST so that one is always replaced.
+  incoming.data = { ...incoming.data, [AS_AGENT_FIELD]: String(roles.isAgent(email)) };
 
   // Resolved BEFORE the write, not after: an event's author is never null — the row has to exist
   // for the event to mean anything — so this is the one log id that must still find-OR-CREATE.
