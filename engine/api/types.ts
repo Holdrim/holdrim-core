@@ -247,8 +247,21 @@ export function legacyLock(approval: Pick<Event, 'author' | 'when'>, baseline: E
  * upgrade this field exists to protect. The one implementation server.ts and validation.ts (`holdrim
  * sync`) both call, so the fallback is not three slightly different copies of the same rule (round 1's
  * review, finding 2).
+ *
+ * One exception, ahead of all of the above: a written `'false'` is trusted EVEN before the baseline
+ * (round 4's review, MINOR "clock stepped back"). If a server's clock ever runs behind — a bad NTP
+ * sync, a container that boots with the wrong time — a former owner's ✓, correctly written
+ * `locks:"false"` by this very version, can land dated BEFORE the baseline it itself sits after in
+ * real time. `legacyLock` would then read it as a lock (same author as the baseline, and the `when`
+ * comparison alone cannot tell a clock error from a genuinely old event). A forged field only ever
+ * helps an attacker by claiming `'true'` — a lock nobody gave — never by claiming `'false'`, since
+ * that is already `legacyLock`'s worst case for a stranger to the baseline. Trusting `'false'`
+ * unconditionally therefore fails closed either way: it can only ever turn a would-be lock into no
+ * lock, never the other way round. `authorCouldTriage` has no matching exception — there, a written
+ * `'false'` already equals its own fail-closed answer, so there is nothing to protect.
  */
 export function isLocked(approval: Pick<Event, 'data' | 'author' | 'when'>, baseline: Event | null): boolean {
+  if (writtenBoolean(approval.data, LOCKS_FIELD) === false) return false;
   if (baseline && approval.when > baseline.when) return writtenBoolean(approval.data, LOCKS_FIELD) ?? false;
   return legacyLock(approval, baseline);
 }

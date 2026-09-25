@@ -72,6 +72,9 @@ who ran the engine from `main` before it.
   field written before this version existed is trusted the same way — only when it is dated after
   the store's own baseline — since a client's own POST body could shape `data` freely before this
   change; one that predates the baseline is decided by the baseline rule instead, whatever it claims.
+  One exception: a ✓ written `locks:"false"` is trusted even before the baseline, since a forged field
+  can only ever help an attacker by claiming `"true"`, never `"false"` — guarding a former owner's own
+  ✓ from misreading as a lock should this server's clock ever run behind the baseline's.
   **What to change, before anyone uses this version against a real store:** move ALL traffic to the
   new revision first — an old revision left serving alongside it can still record events with
   client-forged `locks`/`authorCouldTriage`, dated after the new baseline, which the new version would

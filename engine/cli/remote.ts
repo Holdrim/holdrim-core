@@ -45,6 +45,34 @@ export function normalizeWhen(timestampValue: string | null | undefined): string
   return timestampValue ? new Date(timestampValue).toISOString() : '';
 }
 
+/**
+ * One Firestore document → the raw event shape `withTexts` expects. Pulled out of `Source` (it reads
+ * nothing private) so a test can drive the exact parsing `events()` runs on a real document — this
+ * function calling `normalizeWhen` on `when` included — without standing up the whole REST protocol
+ * behind it (round 2's review, MINOR: nothing pinned that this reader calls `normalizeWhen` at all,
+ * so reverting `when` back to the raw `timestampValue` string survived every test in the suite).
+ */
+export function firestoreEventOf(d: Record<string, any>): RawEvent {
+  const f = d.fields ?? {};
+  const s = (k: string) => f[k]?.stringValue ?? null;
+  const data: Record<string, string> = {};
+  for (const [k, v] of Object.entries(f.data?.mapValue?.fields ?? {})) {
+    data[k] = (v as any).stringValue;
+  }
+  return {
+    id: String(d.name).split('/').pop()!,
+    type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
+    // Absent on a document from before texts were extracted, or one the CLI's own `add` wrote —
+    // that path writes straight to the cloud with no hash, a gap docs/PRIVACY.md, section 3 already
+    // names — and `text`/`snapshot` there already hold their own plain value: read as such.
+    text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
+    author: s('author')!,
+    when: normalizeWhen(f.when?.timestampValue),
+    data: Object.keys(data).length ? data : null,
+    textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+  };
+}
+
 export class Source {
   #local: boolean;
   #db?: string;
@@ -259,7 +287,7 @@ export class Source {
     // an address that does not exist.
     this.#requireProject();
     const headers = { Authorization: `Bearer ${await this.#gcloudToken()}` };
-    const out = (await this.#collection(headers, 'events')).map((d) => this.#fromFirestore(d));
+    const out = (await this.#collection(headers, 'events')).map((d) => firestoreEventOf(d));
     // The people after the events, as the server's Firestore store reads them and for its reason:
     // a person is made before their first event, so every author read above is in this read.
     const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
@@ -281,7 +309,7 @@ export class Source {
       // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
       const removed = await this.#collection(headers, 'events',
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
-      return withAuthors(removed.map((d) => this.#fromFirestore(d)), people);
+      return withAuthors(removed.map((d) => firestoreEventOf(d)), people);
     });
   }
 
@@ -420,26 +448,5 @@ export class Source {
     }]);
     if (!r.ok) throw await this.#cloudError(r, 'writing to');
     return id;
-  }
-
-  #fromFirestore(d: Record<string, any>): RawEvent {
-    const f = d.fields ?? {};
-    const s = (k: string) => f[k]?.stringValue ?? null;
-    const data: Record<string, string> = {};
-    for (const [k, v] of Object.entries(f.data?.mapValue?.fields ?? {})) {
-      data[k] = (v as any).stringValue;
-    }
-    return {
-      id: String(d.name).split('/').pop()!,
-      type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
-      // Absent on a document from before texts were extracted, or one the CLI's own `add` wrote —
-      // that path writes straight to the cloud with no hash, a gap docs/PRIVACY.md, section 3 already
-      // names — and `text`/`snapshot` there already hold their own plain value: read as such.
-      text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
-      author: s('author')!,
-      when: normalizeWhen(f.when?.timestampValue),
-      data: Object.keys(data).length ? data : null,
-      textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-    };
   }
 }

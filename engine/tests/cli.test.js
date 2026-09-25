@@ -375,6 +375,29 @@ test('sync fails closed with no baseline event in the store at all, and warns ex
   assert.equal(warnings.length, 1, `warned ${warnings.length} time(s), wanted exactly one`);
 });
 
+/**
+ * Round 4's review, CRITICAL: with no baseline anywhere in the store, `isLocked` must trust NOTHING
+ * written, `'true'` included — the previous test only proves this for an unwritten ✓ (`data: null`),
+ * which cannot tell "no baseline means nothing written is trusted" apart from "no baseline means an
+ * unwritten ✓ never locks" (`legacyLock`'s own `if (!baseline) return false;`). Written here as an
+ * admin's ✓ carrying an explicit, forged `locks:"true"`: reverting `isLocked`'s guard from
+ * `if (baseline && …)` to `if (!baseline || …)` would trust it the moment there is no baseline to
+ * compare against, and this is the one shape that tells the two apart.
+ */
+test('sync fails closed with no baseline at all, even over an admin\'s forged locks:"true"', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const events = [
+    // No lock_baseline event anywhere in this store — read straight from a file, or the cloud.
+    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+      author: 'admin@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
+  ];
+  const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
+  assert.equal(r.added, 0, 'no baseline: a forged locks:"true" is trusted no more than an unwritten ✓ would be');
+});
+
 /** The other half of the MINOR above: with a real baseline in the store, sync says nothing about a
  *  missing one — the warning names a gap this run is actually in, not a stock line on every run. */
 test('sync prints no baseline warning at all once the store holds one', async (t) => {
@@ -428,12 +451,38 @@ test('a malformed locks value fails closed, even from the baseline\'s own author
  * Round 2's review, CRITICAL "fields written before this version are trusted": a ✓ that PREDATES the
  * baseline is answered by `legacyLock` alone — whatever `data.locks` on it claims, well-formed,
  * malformed or a forgery, since an event that old could not have been written by this mechanism at
- * all. Written here as an explicit `'false'`, by the baseline's own author: if the field were trusted
- * this early, it would read as NOT a lock; `legacyLock` says the opposite (predates the baseline, same
- * author), and `legacyLock` is what decides for anything this old — the opposite-value trick proves
- * the field is genuinely ignored, not merely consistent with it by accident.
+ * all. That still holds for `'true'` (round 4's review carves out exactly ONE exception, for a
+ * written `'false'` — see the next test, and `isLocked`'s own comment). Written here as an explicit
+ * `'true'`, by somebody who is NOT the baseline's own author: if the field were trusted this early, it
+ * would read as a lock; `legacyLock` says the opposite (the wrong author, whatever `when` says), and
+ * `legacyLock` is what decides for anything this old — the mismatched-author trick proves the field
+ * is genuinely ignored, not merely consistent with it by accident.
  */
-test('before the baseline, a written field is ignored outright — legacyLock alone decides', async (t) => {
+test('before the baseline, a written "true" is ignored outright — legacyLock alone decides', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
+    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
+  const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
+    fingerprint: blocks.get('A01.1.1').fingerprint, author: 'somebody-else@example.org',
+    when: '2026-09-22T08:00:00Z', data: { locks: 'true' } }; // predates the baseline, wrong author
+  const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
+  assert.equal(r.added, 0, 'predating the baseline: the written "true" is ignored, and legacyLock says no (wrong author)');
+});
+
+/**
+ * Round 4's review, MINOR "clock stepped back": the one exception to the rule above. If a server's
+ * clock runs behind, a former owner's brand-new ✓ — given by THIS version, and correctly written
+ * `locks:"false"` at the moment it was recorded — can land dated BEFORE the baseline it actually
+ * follows in real time. `legacyLock` alone would read it as a lock (same author as the baseline, and
+ * `when` says "predates it"), silently reviving a lock its own author just gave up. Written here by
+ * the baseline's OWN author, predating it, with an explicit `locks:"false"`: if the field were still
+ * ignored this early, `legacyLock` would say yes; trusting the written `"false"` says no instead —
+ * proving the exception fires, not merely that nothing here locks by coincidence.
+ */
+test('a written "false" wins even before the baseline, unlike every other written value', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
   cpSync(EXAMPLE, tmp, { recursive: true });
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -442,9 +491,11 @@ test('before the baseline, a written field is ignored outright — legacyLock al
     author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
   const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
     fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
-    when: '2026-09-22T08:00:00Z', data: { locks: 'false' } }; // predates the baseline
+    // The clock ran behind: dated before the baseline, by the baseline's own author — exactly the
+    // shape `legacyLock` would otherwise lock.
+    when: '2026-09-22T08:00:00Z', data: { locks: 'false' } };
   const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
-  assert.equal(r.added, 1, 'predating the baseline: the written "false" is ignored, and legacyLock locks it');
+  assert.equal(r.added, 0, 'a written "false" fails closed even predating the baseline, clock or not');
 });
 
 /**
@@ -753,6 +804,21 @@ test('requests() ignores a forged pre-baseline authorCouldTriage, straight into 
     when: '2026-09-22T08:00:00Z', data: { authorCouldTriage: 'true' } }; // predates the baseline
   const [r] = requests([baseline, forged]);
   assert.equal(r.state, 'open', 'a forged pre-baseline authorCouldTriage is ignored: still at triage');
+});
+
+/**
+ * Round 4's review, CRITICAL: with no `lock_baseline` event among the events at all, `authorCouldTriage`
+ * must trust NOTHING written — the previous test only proves this for events that predate a REAL
+ * baseline, which cannot tell "no baseline exists" apart from "this one predates the baseline that
+ * does". Reverting the guard from `if (baseline && …)` to `if (!baseline || …)` would trust a forged
+ * `authorCouldTriage:"true"` the moment `earliestLockBaseline(events)` finds none at all — exactly the
+ * shape this pins.
+ */
+test('requests() ignores a forged authorCouldTriage with no baseline in the events at all', () => {
+  const forged = { id: 'q', type: 'request', page: 'A01', author: 'member@x.org',
+    when: '2026-09-22T10:00:00Z', data: { authorCouldTriage: 'true' } }; // no lock_baseline event anywhere
+  const [r] = requests([forged]);
+  assert.equal(r.state, 'open', 'no baseline at all: a forged authorCouldTriage is trusted no more than an absent one');
 });
 
 test('the request list is linear in its history: 30 000 requests read in well under a second', () => {

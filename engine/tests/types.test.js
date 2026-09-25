@@ -9,9 +9,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { earliestLockBaseline, ensureLockBaseline, writtenBoolean, LOCK_BASELINE_TYPE, LOCK_BASELINE_PAGE }
-  from '../api/types.ts';
-import { normalizeWhen } from '../cli/remote.ts';
+import { earliestLockBaseline, ensureLockBaseline, writtenBoolean, isLocked, authorCouldTriage,
+  LOCK_BASELINE_TYPE, LOCK_BASELINE_PAGE } from '../api/types.ts';
+import { normalizeWhen, firestoreEventOf } from '../cli/remote.ts';
 
 const baseline = (id, when, author = 'owner@example.org') =>
   ({ id, type: LOCK_BASELINE_TYPE, page: LOCK_BASELINE_PAGE, author, when, data: null });
@@ -116,4 +116,72 @@ test('writtenBoolean: an explicit null value reads as absent, same as no key at 
   assert.equal(writtenBoolean({}, 'locks'), undefined, 'and a `data` object with no such key');
   assert.equal(writtenBoolean({ locks: 'true' }, 'locks'), true);
   assert.equal(writtenBoolean({ locks: 'false' }, 'locks'), false);
+});
+
+/**
+ * Round 4's review, MINOR "clock stepped back", direct on `isLocked` (engine/tests/cli.test.js has
+ * the same case through `sync`; this one isolates the function with no store, no project, no disk).
+ * A ✓ dated before the baseline, by the baseline's own author — the exact shape `legacyLock` locks —
+ * but written as `locks:"false"`: the written value has to win, because a forged field can only ever
+ * help an attacker by claiming `"true"`, never `"false"`, so trusting `"false"` here still fails
+ * closed. Reverting the guard this adds — the `writtenBoolean(...) === false` check ahead of the
+ * baseline comparison — would make this read `true`, via `legacyLock`.
+ */
+test('isLocked: a written "false" wins even before the baseline (a clock stepped back)', () => {
+  const baseline = { author: 'owner@example.org', when: '2026-09-22T09:00:00Z' };
+  const approval = { author: 'owner@example.org', when: '2026-09-22T08:00:00Z', data: { locks: 'false' } };
+  assert.equal(isLocked(approval, baseline), false,
+    'a written "false" fails closed even though legacyLock, asked directly, would say yes');
+  // The exception is `isLocked`'s alone: `authorCouldTriage` has no legacy fallback to protect a
+  // written "false" from — its own fail-closed answer already IS "false" — so the same shape there
+  // must stay ignored before the baseline, exactly as every other written value is.
+  const request = { when: '2026-09-22T08:00:00Z', data: { authorCouldTriage: 'false' } };
+  assert.equal(authorCouldTriage(request, baseline), false, 'unaffected: already false, with or without the field');
+});
+
+/**
+ * Round 4's review, MINOR "the tie" (n1): an event dated EXACTLY at the baseline's own `when` must
+ * get the fail-closed answer — the baseline event itself is the moment this version started
+ * recording written fields, not a moment IT wrote one onto. `isLocked`'s comparison is a strict `>`;
+ * flipping it to `>=` would trust this ✓'s `locks:"true"` instead of falling through to `legacyLock`
+ * (same author, but `when < baseline.when` is false at a tie too, so `legacyLock` also says no) —
+ * `locks:"true"`, not `"false"`, so the exception the test above pins cannot mask this one.
+ */
+test('isLocked: an event dated exactly at the baseline\'s own `when` fails closed (the tie)', () => {
+  const baseline = { author: 'owner@example.org', when: '2026-09-22T09:00:00Z' };
+  const approval = { author: 'owner@example.org', when: baseline.when, data: { locks: 'true' } };
+  assert.equal(isLocked(approval, baseline), false,
+    'a tie is not AFTER the baseline: the written field is not yet trusted, and legacyLock says no either (not before it)');
+});
+
+/** The same tie, for `authorCouldTriage` (n2): `>` → `>=` would trust this request's forged field. */
+test('authorCouldTriage: an event dated exactly at the baseline\'s own `when` fails closed (the tie)', () => {
+  const baseline = { author: 'owner@example.org', when: '2026-09-22T09:00:00Z' };
+  const request = { when: baseline.when, data: { authorCouldTriage: 'true' } };
+  assert.equal(authorCouldTriage(request, baseline), false, 'a tie is not AFTER the baseline: still at triage');
+});
+
+/**
+ * Round 4's review, MINOR (n5b): nothing drove `Source`'s Firestore reader far enough to prove it
+ * calls `normalizeWhen` on a real document's `when` — `normalizeWhen` itself was only ever pinned in
+ * isolation, above. `firestoreEventOf` is the exact mapping `events()` runs on every document the
+ * cloud hands back; reverting its `when` line to the raw `f.when?.timestampValue` (dropping
+ * `normalizeWhen`) would still pass every other test in this file, since none of them read a
+ * Firestore document at all.
+ */
+test('firestoreEventOf: a whole-second timestampValue comes back normalized, the same as normalizeWhen', () => {
+  const doc = {
+    name: 'projects/p/databases/(default)/documents/events/abc123def456',
+    fields: {
+      type: { stringValue: 'approval' }, page: { stringValue: 'A01' },
+      author: { stringValue: 'owner@example.org' },
+      when: { timestampValue: '2026-09-25T02:43:44Z' }, // 0 fractional digits: the un-normalized bug shape
+      data: { mapValue: { fields: { locks: { stringValue: 'true' } } } },
+    },
+  };
+  const event = firestoreEventOf(doc);
+  assert.equal(event.id, 'abc123def456');
+  assert.equal(event.when, normalizeWhen('2026-09-25T02:43:44Z'), 'normalized the same way normalizeWhen would');
+  assert.equal(event.when, '2026-09-25T02:43:44.000Z', 'and not the raw, un-normalized timestampValue string');
+  assert.deepEqual(event.data, { locks: 'true' });
 });
