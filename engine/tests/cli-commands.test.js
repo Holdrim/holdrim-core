@@ -367,9 +367,10 @@ const guardLines = (stderr) => stderr.split('\n')
 
 /**
  * What every mismatch has to come out as: `list --json` still parses — every warning went to
- * stderr — with `guardsTampered` set and `tampered` not, since no text was touched; a non-zero exit;
- * the server's own words for it, and one structured line naming it, and nothing else named. The
- * file is left exactly as found: this reader warns, it never repairs.
+ * stderr — with `guardsTampered` set, `tampered` not (no text was touched), and `requests` itself
+ * empty (holdrim#108, decision 4): an agent reading `--json` has nothing here safe to act on. A
+ * non-zero exit; the server's own words for it, and one structured line naming it, and nothing else
+ * named. The file is left exactly as found: this reader warns, it never repairs.
  */
 function assertNamed(db, dir, name, kind, words) {
   const before = triggerNames(db);
@@ -378,7 +379,7 @@ function assertNamed(db, dir, name, kind, words) {
   const q = JSON.parse(r.stdout);
   assert.equal(q.guardsTampered, true);
   assert.equal(q.tampered, false, 'no text was touched: the two flags say different things');
-  assert.equal(q.requests.length, 1, 'the file is still read: this warns, it does not refuse');
+  assert.deepEqual(q.requests, [], 'an agent gets nothing to act on when the guards may be forged');
   assert.match(r.stderr, words);
   assert.deepEqual(guardLines(r.stderr), [{ severity: 'WARNING', event: 'sqlite_guard_missing', guard: name, kind }]);
   assert.deepEqual(triggerNames(db), before, 'nothing repaired: the file is opened read-only');
@@ -415,10 +416,14 @@ test('list --db exits non-zero and names a trigger that is not a guard at all', 
 
 test('list --db with every guard in place: guardsTampered false, exit 0, and nothing said about a guard', async (t) => {
   const dir = project(t);
-  const { db } = await guardedDb(dir);
+  const { db, id } = await guardedDb(dir);
   const r = runApart(['list', '--db', db, '--json'], dir);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(JSON.parse(r.stdout).guardsTampered, false);
+  const q = JSON.parse(r.stdout);
+  assert.equal(q.guardsTampered, false);
+  // Guards intact, so the request is real data an agent can act on — this is what would break if
+  // `list` emptied `requests` unconditionally instead of only when `guardsTampered`.
+  assert.deepEqual(q.requests.map((x) => x.id), [id]);
   assert.doesNotMatch(r.stderr, /guard|trigger/);
 });
 
@@ -462,12 +467,16 @@ test('the locks lens\'s reproduction: a request forged below every hashed row, e
          '2026-01-01T00:00:01.000Z', '{"request":"forged","state":"approved","from":"open"}');`);
     const r = runApart(['list', '--db', db, '--json'], dir);
     const q = JSON.parse(r.stdout);
-    assert.deepEqual(q.requests.map((x) => [x.id, x.state]), [['forged', 'approved']],
-      'the forgery still reads as approved: the text check alone cannot see it');
+    // The forgery reads as approved (the text check alone cannot see it) — but `--json` no longer
+    // hands it to an agent at all: `guardsTampered` empties `requests` (holdrim#108, decision 4).
+    assert.deepEqual(q.requests, []);
     assert.equal(q.tampered, false);
     assert.equal(q.guardsTampered, true, 'the dropped guard is what gives it away');
     assert.equal(r.code, 1);
     assert.match(r.stderr, /the database's guard "events_no_low_rowid" is missing/);
+    // The table (no --json) is where the owner still gets to see it and judge for themselves.
+    const table = runApart(['list', '--db', db], dir);
+    assert.match(table.stdout, /forged\s+Approved/);
   });
 
 test('plain list --db (the table) exits non-zero on a dropped guard, with approved requests to show', async (t) => {

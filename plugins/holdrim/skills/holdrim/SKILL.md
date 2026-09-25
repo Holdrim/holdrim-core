@@ -43,7 +43,9 @@ the site.
 ## When applying a request
 
 1. `holdrim show <id>` — what was asked, the text then and now, and the conversation.
-   `holdrim list --json` gives the same as data, for every approved request at once.
+   `holdrim list --json` gives the same as data, for every approved request at once. If it reports
+   `guardsTampered` or `tampered`, or exits non-zero, stop there: apply nothing, change no state,
+   and tell the owner — the store needs its guards restored before anything in it can be trusted.
 2. `holdrim state <id> applying "Received…"` — the reviewer sees the progress in the panel.
 3. `holdrim impact <id> --term "…"` — **everywhere else the subject shows up**. Never change
    anything without this: the command marks which blocks are **validated**, and those need the

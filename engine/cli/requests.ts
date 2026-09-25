@@ -238,7 +238,17 @@ export async function list(root: string, source: Parameters<typeof queue>[1], op
   // Either one exits non-zero. The guards' own warning was already said, one line per guard, by the
   // reader that compared them (`Source#fromFile`), so only a text's needs saying here.
   const alarmed = q.tampered || q.guardsTampered;
-  if (options.json) { console.log(JSON.stringify(q, null, 2)); if (q.tampered) warnOfTampering(); return alarmed; }
+  if (options.json) {
+    // An agent reads this and acts on `requests` alone — it has no eyes to notice `guardsTampered`
+    // the way a person scanning the table would. With guards gone, an approval in the file may be
+    // forged (`refuseToActOnBrokenGuards`), so there is nothing here safe to hand it: `toTriage`,
+    // `tampered` and `guardsTampered` still say what happened, but the list itself comes back empty.
+    // The human table below is untouched: the owner judging the file needs to see what is in it.
+    const forJson = q.guardsTampered ? { ...q, requests: [] } : q;
+    console.log(JSON.stringify(forJson, null, 2));
+    if (q.tampered) warnOfTampering();
+    return alarmed;
+  }
   if (q.tampered) warnOfTampering();
 
   if (!q.requests.length) {
