@@ -147,6 +147,7 @@
   "panel.history.title": "O que já aconteceu aqui",
   "panel.moved": "o texto não mudou, mas isto mudou: {list}",
   "panel.open": "Bloco {code}. Abrir revisão",
+  "panel.radius.elsewhere": "Mais {n} bloco(s), em outras páginas, também dependem disto — direta ou indiretamente.",
   "panel.recording": "registrando…",
   "panel.request.from": "Pedido de {who}:",
   "panel.request.kind": "O que é",

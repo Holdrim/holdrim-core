@@ -6,6 +6,7 @@ import { ofProject } from './pages.ts';
 import { Source } from './remote.ts';
 import * as requests from './requests.ts';
 import * as validation from './validation.ts';
+import * as graph from './graph.ts';
 import * as agent from './agent.ts';
 
 /**
@@ -43,6 +44,9 @@ holdrim — the agent's tool for the Holdrim method
     restamp                     writes into the HTML what the registry already knows, so the
                                   browser can paint 🟡 — for approvals older than the attributes
     if-i-touch <id>             what else needs checking if I edit this
+    graph --json|--mermaid|--dot
+                                 the dependency graph the traffic light reads, for a script or a
+                                  diagram — exactly one format, never a guessed default
 
   Publishing
     export <folder>             the documentation as static pages, without the panel, for anyone
@@ -72,6 +76,8 @@ async function main() {
       local: { type: 'boolean', default: false },
       all: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
+      mermaid: { type: 'boolean', default: false },
+      dot: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       term: { type: 'string', multiple: true },
       root: { type: 'string' },
@@ -108,7 +114,7 @@ async function main() {
   });
 
   switch (command) {
-    case 'list':       await requests.list(root, source, { all: values.all, json: values.json }); return 0;
+    case 'list':       return (await requests.list(root, source, { all: values.all, json: values.json })) ? 1 : 0;
     case 'show':       await requests.show(root, source, requireArg(arg, 'show <id>')); return 0;
     case 'impact':     await requests.impact(root, source, requireArg(arg, 'impact <id>'), values.term ?? []); return 0;
     case 'summary':    await requests.summary(root, source); return 0;
@@ -118,13 +124,14 @@ async function main() {
                          { commit: values.commit, blocks: values.blocks }); return 0;
     case 'apply':      return agent.apply(root, source, requireArg(arg, 'apply <id>'),
                          { agent: values.agent, dryRun: values['dry-run'] });
-    case 'sync':       await validation.sync(root, source); return 0;
+    case 'sync':       return (await validation.sync(root, source)).tampered ? 1 : 0;
     case 'check':      return (await validation.check(root)) ? 1 : 0;
     case 'index':      await validation.rebuildIndex(root, values.db); return 0;
     case 'kinds':      await validation.listKinds(); return 0;
     case 'lights':     return (await validation.showLights(root, { only: values.only })) ? 0 : 2;
     case 'restamp':    await validation.restamp(root); return 0;
     case 'if-i-touch': return validation.ifITouch(root, requireArg(arg, 'if-i-touch <id>'));
+    case 'graph':      return graph.showGraph(root, { json: values.json, mermaid: values.mermaid, dot: values.dot });
     case 'export': {
       const out = requireArg(arg, 'export <folder>');
       const { pages, files } = exportSite(root, out);

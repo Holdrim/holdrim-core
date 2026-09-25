@@ -242,6 +242,17 @@ MANY=$(node -e "console.log([...Array(600)].map((_, i) => 'X' + i + '.1.1').conc
 expect "the 601st id is answered like the first" "$FP_WANT" "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/fingerprints?ids=$MANY" | fp_of A02.1.1)"
 expect "and nobody unknown asks → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/fingerprints?ids=A02.1.1")"
 
+echo "the impact radius, from the same walk if-i-touch uses:"
+# The hello world declares no dependency at all, so the only thing this proves over HTTP is the
+# wiring — the route exists, answers 200, shapes its answer as {ids:[...]}, and is behind the same
+# auth as every other block-reading route. The walk ITSELF, including going past one hop, is
+# engine/tests/validity.test.js's job (`radiusOf`), which does not need a server to prove.
+expect "a block nothing depends on → empty, not missing" '{"ids":[]}' \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/impact-radius?id=A01.1.1")"
+expect "a block that does not exist → empty too, never an error" '{"ids":[]}' \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/impact-radius?id=NOPE.1.1")"
+expect "and nobody unknown asks → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/impact-radius?id=A01.1.1")"
+
 echo "the home counts only the owner's ✓ as waiting for the repository:"
 # An admin's ✓ is recorded and stays an opinion: `holdrim sync` brings in the owner's alone. Counted
 # on the home as "approved on the site", it would tell the owner a lock is one sync away when the

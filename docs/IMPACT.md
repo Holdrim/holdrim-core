@@ -152,6 +152,12 @@ Propagation happens **by human confirmation instead**. Look at the 🔴 and say 
 wave stops there. Change the text → that is a real change, and it propagates one more hop on its
 own. The wave advances at the speed of checking, which is the only speed that means anything.
 
+*This is about painting the traffic light, not about looking before you edit.* `radiusOf`
+(`engine/core/validity.js`) DOES compute the full transitive closure, and the panel draws it when a
+block is selected — the "impact radius" is a preview a person asks for, costs nothing, and locks
+nothing. What it must never become is a second way to turn a block red: that would repaint the whole
+project on day one, which is exactly the failure this section is about.
+
 ## Why this is not a scan
 
 Three layers, each answering a question the layer below would have to scan for:
