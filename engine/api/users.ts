@@ -321,7 +321,7 @@ export abstract class UserStoreBase implements UserStore {
     // was handed out over the same "somebody stole it" premise that made the reset worth doing — so
     // it is dropped here, not left to ride out its remaining hours on the strength of a password
     // that no longer means anything.
-    await this.deleteSessionsForEmail(normalized);
+    await this.#dropSessionsQuietly(normalized, 'a password reset');
     return chosen;
   }
 
@@ -353,7 +353,35 @@ export abstract class UserStoreBase implements UserStore {
     // account is re-enabled the row is still there with a still-valid expiry, and the same stolen
     // cookie is 200 again for whatever is left of its twelve hours: exactly the story issue #113
     // reproduced, where disable → reset → re-enable ends with the thief still in.
-    if (!enabled) await this.deleteSessionsForEmail(normalized);
+    if (!enabled) await this.#dropSessionsQuietly(normalized, 'disabling the account');
+  }
+
+  /**
+   * Deletes every session for an e-mail, but never lets that failure reach the caller.
+   *
+   * ⚠️ By the time this runs, `writeCredential` or `writeEnabled` has ALREADY committed — the
+   * access change is real, whatever happens next. Letting a failed delete here reject the whole
+   * `resetPassword` or `setEnabled` call would turn a real, already-applied change into a 500 with
+   * NO `user_password_reset` or `user_enabled_changed` line in the audit log: the one record of who
+   * did this and to whom simply would not exist, for a change that certainly happened. The
+   * write-then-delete order stays — the alternative was rejected once already, in the sign-in race
+   * `identity-password.ts` guards against — so what changes here is only that the delete's own
+   * failure does not also swallow the record of the write that preceded it.
+   *
+   * The failure is not allowed to vanish either: it means some number of that account's sessions
+   * may still be alive, silently, which is a real gap in exactly the guarantee issue #113 exists
+   * for. `console.error` and not the request's own structured `log()`: this class knows no request,
+   * no actor and no i18n — the route above it holds all three, and `console.error` is the one
+   * channel reachable from here that every deployment already collects.
+   */
+  async #dropSessionsQuietly(email: string, because: string): Promise<void> {
+    try {
+      await this.deleteSessionsForEmail(email);
+    } catch (error) {
+      console.error(
+        `holdrim: could not drop sessions for ${email} after ${because} — some may still be alive: `
+        + (error instanceof Error ? error.message : String(error)));
+    }
   }
 
   async rename(email: string, name: string): Promise<void> {
