@@ -317,7 +317,9 @@ export class Source {
       }
       // Warned, never refused: the server, finding the same, repairs and warns, and a text that
       // fails its hash is read and warned about too — refusing would leave the owner unable to look
-      // at the very file they need to judge. And never repaired: this connection is read-only.
+      // at the very file they need to judge. Acting on it is refused, by the commands that act
+      // (`refuseToActOnBrokenGuards`, requests.ts), not here. And never repaired: this connection
+      // is read-only.
       // stderr, both lines, so `list --json` stays parseable with `guardsTampered` in it.
       this.#guardsTampered = mismatches.length > 0;
       for (const m of mismatches) {

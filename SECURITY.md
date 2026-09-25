@@ -20,13 +20,16 @@ Worth knowing before you run it:
   [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89). The CLI reading the file with
   `--db` makes the same comparison on every read
   ([holdrim#108](https://github.com/Holdrim/holdrim-core/issues/108)), with the file opened
-  read-only, so it repairs nothing and refuses nothing: it names each guard missing or changed, and
-  each trigger that is not a guard, in a `sqlite_guard_missing` warning on stderr; `holdrim list
-  --json` carries `guardsTampered`; `list` and `sync` exit non-zero, and `show`, `impact` and
-  `summary` warn and go on reading. Both catch a guard left dropped, not a person who puts it back:
-  dropping a guard, changing rows and recreating it by its exact text before anything reads the
-  file leaves nothing either check can see, and — for the server — neither does emptying every
-  table. Only signed events close that.) For an event's own text, moved
+  read-only, so it repairs nothing: it names each guard missing or changed, and each trigger that
+  is not a guard, in a `sqlite_guard_missing` warning on stderr; `holdrim list --json` carries
+  `guardsTampered`; `list` and `sync` exit non-zero, and `show`, `impact` and `summary` warn and go
+  on reading — reading never refuses. Acting does: `apply` (`--dry-run` included) and `state` exit
+  non-zero before a brief is written, an agent started or an event recorded, because a guard gone
+  is how a rejection is rewritten into an approval that no text hash covers. Both checks catch a
+  guard left dropped, not a person who puts it back: dropping a guard, changing rows and recreating
+  it by its exact text before anything reads the file leaves nothing either check can see, and —
+  for the server — neither does emptying every table. Only signed events close that.) For an
+  event's own text, moved
   out of the event into its own table, a forged removal dated and ordered after the text it targets
   can still pass as a genuine one; a backdated one cannot (docs/PRIVACY.md, section 4). Closing this
   for every kind of forgery, or for a trigger dropped outright, needs the events themselves signed —

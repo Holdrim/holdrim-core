@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,6 +16,7 @@ import { SqliteEventStore, GUARDS } from '../api/store-sqlite.ts';
 import { TEXT_REMOVED } from '../api/texts.ts';
 import { readBlocks } from '../cli/pages.ts';
 import { outside } from './helpers/sqlite.js';
+import { stub } from './helpers/stub.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -526,6 +527,54 @@ test('a foreign trigger\'s name reaches the terminal escaped, never as a raw con
   assert.ok(r.stderr.includes('"x\\u001b[2K\\u001b[1A"'), 'the name, quoted, with the escapes spelled out');
   assert.deepEqual(guardLines(r.stderr).map((l) => [l.guard, l.kind]), [[name, 'foreign']],
     'and the structured line still carries the name itself, for a program to read');
+});
+
+// ------------------------------------------------ acting refuses where reading warns
+// `apply` and `state` act on the queue. With `events_no_update` dropped, a rejection can be rewritten
+// into an approval in `data`, which no text hash covers: reading such a file warns, acting on it
+// would hand a request the owner refused to an agent. So these two refuse, before anything happens.
+const REFUSED = /refusing to act on this events file: its guards are not the ones this version installs/;
+
+test('apply --dry-run --db refuses on a dropped guard, and prints no brief', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  outside(db, 'DROP TRIGGER events_no_update');
+  const r = runApart(['apply', id.slice(0, 6), '--db', db, '--dry-run'], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, REFUSED);
+  assert.doesNotMatch(r.stdout, /# Holdrim request/, 'no brief written anywhere');
+});
+
+test('apply --db refuses on a dropped guard, and never starts the agent', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  const bin = mkdtempSync(join(tmpdir(), 'holdrim-agent-'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  stub(bin, 'agent', 'touch "$(dirname "$0")/started"');
+  const started = join(bin, 'started');
+  // The stub is proved to run first, on the intact file: otherwise "not started" below could only
+  // mean the stub never works.
+  const intact = runApart(['apply', id.slice(0, 6), '--db', db, '--agent', join(bin, 'agent')], dir);
+  assert.equal(intact.code, 0, intact.stderr);
+  assert.ok(existsSync(started), 'on an intact file, the agent is started');
+  rmSync(started);
+  outside(db, 'DROP TRIGGER events_no_update');
+  const r = runApart(['apply', id.slice(0, 6), '--db', db, '--agent', join(bin, 'agent')], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, REFUSED);
+  assert.equal(existsSync(started), false, 'the agent was never started');
+});
+
+test('state --db refuses on a dropped guard, before anything is recorded', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  outside(db, 'DROP TRIGGER events_no_update');
+  const r = runApart(['state', id.slice(0, 6), 'applying', 'on it', '--db', db], dir);
+  assert.notEqual(r.code, 0, r.stdout + r.stderr);
+  // Named, because `state --db` with no cloud configured fails anyway, one step later, at the write:
+  // only this sentence says the refusal came first, and for this reason.
+  assert.match(r.stderr, REFUSED);
+  assert.doesNotMatch(r.stdout + r.stderr, /recorded:|cloud project/);
 });
 
 test('the pre-commit lock over every example passes on a clean checkout', () => {

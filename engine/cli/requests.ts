@@ -214,6 +214,22 @@ export function warnOfTampering() {
     + 'server log (or run this again where the log is written) for which event and field.');
 }
 
+/**
+ * What `apply` and `state` do on a file whose guards are not as this version installs them: refuse,
+ * before a brief is written, an agent is started or an event appended. Reading warns and goes on
+ * (holdrim#108): the owner has to be able to look at the file they are judging. Acting is another
+ * matter. With `events_no_update` dropped, a rejection can be rewritten into an approval in `data`,
+ * where no text hash sees it, and an agent that went ahead would apply work the owner refused.
+ * The reader has already named each guard; this only stops the act, and says how to get going again.
+ */
+export function refuseToActOnBrokenGuards(source: Partial<Pick<Source, 'guardsTampered'>>): void {
+  if (!source.guardsTampered) return;
+  throw new Error('refusing to act on this events file: its guards are not the ones this version installs '
+    + '(each is named above), so an approval in it may be forged.\n'
+    + '  Start the server against the file once — it puts the guards back and names them in its log — '
+    + 'check what was written while they were gone, then run this again.');
+}
+
 export async function list(root: string, source: Parameters<typeof queue>[1], options: { all?: boolean; json?: boolean } = {}) {
   const cycle = loadCycle();
   const q = await queue(root, source, options.all ?? false);
@@ -335,11 +351,13 @@ export async function summary(root: string, source: Pick<Source, 'events'>) {
  * The agent only uses ITS OWN states: approving, rejecting and asking is the owner's triage, on
  * the site.
  */
-export async function setState(root: string, source: Pick<Source, 'events' | 'add'>, prefix: string, target: string,
+export async function setState(root: string, source: Pick<Source, 'events' | 'add'> & Partial<Pick<Source, 'guardsTampered'>>,
+                               prefix: string, target: string,
                                message: string, extra: { commit?: string; blocks?: string } = {}) {
   checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
+  refuseToActOnBrokenGuards(source);
   const r = find(requests(events), prefix);
 
   if (!cycle.agentStates.includes(target)) {
