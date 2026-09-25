@@ -1,5 +1,13 @@
 import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
+import { normalizeEmail, isEmailAddress, MAX_EMAIL_LENGTH } from '../core/email.js';
+
+// Re-exported: every route and store implementation already imports these three from here, and
+// `engine/core/roles.js` (HOLDRIM_LOCKS) needs the SAME check without pulling in this file's
+// node:crypto import — core JavaScript the browser also loads, and this one is not
+// (`engine/core/email.js`'s own module comment says why). One definition, two doors onto it,
+// rather than two definitions that quietly drift apart.
+export { normalizeEmail, isEmailAddress, MAX_EMAIL_LENGTH };
 
 /**
  * Who gets in, with user and password, depending on no provider — and WHERE that is kept.
@@ -178,34 +186,8 @@ export interface StoredSession {
   expiresAt: string;
 }
 
-/** One place, so every store agrees on what "the same e-mail" means. */
-export function normalizeEmail(email: string): string {
-  return email.toLowerCase().trim();
-}
-
-/** The longest address RFC 5321 allows. Anything past it is not a typo, it is a payload. */
-export const MAX_EMAIL_LENGTH = 320;
-
-/**
- * Is this something that can be an address here?
- *
- * ⚠️ Deliberately NOT an RFC 5322 parse, and the restraint is the point. The exhaustive regular
- * expressions for that are famous for rejecting addresses that work, and the only thing this check
- * is here to catch is the empty field and the obvious typo — somebody typing a NAME into the
- * e-mail box, which would otherwise create an access nobody can ever sign in to, and which cannot
- * be deleted afterwards because nothing here is deleted.
- *
- * No dot is demanded in the domain: `root@localhost` and internal single-label hosts are real, and
- * refusing them would be this checker deciding what someone else's network looks like.
- */
-export function isEmailAddress(value: string): boolean {
-  const email = value.trim();
-  if (email.length === 0 || email.length > MAX_EMAIL_LENGTH) return false;
-  if (/\s/.test(email)) return false;
-  const at = email.indexOf('@');
-  // Exactly one `@`, with something on both sides of it.
-  return at > 0 && at === email.lastIndexOf('@') && at < email.length - 1;
-}
+// normalizeEmail, isEmailAddress and MAX_EMAIL_LENGTH moved to `engine/core/email.js` and are
+// re-exported at the top of this file — see the comment there for why.
 
 /**
  * Everything that must not differ between databases: the hashing, the constant-time comparison,

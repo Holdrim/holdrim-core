@@ -120,6 +120,18 @@ who ran the engine from `main` before it.
   and every user store passes its own conformance suite in CI, against real databases. Reopening a
   SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
   putting it back without a word.
+- **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
+  tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
+  field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite
+  only) — logs a CRITICAL `text_tampered` line from the one place every reader shares (`reportTampered`,
+  `engine/api/texts.ts`), EVERY time a read resolves it: there is no acknowledgement yet to quiet it
+  (a follow-up issue), so it repeats rather than go silent after its first sighting. `holdrim list
+  --json` now carries a `tampered` key, and `holdrim list`/`sync` warn and exit non-zero when it is
+  set. See SECURITY.md for what this can and cannot catch, store by store. No released version
+  predates text extraction, so there is nothing to roll a pin back to yet — but once a later version
+  exists, moving the pin back to one from before this alert would write fresh events with their text
+  stored inline again, above where this version's own hashed rows begin, and every one of those reads
+  as `downgraded` tampering the next time any version opens the same file.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a
@@ -132,3 +144,16 @@ who ran the engine from `main` before it.
   their fields, the request states and categories, the CLI's commands and flags, what
   `holdrim list --json` prints, and the HTTP routes. CI derives each list from the code and fails
   when one moves, naming it, and the failure asks for the change to be recorded here.
+- **`HOLDRIM_LOCKS` names who else holds `lock`** (`docs/ROLES.md`, section 3), next to
+  `HOLDRIM_OWNER`: `"ana@example.org:P0*; bea@example.org:F12"`, an e-mail, a colon and a scope per
+  entry — a page, a page family (`"P0*"`) or a block id, validated the same way an event's own `page`
+  and `block` are. A malformed entry refuses to start, exactly like a malformed `HOLDRIM_OWNER`. Their
+  accounts are guarded like the owner's: creating, resetting, disabling and re-enabling one — all four
+  routes — is the owner's alone, and none of the four refusals names `HOLDRIM_LOCKS`, so an admin who
+  may not act on the address is not told the mechanism that reserved it. `can('lock', …)` does not
+  trust one yet — it still asks only whether the caller is the owner — because doing so safely needs
+  the session-and-credential-history rule `docs/ROLES.md` section 3 describes, which is not built.
+- **`holdrim.json` refuses `roles` and `grants` too**, alongside `owner`, `admins` and `locks`
+  (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
+  them, are the owner's to define and grant from a settings screen — a later piece — never a file a
+  committer, or the agent applying an approved request, can edit.

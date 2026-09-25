@@ -21,6 +21,7 @@
       "HOLDRIM_IDENTITY",
       "HOLDRIM_LANGUAGE",
       "HOLDRIM_LOCAL_URL",
+      "HOLDRIM_LOCKS",
       "HOLDRIM_MODE",
       "HOLDRIM_NAME",
       "HOLDRIM_OWNER",
@@ -183,6 +184,7 @@
     "requests[].textNow",
     "requests[].validated",
     "requests[].when",
+    "tampered",
     "toTriage"
   ],
   "http-routes": [

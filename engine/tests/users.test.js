@@ -176,6 +176,51 @@ test('the database REFUSES to replace an event, in both REPLACE forms', async ()
   }
 });
 
+test('the database REFUSES an insert whose rowid lands below one already held, even when the rowid itself is free', async () => {
+  const dir = scratch();
+  const path = join(dir, 'events.db');
+  try {
+    const store = new SqliteEventStore(path);
+    await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
+    await store.close();
+    // From outside, as for the two tests above: `events_no_replace` alone only refuses a rowid
+    // ALREADY held, and every negative rowid — and 0 — are always free, so a plain INSERT naming
+    // one used to slip below the highest rowid held with no trigger dropped and nothing replaced
+    // (round 3 of the #91 review, MAJOR). `events_no_low_rowid` is the guard this test is for.
+    const db = new DatabaseSync(path);
+    const insertAt = (rowid, id) => db.prepare(
+      `INSERT INTO events (rowid, id, type, page, author, happened_at)
+       VALUES (?, ?, 'comment', 'A01', 'p_000000000000000000000000', '2026-01-01T00:00:00.000Z')`
+    ).run(rowid, id);
+    assert.throws(() => insertAt(-7, 'forged-negative'), /not inserted below one already held/,
+      'a negative rowid must not land below the highest one already held');
+    assert.throws(() => insertAt(0, 'forged-zero'), /not inserted below one already held/,
+      'rowid 0 is free too, and just as much below it');
+    // A gap opened by an earlier explicit, higher rowid is free, and low, without being negative —
+    // distinguishing this guard from `events_no_replace`, which only ever sees a HELD rowid as a
+    // conflict, never a free one that merely happens to be low.
+    insertAt(100, 'above-first');
+    assert.throws(() => insertAt(50, 'forged-gap'), /not inserted below one already held/,
+      'a free rowid below the current maximum is refused too, not only a negative one');
+    // Exactly what a real append with an explicit, larger rowid does: the new highest, allowed.
+    assert.doesNotThrow(() => insertAt(200, 'above-again'), 'an explicit rowid above the current maximum is allowed');
+    assert.equal(db.prepare('SELECT COUNT(*) c FROM events').get().c, 3,
+      'only the original row and the two genuinely-higher ones landed; every forged one was rolled back');
+    db.close();
+    // And a normal append, with SQLite choosing the rowid itself, still works: by the time the
+    // AFTER trigger runs, the new row is already in the table `MAX(rowid)` reads, so a genuine
+    // append — always becoming the new highest rowid — compares equal to that MAX, never less
+    // than it.
+    const reopened = new SqliteEventStore(path);
+    await assert.doesNotReject(
+      reopened.append({ type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'def', text: null, snapshot: null, data: null }, 'owner@example.org'),
+      'a normal append still goes through');
+    await reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the sqlite store keeps and gives back the whole event', async () => {
   const store = new SqliteEventStore(':memory:');
   const e = await store.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'x',

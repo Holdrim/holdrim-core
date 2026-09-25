@@ -45,10 +45,10 @@ invent a capability, only combine them:
 validates the other six, so a typo there fails the same way — but it is never part of a GRANTABLE
 set: no role a project defines holds it, the owner's `capabilitiesOf` entry does not carry it either,
 and asking `can('lock', someone)` never consults a role's capabilities at all. It answers straight
-from identity — today, "is this the owner?"; once `LOCKS` exists (section 3), "is this the owner, or
-is this address in `LOCKS` for this block?" — because a capability granted through a role is exactly
-the kind of thing an admin, or a future project-defined role, could end up holding by a table edit,
-and this is the one answer that must never move that way.
+from identity — today, "is this the owner?"; once `HOLDRIM_LOCKS` exists (section 3), "is this the
+owner, or is this address in `HOLDRIM_LOCKS` for this block?" — because a capability granted through
+a role is exactly the kind of thing an admin, or a future project-defined role, could end up holding
+by a table edit, and this is the one answer that must never move that way.
 
 A role is a name and a subset of that list. Two roles ship, and with the owner they are today's
 behaviour exactly, so a project that configures nothing sees nothing change: **`admin`** holds every
@@ -89,10 +89,10 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
 
 > **A ✓ is a lock only when its author held `lock` for that block at the moment they gave it. Who
 > holds `lock` besides the owner is set by the deployment, in a variable next to `HOLDRIM_OWNER`
-> — `LOCKS` below, named for good by the change that builds it — never by the repository, the
-> store or a screen. An agent never gives a ✓.**
+> — `HOLDRIM_LOCKS` below, named for good by the change that builds it — never by the repository,
+> the store or a screen. An agent never gives a ✓.**
 
-- **Set where the owner is set.** `LOCKS` names people and scopes, for example
+- **Set where the owner is set.** `HOLDRIM_LOCKS` names people and scopes, for example
   `ana@example.org:P0*; bea@example.org:F12`. It is read at start, by the same hands that set
   `HOLDRIM_OWNER`: whoever configures the server. A committer to the repository cannot grant a lock,
   and an agent applying an approved request cannot. A direct writer to the store cannot grant one
@@ -100,10 +100,21 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   below). Changing it
   means restarting the service, which is the point. The addresses stay out of git and out of the
   store; the store sees only ids (`docs/PRIVACY.md`, section 1).
-- **Their accounts are guarded like the owner's.** Resetting, creating and re-enabling the account of
-  a person named in `LOCKS` belong to the owner alone, on all three routes, because a password
-  handed out for that account is a lock handed out. Guarding one route leaves the others open, as
-  `AGENTS.md` already says of the owner's.
+- **Their accounts are guarded like the owner's.** Resetting, creating, disabling and re-enabling the
+  account of a person named in `HOLDRIM_LOCKS` belong to the owner alone, on all four routes, the same
+  set the `people` capability's own table entry names in section 1 above ("disable and re-enable —
+  never … the account of anyone who holds `lock`"). Creating and resetting hand out a password, a lock
+  handed out with it; disabling and re-enabling do not, but an admin who could disable a lock-holder
+  at will could still silence their ✓ at the exact moment it would matter — round 2 of #29's own review
+  found round 1 had guarded only re-enabling. Guarding one route leaves the others open, as `AGENTS.md`
+  already says of the owner's. None of the four refusals name `HOLDRIM_LOCKS` or say "holds a lock" —
+  but that wording does NOT stop an admin from telling a lock-holder's account apart from an ordinary
+  one: the lock-holder check runs before the ordinary conflict, so even the STATUS CODE the refusal
+  carries differs, and the refusal necessarily shows the address is reserved regardless of what its
+  text says. That is acceptable because the lock markers already in the event history name the
+  holders anyway (round 3 of #29's own review, finding 5: round 2's wording overclaimed this). What
+  the message withholds is only the MECHANISM — that the reservation comes from `HOLDRIM_LOCKS`
+  specifically — never the reservation itself.
 - **A lock comes from a session, and it fails closed.** A ✓ is a lock only when the latest
   credential issued or reset for that account by anyone but the person was issued by the owner, and
   the session was opened after it with a credential the person set themselves after that issuance —
@@ -117,8 +128,8 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   account, or resetting it while it was not yet guarded — leaves it unable to lock until the owner
   issues again. Otherwise an admin could reset an account before its promotion, keep
   a session open across the owner's re-issue, and give locks in the person's name; and "newly named"
-  would need a definition that someone taken out of `LOCKS` and put back would slip through.
-- **One parser, one question.** `LOCKS` is parsed once at start, with the addresses normalized by
+  would need a definition that someone taken out of `HOLDRIM_LOCKS` and put back would slip through.
+- **One parser, one question.** `HOLDRIM_LOCKS` is parsed once at start, with the addresses normalized by
   the same function the store uses; the account guard and the lock check both ask one function in
   `engine/core/roles.js`, and neither compares strings on its own.
 - **Written at the moment, read forever after.** When the server records a ✓, it writes on the event
@@ -132,7 +143,7 @@ missing, the field fails closed, and no request's starting state is derived from
 current authority after 0.1.0. The
   panel, the home and `holdrim sync` read what was written and never recompute it — this is
   `docs/PRIVACY.md` section 2, whose role field it extends with the lock bit. Removing someone from
-  `LOCKS` leaves their past ✓s locks, as an owner's ✓s stay locks after they hand over: they
+  `HOLDRIM_LOCKS` leaves their past ✓s locks, as an owner's ✓s stay locks after they hand over: they
   were locks when given, and the trail says who could give them.
 
 ### 4. An agent never gives a ✓
@@ -158,7 +169,7 @@ and an agent that reaches the server another way arrives as whoever it borrowed 
 |---|---|---|---|
 | The owner | `HOLDRIM_OWNER` | whoever deploys | today's rule |
 | Who holds `admin` | `HOLDRIM_ADMINS` | whoever deploys | it exists before anyone signs in |
-| Who holds `lock`, and where | `LOCKS` | whoever deploys | a forgery must not reach a lock |
+| Who holds `lock`, and where | `HOLDRIM_LOCKS` | whoever deploys | a forgery must not reach a lock |
 | Role definitions | events, from the settings screen | the owner | a click, with a trail |
 | Grants of the project's roles | events, from the settings screen | the owner | a click, with a trail |
 | How a person appears, feature toggles | `holdrim.json` | the repository | decide nothing about authority |
@@ -203,7 +214,7 @@ theme colour does: a toggle misspelled is a toggle that silently did nothing. Fi
 - **Exactly one owner**, from `HOLDRIM_OWNER`. Roles add capabilities to other people; none adds a
   second owner, and none can take a capability from the owner.
 - **Nothing is erased.** A grant revoked is an event after the grant, not the grant removed.
-- **Configuration is untrusted input.** Role names, scopes and `LOCKS` are validated against
+- **Configuration is untrusted input.** Role names, scopes and `HOLDRIM_LOCKS` are validated against
   known shapes before anything uses them.
 - **The front end obeys the server.** The panel draws what the server says this person may do here.
 
@@ -211,7 +222,7 @@ theme colour does: a toggle misspelled is a toggle that silently did nothing. Fi
 
 | Attempt | What stops it |
 |---|---|
-| An admin grants themselves `lock` | `lock` is not granted by anyone in the product: only `LOCKS`, set by whoever deploys |
+| An admin grants themselves `lock` | `lock` is not granted by anyone in the product: only `HOLDRIM_LOCKS`, set by whoever deploys |
 | A committer, or the agent applying an approved request, adds a lock-holder or names a new owner | Authority is read from the environment only, and a `holdrim.json` that names any refuses to start |
 | An admin prepares an account before it is promoted, and keeps its session | A credential changed by anyone but the owner or the person leaves the account unable to lock until the owner issues again |
 | An agent triages, or files a request that starts approved | Its credential never holds `triage`, and the starting state written on its requests is always triage |
@@ -220,7 +231,9 @@ theme colour does: a toggle misspelled is a toggle that silently did nothing. Fi
 | An admin keeps a session open across the owner's re-issue of a lock-holder's password | A lock needs a session opened with a credential the person set after the owner's latest issuance; each issuance drops every session |
 | A direct writer to the store writes a ✓ with the lock bit set | Nothing stops it before signed events, exactly as for the owner's ✓ today (`docs/PRIVACY.md` §3); phase E closes it |
 | A commit renumbers a page into a lock-holder's scope | Not closed by design: the repository decides what a code means. Start logs each scope's coverage and refuses a scope that matches no page; the renumbering itself is a reviewed change |
-| An admin resets a lock-holder's password and signs in as them | Their accounts are the owner's to reset, create and re-enable, on all three routes |
+| An admin resets a lock-holder's password and signs in as them | Their accounts are the owner's to reset, create, disable and re-enable, on all four routes |
+| An admin disables a lock-holder to silence their ✓ right when it would matter | The same four routes: disabling one is the owner's alone too |
+| An admin probes candidate addresses to reconstruct the `HOLDRIM_LOCKS` list from which ones 409 | Not stopped, and not meant to be: the 409 itself already shows an address is reserved. What the refusal withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically — which is acceptable because the lock markers already in the event history name the holders anyway |
 | Someone with `people` makes themselves or an accomplice an approver | Only the owner grants roles |
 | A direct writer to the store forges a grant | Buys a role without `lock`, never `people` over a lock-holder; closed by signed events |
 | An agent approves its own text | An agent's credential is refused for any ✓; a lock ✓ needs an interactive session. Reuse of a person's session is the open gap in section 4 |
@@ -241,7 +254,7 @@ loses the file fallback for the owner and the admins, and the templates, which s
 
 ## Open questions
 
-- **Undoing a lock.** Removing someone from `LOCKS` does not undo their past locks. Should the
+- **Undoing a lock.** Removing someone from `HOLDRIM_LOCKS` does not undo their past locks. Should the
   owner be able to mark the locks someone gave as no longer trusted, turning those blocks yellow for
   review again?
 
@@ -252,9 +265,14 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Capabilities instead of role names (`can(capability, email)`) | built |
 | Owner and admins, from configuration | built |
 | The closed capability list, and roles as sets of it | built — `engine/core/roles.js`, `CAPABILITIES` and `capabilitiesOf` |
-| `LOCKS`, and lock-holders' accounts guarded like the owner's | not built |
+| The scope grammar a grant, and `HOLDRIM_LOCKS`, will be checked against | built (#29) — `isValidScope`, `engine/core/roles.js`, proved both by `HOLDRIM_LOCKS`'s own real use and by its tests. A project role's own NAME grammar is not built ahead of its first caller any more: a format nothing calls is untested by construction, so it waits for the settings screen below |
+| `holdrim.json` refusing `roles` and `grants`, like `owner`, `admins` and `locks` | built (#29) — `engine/core/config.js`'s `AUTHORITY_KEYS`. Authority comes from the deployment only; a project's own roles are the owner's to define and grant, from the settings screen below, never a file a committer or the applying agent can edit |
+| `HOLDRIM_LOCKS`, parsed and validated at start | built (#29) — `engine/core/roles.js`'s `parseLocks`, validating the address with the same `isEmailAddress` account creation uses (`engine/core/email.js`) |
+| Lock-holders' accounts guarded like the owner's, on all four routes | built (#29) — `roles.isLockHolder`, asked by `engine/api/server.ts`'s create, reset, disable and re-enable routes, none of the four messages naming who holds a lock; proved end to end in `engine/test-contract.sh` |
+| `can('lock', …)` actually trusting a `HOLDRIM_LOCKS` entry | not built — stays owner-only until the rule below exists; see the comment on `can` |
+| The session-and-credential-history rule (a lock only from a session opened with a credential the person set after the owner's latest issuance) | not built |
 | Roles and grants as events, from a settings screen, by the owner | not built |
-| Scopes: exact pages, explicit wildcard, blocks | not built |
+| Scopes actually consulted by `can`, with a page or block in hand | not built — the grammar is validated (`isValidScope`), nothing reads it yet |
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | An agent's own credential, refused for any ✓ | not built |
 | `people.show`, applied by the server | not built |
