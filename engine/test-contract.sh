@@ -18,7 +18,20 @@ set -uo pipefail
 # which is why this is easy to look for and fail to find. Bash 4 and newer are fine everywhere.
 set +B
 ROOT=$(cd "$(dirname "$0")" && pwd); cd "$ROOT/.."
-PORT=${PORT:-18095}; B=http://127.0.0.1:$PORT; FAILURES=0
+# Not a fixed number: the guard a few lines down only catches a SECOND run that starts after the
+# first is already listening — it does nothing for two runs (two worktrees, two agents) that start
+# within the same instant, both find the port free, and both proceed. One of their servers then
+# wins the bind; the other's dies of EADDRINUSE, silently, while ITS OWN health-check loop keeps
+# polling the same port and finds the WINNER's server instead — answering, so the loop moves on,
+# every assertion after that now run against the wrong config. Round 1 of the issue #31 review saw a
+# symptom this shape fits exactly: a check expecting a role read a raw address once, then passed
+# clean on retry, with 5+ isolated-port re-runs never reproducing it — consistent with another run's
+# server answering for one boot, on a machine likely running more than one worktree, rather than a
+# bug in the code either run was proving. Spreading the default over a wide range makes two such
+# runs landing on the SAME port a coincidence rather than a certainty; `PORT=` set explicitly, as the
+# guard's own message already tells whoever hits it, still wins outright and is left completely
+# alone.
+PORT=${PORT:-$((19000 + RANDOM % 9000))}; B=http://127.0.0.1:$PORT; FAILURES=0
 export OWNER=owner@example.org; export REVIEWER=reviewer@example.org
 LEAD=lead@example.org
 SITE="$PWD/examples/hello-world"
