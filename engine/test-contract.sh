@@ -39,6 +39,14 @@ AGENT=agent@example.org
 SITE="$PWD/examples/hello-world"
 
 expect() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1 — expected $2, got $3"; FAILURES=$((FAILURES+1)); fi; }
+# OWNER_ID and MEMBER_ID, once captured below, become the EXPECTED side of every `expect` that
+# names them — and `expect` only counts a mismatch, it never stops the run. An empty id there would
+# make each of those checks compare "" against whatever `log_field` returns, which PASSES if
+# `log_field` is also broken (issue #127) rather than failing on its own badly-shaped expected
+# value — the empty-vs-empty trap the self-check above guards against, still open if the id itself
+# were ever captured as "". This is a hard stop, not another `expect`, so a bad id ends the run with
+# one named reason instead of surfacing as a run of unrelated-looking FAILs further down.
+require_id() { [ -n "$1" ] || { echo "$2 came back empty — every check below that expects it would compare '' against another value, possibly also ''. Aborting rather than let that happen quietly."; exit 1; }; }
 # Whether the input has a match, reading ALL of it. `grep -q` stops at the first match and closes the
 # pipe, and under `pipefail` the writer it left behind — usually curl, mid-page — then fails with a
 # write error (curl's 23, or 141 for SIGPIPE) that becomes the pipeline's status. It depends on how
@@ -50,7 +58,11 @@ has() { grep "$@" >/dev/null; }
 # because "the e-mail is gone and something p_-shaped is there" is a shape check: it passes just as
 # well when person and by are swapped, or when the id belongs to a different person entirely. This
 # reads the exact value so a test can assert whose id it is, not merely that it looks like one.
-log_field() { grep "\"event\":\"$2\"" "$1" | tail -1 | sed -n "s/.*\"$3\":\(\"[^\"]*\"\|null\).*/\1/p" | tr -d '"'; }
+# `-E` and an unescaped `|` (extended alternation), never `\|` in a basic regex — see the
+# portability list below: BSD sed treats `\|` as a literal pipe character, so the pattern never
+# matches and this returns "" on every macOS run rather than failing loudly. `-E` is accepted by
+# both BSD and GNU sed, unlike `-r`, which GNU has and BSD does not.
+log_field() { grep "\"event\":\"$2\"" "$1" | tail -1 | sed -E -n "s/.*\"$3\":(\"[^\"]*\"|null).*/\1/p" | tr -d '"'; }
 
 # ----------------------------------------------------------------------------- portable, on purpose
 # This runs on a developer's macOS or Windows laptop and on CI's Linux, and the three do not ship
@@ -61,6 +73,11 @@ log_field() { grep "\"event\":\"$2\"" "$1" | tail -1 | sed -n "s/.*\"$3\":\(\"[^
 #                 POSIX and does the same.
 #   `timeout`     is GNU coreutils. macOS and Git Bash do not have it; `run_for` below is the same
 #                 idea with a background job and a watchdog.
+#   `\|` in a BRE is a GNU extension. BSD sed treats `\|` in a BASIC regex as a literal pipe
+#                 character rather than "or", so the pattern never matches and the command returns
+#                 EMPTY instead of erroring — the same silent-empty failure shape as `head -n -1`
+#                 above, and the one `log_field` hit (issue #127). Use `sed -E` with an unescaped
+#                 `|` instead: accepted by both BSD and GNU sed, unlike `-r`, which BSD lacks.
 #   brace lists   are expanded out of JSON bodies by bash 3.2 — see `set +B` at the top.
 #   fixed /tmp    names collide when two people, or two agents, run this at once — one run reads the
 #                 other's log and the assertions about the password move. Every file is a
@@ -68,6 +85,28 @@ log_field() { grep "\"event\":\"$2\"" "$1" | tail -1 | sed -n "s/.*\"$3\":\(\"[^
 #
 # The rule for anything added here: if a command only exists on one of the three, it is a bug, even
 # while the suite is green on the other two.
+
+# A one-time proof that `log_field` actually reads a value, run before anything else in this file —
+# no server, no request, nothing that could itself be the reason a later check fails. Issue #127:
+# the `\|`-in-a-BRE break above made `log_field` return "" for every field on macOS, and every
+# `expect "…" "$OWNER_ID" "$(log_field …)"` later in this file then compared an empty string with
+# an empty string and passed, about 15 of them, having checked nothing. Feeding it a known line here
+# and aborting loudly if the known value does not come back is what makes that failure shape
+# impossible to repeat quietly — a future regression stops the run with a named reason instead of
+# leaking into "all good" by way of two empty strings agreeing.
+SELF_CHECK_LOG=$(mktemp)
+printf '{"severity":"INFO","event":"self_check","time":"now","person":"p_deadbeef00000000000000","by":null}\n' >"$SELF_CHECK_LOG"
+SELF_CHECK_QUOTED=$(log_field "$SELF_CHECK_LOG" self_check person)
+SELF_CHECK_NULL=$(log_field "$SELF_CHECK_LOG" self_check by)
+rm -f "$SELF_CHECK_LOG"
+if [ "$SELF_CHECK_QUOTED" != "p_deadbeef00000000000000" ] || [ "$SELF_CHECK_NULL" != "null" ]; then
+  echo "log_field self-check FAILED — it must read a quoted value and a bare null from a known line."
+  echo "  quoted field 'person': expected p_deadbeef00000000000000, got '$SELF_CHECK_QUOTED'"
+  echo "  null field 'by':       expected null, got '$SELF_CHECK_NULL'"
+  echo "  this is the failure issue #127 describes: a sed that returns empty instead of matching,"
+  echo "  which every check further down would then read as a vacuous pass. Not running the rest."
+  exit 1
+fi
 
 # Runs a command with a deadline, and returns its exit code — or 124 when the deadline hit, the
 # same number `timeout` uses.
@@ -924,6 +963,7 @@ expect "and the owner truly approves"  201 "$(curl -s -b $COOKIES -o /dev/null -
 # claims to be the owner's can be checked against this EXACT id — a shape check alone, "something
 # p_-shaped is there", would wave through the owner's id credited to somebody else just as happily.
 OWNER_ID=$(log_field $WORK/password.log event_recorded author)
+require_id "$OWNER_ID" OWNER_ID
 expect "and the recorded event names its author by a real person id" 1 \
   "$(echo "$OWNER_ID" | grep -cE '^p_[0-9a-f]{24}$')"
 expect "and never by the e-mail it carried"    0 \
@@ -1048,6 +1088,7 @@ expect "and is nobody special"          member "$(as_member $B/api/me | jfield r
 # be checked against this EXACT id, the way OWNER_ID lets the owner's be checked.
 expect "and they may comment → 201" 201 "$(as_member -o /dev/null -w '%{http_code}' -d '{"type":"comment","page":"D01","text":"a comment"}' $B/api/events)"
 MEMBER_ID=$(log_field $WORK/password.log event_recorded author)
+require_id "$MEMBER_ID" MEMBER_ID
 expect "as a real person id" 1 "$(echo "$MEMBER_ID" | grep -cE '^p_[0-9a-f]{24}$')"
 expect "and not the owner's" 0 "$([ "$MEMBER_ID" != "$OWNER_ID" ]; echo $?)"
 # The people screen draws only what the routes above allow, and is drawn only for who may use them.
