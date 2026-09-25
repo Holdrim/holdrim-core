@@ -134,6 +134,29 @@ export interface Removed {
 }
 
 /**
+ * `removed`, with `by` sent through the same resolution `author` already gets — round 1 of the
+ * issue #31 review, finding 1. `removalsOf` below records `by` as the resolved address, because
+ * `withAuthors` (engine/api/people.ts) always runs before `withTexts`: by the time a removal is
+ * found, every event's `author` — the remover's included — is already an e-mail, not the opaque id
+ * the store keeps. `GET /api/events` and `/api/events/:id` (engine/api/server.ts) used to rewrite
+ * only the top-level `author` to whatever `people.show` and its two overrides decide, and hand the
+ * nested `Removed` through untouched: a plain member, under `people.show: "id"` or `"role"`, still
+ * read the remover's raw e-mail off `textRemoved.by`/`snapshotRemoved.by` — the very address the
+ * setting exists to hide.
+ *
+ * Pure, so it needs no server, no store and no i18n to prove: the caller resolves `displays`
+ * however it already resolves `author` for the same request (`authorDisplaysFor`, server.ts), and
+ * this only rewrites the one field `Removed` carries that is ever a raw address. `null`/`undefined`
+ * pass through unchanged — a field never removed has nobody to resolve — and a `by` with no entry
+ * in `displays` (impossible in practice: the remover always has some event of their own for the
+ * caller to have resolved a display from, since `removeText` writes one) keeps its own value rather
+ * than turning into `undefined`, the same fallback `author` itself already relies on.
+ */
+export function resolveRemovedBy(removed: Removed | null | undefined, displays: ReadonlyMap<string, string>): Removed | null | undefined {
+  return removed ? { ...removed, by: displays.get(removed.by) ?? removed.by } : removed;
+}
+
+/**
  * Which of the cases below made a field read as tampered — issue #91's "which of the three cases it
  * was", so an operator does not have to re-derive it from the raw rows:
  *

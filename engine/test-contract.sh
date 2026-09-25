@@ -663,7 +663,13 @@ node -e '
   config.people = { show: "role" };
   fs.writeFileSync(path, JSON.stringify(config, null, 2));
 ' "$PSHOW_SITE/holdrim.json"
+# sqlite, not the local default of memory: round 1 of this review's finding 1 needs a text actually
+# REMOVED, through `EventStore.removeText` — no route calls it yet (texts.ts's own comment on
+# `TEXT_REMOVED` says why), so this reaches the store directly, on the same file the server has
+# open, the way the CLI already does against a live server (store-sqlite.ts's WAL comment).
+PSHOW_DATA=$(mktemp -d)
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$PSHOW_DATA/events.db \
   HOLDRIM_SITE="$PSHOW_SITE" \
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/people-show.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
@@ -686,6 +692,34 @@ expect "and so does an admin, a holder of \`people\`, about someone else's" "$RE
   "$(author_of $LEAD 'people-show marker from reviewer')"
 expect "a person sees their own address on their own comment, whatever the setting" "$REVIEWER" \
   "$(author_of $REVIEWER 'people-show marker from reviewer')"
+
+# CRITICAL, round 1 of the issue #31 review, finding 1: `textRemoved.by`/`snapshotRemoved.by` used
+# to pass through `asRead` untouched, leaking the remover's raw address to a viewer `people.show`
+# was configured to hide it from. `by` is found by the event's OWN id, never its marker text: the
+# text is exactly what a removal takes away.
+REMOVE_ID=$(new_request $LEAD '{"type":"comment","page":"UC-01","text":"people-show removal marker"}')
+node --input-type=module -e "
+const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
+const store = new SqliteEventStore(process.argv[1]);
+await store.removeText(process.argv[2], 'text', process.argv[3]);
+" "$PSHOW_DATA/events.db" "$REMOVE_ID" "$LEAD"
+removed_by() {
+  curl -s -H "X-Dev-Email: $1" "$B/api/events?page=UC-01" | \
+    node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).find(x=>x.id===process.argv[1]);console.log(e&&e.textRemoved?e.textRemoved.by:'')})" "$2"
+}
+removed_by_one() {
+  curl -s -H "X-Dev-Email: $1" "$B/api/events/$2" | \
+    node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s);console.log(e.textRemoved?e.textRemoved.by:'')})"
+}
+expect "people.show: role — a removal's \`by\` reads as the remover's role too" Admin \
+  "$(removed_by $REVIEWER $REMOVE_ID)"
+expect "and never the remover's address, on the list route"    1 \
+  "$(removed_by $REVIEWER $REMOVE_ID | has -F '@'; echo $?)"
+expect "nor on GET /api/events/{id} alone"                     1 \
+  "$(removed_by_one $REVIEWER $REMOVE_ID | has -F '@'; echo $?)"
+expect "the owner still sees the remover's real address"      "$LEAD" \
+  "$(removed_by $OWNER $REMOVE_ID)"
+
 # The home is `serveHome`'s own wiring, not `requestsInProgress`'s (proved in isolation by
 # home.test.js): the setting has to actually reach it through a real server.
 new_request $LEAD '{"type":"request","page":"UC-01","text":"people-show home marker","data":{"category":"text"}}' >/dev/null
@@ -693,7 +727,41 @@ expect "the home shows the role too, never the address" 0 \
   "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/engine/home | has -F '>Admin<'; echo $?)"
 expect "and not the address, anywhere on the page" 1 \
   "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/engine/home | has -F "$LEAD"; echo $?)"
-kill $PID 2>/dev/null; wait $PID 2>/dev/null
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PSHOW_DATA"
+
+# `people.show: "id"` — the finding's other named case, and the one for which a plain e-mail
+# fallback (`personAs`'s own `id || email`) would be the SECOND leak: a remover with no id in hand
+# reads as their address, not as nothing.
+PSHOW_ID_SITE="$WORK/people-show-id-site"
+cp -r "$SITE" "$PSHOW_ID_SITE"
+node -e '
+  const fs = require("fs");
+  const path = process.argv[1];
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  config.people = { show: "id" };
+  fs.writeFileSync(path, JSON.stringify(config, null, 2));
+' "$PSHOW_ID_SITE/holdrim.json"
+PSHOW_ID_DATA=$(mktemp -d)
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$PSHOW_ID_DATA/events.db \
+  HOLDRIM_SITE="$PSHOW_ID_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/people-show-id.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+
+ID_REMOVE_ID=$(new_request $LEAD '{"type":"comment","page":"UC-01","text":"people-show id removal marker"}')
+node --input-type=module -e "
+const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
+const store = new SqliteEventStore(process.argv[1]);
+await store.removeText(process.argv[2], 'text', process.argv[3]);
+" "$PSHOW_ID_DATA/events.db" "$ID_REMOVE_ID" "$LEAD"
+ID_BY=$(removed_by $REVIEWER $ID_REMOVE_ID)
+expect "people.show: id — a removal's \`by\` is the opaque id too" 1 \
+  "$(echo "$ID_BY" | grep -cE '^p_[0-9a-f]{24}$')"
+expect "and never the remover's address"                      1 \
+  "$(echo "$ID_BY" | has -F '@'; echo $?)"
+expect "and the single-event route agrees"                    "$ID_BY" \
+  "$(removed_by_one $REVIEWER $ID_REMOVE_ID)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PSHOW_ID_DATA"
 
 echo "local mode does NOT turn on outside development:"
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_AUDIENCE=/projects/0/x PORT=$PORT \

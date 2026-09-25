@@ -29,6 +29,7 @@ import { IapIdentity } from './identity-iap.ts';
 import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
 import { personAs } from '../core/people-show.js';
+import { resolveRemovedBy, type Removed } from './texts.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -436,6 +437,32 @@ async function authorDisplaysFor(
   return new Map(entries);
 }
 
+/**
+ * The extra `{author, authorId}` pairs `authorDisplaysFor` needs so `resolveRemovedBy` (engine/api/
+ * texts.ts) can also resolve `e`'s `textRemoved.by`/`snapshotRemoved.by` — round 1 of the issue #31
+ * review, finding 1. `Removed.by` is already an address (`removalsOf`'s own comment says why), the
+ * same shape `author` is before `authorDisplaysFor` resolves it, so it needs the same treatment.
+ *
+ * `authorId` comes from `all` rather than a second store read: `removeText` (store-sqlite.ts) always
+ * writes the removal on the SAME page and block as the text it removes, so whichever event produced
+ * `Removed.by` is already in whatever list the caller has in hand — `all` for `/events?page=`, the
+ * whole-site `all` of `/events/:id` — under that exact `author` value. A remover with no match at
+ * all (impossible today, since `removeText` never leaves an event unauthored) is passed through with
+ * `authorId: undefined`, which `authorDisplaysFor` already reads as "no id to show instead of a
+ * name" — the same fallback an event from before ids existed gets.
+ */
+function removalSubjectsOf(
+  e: { textRemoved?: Removed | null; snapshotRemoved?: Removed | null },
+  all: { author: string; authorId?: string }[],
+): { author: string; authorId?: string }[] {
+  const subjects: { author: string; authorId?: string }[] = [];
+  for (const removed of [e.textRemoved, e.snapshotRemoved]) {
+    if (!removed) continue;
+    subjects.push({ author: removed.by, authorId: all.find((x) => x.author === removed.by)?.authorId });
+  }
+  return subjects;
+}
+
 // ---------------------------------------------------------------- the API routes
 /**
  * Records one event for `email`, after every check the cycle demands — or says, as a status and a
@@ -583,8 +610,15 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     // `own`, never a raw address the panel could compare `me` against: `author` below is already
     // whatever `people.show` says this viewer may see, which for anyone but the viewer themselves is
     // not necessarily an e-mail at all — docs/ROLES.md, "The front end obeys the server" (the panel
-    // computes nothing, `engine/web/src/Panel.jsx`'s own `.own` reads).
-    return json(res, 200, all.map((e) => ({ ...asRead(e, threads), author: displays.get(e.author) ?? e.author, own: e.author === email })));
+    // computes nothing, `engine/web/src/Panel.jsx`'s own `.own` reads). `textRemoved`/`snapshotRemoved`
+    // go through the very same map: the remover's own event is on this page too (`removeText` writes
+    // it there), so `displays` already has their entry — no second resolve, and no raw address left
+    // inside `Removed` for a viewer `author` itself already hides it from.
+    return json(res, 200, all.map((e) => ({
+      ...asRead(e, threads), author: displays.get(e.author) ?? e.author,
+      textRemoved: resolveRemovedBy(e.textRemoved, displays), snapshotRemoved: resolveRemovedBy(e.snapshotRemoved, displays),
+      own: e.author === email,
+    })));
   }
 
   const oneEvent = route.match(/^\/events\/([A-Za-z0-9_-]+)$/);
@@ -593,8 +627,14 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     const found = all.find((e) => e.id === oneEvent[1]);
     if (!found) return json(res, 404, { error: i18n.t(languageOf(req), 'api.event.notFound'), id: oneEvent[1] });
     const lang = languageOf(req);
-    const displays = await authorDisplaysFor([found], email, lang);
-    return json(res, 200, { ...asRead(found, cycle.threadsOf(all)), author: displays.get(found.author) ?? found.author, own: found.author === email });
+    // Unlike the list route above, `all` here spans every page, so `[found]` alone would miss the
+    // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
+    const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], email, lang);
+    return json(res, 200, {
+      ...asRead(found, cycle.threadsOf(all)), author: displays.get(found.author) ?? found.author,
+      textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
+      own: found.author === email,
+    });
   }
 
   // The current fingerprint of blocks by id, read from the pages on disk. The panel computes the
