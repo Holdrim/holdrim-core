@@ -122,3 +122,12 @@ who ran the engine from `main` before it.
   their fields, the request states and categories, the CLI's commands and flags, what
   `holdrim list --json` prints, and the HTTP routes. CI derives each list from the code and fails
   when one moves, naming it, and the failure asks for the change to be recorded here.
+- **A project's own roles, in `holdrim.json`** (`docs/ROLES.md`): `roles` names a role and the
+  capabilities it holds (a subset of `read`, `comment`, `request`, `triage`, `approve`, `lock`,
+  `people`), and `grants` says who holds one — a role name a project already ships (`owner`, `admin`,
+  `member`) refuses to start, as does an unknown capability or a grant naming a role `roles` never
+  defined. `lock` may be listed like any other capability but is never actually granted by it: only
+  the owner holds it, identity alone, exactly as `HOLDRIM_ADMINS` already cannot make an admin the
+  owner. A grant may be limited to a page, a page family (`"P0*"`) or a block id; the scope is
+  validated now, and honoured once the engine asks a capability with a page in hand — an unscoped
+  grant applies everywhere already.

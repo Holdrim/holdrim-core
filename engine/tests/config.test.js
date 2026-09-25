@@ -24,6 +24,17 @@ test('with no file at all, the engine still has every default it needs', () => {
   assert.equal(c.pageExamples, '');
   assert.deepEqual(c.theme, { brand: null, logo: null, name: 'Documentation' });
   assert.equal(c.home, HOME_SCREEN, 'the root opens on the project home, not on a page nobody wrote');
+  assert.deepEqual(c.roles, {}, 'no project role without a file to define one');
+  assert.deepEqual(c.grants, {}, 'no grant without a file to make one');
+});
+
+test('roles and grants are read from holdrim.json (#29) — the opposite of owner and admins', () => {
+  const c = readConfig('/p', file({
+    roles: { 'clinical-lead': ['triage', 'approve'] },
+    grants: { 'bea@example.org': [{ role: 'clinical-lead', scope: 'P0*' }] },
+  }));
+  assert.deepEqual(c.roles, { 'clinical-lead': ['triage', 'approve'] });
+  assert.deepEqual(c.grants, { 'bea@example.org': [{ role: 'clinical-lead', scope: 'P0*' }] });
 });
 
 test('the file is read under the keys the adopting project writes', () => {
@@ -128,4 +139,14 @@ test('a holdrim.json that names an owner, admins or lock-holders refuses to load
     /names "owner", "admins", "locks"/, 'every key it names, not only the first');
   // Keys that merely look alike are the project's own notes, not authority.
   assert.doesNotThrow(() => readConfig('/p', file({ _owner: 'who approves is set by HOLDRIM_OWNER' })));
+});
+
+test('"roles" and "grants" are not authority keys — unlike "admins", the file is where they belong', () => {
+  // The opposite risk from the test above: refusing these too would make #29 impossible to use at
+  // all, since roles and grants are exactly what the file is FOR (docs/ROLES.md, "Where everything
+  // lives" — "Grants of the project's roles" is the one row this file, not the environment, answers
+  // for a project role, as opposed to `admin`, which stays environment-only).
+  assert.doesNotThrow(() => readConfig('/p', file({
+    roles: { 'clinical-lead': ['triage'] }, grants: { 'x@example.org': [{ role: 'clinical-lead' }] },
+  })));
 });

@@ -44,6 +44,23 @@ test('the owner\'s rendered row carries no action; a member\'s still offers rese
   assert.match(rowFor('mem@x.org'), /data-action="disable"/, 'enabled by default, so disable is on offer');
 });
 
+test('a project\'s own role (#29) sorts between admin and member, and shows its own name', () => {
+  const roleOf = (e) => ({ 'owner@x.org': 'owner', 'ana@x.org': 'admin',
+    'bea@x.org': 'clinical-lead', 'mem@x.org': 'member' }[e]);
+  const html = renderPeoplePage(i18n, 'en', {
+    projectName: 'P',
+    // Deliberately out of order in the input: the rendered order is what proves the sort.
+    people: [person('mem@x.org'), person('bea@x.org'), person('owner@x.org'), person('ana@x.org')],
+    roleOf, isOwner: (e) => e === 'owner@x.org',
+  }, ENGINE_THEME, 'n2');
+  const order = [...html.matchAll(/<td>(\w+@x\.org)<\/td>/g)].map((m) => m[1]);
+  assert.deepEqual(order, ['owner@x.org', 'ana@x.org', 'bea@x.org', 'mem@x.org'],
+    'owner, then admin, then the project role, then member');
+  // The role's own name reaches the row, not a shipped name it does not hold — the translation key
+  // falls back to itself for an unknown one (engine/core/i18n.js), which is diagnosable, not a crash.
+  assert.match(html, /people\.role\.clinical-lead/);
+});
+
 test('the People link appears only for whoever may manage people', () => {
   assert.match(engineNav(i18n, 'en', 'home', true), /href="\/engine\/people"/);
   assert.doesNotMatch(engineNav(i18n, 'en', 'home', false), /\/engine\/people/);

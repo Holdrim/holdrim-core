@@ -122,13 +122,11 @@ function decidesOn(name) {
  * could see. `staleEntries`, below, is the test that a snippet still exists somewhere.
  */
 const ALLOWED = [
-  { file: 'engine/api/people-page.ts', text: "type Role = 'owner' | 'admin' | 'member';",
-    why: 'the display role\'s own type — naming the three shipped roles for a column and a sort ' +
-      'order is what this type is for; nothing here decides anything from them' },
   { file: 'engine/api/people-page.ts',
-    text: 'rank[data.roleOf(a.email)] - rank[data.roleOf(b.email)]',
-    why: 'a SORT ORDER, never a decision — the exact shape `COMPUTED_LOOKUP` exists to refuse, which ' +
-      'is why this one instance is named here instead of exempting the shape in general' },
+    text: 'rankOf(data.roleOf(a.email)) - rankOf(data.roleOf(b.email))',
+    why: 'a SORT ORDER, never a decision — `rankOf` (#29) reads a plain lookup table for the three ' +
+      'shipped names and a display fallback for a project\'s own role, so this is named here instead ' +
+      'of exempting every call to roleOf() in general' },
   { file: 'engine/cli/remote.ts', text: "this.#token = 'owner'",
     why: '"owner" is the Firestore EMULATOR\'s own word for a caller its security rules do not ' +
       'apply to (see the comment above it), never a Holdrim role' },
@@ -308,8 +306,8 @@ test('catches a decision hiding behind an object literal keyed by roleOf(), with
   assert.ok(found.length, 'a lookup object indexed by roleOf() slipped through');
 });
 
-test('does not flag the one allow-listed instance of the lookup shape it otherwise refuses', () => {
-  assert.deepEqual(offendersIn('rank[data.roleOf(a.email)] - rank[data.roleOf(b.email)]',
+test('does not flag the one allow-listed sort-order call site it otherwise refuses', () => {
+  assert.deepEqual(offendersIn('rankOf(data.roleOf(a.email)) - rankOf(data.roleOf(b.email))',
     'engine/api/people-page.ts'), []);
 });
 

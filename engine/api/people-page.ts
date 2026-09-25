@@ -26,7 +26,13 @@ import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
  * or the console. A reload loses it, on purpose: that is what "once" means.
  */
 
-type Role = 'owner' | 'admin' | 'member';
+/**
+ * A DISPLAY role: one of the three names this version ships, or a project's own (`holdrim.json`'s
+ * `roles`, docs/ROLES.md #29). No longer a closed union — `roleOf` may answer with any name a
+ * project defined — so it is `string`, checked nowhere here: see `actionsFor`'s own comment on why
+ * this file never compares one.
+ */
+type Role = string;
 
 /** The keys this screen reads, for the test that checks every dictionary has them. */
 export const PEOPLE_KEYS = [
@@ -77,10 +83,14 @@ export function renderPeoplePage(
 ): string {
   const t = (key: string, params?: Record<string, string | number>) => forHtml(i18n.t(lang, key, params));
 
-  // The owner first, then admins, then everyone else; by name within each.
-  const rank: Record<Role, number> = { owner: 0, admin: 1, member: 2 };
+  // The owner first, then admins, then a project's own roles (#29) — holding SOME capability beyond
+  // a member's three, never as much as an admin's — then everyone else; by name within each.
+  const rank: Record<string, number> = { owner: 0, admin: 1, member: 3 };
+  /** Display order only, never a decision: an unlisted name is a project's own role, ranked between
+   *  admin and member by convention, not by anything the role actually holds. */
+  const rankOf = (displayRole: Role) => rank[displayRole] ?? 2;
   const people = [...data.people].sort((a, b) =>
-    rank[data.roleOf(a.email)] - rank[data.roleOf(b.email)] || a.name.localeCompare(b.name));
+    rankOf(data.roleOf(a.email)) - rankOf(data.roleOf(b.email)) || a.name.localeCompare(b.name));
 
   const rows = people.map((p) => {
     const role = data.roleOf(p.email);

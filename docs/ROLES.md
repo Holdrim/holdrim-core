@@ -252,9 +252,10 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Capabilities instead of role names (`can(capability, email)`) | built |
 | Owner and admins, from configuration | built |
 | The closed capability list, and roles as sets of it | built — `engine/core/roles.js`, `CAPABILITIES` and `capabilitiesOf` |
+| A project's own roles and grants, in `holdrim.json`, validated | built (#29) — `engine/core/roles.js`, `projectRoles` and `projectGrants`. An INTERIM path, ahead of the row below: a file a committer, or the agent applying an approved request, can edit — bounded exactly as "What that buys is bounded" already describes for a forged event, and never `lock` (see `can`) |
 | `LOCKS`, and lock-holders' accounts guarded like the owner's | not built |
-| Roles and grants as events, from a settings screen, by the owner | not built |
-| Scopes: exact pages, explicit wildcard, blocks | not built |
+| Roles and grants as events, from a settings screen, by the owner | not built — will REPLACE the file-based path above, not sit beside it: `AGENTS.md`'s worry about the agent editing `holdrim.json` applies to a project role exactly as it does to `owner` and `admins` |
+| Scopes: exact pages, explicit wildcard, blocks | validated (#29, `isValidGrantScope`), not yet consulted by `can` — an unscoped grant already applies everywhere |
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | An agent's own credential, refused for any ✓ | not built |
 | `people.show`, applied by the server | not built |

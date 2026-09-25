@@ -88,6 +88,12 @@ export function readConfig(root, io, env = {}) {
     // two into roles, for the server and the CLI alike.
     owner: env.HOLDRIM_OWNER ?? null,
     admins: env.HOLDRIM_ADMINS ?? '',
+    // THE OPPOSITE OF THE TWO ABOVE (#29): a project's OWN roles, and who holds them, are read from
+    // the file, never the environment — they name no authority `AUTHORITY_KEYS` refuses above, only
+    // capabilities the closed list already knows. `rolesOf` validates both against a known format
+    // before anything uses them (docs/ROLES.md, "Configuration is untrusted input").
+    roles: file.roles ?? {},
+    grants: file.grants ?? {},
     project: env.HOLDRIM_PROJECT ?? cloud.project ?? null,
     account: env.HOLDRIM_ACCOUNT ?? cloud.account ?? null,
     region: cloud.region ?? null,

@@ -53,8 +53,10 @@
     "content.trimPrefix",
     "development.actAs",
     "development.port",
+    "grants",
     "language",
     "name",
+    "roles",
     "theme.brand",
     "theme.logo",
     "theme.name"
