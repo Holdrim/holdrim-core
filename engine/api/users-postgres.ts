@@ -145,6 +145,10 @@ export class UsersPostgres extends UserStoreBase {
     await this.#query('DELETE FROM sessions WHERE expires_at < $1', [instant]);
   }
 
+  protected async deleteSessionsForEmail(email: string): Promise<void> {
+    await this.#query('DELETE FROM sessions WHERE email = $1', [email]);
+  }
+
   async close(): Promise<void> {
     // Awaiting the connection first: closing a store whose pool is still being built would leave
     // the pool open behind us and hold the process alive.

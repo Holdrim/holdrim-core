@@ -1,7 +1,7 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED,
-  type RawEvent, type TextField, type TextRow } from './texts.ts';
+import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
+  type RawEvent, type TextField, type TextRow, type TamperReport } from './texts.ts';
 
 /*
  * The Firestore store lives in store-firestore.ts, loaded only when HOLDRIM_EVENTS=firestore.
@@ -39,7 +39,11 @@ export class MemoryEventStore implements EventStore {
     this.#events.push({ ...e, textHash: hashes.text, snapshotHash: hashes.snapshot });
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
-    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
+    // `authorId: e.author` reads `e`'s OWN field, still the person id `stored()` was given, before
+    // this same line's `author:` overwrites the copy being returned — the id `withAuthors` would
+    // capture too, so a fresh append and the list a moment later answer it identically (proved in
+    // events-conformance.test.js's "the answer to an append is what a list says a moment later").
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: e.author };
   }
 
   async list(page?: string | null): Promise<Event[]> {
@@ -47,7 +51,12 @@ export class MemoryEventStore implements EventStore {
     const events = withAuthors(this.#events
       .filter((e) => page == null || e.page === page)
       .sort((a, b) => a.when.localeCompare(b.when)), people);
-    return withTexts(events, this.#texts);
+    // `reports` is this list's own read of every field it resolved to tampered — issue #91 wants it
+    // raised right here, at the one store every `run-local.sh` session and every unit test use.
+    const reports: TamperReport[] = [];
+    const out = withTexts(events, this.#texts, reports);
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   async removeText(event: string, field: TextField, by: string): Promise<Event> {

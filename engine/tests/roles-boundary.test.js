@@ -132,7 +132,7 @@ const ALLOWED = [
   { file: 'engine/cli/remote.ts', text: "this.#token = 'owner'",
     why: '"owner" is the Firestore EMULATOR\'s own word for a caller its security rules do not ' +
       'apply to (see the comment above it), never a Holdrim role' },
-  { file: 'engine/core/config.js', text: "const AUTHORITY_KEYS = ['owner', 'admins', 'locks'];",
+  { file: 'engine/core/config.js', text: "const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'roles', 'grants'];",
     why: 'holdrim.json KEY NAMES refused at the door, not a person\'s role' },
   { file: 'engine/core/cycle.js', text: "ownerStates: ownedBy('owner'),",
     why: 'the CYCLE\'s own vocabulary (cycle.json) — which side of a transition owns it, "owner" or ' +
@@ -151,6 +151,14 @@ const ALLOWED = [
   { file: 'engine/api/people-page.ts', text: 'const role = data.roleOf(p.email);',
     why: 'the row\'s DISPLAY label and the key into `people.role.*` translations — never compared or ' +
       'looked up by; see `decidesOn`, which would still catch it if a later line started to' },
+  { file: 'engine/api/server.ts',
+    text: 'role: i18n.t(lang, `people.role.${roles.roleOf(subject)}`), alwaysNamed,',
+    why: 'personDisplay\'s own `people.show: "role"` case (docs/ROLES.md, "How a person appears") — ' +
+      'a DISPLAY string handed to `personAs`, translated right here since only the server has the ' +
+      'reader\'s language; never compared or looked up by' },
+  { file: 'engine/cli/requests.ts', text: 'role: roles.roleOf(email), alwaysNamed: false,',
+    why: 'the CLI\'s own `people.show: "role"` case — the same DISPLAY use as server.ts\'s, in ' +
+      'English since the CLI\'s output never goes through i18n (see the file\'s own header comment)' },
 ];
 
 /**

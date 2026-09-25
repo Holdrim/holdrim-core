@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { ofProject } from './pages.ts';
-import { impactOf, formatWhen, mustBeQueued } from './requests.ts';
+import { ofProject, projectRoles } from './pages.ts';
+import { impactOf, formatWhen, mustBeQueued, personLabel } from './requests.ts';
 import type { Source } from './remote.ts';
 
 /**
@@ -84,6 +84,8 @@ export async function brief(root: string, source: Pick<Source, 'events'>, prefix
   const { request: r, terms } = await impactOf(root, source, prefix, []);
   // Before a line is written: the first thing the brief tells the agent is that the owner approved.
   mustBeQueued(r);
+  const { peopleShow } = ofProject(root);
+  const roles = projectRoles(root);
   const lines: string[] = [];
   lines.push(`# Holdrim request ${r.id}`);
   lines.push('');
@@ -92,7 +94,7 @@ export async function brief(root: string, source: Pick<Source, 'events'>, prefix
   lines.push('nothing else.');
   lines.push('');
   lines.push(`State:   ${r.state}`);
-  lines.push(`Who:     ${r.author}  ·  ${formatWhen(r.when)}`);
+  lines.push(`Who:     ${personLabel(peopleShow, roles, r.author)}  ·  ${formatWhen(r.when)}`);
   lines.push(`Where:   ${r.block ?? r.page}${r.data?.category ? `  ·  category: ${String(r.data.category)}` : ''}`);
   lines.push('');
   lines.push('## Asked for');
@@ -136,7 +138,7 @@ export async function brief(root: string, source: Pick<Source, 'events'>, prefix
     lines.push('## Thread');
     lines.push('');
     for (const e of r.history) {
-      lines.push(`- ${formatWhen(e.when)} ${e.author}: ${e.type === 'supplement' ? 'added more' : String(e.data?.state ?? e.type)}${e.text ? ` — ${e.text.replace(/\n/g, ' ')}` : ''}`);
+      lines.push(`- ${formatWhen(e.when)} ${personLabel(peopleShow, roles, e.author)}: ${e.type === 'supplement' ? 'added more' : String(e.data?.state ?? e.type)}${e.text ? ` — ${e.text.replace(/\n/g, ' ')}` : ''}`);
     }
   }
   lines.push('');

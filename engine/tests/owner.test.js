@@ -24,8 +24,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { ofProject, readBlocks } from '../cli/pages.ts';
-import { rolesOf } from '../core/roles.js';
+import { rolesOf, createRoles } from '../core/roles.js';
 import { createCycle } from '../core/cycle.js';
+import { authorCouldTriage, earliestLockBaseline } from '../api/types.ts';
+
+/** Order within one millisecond is not part of the contract (events-conformance.test.js): the
+ *  baseline `project` seeds has to land strictly BEFORE the events that follow it, or `authorCouldTriage`
+ *  and `isLocked` would read their written fields as predating the baseline and ignore them (round 2's
+ *  review) — the exact thing this file means to seed past, not test. */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -42,13 +49,28 @@ const ADMIN = 'admin@example.org';
 const BLOCK_OF = { [OWNER]: 'A01.1.1', [OTHER]: 'A01.1.2', [ADMIN]: 'A01.1.3' };
 
 /** What refuses a holdrim.json that claims authority, on both paths. */
-const AUTHORITY = /authority is set by the deployment.*HOLDRIM_OWNER.*HOLDRIM_ADMINS/;
+const AUTHORITY = /authority is set by the deployment, never by the repository/;
+
+/** Where each authority key actually lives (docs/ROLES.md, "Where everything lives", section 5) —
+ *  checked per key, since the refusal names the actual destination and not the same two variables
+ *  for every key alike (#29's rework: `roles` and `grants` have no variable at all yet). */
+const HOME_OF = {
+  owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS',
+  roles: 'the settings screen', grants: 'the settings screen',
+};
 
 /**
- * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding,
- * for each person, one request they made and one ✓ they gave.
+ * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding a
+ * `lock_baseline` (round 2's review: without one, every written field below predates it — there is
+ * none — and both `authorCouldTriage` and `isLocked` ignore what was written entirely), then, for
+ * each person, one request they made and one ✓ they gave — written exactly as `recordEvent` would,
+ * from `variables`: `authorCouldTriage` and `locks` are baked in at creation, never left for a reader
+ * to recompute (docs/ROLES.md §3). `variables` defaults to plain `{ owner: OWNER }` for the callers
+ * that never read either field (the file/owner refusal cases, which refuse before reaching them) —
+ * the two cases that DO read them pass the exact environment they mean to test both readers against,
+ * so what is written here is what `serverView`/`cliView` later compare against each other.
  */
-async function project(t, extra = {}) {
+async function project(t, extra = {}, variables = { owner: OWNER }) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-owner-'));
   cpSync(EXAMPLE, dir, { recursive: true });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -56,13 +78,16 @@ async function project(t, extra = {}) {
   const blocks = await readBlocks(dir);
   const db = join(dir, 'events.db');
   const store = new SqliteEventStore(db);
+  const roles = createRoles(variables.owner, variables.admins);
+  await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, variables.owner ?? OWNER);
+  await tick();
   const ids = {};
   for (const [who, block] of Object.entries(BLOCK_OF)) {
     const request = await store.append({ type: 'request', page: 'A01', block, fingerprint: 'x',
-      text: `asked by ${who}`, snapshot: null, data: null }, who);
+      text: `asked by ${who}`, snapshot: null, data: { authorCouldTriage: String(roles.can('triage', who)) } }, who);
     ids[who] = request.id;
     await store.append({ type: 'approval', page: 'A01', block,
-      fingerprint: blocks.get(block).fingerprint, text: null, data: null }, who);
+      fingerprint: blocks.get(block).fingerprint, text: null, data: { locks: String(roles.can('lock', who)) } }, who);
   }
   const events = await store.list();
   await store.close();
@@ -92,7 +117,10 @@ function cli(args, dir, env) {
 
 /**
  * What the server would boot with, under the case's environment: server.ts's own two calls, and
- * each request's state as server.ts derives it (`cycle.currentState` with `roles.can('triage', …)`).
+ * each request's state as server.ts derives it — `cycle.currentState` with `authorCouldTriage`
+ * (types.ts), which reads what was WRITTEN on the request, never a live `roles.can('triage', …)`.
+ * `roles` is still built here, and still what refuses an invalid environment before either field is
+ * ever read — that refusal is what this function's `try` still proves.
  */
 function serverView({ dir, ids, events }, variables) {
   const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
@@ -103,8 +131,9 @@ function serverView({ dir, ids, events }, variables) {
   try {
     const roles = rolesOf(ofProject(dir));
     const threads = cycle.threadsOf(events);
+    const baseline = earliestLockBaseline(events);
     const states = Object.fromEntries(Object.entries(ids).map(([who, id]) =>
-      [who, cycle.currentState(id, threads.get(id) ?? [], roles.can('triage', who))]));
+      [who, cycle.currentState(id, threads.get(id) ?? [], authorCouldTriage(events.find((e) => e.id === id), baseline))]));
     return { owner: roles.owner, states };
   } catch (e) {
     return { refused: e.message };
@@ -138,11 +167,40 @@ function cliView({ dir, db, ids }, variables) {
   return { owner: lockedBy[0], states };
 }
 
+/**
+ * `show`, `impact`, `summary` and `state` (requests.ts) all call `checkAuthority` before doing
+ * anything else, exactly as `list` and `sync` do above — but through `projectRoles` directly, not
+ * through the `ofProject` call every command already goes through in `holdrim.ts`'s `main` (round 2's
+ * review, M-6). That top-level call alone catches a holdrim.json that CLAIMS authority (the
+ * `fileRefusals` cases below): it never asks whether HOLDRIM_OWNER resolves to exactly one address,
+ * which is `ownerRefusals`' whole point. So `checkAuthority` removed from any of these four would
+ * still refuse under `fileRefusals`, by accident, but run in SILENCE against a project with no owner
+ * at all, or two, under `ownerRefusals` — exactly where this drives them. `state` is included because
+ * it, alone of the four, WRITES an event once past the check.
+ *
+ * `state` targets `applying`, not `rejected` (round 4's review, MINOR r5): OWNER's own request is
+ * seeded already `approved` (ADMIN_START), so `applying` is a transition the agent MAY make and
+ * `setState` accepts — right up to the actual `source.add` write. `rejected` is not an agent state at
+ * all, so `setState` would refuse it on that ground ALONE, with `checkAuthority` never in question:
+ * a `checkAuthority` removed from `setState` would still throw before the write (a different message,
+ * from the `cycle.agentStates.includes` check further down), and the probe would never reach the one
+ * thing worth proving here — that no event gets written to a project with no real owner.
+ */
+function otherCommandsRefuse(p, env, needs) {
+  const id = p.ids[OWNER];
+  for (const args of [['show', id], ['impact', id], ['summary'], ['state', id, 'applying', 'no']]) {
+    const r = cli([...args, '--db', p.db], p.dir, env);
+    assert.notEqual(r.code, 0, `${args[0]} ran without refusing:\n${r.out}`);
+    assert.match(r.out, needs, args[0]);
+  }
+}
+
 test('the CLI and the server name the same owner: HOLDRIM_OWNER', async (t) => {
-  const p = await project(t);
+  const variables = { owner: OWNER };
+  const p = await project(t, {}, variables);
   const expected = { owner: OWNER, states: { [OWNER]: ADMIN_START, [OTHER]: STRANGER_START, [ADMIN]: STRANGER_START } };
-  assert.deepEqual(serverView(p, { owner: OWNER }), expected, 'the server');
-  assert.deepEqual(cliView(p, { owner: OWNER }), expected, 'the CLI');
+  assert.deepEqual(serverView(p, variables), expected, 'the server');
+  assert.deepEqual(cliView(p, variables), expected, 'the CLI');
 });
 
 test('an admin named in HOLDRIM_ADMINS alone: their request starts approved and their ✓ never locks, on both sides', async (t) => {
@@ -150,8 +208,8 @@ test('an admin named in HOLDRIM_ADMINS alone: their request starts approved and 
   // variable would leave it open for the owner to triage while the server shows it approved.
   // `cliView` also runs `sync` and asserts exactly one person's ✓ locks: this is the one test that
   // catches an admin's ✓ locking too, so its name says both things it proves, not only the first.
-  const p = await project(t);
   const variables = { owner: OWNER, admins: ADMIN };
+  const p = await project(t, {}, variables);
   const expected = { owner: OWNER, states: { [OWNER]: ADMIN_START, [OTHER]: STRANGER_START, [ADMIN]: ADMIN_START } };
   assert.deepEqual(serverView(p, variables), expected, 'the server');
   assert.deepEqual(cliView(p, variables), expected, 'the CLI');
@@ -166,19 +224,29 @@ const fileRefusals = [
   // A revoked admin, still listed in the file: their requests would read as approved.
   { name: 'an admin named only in holdrim.json', variables: { owner: OWNER }, file: { admins: [ADMIN] } },
   { name: 'lock-holders named in holdrim.json', variables: { owner: OWNER }, file: { locks: `${OTHER}:A01` } },
+  // #29's rework: a project's own roles and grants refuse exactly like the three above — they are
+  // events from the settings screen, by the owner, never a key in the file (docs/ROLES.md,
+  // "Authority comes from the deployment only").
+  { name: 'a project role named only in holdrim.json', variables: { owner: OWNER },
+    file: { roles: { 'clinical-lead': ['triage'] } } },
+  { name: 'a grant named only in holdrim.json', variables: { owner: OWNER },
+    file: { grants: { [OTHER]: [{ role: 'clinical-lead' }] } } },
 ];
 
 for (const c of fileRefusals) {
   test(`the CLI and the server both refuse: ${c.name}`, async (t) => {
     const p = await project(t, c.file);
     const [key] = Object.keys(c.file);
+    const home = new RegExp(HOME_OF[key]);
     const server = serverView(p, c.variables);
     assert.match(server.refused ?? `booted with ${server.owner}`, AUTHORITY, 'the server');
     assert.match(server.refused, new RegExp(`names "${key}"`), 'and names the key');
+    assert.match(server.refused, home, 'and says where it actually lives');
     const cliAnswer = cliView(p, c.variables);
     assert.match(cliAnswer.refused ?? `ran with ${cliAnswer.owner}`, AUTHORITY, 'the CLI, list');
     assert.match(cliAnswer.syncRefused, AUTHORITY, 'the CLI, sync');
     assert.equal(readFileSync(join(p.dir, 'approvals.json'), 'utf8').trim(), '{}', 'and sync locked nothing');
+    otherCommandsRefuse(p, environment(c.variables), AUTHORITY);
   });
 }
 
@@ -196,5 +264,6 @@ for (const c of ownerRefusals) {
     const cliAnswer = cliView(p, c.variables);
     assert.match(cliAnswer.refused ?? `ran with ${cliAnswer.owner}`, needs, 'the CLI, list');
     assert.match(cliAnswer.syncRefused, needs, 'the CLI, sync');
+    otherCommandsRefuse(p, environment(c.variables), needs);
   });
 }

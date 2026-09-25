@@ -14,13 +14,30 @@ import { blockState, byWhen, day } from './state.js';
 import cycle from '../../cycle.json';
 import { t } from './i18n.js';
 
-const who = (email, me) => (email === me ? t('panel.you') : email);
+// `own`, never a raw address compared against one the panel was handed separately: the server
+// already answers "is this the viewer's own event" (docs/ROLES.md, "The front end obeys the
+// server"), and `author` on an event nobody wrote themselves is not necessarily an e-mail at all —
+// it is whatever the project's `people.show` says this reader may see (a name, a role, an opaque
+// id), and a panel that went on comparing it to `me` would break the day a project turned that
+// setting away from "email".
+const who = (own, author) => (own ? t('panel.you') : author);
 // Names from the dictionaries, in the reader's language; which states and categories exist, and in
 // what order, from the cycle's own table.
 const labelOf = (state) => t(`cycle.${state}`);
-// A function, not a constant: a constant is translated when the module loads, before the server
-// has said which language this person reads, and stays in that one while the rest follows.
-const categoriesOf = () => Object.keys(cycle.request_categories).map((key) => [key, t(`cycle.category.${key}`)]);
+/**
+ * Which categories a request may pick from: every one `cycle.json` names, minus whichever of
+ * `bug`/`page` this project's `features.bugCategory`/`features.pageRequests` has turned off
+ * (docs/ROLES.md, section 7). `features` comes from `/api/me`, by way of `entry.jsx` — the panel
+ * never decides a toggle's state on its own, only draws what the server already answered. Missing a
+ * key reads as ON: a caller from before this toggle existed, and today's default, both see every
+ * category, exactly as before.
+ *
+ * A function, not a constant: a constant is translated when the module loads, before the server
+ * has said which language this person reads, and stays in that one while the rest follows.
+ */
+const categoriesOf = (features) => Object.keys(cycle.request_categories)
+  .filter((key) => (key !== 'bug' || features.bugCategory !== false) && (key !== 'page' || features.pageRequests !== false))
+  .map((key) => [key, t(`cycle.category.${key}`)]);
 
 function Badge({ situation, validatedOn, broken }) {
   // A green "validated" over a red explanation is two answers to one question; the red one is true.
@@ -144,15 +161,15 @@ function AddDetails({ request, onRecord }) {
  * One request on this block, for whoever is looking: its state, always — the person who filed it is
  * the one who most needs to know where it stands — then what that person may do about it.
  */
-function Request({ request, me, canApprove, onRecord }) {
+function Request({ request, canApprove, onRecord }) {
   const s = request.status ?? {};
   return (
     <div className="rv-request" data-request={request.id}>
       <p>
-        {t('panel.request.from', { who: who(request.author, me) })} <em className={`rv-state rv-state--${s.state}`}>{labelOf(s.state)}</em>
+        {t('panel.request.from', { who: who(request.own, request.author) })} <em className={`rv-state rv-state--${s.state}`}>{labelOf(s.state)}</em>
       </p>
       {canApprove ? <Triage request={request} onDecide={onRecord} /> : null}
-      {(request.author === me || canApprove) && s.acceptsSupplement
+      {(request.own || canApprove) && s.acceptsSupplement
         ? <AddDetails request={request} onRecord={onRecord} />
         : null}
     </div>
@@ -170,14 +187,14 @@ function withCode(sentence, name, ids) {
 
 const DID = { approval: 'panel.did.approval', request: 'panel.did.request', comment: 'panel.did.comment' };
 
-function History({ events, me }) {
+function History({ events }) {
   if (!events.length) return null;
   return (
     <div className="rv-history">
       <h4 className="rv-history-title">{t('panel.history.title')}</h4>
       {[...events].sort(byWhen).map((e) => (
         <p key={e.id} className={`rv-h rv-h--${e.type === 'approval' ? 'approval' : 'request'}`}>
-          <span className="rv-state">{day(e.when)}</span> {who(e.author, me)}
+          <span className="rv-state">{day(e.when)}</span> {who(e.own, e.author)}
           {' '}{DID[e.type] ? t(DID[e.type]) : e.type}
           {e.text ? <>: {e.text}</> : null}
           {e.snapshot ? (
@@ -192,7 +209,7 @@ function History({ events, me }) {
   );
 }
 
-export default function Panel({ block, me, canApprove, events, onRecord, onClose }) {
+export default function Panel({ block, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {
   const dlg = useRef(null);
   const [tab, setTab] = useState(null);
   const [text, setText] = useState('');
@@ -246,6 +263,12 @@ export default function Panel({ block, me, canApprove, events, onRecord, onClose
       <p className="rv-summary">{block.summary}</p>
       <p className="rv-status"><Badge situation={situation} validatedOn={block.validated} broken={block.light?.color === 'broken'} /></p>
 
+      {/* The blocks lit on the page ARE the radius that lives here; the ones elsewhere have no
+          element to light, so without this line they would simply be invisible — which for a block
+          whose only dependents are on other pages would read as "nothing depends on this" and is
+          the opposite of true. */}
+      {radiusElsewhere > 0 ? <p className="rv-radius-note">{t('panel.radius.elsewhere', { n: radiusElsewhere })}</p> : null}
+
       {/* Red with no reason makes a person re-approve out of fright — which is exactly what the lock
           exists to prevent. So the panel says WHAT changed, and sends them to look there before
           deciding here. */}
@@ -259,7 +282,7 @@ export default function Panel({ block, me, canApprove, events, onRecord, onClose
       <div className="rv-actions">
         {/* Not twice by the same person: an admin's ✓ does not turn the block green, and a button still
             on offer after it reads as "it did not take". */}
-        {canApprove && !situation.approved && !situation.seconded.some((e) => e.author === me) ? (
+        {canApprove && !situation.approved && !situation.seconded.some((e) => e.own) ? (
           <button type="button" onClick={() => send('approval')} disabled={sending}>
             {t('panel.approve')}
           </button>
@@ -270,11 +293,15 @@ export default function Panel({ block, me, canApprove, events, onRecord, onClose
         </button>
         {/* A remark that asks for nothing: a question, a note for the next reader. It is kept in
             the block's history like everything else, and changes no state — a request would put
-            it in the owner's queue, which is exactly what a remark should not do. */}
-        <button type="button" className={tab === 'comment' ? 'rv-active' : ''}
-                onClick={() => choose('comment')}>
-          {t('panel.comment.open')}
-        </button>
+            it in the owner's queue, which is exactly what a remark should not do. Hidden, not
+            merely disabled, when `features.comments` is off: an offered control that then 403s
+            reads as broken, and the panel draws only what the server would still accept. */}
+        {features.comments !== false ? (
+          <button type="button" className={tab === 'comment' ? 'rv-active' : ''}
+                  onClick={() => choose('comment')}>
+            {t('panel.comment.open')}
+          </button>
+        ) : null}
       </div>
 
       {tab === 'request' ? (
@@ -282,7 +309,7 @@ export default function Panel({ block, me, canApprove, events, onRecord, onClose
           <label>
             {t('panel.request.kind')}
             <select value={category} onChange={(e) => setCategory(e.target.value)}>
-              {categoriesOf().map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              {categoriesOf(features).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}
@@ -308,10 +335,10 @@ export default function Panel({ block, me, canApprove, events, onRecord, onClose
       {/* Every request's state for everyone; triage only for whoever can triage, and only while the
           request still has a destination. */}
       {situation.requests.map((r) => (
-        <Request key={r.id} request={r} me={me} canApprove={canApprove} onRecord={onRecord} />
+        <Request key={r.id} request={r} canApprove={canApprove} onRecord={onRecord} />
       ))}
 
-      <History events={situation.history} me={me} />
+      <History events={situation.history} />
 
       {/* Said where the person decides, because it is what makes a ✓ worth giving: it is theirs, by
           name, for good. */}

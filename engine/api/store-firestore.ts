@@ -1,8 +1,8 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
-import { noText, saltFields, textKey, withTextsRetrying, TEXT_REMOVED,
-  type RawEvent, type TextField } from './texts.ts';
+import { noText, saltFields, textKey, withTextsRetrying, reportTampered, TEXT_REMOVED,
+  type RawEvent, type TextField, type TamperReport } from './texts.ts';
 
 /**
  * Firestore, `events` collection. INSERT ONLY: `create` fails if the document already exists, so
@@ -42,7 +42,10 @@ export class FirestoreEventStore implements EventStore {
     const { textHash: _th, snapshotHash: _sh, ...withoutHashes } = this.#fromFirestore(read.id, read.data()!);
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
-    return { ...withoutHashes, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
+    // `authorId: personId`, the same value `withAuthors` would capture off this document a moment
+    // later, so a fresh append and the list right after it answer it identically
+    // (events-conformance.test.js, "the answer to an append is what a list says a moment later").
+    return { ...withoutHashes, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId };
   }
 
   /**
@@ -74,7 +77,7 @@ export class FirestoreEventStore implements EventStore {
     });
     const read = await removalDoc.get();
     const { textHash: _th, snapshotHash: _sh, ...withoutHashes } = this.#fromFirestore(read.id, read.data()!);
-    return { ...withoutHashes, author: personEmail(by) };
+    return { ...withoutHashes, author: personEmail(by), authorId: personId };
   }
 
   /**
@@ -107,11 +110,17 @@ export class FirestoreEventStore implements EventStore {
       const data = t.data();
       return [textKey(data.event as string, data.field as TextField), { value: data.value as string, salt: data.salt as string }];
     }));
-    return withTextsRetrying(events, texts, async () => {
+    // `reports`: see store-sqlite.ts's `list` for why this is raised here rather than left to whoever
+    // reads the answer — `withTextsRetrying` itself only reports what its own retry settles as
+    // genuinely tampered, never a torn read's provisional false alarm (its own doc comment says why).
+    const reports: TamperReport[] = [];
+    const out = await withTextsRetrying(events, texts, async () => {
       // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
       const removed = await this.#db.collection('events').where('type', '==', TEXT_REMOVED).get();
       return withAuthors(removed.docs.map((d) => this.#fromFirestore(d.id, d.data())), peopleMap);
-    });
+    }, reports);
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   // The people table, laid out as FIRESTORE_PEOPLE says: `people/{id}` holds the row, and

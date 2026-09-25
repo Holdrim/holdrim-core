@@ -4,8 +4,9 @@ import { join, extname, normalize, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
+import { radiusOf } from '../core/validity.js';
 import { createRoles, rolesOf } from '../core/roles.js';
-import { overLimit, validCommit } from '../core/limits.js';
+import { overLimit, validCommit, short } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
 import { SqliteEventStore } from './store-sqlite.ts';
@@ -25,8 +26,13 @@ import { loadTheme } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { IapIdentity } from './identity-iap.ts';
-import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types.ts';
+import {
+  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, ensureLockBaseline, isLocked, authorCouldTriage,
+  type Event, type NewEvent, type EventStore,
+} from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
+import { personAs } from '../core/people-show.js';
+import { resolveRemovedBy, type Removed } from './texts.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -170,6 +176,21 @@ const events: EventStore = await (async () => {
   }
 })();
 
+/**
+ * The fact an unwritten ✓ is measured against (decision B, round 1's review): who HOLDRIM_OWNER was
+ * the moment THIS server first read this store. Resolved once, at boot, before anything is served —
+ * "on the first start of this version" means whatever the store already holds, checked here, never a
+ * flag this process could lose track of. See `ensureLockBaseline`'s own comment (types.ts) for the
+ * write it makes, and why it is never reachable from a client POST.
+ *
+ * It also decides which events' WRITTEN fields are trusted at all (round 2's review): `isLocked` and
+ * `authorCouldTriage` (types.ts) read `data.locks`/`data.authorCouldTriage` only for an event dated
+ * after this one — anything this server itself recorded, this boot or an earlier one of this
+ * version — never for one that predates it, which is a store from before this mechanism existed and
+ * could hold whatever a client's own POST body once put in `data`.
+ */
+const LOCK_BASELINE = await ensureLockBaseline(events, roles.owner);
+
 /** Wraps `idForLog`/`actedOn` (engine/api/people.ts) around this server's own store. */
 const idForLog = (email: string) => peopleIdForLog(events, email);
 const actedOn = (subject: string, actor: string) => peopleActedOn(events, subject, actor);
@@ -298,6 +319,23 @@ async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 /**
+ * Which toggle an event needs turned on, or null when nothing about it is gated at all.
+ *
+ * A plain lookup, never a question asked of `roles`: FEATURES decide what exists, capabilities
+ * decide who may use it, and the two must never blend into one function — the moment a toggle could
+ * also be read as "may", it could be read as a way to take a capability from someone, which is
+ * exactly what docs/ROLES.md's "a toggle never turns off a guard" forbids. `approval`,
+ * `request_state` and `supplement` are absent on purpose: they are how a request already filed
+ * moves and how a text is locked, never a way to file a new kind of thing a toggle could gate.
+ */
+function gatingFeatureOf(incoming: NewEvent): keyof typeof project.features | null {
+  if (incoming.type === 'comment') return 'comments';
+  if (incoming.type === 'request' && incoming.data?.category === 'page') return 'pageRequests';
+  if (incoming.type === 'request' && incoming.data?.category === 'bug') return 'bugCategory';
+  return null;
+}
+
+/**
  * Why an event is refused before anything else about it is looked up, or null when it may go on.
  *
  * Called by `recordEvent` only, the one way into the event store for the API and both of the home's
@@ -309,6 +347,36 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
   { status: number; body: Record<string, unknown> } | null {
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
+  }
+  // Checked before the feature gate below: `gatingFeatureOf` matches `data.category` by EXACT
+  // string — `"Bug"` or `"page "` would silently side-step whichever toggle the real spelling would
+  // have gated, because nothing else validates it is one of `cycle.json`'s own categories.
+  //
+  // ⚠️ `typeof category !== 'string'` is checked FIRST, never folded into `String(category)` the way
+  // this used to read. `gatingFeatureOf` compares the RAW value (`data.category === 'page'`), never a
+  // stringified one — and `String([...])` joins a single-element array with nothing in between, so a
+  // JSON body naming `"category":["page"]` used to pass THIS check (`String(['page']) === 'page'`)
+  // while `gatingFeatureOf` read the very same value and saw neither `'page'` nor `'bug'`: the gate
+  // stayed null, and a request shaped exactly like a page request reached the store with pageRequests
+  // off, never having asked it. Requiring a real string closes the gap by construction: the two
+  // checks now agree on the same value instead of two different ones that merely print the same.
+  // `data.category` is `unknown` (the core's own typedef, `engine/core/cycle.js`), and a category is
+  // never required — a request naming none still goes on to the checks below.
+  //
+  // `short`, not the raw value, in the message: `category` is caller-controlled and unbounded until
+  // `overLimit` runs, further down — echoing it whole here is how a 200 KB category once became a
+  // 200 KB error body.
+  const category = incoming.data?.category;
+  if (incoming.type === 'request' && category !== undefined
+      && (typeof category !== 'string' || !Object.hasOwn(cycle.table.request_categories ?? {}, category))) {
+    return { status: 400, body: { error: say('api.request.unknownCategory', { category: short(category) }) } };
+  }
+  // Checked before anything role-shaped: a feature that is off refuses everyone, owner included —
+  // it is not a permission, and answering 403 either way keeps the two indistinguishable to whoever
+  // is refused, exactly as intended.
+  const gate = gatingFeatureOf(incoming);
+  if (gate && !project.features[gate]) {
+    return { status: 403, body: { error: say('api.feature.disabled', { feature: gate }) } };
   }
   if (incoming.type === 'approval' && (!incoming.block || !incoming.fingerprint)) {
     return { status: 400, body: { error: say('api.approval.needsBlockAndFingerprint') } };
@@ -329,23 +397,98 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
 /**
  * A request plus the state the server computed. The front end does not reimplement the cycle.
  * `thread` is the request's own events (`cycle.threadsOf`), not the whole list: see there why.
+ * `authorCouldTriage` (types.ts) is what reads what `recordEvent` wrote onto the request when it was
+ * FILED — the one implementation this file and requests.ts (the agent's CLI) both call, so there is
+ * no second copy of the fallback to drift from it (round 1's review, finding 2). It trusts that
+ * written field only when the request itself is dated after `LOCK_BASELINE` (round 2's review): a
+ * request from before this whole mechanism existed could hold a client-forged `authorCouldTriage`
+ * `recordEvent` never wrote, back when it stored whatever `data` a client sent.
  */
 const withStatus = (e: Event, thread: Event[]) => ({
   ...e,
-  status: cycle.status(cycle.currentState(e.id, thread, roles.can('triage', e.author))),
+  status: cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e, LOCK_BASELINE))),
 });
 
 /**
  * An event as a reader gets it: a request with its state, and an approval saying whether it is the
  * lock. Only the owner's ✓ is — `holdrim sync` and the home count theirs alone — and a panel that
- * painted any ✓ green, an admin's included, would show an opinion as if it were the lock.
- * Said here, where the roles are, so the panel reads the answer instead of learning who the owner is.
+ * painted any ✓ green, an admin's included, would show an opinion as if it were the lock. `isLocked`
+ * (types.ts) reads what `recordEvent` wrote onto the ✓ when it was GIVEN — but only when the ✓ is
+ * dated after `LOCK_BASELINE`, for the same reason `withStatus`, above, gates `authorCouldTriage` the
+ * same way — falling back to `legacyLock` against `LOCK_BASELINE` for one that predates it, or holds
+ * nothing at all. The one implementation this file and validation.ts (`holdrim sync`) both call.
  */
 const asRead = (e: Event, threads: Map<string, Event[]>) => {
   if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? []);
-  if (e.type === 'approval') return { ...e, locks: roles.can('lock', e.author) };
+  if (e.type === 'approval') return { ...e, locks: isLocked(e, LOCK_BASELINE) };
   return e;
 };
+
+/**
+ * What `viewer` is sent instead of `subject`'s own address — docs/ROLES.md, "How a person appears":
+ * the project's `people.show`, with the two overrides the design names applied here, once, so the
+ * panel, the home and the API's own two `/events` routes never re-decide them. `alwaysNamed` covers
+ * both: the owner and a holder of `people` (`roles.can('people', …)` already answers true for the
+ * owner — see `ROLE_CAPABILITIES` in engine/core/roles.js) see every name, and a person sees their
+ * own on their own requests, whatever the project chose.
+ *
+ * `id` is `authorId` (`withAuthors`, engine/api/people.ts) — the value `author` held before it was
+ * resolved to an address — so this never has to ask the store a second time for what the first read
+ * already had in hand.
+ */
+async function personDisplay(subject: string, id: string | undefined, viewer: string | null, lang: string): Promise<string> {
+  const alwaysNamed = viewer !== null && (subject === viewer || roles.can('people', viewer));
+  // Only asked when the answer could actually change: `alwaysNamed` and `people.show: "name"` are
+  // the only two paths `personAs` reads `name` on at all, and behind no password there is no account
+  // to find in the first place — an identity proxy holds no name Holdrim could show instead.
+  const needsName = alwaysNamed || project.peopleShow === 'name';
+  const user = needsName && byPassword ? await byPassword.users.find(subject) : null;
+  return personAs({
+    show: project.peopleShow, email: subject, id: id ?? null, name: user?.name ?? null,
+    role: i18n.t(lang, `people.role.${roles.roleOf(subject)}`), alwaysNamed,
+  });
+}
+
+/**
+ * `personDisplay` over a list of events, once per DISTINCT author rather than once per event: a
+ * page's history repeats the same few people, and a busy home page many more.
+ */
+async function authorDisplaysFor(
+  events: { author: string; authorId?: string }[], viewer: string | null, lang: string,
+): Promise<Map<string, string>> {
+  const distinct = new Map<string, string | undefined>();
+  for (const e of events) if (!distinct.has(e.author)) distinct.set(e.author, e.authorId);
+  const entries = await Promise.all(
+    [...distinct].map(async ([email, id]) => [email, await personDisplay(email, id, viewer, lang)] as const),
+  );
+  return new Map(entries);
+}
+
+/**
+ * The extra `{author, authorId}` pairs `authorDisplaysFor` needs so `resolveRemovedBy` (engine/api/
+ * texts.ts) can also resolve `e`'s `textRemoved.by`/`snapshotRemoved.by` — round 1 of the issue #31
+ * review, finding 1. `Removed.by` is already an address (`removalsOf`'s own comment says why), the
+ * same shape `author` is before `authorDisplaysFor` resolves it, so it needs the same treatment.
+ *
+ * `authorId` comes from `all` rather than a second store read: `removeText` (store-sqlite.ts) always
+ * writes the removal on the SAME page and block as the text it removes, so whichever event produced
+ * `Removed.by` is already in whatever list the caller has in hand — `all` for `/events?page=`, the
+ * whole-site `all` of `/events/:id` — under that exact `author` value. A remover with no match at
+ * all (impossible today, since `removeText` never leaves an event unauthored) is passed through with
+ * `authorId: undefined`, which `authorDisplaysFor` already reads as "no id to show instead of a
+ * name" — the same fallback an event from before ids existed gets.
+ */
+function removalSubjectsOf(
+  e: { textRemoved?: Removed | null; snapshotRemoved?: Removed | null },
+  all: { author: string; authorId?: string }[],
+): { author: string; authorId?: string }[] {
+  const subjects: { author: string; authorId?: string }[] = [];
+  for (const removed of [e.textRemoved, e.snapshotRemoved]) {
+    if (!removed) continue;
+    subjects.push({ author: removed.by, authorId: all.find((x) => x.author === removed.by)?.authorId });
+  }
+  return subjects;
+}
 
 // ---------------------------------------------------------------- the API routes
 /**
@@ -369,7 +512,7 @@ async function recordEvent(
     const ofPage = await events.list(incoming.page);
     const request = ofPage.find((e) => e.id === requestId && e.type === 'request');
     if (!request) return { status: 404, body: { error: say('api.request.notFound') } };
-    const current = cycle.currentState(requestId, ofPage, roles.can('triage', request.author));
+    const current = cycle.currentState(requestId, ofPage, authorCouldTriage(request, LOCK_BASELINE));
 
     if (incoming.type === 'supplement') {
       if (email !== request.author && !canApprove) {
@@ -401,6 +544,18 @@ async function recordEvent(
       // guard — see `currentState` in engine/core/cycle.js.
       incoming.data = { ...incoming.data, from: current };
     }
+  }
+
+  // Written NOW, from the grants `roles` holds at this exact instant — never left for a later read
+  // to work out, which is the bug this closes (docs/ROLES.md §3, "written at the moment, read
+  // forever after"): a ✓ recomputed on every read stops being a lock the moment its author no longer
+  // holds `lock`, and a request recomputed the same way is silently decided the moment its author
+  // gains `triage`, with no triage event ever written. Written as a STRING — see `writtenBoolean`'s
+  // own comment for why a bare boolean here would silently break the CLI's cloud reader.
+  if (incoming.type === 'approval') {
+    incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(roles.can('lock', email)) };
+  } else if (incoming.type === 'request') {
+    incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(roles.can('triage', email)) };
   }
 
   // Resolved BEFORE the write, not after: an event's author is never null — the row has to exist
@@ -457,6 +612,13 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       // their own choice, then the browser, then the project — so the panel does not decide it a
       // second way and speak Spanish on a page whose sign-in spoke Portuguese.
       language: languageOf(req),
+      // The toggles the PANEL draws a control for, and only those — never peopleScreen or graph,
+      // which gate a server screen and a CLI command the panel never renders. Without this the
+      // panel would keep offering "Comment", or the bug/page categories, after a project turned
+      // them off, and the person would type into a form the server then 403s on: the front end has
+      // to obey the same answer the server would give (docs/ROLES.md, "The front end obeys the
+      // server"). `engine/web/src/Panel.jsx` is the one place that reads this.
+      features: { comments: project.features.comments, pageRequests: project.features.pageRequests, bugCategory: project.features.bugCategory },
       // Only exists with password login. Without it, reloading the page would forget the password
       // is still the first-access one — and the change screen would only appear at login.
       ...(byPassword ? { mustChangePassword: (await byPassword.fromRequest(req.headers))?.mustChangePassword ?? false } : {}),
@@ -482,16 +644,36 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     // page), so the filtered query is enough — no need to scan the whole collection.
     const all = await events.list(page);
     const threads = cycle.threadsOf(all);
-    return json(res, 200, all.map((e) => asRead(e, threads)));
+    const lang = languageOf(req);
+    const displays = await authorDisplaysFor(all, email, lang);
+    // `own`, never a raw address the panel could compare `me` against: `author` below is already
+    // whatever `people.show` says this viewer may see, which for anyone but the viewer themselves is
+    // not necessarily an e-mail at all — docs/ROLES.md, "The front end obeys the server" (the panel
+    // computes nothing, `engine/web/src/Panel.jsx`'s own `.own` reads). `textRemoved`/`snapshotRemoved`
+    // go through the very same map: the remover's own event is on this page too (`removeText` writes
+    // it there), so `displays` already has their entry — no second resolve, and no raw address left
+    // inside `Removed` for a viewer `author` itself already hides it from.
+    return json(res, 200, all.map((e) => ({
+      ...asRead(e, threads), author: displays.get(e.author) ?? e.author,
+      textRemoved: resolveRemovedBy(e.textRemoved, displays), snapshotRemoved: resolveRemovedBy(e.snapshotRemoved, displays),
+      own: e.author === email,
+    })));
   }
 
   const oneEvent = route.match(/^\/events\/([A-Za-z0-9_-]+)$/);
   if (req.method === 'GET' && oneEvent) {
     const all = await events.list(null);
     const found = all.find((e) => e.id === oneEvent[1]);
-    return found
-      ? json(res, 200, asRead(found, cycle.threadsOf(all)))
-      : json(res, 404, { error: i18n.t(languageOf(req), 'api.event.notFound'), id: oneEvent[1] });
+    if (!found) return json(res, 404, { error: i18n.t(languageOf(req), 'api.event.notFound'), id: oneEvent[1] });
+    const lang = languageOf(req);
+    // Unlike the list route above, `all` here spans every page, so `[found]` alone would miss the
+    // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
+    const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], email, lang);
+    return json(res, 200, {
+      ...asRead(found, cycle.threadsOf(all)), author: displays.get(found.author) ?? found.author,
+      textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
+      own: found.author === email,
+    });
   }
 
   // The current fingerprint of blocks by id, read from the pages on disk. The panel computes the
@@ -511,11 +693,30 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       .map((id) => [id, blocks.get(id)!.fingerprint])));
   }
 
+  // What would need checking, transitively, before touching this block — the panel's "impact
+  // radius" (docs/IMPACT.md). Computed here, from the SAME `radiusOf` the CLI's `if-i-touch` is
+  // built on (engine/core/validity.js), because the panel only has the DOM of the page it is on:
+  // a dependent three pages away is invisible to it unless the server names it.
+  //
+  // No `blocks.has(id)` guard: an id nobody declares any more still answers correctly, because
+  // `radiusOf` looks at what OTHER blocks point at, not at whether `id` itself is there — the same
+  // reasoning `stateOf` already relies on for "red when the dependency vanishes, too".
+  //
+  // ⚠️ Every dependent is named, with no visibility filter — the same gap `/fingerprints` already
+  // has. Fine today, when a session only needs to be signed in at all; once grants can be scoped to
+  // pages or blocks (#33), this has to filter by what the viewer may see, or the radius becomes a
+  // way to learn the ids of blocks a scoped grant was meant to hide.
+  if (req.method === 'GET' && route === '/impact-radius') {
+    const id = url.searchParams.get('id') ?? '';
+    const blocks = await readBlocks(projectRoot);
+    return json(res, 200, { ids: radiusOf(id, blocks) });
+  }
+
   if (req.method === 'GET' && route === '/requests/open') {
     const all = await events.list(null);
     const threads = cycle.threadsOf(all);
     const toTriage = all.filter((e) => e.type === 'request')
-      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.can('triage', r.author)) === 'open').length;
+      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)) === 'open').length;
     return json(res, 200, { toTriage });
   }
 
@@ -601,6 +802,22 @@ async function userRoutes(
       json(res, 409, { error: say('api.users.ownerIsProvisionedAtBoot', { email: address }) });
       return true;
     }
+    // ⚠️ Their accounts are guarded like the owner's (docs/ROLES.md, section 3): a password handed
+    // out for a HOLDRIM_LOCKS address is a lock handed out, whoever ends up holding it. Guarded on
+    // all four routes with the SAME question, `roles.isLockHolder` — see the reset and enabled
+    // routes below.
+    //
+    // The MESSAGE never says "holds a lock" or names `HOLDRIM_LOCKS`. That does NOT stop an admin
+    // from telling this account apart from an ordinary one — the refusal necessarily shows the
+    // address is reserved, and this check runs before "already taken" below, so even the STATUS
+    // CODE differs; the lock markers already in the event history name the holders anyway. What the
+    // message withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically
+    // — never the fact of the reservation itself, which the 409 already gives away (round 3 of #29's
+    // review, finding 5; round 2's finding 5 first wrote this check, overclaiming what it hides).
+    if (roles.isLockHolder(address) && !roles.isOwner(email)) {
+      json(res, 409, { error: say('api.users.lockHolderIsOwnerToCreate', { email: address }) });
+      return true;
+    }
     if (await users.find(address)) {
       json(res, 400, { error: say('api.users.emailTaken', { email: address }) });
       return true;
@@ -655,10 +872,28 @@ async function userRoutes(
     if (roles.isOwner(target) && target !== email) {
       return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
     }
-    const password = await users.resetPassword(target);
+    // Same guard, extended to HOLDRIM_LOCKS (docs/ROLES.md, section 3): "the owner's alone", with no
+    // exception for the lock-holder resetting themselves — unlike the owner's own guard above, which
+    // exists so the owner is never locked out of their own recovery. A lock-holder has no comparable
+    // need served by this admin-only route; `/change-password` is theirs already.
+    //
+    // The message does not say "holds a lock" here either — see the create route's own comment,
+    // above, for why (round 2 of #29's review, finding 5).
+    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+      return json(res, 409, { error: say('api.users.lockHolderPasswordIsOwnerToReset', { email: target }) }), true;
+    }
+    const { password, sessionsDropped } = await users.resetPassword(target);
     // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
     log('INFO', 'user_password_reset', await actedOn(target, email));
-    json(res, 200, { user: await users.find(target), password });
+    // ⚠️ The credential change is real either way — `password` is returned regardless — but a
+    // failed drop means the OLD sessions may still be alive, which is exactly the gap a reset
+    // exists to close. `idForLog`, never `target`: docs/PRIVACY.md says a log names a person by id,
+    // and this is the one line that used to carry the e-mail instead, from inside the store that
+    // had no id to reach for.
+    if (!sessionsDropped) {
+      log('ERROR', 'user_sessions_not_dropped', { person: await idForLog(target), reason: 'password reset' });
+    }
+    json(res, 200, { user: await users.find(target), password, ...(sessionsDropped ? {} : { sessionsDropped }) });
     return true;
   }
 
@@ -689,9 +924,27 @@ async function userRoutes(
       json(res, 409, { error: say('api.users.ownerCannotBeDisabled', { email: target }) });
       return true;
     }
-    await users.setEnabled(target, body.enabled);
+    // ⚠️ BOTH directions on a lock-holder's account are the owner's alone (docs/ROLES.md, "Capabilities
+    // are the engine's": the `people` capability's own entry reads "disable and re-enable — never …
+    // the account of anyone who holds `lock`"). Round 1 of this issue guarded only re-enabling, on the
+    // reasoning that disabling hands out no password — true, but it misses the other half: an admin
+    // who can disable a lock-holder at will can silence their ✓ at the exact moment it would matter,
+    // with no password needed to do it. One check now, not two: `roles.isLockHolder` does not care
+    // which direction `body.enabled` asks for, only who is asking (round 2 of #29's review, finding 1).
+    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+      const key = body.enabled ? 'api.users.lockHolderIsOwnerToEnable' : 'api.users.lockHolderIsOwnerToDisable';
+      json(res, 409, { error: say(key, { email: target }) });
+      return true;
+    }
+    const { sessionsDropped } = await users.setEnabled(target, body.enabled);
     log('INFO', 'user_enabled_changed', { ...await actedOn(target, email), enabled: body.enabled });
-    json(res, 200, { user: await users.find(target) });
+    // Same reasoning as the reset route just above: the disable itself already took, but a failed
+    // drop leaves the old sessions possibly alive, and that has to reach both the log — by id, not
+    // by the e-mail the store no longer has anywhere to put — and the person who asked.
+    if (!sessionsDropped) {
+      log('ERROR', 'user_sessions_not_dropped', { person: await idForLog(target), reason: 'disabling the account' });
+    }
+    json(res, 200, { user: await users.find(target), ...(sessionsDropped ? {} : { sessionsDropped }) });
     return true;
   }
 
@@ -737,6 +990,18 @@ async function viewerOf(req: IncomingMessage): Promise<string | null> {
  */
 const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.can('people', viewer));
 
+/**
+ * Whether the people SCREEN (and its link in the nav) is reachable at all — `features.peopleScreen`.
+ *
+ * ⚠️ This is the ONLY place that toggle is read. The `/api/users*` routes (`userRoutes`, above) ask
+ * `manages()` — `roles.can('people', email)` — and never this: hiding the screen must never mean
+ * disabling what it fronts (docs/ROLES.md, "no toggle may disable a guard"). An owner who knows the
+ * routes, or a script that calls them directly, keeps every ability the screen merely gives a button
+ * to; turning this off hides the button, nothing else. `engine/tests/features.test.js` proves the
+ * guards themselves read as if this toggle did not exist.
+ */
+const peopleScreenOn = () => project.features.peopleScreen;
+
 /** Headers for a screen the engine renders itself: never cached, framed by nobody, and its policy. */
 function screenHeaders(nonce: string, script: boolean) {
   return {
@@ -748,8 +1013,10 @@ function screenHeaders(nonce: string, script: boolean) {
 async function servePeople(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
   // Somebody who may not manage people is sent home rather than shown a refusal: the navigation
-  // never offered them this screen, so they got here by typing the address.
-  if (!byPassword || !managesPeople(viewer)) {
+  // never offered them this screen, so they got here by typing the address. A project that turned
+  // the screen off sends EVERYONE home the same way, owner included — the routes behind it (above)
+  // never asked this question and are not asked it here either.
+  if (!peopleScreenOn() || !byPassword || !managesPeople(viewer)) {
     return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
   }
   const nonce = randomBytes(16).toString('base64');
@@ -828,14 +1095,18 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   const all = await events.list(null);
   // Only a ✓ from someone who holds `lock` can become one, so only those are worth counting as
   // waiting for one.
-  const ownerApprovals = all.filter((e) => e.type === 'approval' && roles.can('lock', e.author));
+  const ownerApprovals = all.filter((e) => e.type === 'approval' && isLocked(e, LOCK_BASELINE));
   const pages = summarisePages(await readBlocks(projectRoot), loadRegistry(projectRoot), cfg.site, ownerApprovals,
     (path) => readFileSync(path, 'utf8'));
   const threads = cycle.threadsOf(all);
-  const requests = requestsInProgress(all,
-    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.can('triage', r.author)),
-    new Map(pages.map((p) => [p.page, p.href])));
   const viewer = await viewerOf(req);
+  // Resolved once for every request on the home, not once per row: `requestsInProgress` only reads
+  // this for `type: "request"` events, so those are all `authorDisplaysFor` ever needs to look at.
+  const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, lang);
+  const requests = requestsInProgress(all,
+    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)),
+    new Map(pages.map((p) => [p.page, p.href])),
+    (email) => displays.get(email) ?? email);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the
   // same one the panel draws its buttons from. Nobody else is offered a form the server refuses.
   if (viewer && roles.can('approve', viewer)) {
@@ -848,7 +1119,8 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   res.writeHead(status, screenHeaders(nonce, false));
   res.end(renderHomePage(i18n, lang, {
     projectName: project.name, pages, requests,
-    canManagePeople: managesPeople(viewer), ask,
+    canManagePeople: peopleScreenOn() && managesPeople(viewer),
+    pageRequestsEnabled: project.features.pageRequests, ask,
   }, projectTheme, nonce));
 }
 

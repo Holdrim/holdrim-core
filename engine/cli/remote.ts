@@ -3,7 +3,8 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
 import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
-import { textKey, withTexts, withTextsRetrying, TEXT_REMOVED, type RawEvent as Raw, type TextField, type TextRow } from '../api/texts.ts';
+import { textKey, withTexts, withTextsRetrying, reportTampered, TEXT_REMOVED,
+  type RawEvent as Raw, type TextField, type TextRow, type TamperReport } from '../api/texts.ts';
 
 /** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
 type RawEvent = Raw<Event>;
@@ -29,6 +30,49 @@ const exec = promisify(execFile);
  * that writes the cloud directly be proved against a real Firestore instead of a stub.
  */
 const emulator = (): string | undefined => process.env.FIRESTORE_EMULATOR_HOST || undefined;
+
+/**
+ * A Firestore `timestampValue`, normalized to the plain ms ISO string the server itself writes and
+ * compares (round 2's review, MINOR). Firestore's own JSON mapping for a timestamp
+ * (`google.protobuf.Timestamp`) emits 0, 3, 6 or 9 fractional digits depending on the value, while
+ * every comparison of `when` in this codebase (`legacyLock`, `earliestLockBaseline`, this file's own
+ * history sort) is a plain `<`/`localeCompare` on the raw string. Left un-normalized, a whole-second
+ * timestamp sorts AFTER a fractional one from the same second — `'…10:00:00Z' > '…10:00:00.5Z'`
+ * lexically, because `Z` (0x5A) sorts after `.` (0x2E) — even though the first is the LATER instant.
+ * `Date` accepts any of the four shapes and always answers back with exactly three digits, matching
+ * the server's own `new Date().toISOString()` (store-sqlite.ts, `append`).
+ */
+export function normalizeWhen(timestampValue: string | null | undefined): string {
+  return timestampValue ? new Date(timestampValue).toISOString() : '';
+}
+
+/**
+ * One Firestore document → the raw event shape `withTexts` expects. Pulled out of `Source` (it reads
+ * nothing private) so a test can drive the exact parsing `events()` runs on a real document — this
+ * function calling `normalizeWhen` on `when` included — without standing up the whole REST protocol
+ * behind it (round 2's review, MINOR: nothing pinned that this reader calls `normalizeWhen` at all,
+ * so reverting `when` back to the raw `timestampValue` string survived every test in the suite).
+ */
+export function firestoreEventOf(d: Record<string, any>): RawEvent {
+  const f = d.fields ?? {};
+  const s = (k: string) => f[k]?.stringValue ?? null;
+  const data: Record<string, string> = {};
+  for (const [k, v] of Object.entries(f.data?.mapValue?.fields ?? {})) {
+    data[k] = (v as any).stringValue;
+  }
+  return {
+    id: String(d.name).split('/').pop()!,
+    type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
+    // Absent on a document from before texts were extracted, or one the CLI's own `add` wrote —
+    // that path writes straight to the cloud with no hash, a gap docs/PRIVACY.md, section 3 already
+    // names — and `text`/`snapshot` there already hold their own plain value: read as such.
+    text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
+    author: s('author')!,
+    when: normalizeWhen(f.when?.timestampValue),
+    data: Object.keys(data).length ? data : null,
+    textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+  };
+}
 
 export class Source {
   #local: boolean;
@@ -183,31 +227,74 @@ export class Source {
   /**
    * Reads events straight from the SQLite file. READ ONLY — never writes: writing through here
    * would bypass the cycle, the roles and the limits.
+   *
+   * The four reads — events, people, texts, the extraction boundary — inside one read transaction,
+   * the same fix `SqliteEventStore.list()` already has (store-sqlite.ts) and this file's own doc
+   * comment already claimed for itself: round 1 of the #91 review, finding 2, is that this reader
+   * never actually took it. Autocommitted one at a time on a WAL file, a `removeText` from the real
+   * server landing between the events SELECT and the texts SELECT reads back as tampering that never
+   * happened — a false CRITICAL alert, which is worse than none: it teaches whoever sees it that this
+   * alert cries wolf.
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
+    const { extractionBoundary, rollbackQuietly } = await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
+    let rows: Record<string, any>[];
+    let people: Map<string, string | null>;
+    let texts: Map<string, TextRow>;
+    let boundary: number | null;
     try {
-      // `*`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no such
-      // columns at all, and naming them would fail the query outright rather than read the file's
-      // own, older shape — the same reason `hasPeople` below asks before it reads that table.
-      // `rowid`, same as the server's own `SqliteEventStore.list()` (store-sqlite.ts): a removal is
-      // always inserted after the event it names, so a tie inside one `happened_at` millisecond —
-      // `notBefore` clamping a removal to its target's own timestamp — has to keep breaking toward
-      // recorded order, not whatever the planner happens to pick, or the two readers of one file
-      // could disagree about which side of the tie a removal falls on. As store-sqlite.ts's own
-      // comment says of its identical clause: today's SQLite already hands ties back in rowid order,
-      // so dropping this changes nothing the suite below can see; naming it turns that accident into
-      // a promise. `rowid DESC` does fail it.
-      const rows = db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
-      // A file written before the people table existed has no such table, and every author in it
-      // is an address: an empty table resolves none of them, which is what they need. The read
-      // is the same rule the server's store applies, through the same resolver.
-      const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
-      const people = new Map(hasPeople
-        ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
-          .map((p) => [p.id, p.email ?? null])
-        : []);
+      db.exec('BEGIN DEFERRED');
+      try {
+        // `*, rowid`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no
+        // such columns at all, and naming them would fail the query outright rather than read the
+        // file's own, older shape — the same reason `hasPeople` below asks before it reads that
+        // table. `rowid`, same as the server's own `SqliteEventStore.list()` (store-sqlite.ts): a
+        // removal is always inserted after the event it names, so a tie inside one `happened_at`
+        // millisecond — `notBefore` clamping a removal to its target's own timestamp — has to keep
+        // breaking toward recorded order, not whatever the planner happens to pick, or the two
+        // readers of one file could disagree about which side of the tie a removal falls on. As
+        // store-sqlite.ts's own comment says of its identical clause: today's SQLite already hands
+        // ties back in rowid order, so dropping this changes nothing the suite below can see; naming
+        // it turns that accident into a promise. `rowid DESC` does fail it. It is also what
+        // `extractionBoundary` below is compared against, per row, for the downgrade check.
+        rows = db.prepare('SELECT *, rowid FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
+        // A file written before the people table existed has no such table, and every author in it
+        // is an address: an empty table resolves none of them, which is what they need. The read
+        // is the same rule the server's store applies, through the same resolver.
+        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
+        people = new Map(hasPeople
+          ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
+            .map((p) => [p.id, p.email ?? null])
+          : []);
+        // A file written before texts were extracted has no `texts` table either, and every row's
+        // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
+        // an empty people map gives an author (docs/PRIVACY.md, section 4).
+        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
+        texts = new Map(hasTexts
+          ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
+              { event: string; field: TextField; value: string; salt: string }[])
+            .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt } as TextRow])
+          : []);
+        // Same rule again: a file with no `text_hash` column at all has never been touched by any
+        // version that hashes, so nothing in it can be proven `afterExtraction` either.
+        const hasHashColumns = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[])
+          .some((c) => c.name === 'text_hash');
+        boundary = hasHashColumns ? extractionBoundary(db) : null;
+        db.exec('COMMIT');
+      } catch (err) {
+        // Round 3 of the #91 review, MINOR: a ROLLBACK that itself throws — the transaction was
+        // never actually open, say — would otherwise replace `err`, the real reason this read
+        // failed, with a complaint about undoing a failure that already happened. `rollbackQuietly`
+        // (engine/api/store-sqlite.ts) is the one place the ROLLBACK-swallowing lives, so
+        // `SqliteEventStore.list()` and `installGuards` in that same file share the identical fix,
+        // not a second copy of it; the `throw err` stays here; a version that also rethrew inside
+        // the helper left `rows`/`people`/`texts` below "used before being assigned" to `tsc` — see
+        // the helper's own comment for why.
+        rollbackQuietly(db);
+        throw err;
+      }
       const events = withAuthors(rows.map((row) => ({
         id: String(row.id), type: String(row.type), page: String(row.page),
         block: row.block ?? null, fingerprint: row.fingerprint ?? null, text: row.text ?? null,
@@ -215,17 +302,16 @@ export class Source {
         author: String(row.author), when: String(row.happened_at),
         data: row.data ? JSON.parse(String(row.data)) : null,
         textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+        afterExtraction: boundary != null && (row.rowid as number) >= boundary,
       })), people);
-      // A file written before texts were extracted has no `texts` table either, and every row's
-      // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
-      // an empty people map gives an author (docs/PRIVACY.md, section 4).
-      const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
-      const texts = new Map(hasTexts
-        ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
-            { event: string; field: TextField; value: string; salt: string }[])
-          .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt } as TextRow])
-        : []);
-      return withTexts(events, texts);
+      // Read straight from the file, so this is one of the two CLI readers issue #91 names: the
+      // server, reading through the API, already raises this alert on its own; a person pointing
+      // `--db` at the file directly gets no such server in between, so this is the only place left
+      // for the alert to come from.
+      const reports: TamperReport[] = [];
+      const out = withTexts(events, texts, reports);
+      for (const r of reports) reportTampered(r);
+      return out;
     } finally {
       db.close();
     }
@@ -244,7 +330,7 @@ export class Source {
     // an address that does not exist.
     this.#requireProject();
     const headers = { Authorization: `Bearer ${await this.#gcloudToken()}` };
-    const out = (await this.#collection(headers, 'events')).map((d) => this.#fromFirestore(d));
+    const out = (await this.#collection(headers, 'events')).map((d) => firestoreEventOf(d));
     // The people after the events, as the server's Firestore store reads them and for its reason:
     // a person is made before their first event, so every author read above is in this read.
     const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
@@ -262,12 +348,17 @@ export class Source {
     // holding one open across a full scan of both eventually fails outright. `withTextsRetrying`
     // (engine/api/texts.ts) is the one rule both readers now share: for a field a first pass calls
     // tampered, ask once more, later, for the removal events that first pass could not have seen.
-    return withTextsRetrying(events, texts, async () => {
+    // The other CLI reader issue #91 names: reading the cloud directly, bypassing the server and
+    // therefore the alert it would otherwise have raised on this same event.
+    const reports: TamperReport[] = [];
+    const resolved = await withTextsRetrying(events, texts, async () => {
       // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
       const removed = await this.#collection(headers, 'events',
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
-      return withAuthors(removed.map((d) => this.#fromFirestore(d)), people);
-    });
+      return withAuthors(removed.map((d) => firestoreEventOf(d)), people);
+    }, reports);
+    for (const r of reports) reportTampered(r);
+    return resolved;
   }
 
   /**
@@ -405,26 +496,5 @@ export class Source {
     }]);
     if (!r.ok) throw await this.#cloudError(r, 'writing to');
     return id;
-  }
-
-  #fromFirestore(d: Record<string, any>): RawEvent {
-    const f = d.fields ?? {};
-    const s = (k: string) => f[k]?.stringValue ?? null;
-    const data: Record<string, string> = {};
-    for (const [k, v] of Object.entries(f.data?.mapValue?.fields ?? {})) {
-      data[k] = (v as any).stringValue;
-    }
-    return {
-      id: String(d.name).split('/').pop()!,
-      type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
-      // Absent on a document from before texts were extracted, or one the CLI's own `add` wrote —
-      // that path writes straight to the cloud with no hash, a gap docs/PRIVACY.md, section 3 already
-      // names — and `text`/`snapshot` there already hold their own plain value: read as such.
-      text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
-      author: s('author')!,
-      when: f.when?.timestampValue ?? '',
-      data: Object.keys(data).length ? data : null,
-      textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-    };
   }
 }

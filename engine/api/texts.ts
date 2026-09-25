@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { log } from './log.ts';
 
 /**
  * Where a request's, a comment's or a supplement's free text — and an approval's or a request's
@@ -133,13 +134,99 @@ export interface Removed {
 }
 
 /**
+ * `removed`, with `by` sent through the same resolution `author` already gets — round 1 of the
+ * issue #31 review, finding 1. `removalsOf` below records `by` as the resolved address, because
+ * `withAuthors` (engine/api/people.ts) always runs before `withTexts`: by the time a removal is
+ * found, every event's `author` — the remover's included — is already an e-mail, not the opaque id
+ * the store keeps. `GET /api/events` and `/api/events/:id` (engine/api/server.ts) used to rewrite
+ * only the top-level `author` to whatever `people.show` and its two overrides decide, and hand the
+ * nested `Removed` through untouched: a plain member, under `people.show: "id"` or `"role"`, still
+ * read the remover's raw e-mail off `textRemoved.by`/`snapshotRemoved.by` — the very address the
+ * setting exists to hide.
+ *
+ * Pure, so it needs no server, no store and no i18n to prove: the caller resolves `displays`
+ * however it already resolves `author` for the same request (`authorDisplaysFor`, server.ts), and
+ * this only rewrites the one field `Removed` carries that is ever a raw address. `null`/`undefined`
+ * pass through unchanged — a field never removed has nobody to resolve — and a `by` with no entry
+ * in `displays` (impossible in practice: the remover always has some event of their own for the
+ * caller to have resolved a display from, since `removeText` writes one) keeps its own value rather
+ * than turning into `undefined`, the same fallback `author` itself already relies on.
+ */
+export function resolveRemovedBy(removed: Removed | null | undefined, displays: ReadonlyMap<string, string>): Removed | null | undefined {
+  return removed ? { ...removed, by: displays.get(removed.by) ?? removed.by } : removed;
+}
+
+/**
+ * Which of the cases below made a field read as tampered — issue #91's "which of the three cases it
+ * was", so an operator does not have to re-derive it from the raw rows:
+ *
+ * - `overwritten`: a row is still there, but no longer hashes to what the event claims — the value
+ *   was edited in place.
+ * - `unaccounted`: no row, and nothing among `events` says it was let go on purpose.
+ * - `double_removal`: no row, and TWO removals claim it — `removeText` can never produce a second
+ *   one, so this is forgery even though a single one would have been a clean, ordinary removal.
+ * - `downgraded`: no hash at all, on an event a store can PROVE was made after text extraction began
+ *   — round 1 of the #91 review, finding 1. Stripping `textHash`/`snapshotHash` back to `null` and
+ *   writing the value straight into `text`/`snapshot` makes a forged event LOOK like one of the
+ *   genuinely unhashed rows `resolveOne`'s own "no hash" branch has always passed through unchanged
+ *   (a field never given, or a row from before extraction — see `RawEvent`'s own comment). Only a
+ *   store that can tell "before extraction" from "after, with the hash stripped" reports this kind;
+ *   see `afterExtraction` on `RawEvent` for which ones can.
+ */
+export type TamperKind = 'overwritten' | 'unaccounted' | 'double_removal' | 'downgraded';
+
+/** One field a reader resolved to tampered — the text itself never travels in this, only where. */
+export interface TamperReport {
+  event: string;
+  field: TextField;
+  kind: TamperKind;
+}
+
+/**
+ * The one door every reader raises the alert through — issue #91's "reports it once to a single
+ * place in the engine". Before this, three read paths (the server's stores and the CLI's two direct
+ * readers) each detected the same three cases with the same code, and each would have needed its own
+ * log call added, worded, and kept in step by hand; one function is one place for the wording, the
+ * event name and the level to agree, and one place left to check when they need to change together.
+ *
+ * CRITICAL, not ERROR: this is not a bug in the product, it is the product's own proof — a hash that
+ * no longer matches its row — saying someone wrote to the store outside it, which almost always means
+ * a credential leaked. `console.error` first, so the line is readable without a JSON parser for
+ * whoever is at a terminal (`holdrim list`, `sync`); `log()` second, so a collector watching
+ * structured lines can alert on `severity: "CRITICAL"` without parsing English.
+ *
+ * What this cannot do, and no function in this file can: stop the same attacker who forged the write
+ * from also silencing this very report — see SECURITY.md's note on this alert's honest limit.
+ */
+export function reportTampered(report: TamperReport): void {
+  console.error(`holdrim: CRITICAL — event ${report.event}, field ${report.field} reads as tampered ` +
+    `(${report.kind}): the store was written to outside the product. Rotate its credentials.`);
+  // `eventId`, not `event`: `log()`'s own second argument IS `event` — the stable, greppable NAME
+  // of what happened (`text_tampered`) — and `{ ...extra }` is spread AFTER it, so an `extra.event`
+  // would silently overwrite that name with the tampered event's id, and an alert rule keyed on
+  // `event: "text_tampered"` would stop matching on the very first real tampering it was written for.
+  log('CRITICAL', 'text_tampered', { eventId: report.event, field: report.field, kind: report.kind });
+}
+
+/**
  * An event exactly as its store keeps the row: `text`/`snapshot` hold a field's own plain value only
  * for a row written before texts were extracted (docs/PRIVACY.md, section 4, the same back-compat
  * `authorOf` gives an event from before authors were ids) — a fresh row keeps them `null` and carries
  * the field's hash instead, in `textHash`/`snapshotHash`, which never leaves this file: `withTexts`
  * deletes both before an event reaches any reader.
+ *
+ * `afterExtraction`, given `true`, is a store's own proof that THIS event was written after text
+ * extraction began — round 1 of the #91 review, finding 1: without it, `resolveOne` cannot tell a
+ * genuinely pre-extraction row from a forged one dressed to look like one (a direct writer sets
+ * `textHash: null` and writes the value straight into `text`), because both arrive here in exactly
+ * the same shape, a value with no hash. A store omits it, or gives `false`, when it has no such
+ * proof — Firestore's own ordering is a direct writer's to set (`when` is a plain field, not a
+ * server-enforced one, once someone is writing outside the SDK's own path — see store-firestore.ts's
+ * own comment), so it never claims one; `SqliteEventStore` and the CLI's own file reader can, and do
+ * — see `afterExtraction`'s own comment in store-sqlite.ts for the forge-proof reason `rowid` gives
+ * them one where Firestore has none.
  */
-export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string | null };
+export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string | null; afterExtraction?: boolean };
 
 /**
  * What an event's `text` and `snapshot` mean, for every reader: the two server stores and, in time,
@@ -147,7 +234,9 @@ export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string 
  * is for `author`. `rows` is what the texts table still holds, keyed by `textKey`. Per field:
  *
  * - no hash on the event: the field was never given (the ordinary `null`), or the row is from before
- *   texts were extracted and already holds its own plain value — returned exactly as it came in.
+ *   texts were extracted and already holds its own plain value — returned exactly as it came in,
+ *   UNLESS the store marks this event `afterExtraction`: then a value with no hash is the downgrade
+ *   forgery round 1 of the #91 review names, and reads as tampered instead (`RawEvent`'s own comment).
  * - a hash, and a row whose own hash matches it: the row is what was recorded. Its value is the text.
  * - a hash, and no row that still matches it: the text is gone, and MISSING IS NOT ABSENCE. A
  *   `TEXT_REMOVED` event naming this event and this field, found among `events` — the same list, so
@@ -167,13 +256,19 @@ export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string 
  * clock, did not exist yet. What it cannot refuse is a forgery dated and ordered correctly, paired
  * with deleting the row it names: that is a real erasure passed off as a real removal, closed only
  * once events are signed (see the note on `TEXT_REMOVED` above).
+ *
+ * `reports`, given, is appended to — never replaced — with one `TamperReport` per field this pass
+ * finds tampered. It is an accumulator rather than a return value so this function's own shape stays
+ * `E[]`, the one every existing caller and test already destructures; a caller that does not ask for
+ * reports (most of `texts.test.js`) pays nothing and reports nothing. `withTextsRetrying` below is
+ * the one caller that must NOT always pass its own straight through — see its comment for why.
  */
 export function withTexts<E extends { id: string; type: string; author: string; when: string;
                                      data?: { [k: string]: unknown } | null }>(
-  events: RawEvent<E>[], rows: ReadonlyMap<string, TextRow>,
+  events: RawEvent<E>[], rows: ReadonlyMap<string, TextRow>, reports?: TamperReport[],
 ): E[] {
   const removed = removalsOf(events);
-  return events.map((e) => resolveOne(e, rows, removed));
+  return events.map((e) => resolveOne(e, rows, removed, reports));
 }
 
 /** What `removalsOf` found: the valid removals, and which keys had more than one. */
@@ -218,9 +313,14 @@ function removalsOf<E extends { id: string; type: string; author: string; when: 
   return { valid, duplicated };
 }
 
-function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, removed: Removals): E {
+function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, removed: Removals,
+                       reports?: TamperReport[]): E {
   const e = event as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = { ...e };
+  // Internal to this decision, like the two hashes below: a store's own proof of ordering is not part
+  // of what an event means to any reader, and leaving it in would leak a fact — this store's rowid —
+  // no reader outside this file has any business seeing.
+  delete out.afterExtraction;
   for (const field of TEXT_FIELDS) {
     const hashKey = `${field}Hash`;
     const hash = (e[hashKey] as string | null | undefined) ?? null;
@@ -228,6 +328,19 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
     // Every branch sets both fields, deterministically: a caller of `withTexts` never has to seed
     // "nothing to say" defaults first, and an event resolved twice answers the same either time.
     if (hash == null) { // never given, or a pre-extraction row already holding its own value
+      const value = (e[field] as string | null | undefined) ?? null;
+      // A store that can PROVE this event postdates text extraction (`afterExtraction`) rules out
+      // "genuinely from before extraction" — see `RawEvent`'s own comment — so a value with no hash
+      // here is the downgrade forgery, not back-compat. `value == null` still passes through: a field
+      // legitimately never given has no value to have downgraded, whichever side of the boundary the
+      // event falls on.
+      if (e.afterExtraction === true && value != null) {
+        out[field] = null;
+        out[`${field}Removed`] = null;
+        out[`${field}Tampered`] = true;
+        reports?.push({ event: e.id as string, field, kind: 'downgraded' });
+        continue;
+      }
       out[`${field}Removed`] = null;
       out[`${field}Tampered`] = false;
       continue;
@@ -245,7 +358,12 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
     out[`${field}Removed`] = gone;
     // Tampered when nothing accounts for it at all, or when TWO removals do — a duplicate is not a
     // cleaner story than a missing one, it is the same suspicion from the other direction.
-    out[`${field}Tampered`] = gone == null || removed.duplicated.has(key);
+    const duplicated = removed.duplicated.has(key);
+    const tampered = gone == null || duplicated;
+    out[`${field}Tampered`] = tampered;
+    // `row` truthy here means it FAILED the hash check above — a row that is there but wrong, the
+    // "overwritten" case; no row is either simply unaccounted for, or the double-removal forgery.
+    if (tampered) reports?.push({ event: e.id as string, field, kind: row ? 'overwritten' : duplicated ? 'double_removal' : 'unaccounted' });
   }
   return out as unknown as E;
 }
@@ -256,8 +374,15 @@ export interface Suspect {
   field: TextField;
 }
 
-/** The fields a resolved list reads as tampered, named for `fetchRemovals` below. */
-function suspectsOf<E extends { id: string; textTampered?: boolean; snapshotTampered?: boolean }>(
+/**
+ * The fields a resolved list reads as tampered — named for `fetchRemovals` below, on a PROVISIONAL
+ * list `withTextsRetrying` has not yet had its retry settle. Exported as well for a second, unrelated
+ * use: on a list that IS final — the CLI's own `queue`/`sync` (engine/cli/requests.ts, validation.ts)
+ * — the same {event, field} pairs are exactly what `holdrim list`/`sync` warn from and exit non-zero
+ * on, with no need to recompute anything or to know which of the three cases it was: that already
+ * went out through `reportTampered`, in whichever store or reader built this same list.
+ */
+export function suspectsOf<E extends { id: string; textTampered?: boolean; snapshotTampered?: boolean }>(
   resolved: E[],
 ): Suspect[] {
   const out: Suspect[] = [];
@@ -298,28 +423,44 @@ function suspectsOf<E extends { id: string; textTampered?: boolean; snapshotTamp
  * collection, bounded by how many texts have ever been let go, not by how many events there have
  * ever been. `withTextsRetrying` itself only ever keeps the caller's own `events.length` results
  * (round 3, finding 1), so an unnarrowed, whole-project answer costs a wider fetch, never a wrong one.
+ *
+ * `reports`, given, gets exactly the tampered fields THIS call's own final answer holds — never the
+ * provisional ones `first` finds before a retry has had its say. `first`'s own tamper reports are
+ * thrown away on purpose: reporting them would raise issue #91's critical alert for every torn read
+ * this whole function exists to correct, the one false positive `resolveOne`'s own comment already
+ * warns about. Reporting only ever happens once suspects.length or more.length has settled things one
+ * way or the other — genuinely nothing tampered, genuinely nothing left to explain it, or genuinely
+ * resolved by the fetched removals.
  */
 export async function withTextsRetrying<E extends { id: string; type: string; author: string; when: string;
                                         data?: { [k: string]: unknown } | null }>(
   events: RawEvent<E>[], rows: ReadonlyMap<string, TextRow>,
   fetchRemovals: (suspects: Suspect[]) => Promise<RawEvent<E>[]>,
+  reports?: TamperReport[],
 ): Promise<E[]> {
-  const first = withTexts(events, rows);
+  const provisional: TamperReport[] = [];
+  const first = withTexts(events, rows, provisional);
   const suspects = suspectsOf(first);
-  if (suspects.length === 0) return first;
+  if (suspects.length === 0) return first; // nothing tampered: `provisional` is empty too
   const more = await fetchRemovals(suspects);
-  if (more.length === 0) return first;
+  // Nothing more exists anywhere to explain them: `first`'s suspects are the real, final answer, not
+  // a torn read's false alarm — report them as such.
+  if (more.length === 0) { reports?.push(...provisional); return first; }
   // Appended, not merged in by id: a removal's own event always sorts after the event it names
   // (docs/PRIVACY.md, section 4 — `removeText` cannot pre-date what it removes from), and every
   // target here is already somewhere in `events`, so putting every freshly-fetched removal after
   // all of them keeps `removalsOf`'s own ordering check (finding F) exactly as true as it was.
   const known = new Set(events.map((e) => e.id));
-  const resolved = withTexts(events.concat(more.filter((m) => !known.has(m.id))), rows);
+  const final: TamperReport[] = [];
+  const resolved = withTexts(events.concat(more.filter((m) => !known.has(m.id))), rows, final);
   // `fetchRemovals` reads the WHOLE project — a torn read cannot know which page a removal from
   // years ago belonged to any better than list(page) itself can — so `resolved` holds more events
   // than this caller asked for. Only the first `events.length` of them are the caller's own,
   // resolved with the extra removals borrowed to see correctly; the rest go no further; without
   // this, a removal from another page would leak into list(page)'s answer, and calling this twice
-  // would duplicate it a second time (round 3, finding 1).
+  // would duplicate it a second time (round 3, finding 1) — and reporting a tampered field from
+  // another page would repeat the same leak as a false alert nobody asked this call about.
+  const ownIds = new Set(events.map((e) => e.id));
+  reports?.push(...final.filter((r) => ownIds.has(r.event)));
   return resolved.slice(0, events.length);
 }

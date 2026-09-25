@@ -87,6 +87,22 @@ test('only requests someone is still waiting on are listed, the oldest first, li
   assert.equal(rows[0].state, 'approved');
 });
 
+test('requestsInProgress shows the address by default — every caller from before people.show existed', () => {
+  const request = (id) => ({ id, type: 'request', page: 'A01', block: 'A01.1.1', author: 'r@x.org', when: '2026-09-22', text: id, data: {} });
+  const rows = requestsInProgress([request('r1')], () => 'open', new Map([['A01', '/pages/A01.html']]));
+  assert.equal(rows[0].author, 'r@x.org');
+});
+
+test('requestsInProgress shows whatever authorOf resolves the address to — docs/ROLES.md, "How a person appears"', () => {
+  const request = (id, author) => ({ id, type: 'request', page: 'A01', block: 'A01.1.1', author, when: '2026-09-22', text: id, data: {} });
+  const rows = requestsInProgress(
+    [request('r1', 'ana@example.org'), request('r2', 'bea@example.org')],
+    () => 'open', new Map([['A01', '/pages/A01.html']]),
+    (email) => (email === 'ana@example.org' ? 'Ana Silva' : email),
+  );
+  assert.deepEqual(rows.map((r) => r.author), ['Ana Silva', 'bea@example.org']);
+});
+
 test('the states the home treats as settled are states the cycle has', () => {
   const cycle = JSON.parse(readFileSync(`${ROOT}engine/cycle.json`, 'utf8'));
   for (const state of SETTLED) assert.ok(cycle.states[state], `${state} is not a state in cycle.json`);
@@ -161,6 +177,25 @@ test('the home asks for a page near an existing one, keeps a refused text, and a
     /role="status">Your request is recorded/);
   assert.doesNotMatch(renderHomePage(i18n, 'en', { projectName: 'P', pages: [], requests: [] }, ENGINE_THEME, 'n'), /<form/,
     'a request hangs on a page: with none, there is nothing to ask near');
+});
+
+// ---------------------------------------------------------------- the pageRequests toggle (docs/ROLES.md §7)
+
+test('features.pageRequests OFF hides the "ask for a page" form; on, or unset, it is there', () => {
+  const i18n = createI18n({ en: JSON.parse(readFileSync(`${ROOT}engine/locales/en.json`, 'utf8')) }, 'en');
+  const pages = [{ page: 'A01', href: '/a', title: 'First', tally: { valid: 0, stale: 0, broken: 0, none: 1 }, awaitingSync: 0 }];
+
+  const off = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], pageRequestsEnabled: false }, ENGINE_THEME, 'n');
+  assert.doesNotMatch(off, /<form method="post" action="\/engine\/home"/, 'the toggle hides the form entirely, not merely disables it');
+  assert.doesNotMatch(off, /home\.ask\.heading|Ask for a page/);
+
+  // The server always passes the toggle, but a caller from before it existed — and every other test
+  // in this file — passes none at all, and has to keep seeing the form it always saw.
+  const unset = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [] }, ENGINE_THEME, 'n');
+  assert.match(unset, /<form method="post" action="\/engine\/home"/, 'no value at all means on, same as today');
+
+  const on = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], pageRequestsEnabled: true }, ENGINE_THEME, 'n');
+  assert.match(on, /<form method="post" action="\/engine\/home"/);
 });
 
 test('whoever may decide gets one plain form per request, with the cycle\'s destinations and nothing run', () => {

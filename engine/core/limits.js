@@ -14,11 +14,20 @@ export const LIMITS = {
 
 // Deliberately loose: it stops junk, it does not impose a taxonomy. Real page codes look like
 // D01, T03a, C02, UC-01 and DNN — a "letter + two digits" regex would reject half of them.
-const PAGE_FORMAT = /^[A-Za-z][A-Za-z0-9-]{0,7}$/;
-const ID_FORMAT = /^[A-Za-z0-9._:-]+$/;
+//
+// Exported so `engine/core/roles.js` can validate a grant's scope (docs/ROLES.md, "A grant can be
+// limited to pages or to blocks") against the SAME shape an event's own `page` and `block` fields
+// answer to — one grammar for "what is a page code", not two that could quietly drift apart.
+export const PAGE_FORMAT = /^[A-Za-z][A-Za-z0-9-]{0,7}$/;
+export const ID_FORMAT = /^[A-Za-z0-9._:-]+$/;
 const COMMIT_FORMAT = /^[0-9a-f]{7,40}$/;
 
-const short = (v) => (String(v ?? '').length <= 20 ? String(v ?? '') : String(v).slice(0, 20) + '…');
+// Exported: `server.ts`'s `refusalOf` echoes a caller-controlled category back in a 400 body, and
+// that value is not yet bounded by anything below when it gets there — an unbounded echo is how a
+// 200 KB category once became a 200 KB error body. Truncating it here, the one place this codebase
+// already truncates an unbounded value for an error message, keeps the two truncations from silently
+// drifting to different lengths.
+export const short = (v) => (String(v ?? '').length <= 20 ? String(v ?? '') : String(v).slice(0, 20) + '…');
 const longerThan = (v, max) => String(v ?? '').length > max;
 
 /**

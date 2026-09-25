@@ -12,7 +12,7 @@
 import { createRoot } from 'react-dom/client';
 import { useEffect, useState } from 'react';
 import Panel from './Panel.jsx';
-import { whoAmI, eventsOfPage, record, fingerprintOf, fingerprintsOf, textOf } from './api.js';
+import { whoAmI, eventsOfPage, record, fingerprintOf, fingerprintsOf, impactRadiusOf, textOf } from './api.js';
 import { HOME_SCREEN } from '../../core/screens.js';
 import { blockState, trafficLightOf, foreignDependencies, summaryOf } from './state.js';
 import { t, speak } from './i18n.js';
@@ -43,9 +43,16 @@ function dependedOnOf(el) {
 
 function App({ blocks, elsewhere, who }) {
   const [opened, setOpened] = useState(null);
-  const me = who.email;
   const canApprove = Boolean(who.canApprove);
+  // Which of the panel's own controls this project has turned off (docs/ROLES.md, section 7),
+  // as `/api/me` sent them. A caller from before this toggle existed sends no `features` at all,
+  // and `Panel.jsx` reads a missing key as on — so `{}` here changes nothing for it.
+  const features = who.features ?? {};
   const [events, setEvents] = useState([]);
+  // How many of the selected block's dependents live on OTHER pages, where there is no element to
+  // light. The count still says something happened; a silent zero would read as "nothing depends on
+  // this", which for a block with only foreign dependents is the opposite of true.
+  const [radiusElsewhere, setRadiusElsewhere] = useState(0);
 
   async function reload() {
     setEvents(await eventsOfPage(page));
@@ -86,12 +93,45 @@ function App({ blocks, elsewhere, who }) {
     }
   }, [events, blocks, elsewhere]);
 
+  // The impact radius: selecting a block lights every block that depends on it, directly or through
+  // another one (docs/IMPACT.md, "Impact radius"). Computed on the server (`radiusOf`, the same
+  // function `holdrim if-i-touch` is built on) and not here, because this page's DOM is not the
+  // whole documentation — a dependent on another page has no element for this effect to find.
+  useEffect(() => {
+    // Cleared FIRST, unconditionally: a block closed, or a second click landing before the first
+    // fetch answers, must not leave a stale light lit on a block the reader is no longer looking at.
+    for (const b of blocks) b.button.classList.remove('rv-num--radius');
+    setRadiusElsewhere(0);
+    if (!opened) return;
+
+    let current = true;
+    (async () => {
+      let ids;
+      try { ids = await impactRadiusOf(opened.id); } catch (e) {
+        // Read-only and decorative: a reviewer can still approve, request or comment with no radius
+        // drawn, so this degrades quietly rather than switching the whole panel off.
+        console.warn('[holdrim] impact radius unavailable:', e);
+        return;
+      }
+      if (!current) return;
+      let elsewhere = 0;
+      for (const id of ids) {
+        const dependent = blocks.find((b) => b.id === id);
+        if (dependent) dependent.button.classList.add('rv-num--radius');
+        else elsewhere++;
+      }
+      setRadiusElsewhere(elsewhere);
+    })();
+    return () => { current = false; };
+  }, [opened, blocks]);
+
   return (
     <Panel
       block={opened}
-      me={me}
       canApprove={canApprove}
+      features={features}
       events={events}
+      radiusElsewhere={radiusElsewhere}
       onRecord={async (e) => {
         await record(e);
         // Recorded is recorded. When only the refresh after it fails, throwing like a failed POST

@@ -48,6 +48,66 @@ test('session: it opens, it holds, and it stops holding on logout', async () => 
   assert.equal(await id.fromRequest({ cookie: `${SESSION_COOKIE}=${r.session}` }), null, 'a closed session is worth nothing');
 });
 
+/**
+ * The race issue #113's first fix missed: `signIn` reads the row, hashes, and checks `enabled`
+ * BEFORE it ever calls `openSession` — and a disable or a reset that deletes every session for the
+ * account can land in exactly that gap, after the read and before the insert. Its delete only ever
+ * reaches sessions that already exist, so a session inserted a moment later is not there to catch.
+ *
+ * `openSession` is overridden here, not `check`, because it is the seam `signIn` calls right after
+ * deciding the password is good — staging the race there reproduces "verified, then reset, then
+ * inserted" in one deterministic step, with no timers and no real concurrency needed.
+ */
+test('a sign-in racing a reset does not open a session the reset cannot reach', async () => {
+  const store = new UsersSqlite(':memory:');
+  const password = await store.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = new PasswordIdentity(store, { secure: false });
+
+  const realOpenSession = store.openSession.bind(store);
+  let raced = null;
+  store.openSession = async (...args) => {
+    // The reset's own delete finds nothing here — this account has no session yet — which is
+    // exactly why the old fix alone was not enough.
+    await store.resetPassword('x@example.org');
+    raced = await realOpenSession(...args);
+    return raced;
+  };
+
+  const result = await id.signIn('x@example.org', password);
+  assert.equal(result, null, 'the password stopped matching before this session existed');
+  // `signIn` refusing is not, by itself, proof the row is gone — it is also what a session that was
+  // simply never inserted would look like. What closes THAT gap is `signIn`'s own re-check calling
+  // `closeSession(session)` on exactly this id: without it, or with it closing a different one, the
+  // row this test staged would still be sitting there, live, for whoever still holds it.
+  assert.equal(await store.fromSession(raced), null,
+    'the session opened in the race has to be the one signIn closes, not merely refused up front');
+});
+
+test('a sign-in racing a disable does not open a session the disable cannot reach', async () => {
+  const store = new UsersSqlite(':memory:');
+  const password = await store.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = new PasswordIdentity(store, { secure: false });
+
+  const realOpenSession = store.openSession.bind(store);
+  let raced = null;
+  store.openSession = async (...args) => {
+    await store.setEnabled('x@example.org', false);
+    raced = await realOpenSession(...args);
+    return raced;
+  };
+
+  const result = await id.signIn('x@example.org', password);
+  assert.equal(result, null, 'the account stopped being enabled before this session existed');
+  // Re-enabled before the check, the same reason the conformance suite re-enables before checking a
+  // race staged inside `setEnabled` itself: while the account is still disabled, `fromSession`
+  // refuses on `enabled` alone and would read as null whether or not the ROW survived. Only once
+  // the account can sign in again does a live row come back to life — so a null here, and only
+  // here, means `signIn`'s own `closeSession(session)` really deleted it.
+  await store.setEnabled('x@example.org', true);
+  assert.equal(await store.fromSession(raced), null,
+    'the session opened in the race has to be the one signIn closes, not merely refused up front');
+});
+
 test('the session cookie is not readable by JavaScript and does not travel to another site', () => {
   const id = new PasswordIdentity(new UsersSqlite(':memory:'), { secure: true });
   const header = id.sessionCookie('abc');
@@ -111,6 +171,51 @@ test('the database REFUSES to replace an event, in both REPLACE forms', async ()
     assert.deepEqual({ ...row }, { fingerprint: 'abc', author: owner }, 'the original event stays as it was');
     assert.equal(db.prepare('SELECT COUNT(*) c FROM events').get().c, 1);
     db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the database REFUSES an insert whose rowid lands below one already held, even when the rowid itself is free', async () => {
+  const dir = scratch();
+  const path = join(dir, 'events.db');
+  try {
+    const store = new SqliteEventStore(path);
+    await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
+    await store.close();
+    // From outside, as for the two tests above: `events_no_replace` alone only refuses a rowid
+    // ALREADY held, and every negative rowid — and 0 — are always free, so a plain INSERT naming
+    // one used to slip below the highest rowid held with no trigger dropped and nothing replaced
+    // (round 3 of the #91 review, MAJOR). `events_no_low_rowid` is the guard this test is for.
+    const db = new DatabaseSync(path);
+    const insertAt = (rowid, id) => db.prepare(
+      `INSERT INTO events (rowid, id, type, page, author, happened_at)
+       VALUES (?, ?, 'comment', 'A01', 'p_000000000000000000000000', '2026-01-01T00:00:00.000Z')`
+    ).run(rowid, id);
+    assert.throws(() => insertAt(-7, 'forged-negative'), /not inserted below one already held/,
+      'a negative rowid must not land below the highest one already held');
+    assert.throws(() => insertAt(0, 'forged-zero'), /not inserted below one already held/,
+      'rowid 0 is free too, and just as much below it');
+    // A gap opened by an earlier explicit, higher rowid is free, and low, without being negative —
+    // distinguishing this guard from `events_no_replace`, which only ever sees a HELD rowid as a
+    // conflict, never a free one that merely happens to be low.
+    insertAt(100, 'above-first');
+    assert.throws(() => insertAt(50, 'forged-gap'), /not inserted below one already held/,
+      'a free rowid below the current maximum is refused too, not only a negative one');
+    // Exactly what a real append with an explicit, larger rowid does: the new highest, allowed.
+    assert.doesNotThrow(() => insertAt(200, 'above-again'), 'an explicit rowid above the current maximum is allowed');
+    assert.equal(db.prepare('SELECT COUNT(*) c FROM events').get().c, 3,
+      'only the original row and the two genuinely-higher ones landed; every forged one was rolled back');
+    db.close();
+    // And a normal append, with SQLite choosing the rowid itself, still works: by the time the
+    // AFTER trigger runs, the new row is already in the table `MAX(rowid)` reads, so a genuine
+    // append — always becoming the new highest rowid — compares equal to that MAX, never less
+    // than it.
+    const reopened = new SqliteEventStore(path);
+    await assert.doesNotReject(
+      reopened.append({ type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'def', text: null, snapshot: null, data: null }, 'owner@example.org'),
+      'a normal append still goes through');
+    await reopened.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

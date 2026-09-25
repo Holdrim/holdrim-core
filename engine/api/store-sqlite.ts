@@ -3,7 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED, type TextField } from './texts.ts';
+import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
+  type TextField, type TamperReport } from './texts.ts';
 import { log } from './log.ts';
 
 /**
@@ -17,6 +18,28 @@ import { log } from './log.ts';
  * person's e-mail — the only change the people table takes, and the triggers refuse any other. The
  * trail is the product.
  */
+/**
+ * Attempts a ROLLBACK, swallowing only ITS OWN failure — the caller still throws whatever error
+ * sent it here. Round 3 of the #91 review, MINOR: a bare `db.exec('ROLLBACK')` in a catch block, on
+ * a connection already gone or a WAL past saving, can fail on its own, and an unguarded call there
+ * replaces the read's or write's real reason for failing with a complaint about undoing a failure
+ * that already happened — strictly worse than a ROLLBACK that quietly does nothing because there
+ * was nothing left to undo.
+ *
+ * Returns instead of also rethrowing `err` itself, so every call site keeps its own `throw err;` —
+ * a version that swallowed and rethrew here once left `rows`/`people`/`texts` in `Source#fromFile`
+ * (engine/cli/remote.ts) "used before being assigned" to `tsc`: that file imports this one
+ * dynamically (the same reason it already does for `extractionBoundary`), and a `never`-returning
+ * function reached through a destructured dynamic import does not narrow control flow the way a
+ * literal `throw` does, so `tsc` could no longer see that the lines after the catch are unreachable
+ * without it. One helper either way, not a `try { db.exec('ROLLBACK') } catch {}` repeated at every
+ * site: `list` and `installGuards` below use it, and so does `Source#fromFile`. `append` and
+ * `removeText` keep their own inline `db.exec('ROLLBACK')` for now: nothing has flagged those two,
+ * and folding them in without a finding behind it is scope this round of review did not ask for.
+ */
+export function rollbackQuietly(db: DatabaseSync): void {
+  try { db.exec('ROLLBACK'); } catch { /* the caller's own error is the one that matters */ }
+}
 /**
  * The triggers "Nothing is erased" rests on, by name. The database refuses, even for someone opening
  * the file with another program, so the rule stops depending on this code never calling UPDATE.
@@ -35,6 +58,28 @@ export const GUARDS: Record<string, string> = {
   events_no_replace: `BEFORE INSERT ON events
     WHEN EXISTS (SELECT 1 FROM events WHERE id = NEW.id OR rowid = NEW.rowid)
     BEGIN SELECT RAISE(ABORT, 'an event is not replaced: the trail is the product'); END`,
+  // Round 3 of the #91 review, MAJOR: `events_no_replace` above only refuses a rowid that is
+  // ALREADY held — nothing stopped an explicit `INSERT INTO events (rowid, ...) VALUES (-7, ...)`,
+  // since a negative rowid (or 0) is always free; SQLite's rowid space runs from -2^63 to 2^63-1,
+  // and a real `append` never asks for anything but the next positive one. A row forged that way
+  // sorts BELOW `extractionBoundary` by rowid, and stripped of its hash it reads as a genuine
+  // pre-extraction row with no alert at all — the very forgery `extractionBoundary` exists to name,
+  // walked around with a plain INSERT and no trigger dropped. This closes that: an insert may only
+  // ever become the new highest rowid, so `extractionBoundary`'s own claim that rowid only grows
+  // is enforced here, not merely assumed of every past and future write to this table.
+  //
+  // AFTER, not BEFORE: in a BEFORE INSERT trigger, `NEW.rowid` is still -1 for an ordinary insert
+  // that leaves SQLite to pick the rowid itself — the real value is not assigned until the row is
+  // actually written — so a BEFORE trigger comparing NEW.rowid here would reject every normal
+  // insert, not only a forged one. By the time an AFTER trigger runs, NEW.rowid is the row's real,
+  // final one, and the row is already IN the table `MAX(rowid)` reads: a genuine append always
+  // becomes the new highest rowid, so it compares equal to that MAX (not less than it) and passes;
+  // only a row that landed BELOW one already there trips this — verified directly against
+  // `node:sqlite`, not assumed from SQLite's own docs, in users.test.js ("the database REFUSES an
+  // insert whose rowid lands below one already held, even when the rowid itself is free").
+  events_no_low_rowid: `AFTER INSERT ON events
+    WHEN NEW.rowid < (SELECT MAX(rowid) FROM events)
+    BEGIN SELECT RAISE(ABORT, 'an event is not inserted below one already held: the trail is the product'); END`,
   // A row may only lose its e-mail, as an event may not change at all: an UPDATE that does anything
   // but empty the address is refused, and so is every DELETE. A re-pointed row would hand every
   // event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3). The rowid may not move
@@ -171,9 +216,43 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
     }
     db.exec('COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    rollbackQuietly(db);
     throw err;
   }
+}
+
+/**
+ * The earliest `rowid` any event in this table already carries a text or a snapshot hash on — round
+ * 1 of the #91 review, finding 1, and the forge-proof line between "genuinely written before text
+ * extraction" and "written after, with the hash stripped to look like it".
+ *
+ * `rowid` only grows: nothing on `events` is ever deleted (the guards above), a real `append` always
+ * takes the next one, and `events_no_low_rowid` (round 3 of the #91 review) now refuses an explicit
+ * INSERT that lands below one already held — round 1 of this same review shipped this function
+ * trusting that no write, forged or not, ever could, which was true of every rowid `events_no_replace`
+ * already refused to reuse but left every UNHELD low one, negative and 0 included, free for a plain
+ * INSERT to claim. Once one hashed row exists, then, every row that sorts after it by rowid was
+ * written by a version of `append` that always salts and hashes whatever text or snapshot it is given
+ * (`saltFields`) — so a LATER row with no hash at all did not come from before extraction; its hash
+ * was taken off. `resolveOne` (engine/api/texts.ts) is the reader that acts on this, through
+ * `afterExtraction` on the event it is given.
+ *
+ * `events` has no INTEGER PRIMARY KEY (its primary key is the TEXT `id`), so it is a plain rowid
+ * table, and SQLite's own docs allow `VACUUM` to renumber rowids on one of those — the promise here
+ * is only that today's SQLite keeps them in their RELATIVE order when it does, which every test that
+ * runs `VACUUM` between writes and a `list()` rests on same as this comment does; it is not a promise
+ * a future SQLite version owes this file. Newly appended rows land above whatever `VACUUM` leaves
+ * behind either way, since `events_no_low_rowid` refuses anything that would not.
+ *
+ * A database with no hashed row at all — a fresh install about to write its first event, or one
+ * whose every hashed row an attacker deleted after also dropping `events_no_delete` — answers `null`,
+ * and nothing downstream is marked `afterExtraction`: the same already-open gap a dropped-and-restored
+ * guard leaves (the long comment on `installGuards` above), not a new one this closes.
+ */
+export function extractionBoundary(db: DatabaseSync): number | null {
+  return (db.prepare(
+    'SELECT MIN(rowid) AS boundary FROM events WHERE text_hash IS NOT NULL OR snapshot_hash IS NOT NULL'
+  ).get() as { boundary: number | null }).boundary;
 }
 
 /**
@@ -345,7 +424,10 @@ export class SqliteEventStore implements EventStore {
     }
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
-    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
+    // `authorId: personId`, the same value `withAuthors` would capture off this row a moment later,
+    // so a fresh append and the list right after it answer it identically (events-conformance.test.js,
+    // "the answer to an append is what a list says a moment later").
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId };
   }
 
   async removeText(event: string, field: TextField, by: string): Promise<Event> {
@@ -382,7 +464,7 @@ export class SqliteEventStore implements EventStore {
     return {
       id, type: TEXT_REMOVED, page: original.page, block: original.block ?? null, fingerprint: null,
       text: null, snapshot: null, textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-      author: personEmail(by), when, data,
+      author: personEmail(by), authorId: personId, when, data,
     };
   }
 
@@ -399,31 +481,45 @@ export class SqliteEventStore implements EventStore {
     let rows: unknown[];
     let people: Map<string, string | null>;
     let texts: Map<string, { value: string; salt: string }>;
+    let boundary: number | null;
     try {
       rows = page == null
         // `rowid` breaks a tie inside one millisecond: recorded order, not whatever the planner
         // picks. Today's SQLite already hands ties back in rowid order, so dropping it changes
         // nothing a test can see; naming it turns that accident into a promise. `rowid DESC` fails
-        // the suite.
-        ? this.#db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all()
-        : this.#db.prepare('SELECT * FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
+        // the suite. Selected explicitly (not `SELECT *`, which hides it on a table with a non-integer
+        // primary key): `extractionBoundary` below is compared against it, per row.
+        ? this.#db.prepare('SELECT *, rowid FROM events ORDER BY happened_at, rowid').all()
+        : this.#db.prepare('SELECT *, rowid FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
       people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
         .map((p) => [p.id, p.email]));
       texts = new Map((this.#db.prepare('SELECT event, field, value, salt FROM texts').all() as
         { event: string; field: TextField; value: string; salt: string }[])
         .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt }]));
+      // Read over the WHOLE table, `page` filter or not: the boundary is a fact about this database,
+      // not about one page of it, and a page that happens to hold none of the earliest hashed rows
+      // must still judge ITS OWN rows against the database's real cutover.
+      boundary = extractionBoundary(this.#db);
       this.#db.exec('COMMIT');
     } catch (err) {
-      this.#db.exec('ROLLBACK');
+      rollbackQuietly(this.#db);
       throw err;
     }
-    const events = withAuthors((rows as Record<string, string | null>[]).map((r) => ({
-      id: r.id!, type: r.type!, page: r.page!, block: r.block, fingerprint: r.fingerprint,
-      text: r.text, snapshot: r.snapshot, textHash: r.text_hash, snapshotHash: r.snapshot_hash,
-      author: r.author!, when: r.happened_at!, data: r.data ? JSON.parse(r.data) : null,
+    const events = withAuthors((rows as Record<string, any>[]).map((r) => ({
+      id: r.id as string, type: r.type as string, page: r.page as string, block: r.block as string | null,
+      fingerprint: r.fingerprint as string | null, text: r.text as string | null, snapshot: r.snapshot as string | null,
+      textHash: r.text_hash as string | null, snapshotHash: r.snapshot_hash as string | null,
+      author: r.author as string, when: r.happened_at as string, data: r.data ? JSON.parse(r.data as string) : null,
       textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+      afterExtraction: boundary != null && (r.rowid as number) >= boundary,
     })), people);
-    return withTexts(events, texts);
+    // Reported here, not left to whoever reads `list`'s answer next: issue #91 wants every read that
+    // resolves a field to tampered to raise the alert, not only the one a person happens to be
+    // looking at.
+    const reports: TamperReport[] = [];
+    const out = withTexts(events, texts, reports);
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   async close(): Promise<void> { this.#db.close(); }

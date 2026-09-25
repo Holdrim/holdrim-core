@@ -164,6 +164,14 @@ body.rv-on main [data-code]::after { content: none !important; }
 }
 .rv-num--broken::before { content: '!'; margin-right: .15em; }
 
+/* The impact radius: every block that depends, directly or through another, on the one just
+   selected — lit on the page itself instead of asked of the CLI (docs/IMPACT.md, "Impact radius").
+   A ring, not a fill: it rides ON TOP of whatever traffic-light colour the block already has, and
+   the two must stay visually distinct or a red block in the radius reads as "the radius turned it
+   red" — the radius is about SELECTION, not about validity. */
+.rv-num--radius { box-shadow: 0 0 0 3px var(--holdrim-brand); }
+.rv-radius-note { margin: 0 0 .75rem; font-size: .82rem; color: var(--holdrim-ink-muted); }
+
 /* The warning inside the panel, when the block is red. It explains the cause, because "red" with no
    reason makes a person re-approve out of fright — which is exactly what the lock exists to
    prevent. */

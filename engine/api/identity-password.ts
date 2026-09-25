@@ -106,7 +106,26 @@ export class PasswordIdentity {
 
   async signIn(email: string, password: string): Promise<{ user: User; session: string } | null> {
     const user = await this.#verify(email, password);
-    return user ? { user, session: await this.#users.openSession(user.email) } : null;
+    if (!user) return null;
+    const session = await this.#users.openSession(user.email);
+    // ⚠️ Re-checked with the SAME password, AFTER the session row exists — not merely trusting the
+    // `#verify` above. `setEnabled(false)` and `resetPassword` delete every session for an account,
+    // but only the sessions that exist AT THAT MOMENT: one that lands in the gap between `#verify`
+    // reading the old row and `openSession` inserting this one is not there yet to be caught, and
+    // survives untouched — issue #113's fix closes the gap after a session exists, not the one
+    // before it exists. Every ordering of a concurrent disable-or-reset against this pair of calls
+    // reduces to one of two outcomes: either it lands AFTER this session is inserted, in which case
+    // its own delete already takes this session with it, or it lands BEFORE — which means it also
+    // landed before `#verify`, or `#verify` would have refused the old password outright — and in
+    // that case THIS check, run against whatever the store holds now, fails the same way the first
+    // one would have: a changed hash stops matching, a flipped `enabled` is refused inside `check`
+    // itself. Either path ends with no live session for a password or an account that no longer
+    // authorises one.
+    if (!(await this.#users.check(email, password))) {
+      await this.#users.closeSession(session);
+      return null;
+    }
+    return { user, session };
   }
 
   /**

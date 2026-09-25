@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { createCycle } from '../core/cycle.js';
-import { readBlocks, projectRoles } from './pages.ts';
+import { readBlocks, ofProject, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
-import type { Event } from '../api/types.ts';
+import { authorCouldTriage, earliestLockBaseline, type Event } from '../api/types.ts';
+import { suspectsOf } from '../api/texts.ts';
+import { personAs } from '../core/people-show.js';
 
 /**
  * The agent's tool: read the change requests reviewers made on the site, see the context, measure
@@ -65,20 +67,49 @@ export function mustBeQueued(r: { state: string }) {
 }
 
 /**
+ * Refuses to run against a project whose authority is not the deployment's alone — a holdrim.json
+ * naming `owner`, `admins` or `locks`, or HOLDRIM_OWNER missing or malformed — exactly as `sync`
+ * refuses it (docs/ROLES.md, "Authority comes from the deployment only").
+ *
+ * Every command below calls this and throws away the `roles` it gets back: since decision A, a
+ * request's own state no longer depends on them (`authorCouldTriage`, types.ts, reads what was
+ * WRITTEN, never a live `roles.can(...)`), so nothing here needs the VALUE any more — but the
+ * VALIDATION is still owed. Dropping this call would leave `list`, `show`, `summary`, `impact` and
+ * `state` silently running against a project with no owner at all, or one whose repository claims to
+ * be it, while `sync` alone still refused — exactly the asymmetry `engine/tests/owner.test.js` was
+ * written to catch.
+ */
+function checkAuthority(root: string): void {
+  projectRoles(root);
+}
+
+/**
  * Reduces events to requests with a state — using the SAME core as the server and the browser.
  *
- * The roles are handed in, not looked up here: this has no project root to resolve them from, and
- * resolving them from the environment alone is how the CLI came to know a different owner than
- * the server. The callers take them from `projectRoles(root)`.
+ * No roles are handed in any more: a request's starting state is read from what `recordEvent` wrote
+ * on it when it was FILED (`authorCouldTriage`, types.ts — the one implementation this file and
+ * server.ts both call, round 1's review, finding 2), and a request with nothing written fails closed
+ * to "at triage" (decision A) rather than asking this process's own HOLDRIM_ADMINS — which is how the
+ * CLI came to know a different answer than the server in the first place: this runs in the agent's
+ * own process, and a request granted `triage` afterwards must not read as pre-approved here with no
+ * triage event to show for it.
+ *
+ * `authorCouldTriage` trusts what was written only for a request dated after the events' OWN
+ * `lock_baseline` (round 2's review, CRITICAL "fields written before this version are trusted"): the
+ * same store this reads from can hold a pre-version request with a client-forged `authorCouldTriage`,
+ * from back when `recordEvent` stored whatever `data` a client sent — and this file has no server
+ * process's `LOCK_BASELINE` to ask, only whatever `events` itself carries, which is exactly why the
+ * baseline is a written EVENT (`ensureLockBaseline`, types.ts) and not a value kept in memory.
  */
-export function requests(events: Event[], roles: Pick<ReturnType<typeof projectRoles>, 'can'>): Request[] {
+export function requests(events: Event[]): Request[] {
   const cycle = loadCycle();
   const threads = cycle.threadsOf(events);
+  const baseline = earliestLockBaseline(events);
   return events.filter((e) => e.type === 'request').map((r) => {
     const thread = threads.get(r.id) ?? [];
     return {
       ...r,
-      state: cycle.currentState(r.id, thread, roles.can('triage', r.author)),
+      state: cycle.currentState(r.id, thread, authorCouldTriage(r, baseline)),
       history: thread.filter((e) => e.type !== 'request').sort((a, b) => a.when.localeCompare(b.when)),
     };
   });
@@ -110,18 +141,44 @@ export const formatWhen = (iso: string) => {
 };
 
 /**
+ * What the CLI prints for a person — docs/ROLES.md, "How a person appears" — applied at the two
+ * places a human (or the coding agent reading `agent.ts`'s brief) actually reads one: the console
+ * lines below, and `brief`'s own "Who:" line. `holdrim list --json` is untouched: `queue`'s own
+ * comment already calls it "the contract other tools read", and a display setting is not the kind
+ * of thing that contract should move under — it keeps naming the real address, exactly as before.
+ *
+ * The CLI never reaches the accounts store (docs/PRIVACY.md, section 1: "never the accounts") or a
+ * signed-in reader of its own, so two things `personAs` can do for the panel and the home, this
+ * cannot: "name" has nothing beyond the address to fall back to, and "id" the same — the row id
+ * lives behind a lookup this tool has no connection open for — and no override applies, because
+ * there is no viewer here to apply one TO. Both read as `personAs` already reads missing data: the
+ * address, which is what a project set "email" to mean in the first place.
+ */
+export function personLabel(show: ReturnType<typeof ofProject>['peopleShow'], roles: Pick<ReturnType<typeof projectRoles>, 'roleOf'>, email: string): string {
+  return personAs({
+    show, email, id: null, name: null,
+    role: roles.roleOf(email), alwaysNamed: false,
+  });
+}
+
+/**
  * The agent's queue: what the owner approved and nobody applied yet, with everything an agent
  * needs to act — as data. `--json` is the contract other tools read; the table is for a person.
  */
 export async function queue(root: string, source: Pick<Source, 'events'>, all: boolean) {
+  checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
-  const found = requests(events, projectRoles(root));
+  const found = requests(events);
   const agentQueue = cycle.table.agent_queue ?? ['approved', 'applying', 'waiting'];
   const showing = all ? found : found.filter((r) => agentQueue.includes(r.state));
   const blocks = await readBlocks(root);
   return {
     toTriage: found.filter((r) => r.state === 'open').length,
+    // Which of the three cases it was already went out through `reportTampered`, wherever `events`
+    // was actually resolved (the server, or one of `Source`'s two direct readers) — this is only
+    // the flag `list` warns from and exits non-zero on (issue #91's "same warning").
+    tampered: suspectsOf(events).length > 0,
     requests: showing.map((r) => {
       const block = r.block ? blocks.get(r.block) : undefined;
       return {
@@ -139,35 +196,55 @@ export async function queue(root: string, source: Pick<Source, 'events'>, all: b
   };
 }
 
+/**
+ * The one line `list` and `sync` (validation.ts) both print when a field they read comes back
+ * tampered — issue #91's "the CLI prints the same warning". `reportTampered` (engine/api/texts.ts)
+ * has already put the specifics — the event, the field, which of the three cases it was — through the
+ * CRITICAL log, wherever the read actually happened; this is the terminal's own notice that a person
+ * running the command is looking at data it does not trust, not a second copy of that alert.
+ */
+export function warnOfTampering() {
+  console.error('⚠ CRITICAL: a text read back does not match its own hash. The store was written to '
+    + 'outside the product — this almost always means a credential leaked. Rotate it, and see the '
+    + 'server log (or run this again where the log is written) for which event and field.');
+}
+
 export async function list(root: string, source: Pick<Source, 'events'>, options: { all?: boolean; json?: boolean } = {}) {
   const cycle = loadCycle();
   const q = await queue(root, source, options.all ?? false);
-  if (options.json) { console.log(JSON.stringify(q, null, 2)); return; }
+  if (options.json) { console.log(JSON.stringify(q, null, 2)); if (q.tampered) warnOfTampering(); return q.tampered; }
+  if (q.tampered) warnOfTampering();
 
   if (!q.requests.length) {
     console.log(`no requests ${options.all ? 'recorded' : 'approved and waiting to be applied'}.` +
       (q.toTriage && !options.all ? ` (${q.toTriage} waiting for the owner's triage)` : ''));
-    return;
+    return q.tampered;
   }
+  const { peopleShow } = ofProject(root);
+  const roles = projectRoles(root);
   for (const r of q.requests) {
     const changed = r.blockChanged ? ' · ⚠ the block changed since the request' : '';
     const label = cycle.table.states[r.state]?.short ?? r.state;
     console.log(`${r.id.slice(0, 8)}  ${label.padEnd(10)} ${(r.block ?? r.page).padEnd(10)} ` +
-      `${formatWhen(r.when)}  ${r.author}${changed}`);
+      `${formatWhen(r.when)}  ${personLabel(peopleShow, roles, r.author)}${changed}`);
     console.log(`          “${r.text.replace(/\n/g, ' ').slice(0, 140)}”`);
   }
+  return q.tampered;
 }
 
 export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
+  checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
-  const r = find(requests(events, projectRoles(root)), prefix);
+  const roles = projectRoles(root);
+  const r = find(requests(events), prefix);
   const blocks = await readBlocks(root);
   const block = r.block ? blocks.get(r.block) : undefined;
+  const { peopleShow } = ofProject(root);
 
   console.log(`Request  ${r.id}`);
   console.log(`State    ${labelOf(cycle, r.state)}`);
-  console.log(`Who      ${r.author}  ·  ${formatWhen(r.when)}`);
+  console.log(`Who      ${personLabel(peopleShow, roles, r.author)}  ·  ${formatWhen(r.when)}`);
   console.log(`Where    ${r.block ?? r.page}${block ? `  (${block.file})` : ''}`);
   console.log(`\nAsked for:\n  ${(r.text ?? '').replace(/\n/g, '\n  ')}`);
   if (r.snapshot) console.log(`\nThe block's text when they asked:\n  ${r.snapshot.slice(0, 500)}`);
@@ -183,7 +260,7 @@ export async function show(root: string, source: Pick<Source, 'events'>, prefix:
     for (const e of r.history) {
       const what = e.type === 'supplement' ? 'added more'
         : (labelOf(cycle, String(e.data?.state ?? '')) || e.type);
-      console.log(`  ${formatWhen(e.when)}  ${e.author}  ${what}`);
+      console.log(`  ${formatWhen(e.when)}  ${personLabel(peopleShow, roles, e.author)}  ${what}`);
       if (e.text) console.log(`      ${e.text.replace(/\n/g, ' ')}`);
     }
   }
@@ -191,8 +268,9 @@ export async function show(root: string, source: Pick<Source, 'events'>, prefix:
 
 /** Where else the subject shows up — the impact analysis you run before editing. As data. */
 export async function impactOf(root: string, source: Pick<Source, 'events'>, prefix: string, terms: string[]) {
+  checkAuthority(root);
   const events = await source.events();
-  const r = find(requests(events, projectRoles(root)), prefix);
+  const r = find(requests(events), prefix);
   const blocks = await readBlocks(root);
   const searching = terms.length ? terms : [(r.text ?? '').split(/\s+/).slice(0, 3).join(' ')];
   return {
@@ -221,8 +299,9 @@ export async function impact(root: string, source: Pick<Source, 'events'>, prefi
 }
 
 export async function summary(root: string, source: Pick<Source, 'events'>) {
+  checkAuthority(root);
   const events = await source.events();
-  const all = requests(events, projectRoles(root));
+  const all = requests(events);
   const perPage = new Map<string, { approvals: number; requests: number; open: number }>();
   for (const e of events) {
     const v = perPage.get(e.page) ?? { approvals: 0, requests: 0, open: 0 };
@@ -250,9 +329,10 @@ export async function summary(root: string, source: Pick<Source, 'events'>) {
  */
 export async function setState(root: string, source: Pick<Source, 'events' | 'add'>, prefix: string, target: string,
                                message: string, extra: { commit?: string; blocks?: string } = {}) {
+  checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
-  const r = find(requests(events, projectRoles(root)), prefix);
+  const r = find(requests(events), prefix);
 
   if (!cycle.agentStates.includes(target)) {
     throw new Error(`the agent only uses: ${cycle.agentStates.join(', ')} ` +

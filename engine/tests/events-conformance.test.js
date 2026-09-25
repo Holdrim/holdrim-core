@@ -82,6 +82,9 @@ forEachStore('what is appended comes back as it went in, with who and when added
   assert.deepEqual(listed, answered, 'the answer to an append is what a list says a moment later');
   for (const [field, value] of Object.entries(sent)) assert.deepEqual(listed[field], value, field);
   assert.equal(listed.author, 'owner@example.org');
+  // The id `author` was resolved FROM — never the address itself — is on both answers too, and the
+  // deepEqual above already proves the two agree; this pins what it is, not merely that it matches.
+  assert.match(listed.authorId, PERSON_ID);
   assert.match(listed.id, /^\S+$/);
   assert.ok(!Number.isNaN(Date.parse(listed.when)), `when is a date: ${listed.when}`);
 });

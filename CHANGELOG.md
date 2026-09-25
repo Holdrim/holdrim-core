@@ -57,6 +57,32 @@ who ran the engine from `main` before it.
   texts as ordinary, unbounded reads, not inside one Firestore transaction — a read-only transaction
   aborts after 270 seconds, and both collections only grow — and correct a field that looks tampered
   by asking once more, later, for the removal it could not have seen yet.
+- **Whether a ✓ is a lock, and whether a request's author could already triage it, are now written
+  onto the event when it is given or filed, and read from what was written forever after — never
+  recomputed from who holds `lock`/`triage` today.** Before this, an owner who handed over silently
+  un-locked every ✓ they had given, and revoking `triage` from an admin silently sent their past
+  requests back to triage with no event recording either change. The server writes `locks` (an
+  approval) and `authorCouldTriage` (a request) at the moment it records the event; every reader —
+  the panel, the home, `holdrim sync` and `holdrim list`/`show`/`summary`/`state` — reads what was
+  written. A request with nothing written reads as "at triage" (the safe direction: the owner
+  triages it again, once). A ✓ with nothing written needs a **baseline**: on its first boot against a
+  store, a server of this version writes one `lock_baseline` event, recording who `HOLDRIM_OWNER` was
+  at that exact moment; an unwritten ✓ then locks only if its author matches the baseline's and it
+  predates the baseline, and a store with no baseline at all trusts no unwritten ✓ from anyone. A
+  field written before this version existed is trusted the same way — only when it is dated after
+  the store's own baseline — since a client's own POST body could shape `data` freely before this
+  change; one that predates the baseline is decided by the baseline rule instead, whatever it claims.
+  One exception: a ✓ written `locks:"false"` is trusted even before the baseline, since a forged field
+  can only ever help an attacker by claiming `"true"`, never `"false"` — guarding a former owner's own
+  ✓ from misreading as a lock should this server's clock ever run behind the baseline's.
+  **What to change, before anyone uses this version against a real store:** move ALL traffic to the
+  new revision first — an old revision left serving alongside it can still record events with
+  client-forged `locks`/`authorCouldTriage`, dated after the new baseline, which the new version would
+  then trust as if it had written them itself. **And boot this version once under the `HOLDRIM_OWNER`
+  who gave the existing ✓s** (Cloud Run: a revision serving 100% of traffic; anywhere else, once at
+  startup): the baseline freezes whoever `HOLDRIM_OWNER` is at that first boot, **permanently** — a
+  later handover does not move it, and there is no second chance to set it once a store already holds
+  one. `SECURITY.md` has the same two steps, in the place an operator reads before upgrading.
 - **`holdrim apply`'s commit no longer carries `Requested-by:`.** Only `Request: <full id>` is
   written; who asked is found from the request, through the people table, the one place it can be
   removed. What to change: anything reading a commit for who asked now reads the request instead.
@@ -96,13 +122,23 @@ who ran the engine from `main` before it.
   every page, so a page needs no link of its own that an exported copy would leave dead.
   Only the owner's ✓ turns a block green, as only theirs becomes a lock: an admin's is recorded,
   and the panel shows it as an admin's.
+- **The impact radius.** Selecting a block lights every block that depends on it, directly or
+  through another — asked of the server (`GET /api/impact-radius`) and drawn on the page, since a
+  dependent three pages away has no element the panel can find on its own. `holdrim if-i-touch`
+  still names the ONE hop that would turn 🔴, as the traffic light itself does, and now also lists
+  the rest of the radius as worth checking too — the CLI and the panel share the one walk
+  (`radiusOf`, `engine/core/validity.js`) rather than each answering "what could this touch" its
+  own way.
 - **A page runs the panel and nothing else.** Every documentation page is served with a
   Content-Security-Policy whose nonce only the panel's tag carries, so a script written into the
   content — by a person, or by an agent following an instruction hidden in a document — cannot act
   with the reader's session. A page cannot bring scripts of its own.
-- **The CLI, `holdrim`**: `lights`, `if-i-touch`, `index`, `check`, `kinds`, `export`, and the request
-  cycle, `list`, `show`, `impact`, `apply` and `state`. `apply` hands a request to the agent CLI the
-  person already has. The engine calls no model and holds no key.
+- **The CLI, `holdrim`**: `lights`, `if-i-touch`, `graph`, `index`, `check`, `kinds`, `export`, and
+  the request cycle, `list`, `show`, `impact`, `apply` and `state`. `apply` hands a request to the
+  agent CLI the person already has. The engine calls no model and holds no key.
+- **`holdrim graph`**: the dependency graph the traffic light already reads, as JSON, Mermaid or
+  DOT — for a script, another tool, or a diagram to look at outside the browser. It reads the same
+  blocks and the same traffic light every other command does, never a second copy of either.
 - **Sign-in** with passwords, or behind an identity proxy. There is exactly one owner, named by
   `HOLDRIM_OWNER`, and the first-access password is printed once.
 - **Storage.** Events go to SQLite or Firestore and are only ever appended; SQLite refuses
@@ -110,6 +146,18 @@ who ran the engine from `main` before it.
   and every user store passes its own conformance suite in CI, against real databases. Reopening a
   SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
   putting it back without a word.
+- **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
+  tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
+  field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite
+  only) — logs a CRITICAL `text_tampered` line from the one place every reader shares (`reportTampered`,
+  `engine/api/texts.ts`), EVERY time a read resolves it: there is no acknowledgement yet to quiet it
+  (a follow-up issue), so it repeats rather than go silent after its first sighting. `holdrim list
+  --json` now carries a `tampered` key, and `holdrim list`/`sync` warn and exit non-zero when it is
+  set. See SECURITY.md for what this can and cannot catch, store by store. No released version
+  predates text extraction, so there is nothing to roll a pin back to yet — but once a later version
+  exists, moving the pin back to one from before this alert would write fresh events with their text
+  stored inline again, above where this version's own hashed rows begin, and every one of those reads
+  as `downgraded` tampering the next time any version opens the same file.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a
@@ -122,3 +170,51 @@ who ran the engine from `main` before it.
   their fields, the request states and categories, the CLI's commands and flags, what
   `holdrim list --json` prints, and the HTTP routes. CI derives each list from the code and fails
   when one moves, naming it, and the failure asks for the change to be recorded here.
+- **Feature toggles**, `holdrim.json`'s new `features` block: a closed list — `comments`,
+  `pageRequests`, `bugCategory`, `peopleScreen`, `graph`, `voice`, `sketch` — each with a default
+  equal to today's behaviour, so a project that sets none sees no change. An unknown key, or a
+  value that is not `true`/`false`, refuses to start the service. A toggle never reaches a guard:
+  `peopleScreen` off hides the people screen and its nav link, never the `/api/users*` routes' own
+  rules. `/api/me` sends the panel the three it needs, and it draws no control a project has turned
+  off. A request's category is now checked against `cycle.json`'s own list before anything else, so
+  a category the toggles do not recognise (a typo, a different case) is refused with 400 rather than
+  quietly bypassing `bugCategory`/`pageRequests`. `bash engine/test-contract.sh` runs every
+  server-gated toggle on and off against a real server.
+- **`HOLDRIM_LOCKS` names who else holds `lock`** (`docs/ROLES.md`, section 3), next to
+  `HOLDRIM_OWNER`: `"ana@example.org:P0*; bea@example.org:F12"`, an e-mail, a colon and a scope per
+  entry — a page, a page family (`"P0*"`) or a block id, validated the same way an event's own `page`
+  and `block` are. A malformed entry refuses to start, exactly like a malformed `HOLDRIM_OWNER`. Their
+  accounts are guarded like the owner's: creating, resetting, disabling and re-enabling one — all four
+  routes — is the owner's alone, and none of the four refusals names `HOLDRIM_LOCKS`, so an admin who
+  may not act on the address is not told the mechanism that reserved it. `can('lock', …)` does not
+  trust one yet — it still asks only whether the caller is the owner — because doing so safely needs
+  the session-and-credential-history rule `docs/ROLES.md` section 3 describes, which is not built.
+- **`holdrim.json` refuses `roles` and `grants` too**, alongside `owner`, `admins` and `locks`
+  (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
+  them, are the owner's to define and grant from a settings screen — a later piece — never a file a
+  committer, or the agent applying an approved request, can edit.
+- **`people.show`**, `holdrim.json`'s new setting for how a person appears next to a comment, a
+  request or a ✓ (`docs/ROLES.md`, "How a person appears"): `name`, `email` (the default, today's
+  behaviour), `role` or `id`. An unknown value refuses to start the service, like a misspelled
+  feature toggle. Not authority — it decides what a reader is SENT, never what they may do, and
+  `holdrim.json` still refuses `owner`, `admins`, `locks`, `roles` and `grants` exactly as before.
+  The server applies it before the data leaves: the panel and the home draw whatever they are sent
+  and compute nothing themselves. Whatever the setting, the owner and whoever holds `people` always
+  see names, and a person always sees their own name on their own requests. The CLI applies the same
+  setting to what it prints for a person — `holdrim list`, `holdrim show` and the brief `holdrim
+  apply` hands the agent — except that it never reaches the accounts store, so `name` there falls
+  back to the address, the same way it does for anyone with no name on record.
+
+### Security
+
+- **Disabling an account, or resetting its password, now drops every session already open under
+  it.** Before, a stolen cookie came back to life the moment the account was re-enabled, or even
+  sooner: a reset alone left an already-open session untouched, since only the disabled flag was
+  ever checked, at the next request. Resetting your own password now signs you out too — the drop
+  cannot tell a self-service reset apart from one that reached the account through a stolen
+  credential, so there is no exception for the person who pressed the button. A sign-in racing a
+  reset or a disable cannot come away holding a session either. When the drop itself fails — the
+  credential or the enabled flag has already changed regardless — the answer from
+  `POST /api/users/:email/password` and `.../enabled` carries `sessionsDropped: false`, the log
+  gets an `ERROR user_sessions_not_dropped` line naming the person by id, and the people screen
+  warns next to their row.

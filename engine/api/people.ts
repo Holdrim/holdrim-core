@@ -81,9 +81,17 @@ export function authorOf(author: string, people: ReadonlyMap<string, string | nu
   return people.get(author) ?? author;
 }
 
-/** `authorOf` over a list, for the readers that hold a list. */
-export function withAuthors<E extends { author: string }>(events: E[], people: ReadonlyMap<string, string | null>): E[] {
-  return events.map((e) => ({ ...e, author: authorOf(e.author, people) }));
+/**
+ * `authorOf` over a list, for the readers that hold a list — and the one place `authorId`
+ * (engine/api/types.ts) is set: the value `.author` held before this function resolved it, which is
+ * exactly what `people.show: "id"` (docs/ROLES.md, "How a person appears") needs to show a person
+ * without ever reading the address the setting was asked to hide. Captured before the overwrite,
+ * never after: reading `e.author` back off the RETURNED object would already be the resolved address.
+ */
+export function withAuthors<E extends { author: string }>(
+  events: E[], people: ReadonlyMap<string, string | null>,
+): (E & { authorId: string })[] {
+  return events.map((e) => ({ ...e, authorId: e.author, author: authorOf(e.author, people) }));
 }
 
 /**

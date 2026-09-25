@@ -133,12 +133,17 @@ export function pageTitle(html: string, code: string): string {
  * Every request someone is still waiting on, the oldest first: the one waiting longest is the one
  * most likely forgotten.
  *
- * @param stateOf the cycle's verdict on one request — passed in so this file does not rebuild the
- *                rule of who triages whom
- * @param hrefOf  where each page is served, from `summarisePages`
+ * @param stateOf  the cycle's verdict on one request — passed in so this file does not rebuild the
+ *                 rule of who triages whom
+ * @param hrefOf   where each page is served, from `summarisePages`
+ * @param authorOf what this reader is sent instead of the address — `server.ts`'s
+ *                 `authorDisplaysFor`, docs/ROLES.md, "How a person appears". Defaults to the address
+ *                 itself, today's behaviour, so a caller from before this setting existed — every
+ *                 test in this file among them — keeps seeing exactly what it always saw.
  */
 export function requestsInProgress(
   events: Event[], stateOf: (request: Event) => string, hrefOf: Map<string, string>,
+  authorOf: (email: string) => string = (email) => email,
 ): RequestRow[] {
   const rows: RequestRow[] = [];
   for (const e of events) {
@@ -150,7 +155,7 @@ export function requestsInProgress(
       id: e.id, page: e.page, block: e.block ?? null,
       href: page && e.block ? `${page}#${encodeURIComponent(e.block)}` : page,
       state, category: typeof e.data?.category === 'string' ? e.data.category : null,
-      author: e.author, when: e.when, text: e.text ?? '',
+      author: authorOf(e.author), when: e.when, text: e.text ?? '',
     });
   }
   return rows.sort((a, b) => a.when.localeCompare(b.when));
@@ -199,6 +204,11 @@ export function renderHomePage(
   i18n: Translator, lang: string,
   data: {
     projectName: string; pages: PageSummary[]; requests: RequestRow[]; canManagePeople: boolean;
+    /** `features.pageRequests` (docs/ROLES.md, section 7). Off, the form disappears — the server
+     *  still refuses a `category: "page"` request posted straight at the API (`server.ts`), so
+     *  this is decoration, not the guard. Defaults to true: every caller from before this toggle
+     *  existed, and every unit test that does not pass it, keeps seeing the form it always saw. */
+    pageRequestsEnabled?: boolean;
     ask?: HomeOutcome;
   },
   theme: Theme, nonce: string,
@@ -277,7 +287,7 @@ export function renderHomePage(
   // existing page because a request needs one, and "near which page" is a question anybody can answer.
   const options = data.pages.map((p) =>
     `<option value="${forHtml(p.page)}"${p.page === ask.near ? ' selected' : ''}>${forHtml(p.page)} · ${forHtml(p.title)}</option>`).join('');
-  const askForm = !data.pages.length ? '' : `<section aria-labelledby="${HOME_SECTION.ask}">
+  const askForm = !data.pages.length || data.pageRequestsEnabled === false ? '' : `<section aria-labelledby="${HOME_SECTION.ask}">
     <h2 id="${HOME_SECTION.ask}">${t('home.ask.heading')}</h2>
     <p class="holdrim-muted">${t('home.ask.lede')}</p>
     ${ask.asked ? `<p class="holdrim-alert holdrim-alert--ok" role="status">${t('home.ask.done')}</p>` : ''}

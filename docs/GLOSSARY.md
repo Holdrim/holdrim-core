@@ -112,6 +112,9 @@ forgot one.
 | **member** | `read`, `comment`, `request` — any other allowed identity |
 | **founder** | a tag that grants the power to see the whole documentation. It sits **on the role, not on the person**, so the second holder of that role sees it too, without an exception. ⚠️ A concept of the method only: no code reads it yet |
 | **capability** | what the engine actually asks about — one of a closed list, `engine/core/roles.js`'s `CAPABILITIES`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`. A role is a name and a subset of it (`capabilitiesOf`); every caller asks `roles.can(capability, email)`, never a role's name — role names change with every company, capabilities do not. `lock` is validated the same as the other six but never part of a role's GRANTABLE set (`docs/ROLES.md`, "Capabilities are the engine's") |
+| **project role** | a role the PROJECT will define, at the owner's settings screen (not built): a name and a subset of `CAPABILITIES` — never one this version already ships, and never read from `holdrim.json` (`AUTHORITY_KEYS` refuses the file the moment it names `roles`). Its own name format has no caller until that screen exists, so it is not built ahead of one (round 2 of #29's review, finding 11) — unlike `isValidScope` (`engine/core/roles.js`), which `HOLDRIM_LOCKS` calls today. `lock` may be listed like any of the other six, but will never be actually granted by it (see **grant**) |
+| **grant** | who will hold a project role — an e-mail, a role, and an optional scope: a page, a page family (`"P0*"`) or a block id. No scope means everywhere. From the settings screen, by the owner (not built); never `holdrim.json`, which refuses the `grants` key the same way |
+| **lock-holder** | someone besides the owner whose ✓ is meant to become a lock, named in `HOLDRIM_LOCKS` — the environment, next to `HOLDRIM_OWNER`, never `holdrim.json`. Their account is guarded like the owner's: only the owner creates, resets, disables or re-enables it (`roles.isLockHolder`). `can('lock', …)` does not trust one yet — that needs docs/ROLES.md section 3's session-and-credential-history rule, not built |
 
 The method defines only `owner` and the `founder` tag. `admin`, clinical lead, operator, auditor —
 those belong to the project adopting the method. If the engine named a product role, it would stop
@@ -138,6 +141,7 @@ accident.
 |---|---|
 | **config** | the configuration of the project using the method, in `holdrim.json` at the root. It exists so the **engine** does not know the product. Environment variables beat the file, so the same repository serves more than one environment — except `language`, where `HOLDRIM_LANGUAGE` counts only when the file names none. Authority is not in it at all: a file naming `owner`, `admins` or `locks` refuses to load. `engine/core/config.js` |
 | **theme** | how the project dresses the engine: `theme.brand`, `theme.logo`, `theme.name` in `holdrim.json`. ⚠️ Untrusted input — it lands inside CSS and HTML, so it is validated in `engine/api/theme.ts`, next to the code that writes it |
+| **feature toggle** | a switch a project sets in `holdrim.json`'s `features` block: `comments`, `pageRequests`, `bugCategory`, `peopleScreen`, `graph`, `voice`, `sketch` — a **closed** list, `engine/core/features.js`, with a default equal to today's behaviour. An unknown key refuses to start. It never reaches a **guard**: it can hide a screen or refuse a kind of event, never who may triage, approve or lock (docs/ROLES.md, section 7) |
 | **i18n** | the core returns **keys**; the edge turns them into sentences, in the reader's language. `engine/core/i18n.js` |
 | **brief** | everything an agent needs to act on one approved request, in plain text. `holdrim apply <id>` writes it and hands it to the person's own agent CLI. `engine/cli/agent.ts` |
 
@@ -166,9 +170,22 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `fingerprint` | of the block's text at that moment: an approval holds for THIS text |
 | `text` | what the person wrote. Stored outside the event, in a table of texts (`engine/api/texts.ts`); the event keeps a salted hash. Reads as the plain value while its row holds one, as `null` with `textRemoved: {by, when}` once `EventStore.removeText` has let it go on purpose, and as `null` with `textTampered: true` when the hash no longer matches anything at hand and no such removal explains why — missing with nothing to say why, never shown as plain absence. An event from before texts were extracted holds its own value directly, with no hash, and reads as it |
 | `snapshot` | the text of the block at that instant. The same table, the same hash, the same three readings as `text` — `snapshotRemoved`, `snapshotTampered` |
-| `author` | who made it. Stored as the person's opaque id (`p_` and 24 hex characters) from the people table, never as an e-mail; every reader gets the e-mail back, as verified by whichever identity is in charge — or the id, once the person is forgotten. An event written before ids holds the e-mail itself, and reads as it |
+| `author` | who made it. Stored as the person's opaque id (`p_` and 24 hex characters) from the people table, never as an e-mail; resolved back to the address, as verified by whichever identity is in charge — or to the id, once the person is forgotten. What a READER is actually sent is then `people.show`'s decision (docs/ROLES.md, "How a person appears"): the name, the address, their current role (not yet the one they acted under — nothing writes that on the event), or the id — never the raw address to a viewer the setting was configured to hide it from. The owner, whoever holds `people`, and a person about their own event are always sent the address (or the name, under `people.show: "name"`). `textRemoved.by`/`snapshotRemoved.by` name the remover the same way, resolved the same way. An event written before ids holds the e-mail itself, and reads as it |
 | `when` | ISO, the server's clock. Stored in the column `happened_at`, since `WHEN` is an SQL keyword |
-| `data` | a small map of scalars: `request`, `state` and `from` on `request_state`, `commit` and `blocks` on an applied one, `category` on a request, `related` on a request that follows an approved one |
+| `data` | a small map of scalars: `request`, `state` and `from` on `request_state`, `commit` and `blocks` on an applied one, `category` on a request, `related` on a request that follows an approved one, `locks` on an approval and `authorCouldTriage` on a request (below) |
+
+`locks` and `authorCouldTriage` are written by `recordEvent` itself, from the grants in force at that
+exact instant, never left for a later read to work out (docs/ROLES.md §3, "written at the moment, read
+forever after") — an owner who hands over must not silently un-lock every ✓ they gave before, and
+granting `triage` afterwards must not silently pre-approve a request already filed. Both are stored as
+the strings `'true'`/`'false'`, and trusted only on an event dated after the store's own `lock_baseline`
+(below); before it, or with none at all, they are ignored outright, since a store from before this
+existed could hold anything a client's own POST body once put there. One exception: a ✓ written
+`locks:"false"` is trusted even before the baseline, since a forged field can only ever help an
+attacker by claiming `"true"`, never `"false"` — guarding a former owner's own ✓ from misreading as a
+lock should the server's clock ever run behind the baseline's. `authorCouldTriage` has no matching
+exception — there, ignoring what was written already equals the fail-closed answer. `writtenBoolean`,
+`isLocked` and `authorCouldTriage` (`engine/api/types.ts`) are the one reading of them.
 
 ## Event types
 
@@ -181,6 +198,7 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `request_state` | a request moving from one state of the cycle to another |
 | `supplement` | detail added to a request by whoever asked |
 | `text_removed` | a `text` or `snapshot` let go on purpose, naming the event and the field in `data`. Written only by `EventStore.removeText`, never through `POST /events` — deliberately not in `EVENT_TYPES`, since the removal has to delete the row in the same step, which that door does not do |
+| `lock_baseline` | who `HOLDRIM_OWNER` was the moment a server of this version first read the store — written once, by `ensureLockBaseline` (`engine/api/types.ts`), at boot. Never through `POST /events`, and deliberately not in `EVENT_TYPES` either, for the same reason as `text_removed`: a client that could write one could forge who the baseline owner was |
 
 ## Request categories
 

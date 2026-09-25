@@ -21,6 +21,7 @@
       "HOLDRIM_IDENTITY",
       "HOLDRIM_LANGUAGE",
       "HOLDRIM_LOCAL_URL",
+      "HOLDRIM_LOCKS",
       "HOLDRIM_MODE",
       "HOLDRIM_NAME",
       "HOLDRIM_OWNER",
@@ -53,8 +54,10 @@
     "content.trimPrefix",
     "development.actAs",
     "development.port",
+    "features",
     "language",
     "name",
+    "people.show",
     "theme.brand",
     "theme.logo",
     "theme.name"
@@ -81,6 +84,7 @@
     "approval",
     "comment",
     "decision_reply",
+    "lock_baseline",
     "request",
     "request_state",
     "supplement"
@@ -102,12 +106,14 @@
     "when"
   ],
   "event-data-keys": [
+    "authorCouldTriage",
     "blocks",
     "category",
     "commit",
     "event",
     "field",
     "from",
+    "locks",
     "request",
     "state"
   ],
@@ -132,6 +138,7 @@
     "apply",
     "check",
     "export",
+    "graph",
     "if-i-touch",
     "impact",
     "index",
@@ -150,10 +157,12 @@
     "--blocks",
     "--commit",
     "--db",
+    "--dot",
     "--dry-run",
     "--help",
     "--json",
     "--local",
+    "--mermaid",
     "--only",
     "--root",
     "--term",
@@ -180,6 +189,7 @@
     "requests[].textNow",
     "requests[].validated",
     "requests[].when",
+    "tampered",
     "toTriage"
   ],
   "http-routes": [
@@ -195,6 +205,7 @@
     "GET /api/events",
     "GET /api/events/:param",
     "GET /api/fingerprints",
+    "GET /api/impact-radius",
     "GET /api/me",
     "GET /api/requests/open",
     "GET /api/users",
