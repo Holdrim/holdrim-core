@@ -20,6 +20,7 @@
   "dependencies": {
     "jose": "^6.0.0",
     "linkedom": "^0.18.13",
+    "mermaid": "11.12.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
