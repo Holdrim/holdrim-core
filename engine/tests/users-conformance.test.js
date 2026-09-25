@@ -494,6 +494,19 @@ forEachStore('disabling still takes effect when dropping sessions fails, and say
     'a delete that fails has to say so, not report a success it did not have');
 });
 
+forEachStore('a disable that works, and the re-enable that follows it, both say so', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+
+  // Nothing failed on either call, so both have to say `true` — not merely "not false", and not
+  // left for the caller to assume. A disable that flips `sessionsDropped: (await
+  // this.#dropSessions(normalized)) && false` here would still delete the sessions correctly and
+  // still be wrong to report, which is exactly what a caller reads to decide whether to warn.
+  assert.equal((await s.setEnabled('x@example.org', false)).sessionsDropped, true,
+    'the delete succeeded, so the answer has to say it worked');
+  assert.equal((await s.setEnabled('x@example.org', true)).sessionsDropped, true,
+    'giving the access back runs no delete at all, so this is vacuously true — never `false`');
+});
+
 forEachStore('an access given back works again, with the same password', async (s) => {
   await s.create('back@example.org', 'Back', 'a-long-enough-password');
   await s.setEnabled('back@example.org', false);

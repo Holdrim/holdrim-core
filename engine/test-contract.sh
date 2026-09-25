@@ -631,6 +631,9 @@ OWN_RESET=$(as_owner -w '\n%{http_code}' -X POST $B/api/users/$OWNER/password)
 OWN_RESET_CODE=$(echo "$OWN_RESET" | tail -1); OWN_RESET=$(echo "$OWN_RESET" | sed '$d')
 NEW_OWNER_PASSWORD=$(echo "$OWN_RESET" | jfield password)
 expect "the owner still can, on themselves" 200 "$OWN_RESET_CODE"
+# Nothing failed here, so the answer must not carry the field that means it did — see the failure
+# phase far below, on its own broken store, for the one case where this is allowed to appear.
+expect "and the answer carries no failed drop" 1 "$(echo "$OWN_RESET" | has 'sessionsDropped":false'; echo $?)"
 expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset person)"
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
@@ -644,7 +647,10 @@ expect "and it drops the owner's own session too → 401" 401 "$(code_owner $B/a
 expect "signing back in with the password just generated → 200" 200 "$(login "$NEW_OWNER_PASSWORD")"
 PASSWORD=$NEW_OWNER_PASSWORD
 
-expect "disabling somebody → 200"       200 "$(code_owner -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)"
+DISABLE=$(as_owner -w '\n%{http_code}' -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)
+DISABLE_CODE=$(echo "$DISABLE" | tail -1); DISABLE=$(echo "$DISABLE" | sed '$d')
+expect "disabling somebody → 200"       200 "$DISABLE_CODE"
+expect "and the answer carries no failed drop" 1 "$(echo "$DISABLE" | has 'sessionsDropped":false'; echo $?)"
 expect "disabling is logged as the member's id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
 expect "and it is the owner who did it, not the member themselves" "$OWNER_ID" \
@@ -661,7 +667,10 @@ expect "disabling is not deleting"      "$ADMIN $MEMBER $OWNER" "$(emails)"
 # A missing field is not "false": read as falsy, a typo in the key would silently revoke somebody.
 expect "a body with no enabled → 400"   400 "$(code_owner -d '{}' $B/api/users/$MEMBER/enabled)"
 
-expect "giving the access back → 200"   200 "$(code_owner -d '{"enabled":true}' $B/api/users/$MEMBER/enabled)"
+ENABLE=$(as_owner -w '\n%{http_code}' -d '{"enabled":true}' $B/api/users/$MEMBER/enabled)
+ENABLE_CODE=$(echo "$ENABLE" | tail -1); ENABLE=$(echo "$ENABLE" | sed '$d')
+expect "giving the access back → 200"   200 "$ENABLE_CODE"
+expect "and it carries no failed drop either" 1 "$(echo "$ENABLE" | has 'sessionsDropped":false'; echo $?)"
 # Both the account touched and who touched it, by id — taking access away and giving it back alike.
 expect "changing who may sign in is logged by id, not by e-mail" 0 \
   "$(grep '"event":"user_enabled_changed"' $WORK/password.log | grep -Ec -e "$MEMBER" -e "$OWNER")"
@@ -692,6 +701,7 @@ expect "this cookie is a live session too, not an empty jar → 200" 200 \
 RESET=$(as_owner -X POST $B/api/users/$MEMBER/password)
 NEW_PASSWORD=$(echo "$RESET" | jfield password)
 expect "a reset gives back a different password" 0 "$([ -n "$NEW_PASSWORD" ] && [ "$NEW_PASSWORD" != "$MEMBER_PASSWORD" ]; echo $?)"
+expect "and the answer carries no failed drop" 1 "$(echo "$RESET" | has 'sessionsDropped":false'; echo $?)"
 # Somebody OTHER than the owner of the account has seen this one — whoever ran the reset, and
 # whatever channel carried it over. The window has to be one login long.
 expect "and it demands a change"        true "$(echo "$RESET" | jfield user.mustChangePassword)"
@@ -715,6 +725,12 @@ expect "crediting the member's own id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_password_reset person)"
 expect "and run by the owner, not the member resetting their own" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset by)"
+# Every disable, enable and reset above ran against a store where the delete never fails — the ONE
+# broken store lives in its own directory, started further below, with its own log file
+# (fail-drop.log), so this count reads only this normal server's log and only what happened before
+# that deliberate failure exists at all.
+expect "and this normal server never once reports a failed drop" 0 \
+  "$(grep -c '\"event\":\"user_sessions_not_dropped\"' $WORK/password.log)"
 # The current password, asked for by change-password, is the same secret sign-in guards: guessing it
 # with a session in hand has to meet the same wait. Six wrong, then the right one is still refused.
 mchange() { curl -s -b $MCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"current\":\"$1\",\"next\":\"a-long-enough-new-password\"}" $B/api/change-password; }
