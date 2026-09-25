@@ -9,6 +9,10 @@
  * breaks. A test holds both directions: every class it creates has a rule, and every rule has a class.
  */
 
+/* A rendered diagram is supplementary review UI; the source beside it remains the approved text. */
+.rv-diagram { max-width: 100%; overflow-x: auto; margin: .8rem 0; }
+.rv-diagram svg { max-width: 100%; height: auto; }
+
 /* ------------------------------------------------ tokens
    The panel speaks the engine's design system (base.css), so a project's theme reaches it the same
    way it reaches the sign-in screen. But a documentation page does not load base.css — it loads its
