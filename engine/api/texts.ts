@@ -173,7 +173,10 @@ export function resolveRemovedBy(removed: Removed | null | undefined, displays: 
  *   store that can tell "before extraction" from "after, with the hash stripped" reports this kind;
  *   see `afterExtraction` on `RawEvent` for which ones can.
  */
-export type TamperKind = 'overwritten' | 'unaccounted' | 'double_removal' | 'downgraded';
+export const TAMPER_KINDS = ['overwritten', 'unaccounted', 'double_removal', 'downgraded'] as const;
+/** Derived from `TAMPER_KINDS`, never written out a second time: that list is what the panel's
+ *  dictionaries are held to (engine/tests/tamper.test.js), so a case added here without one fails. */
+export type TamperKind = typeof TAMPER_KINDS[number];
 
 /** One field a reader resolved to tampered — the text itself never travels in this, only where. */
 export interface TamperReport {
@@ -187,23 +190,31 @@ export interface TamperReport {
 /**
  * What identifies one finding, so the owner's acknowledgement of it (issue #107) quiets that finding
  * and no other: sha256 of the event, the field, the case, and `observed` — what the reader actually
- * found there. Keyed on the field alone, an acknowledgement would also swallow every LATER tampering
- * of the same field, which is the one thing an alert that can be acknowledged must never do.
- *
- * `observed` is never a text, and never an unsalted hash of one (docs/PRIVACY.md, section 4: "an
- * unsalted hash of a CPF would be the CPF") — this value is sent to the panel and written into an
- * event that is never erased:
- *
- * - `overwritten`: the row's OWN hash, under the row's own salt — a new edit of the value is a new
- *   hash, and the salt leaves with the row the day it is removed, so nothing here stays testable.
- * - `double_removal`: the ids of every removal that claims the field — one more forgery, one more id.
- * - `unaccounted`, `downgraded`: nothing beyond the case. There is no row to hash in the first, and
- *   the second's value sits inline with no salt of its own; a change of case (a row put back and
- *   edited, a hash restored and then stripped) is still a new finding, but the same case seen again
- *   is the same finding.
+ * found there (`observedOf`). Keyed on the field alone, an acknowledgement would also swallow every
+ * LATER tampering of the same field, which is the one thing an alert that can be acknowledged must
+ * never do.
  */
 export function findingOf(event: string, field: TextField, kind: TamperKind, observed: string): string {
   return createHash('sha256').update([event, field, kind, observed].join('\u0000'), 'utf8').digest('hex');
+}
+
+/**
+ * What a reader found on one field, for `findingOf` — the same three things for every case, so a
+ * write to any of them after an acknowledgement is a new finding:
+ *
+ * - the hash the event itself carries (`textHash`/`snapshotHash`) — rewritten, a new finding;
+ * - the row's own hash, under the row's own salt, when there is a row — edited, a new finding;
+ * - the ids of every valid removal that names the field — one more forged, a new finding.
+ *
+ * Never a text, and never an unsalted hash of one (docs/PRIVACY.md, section 4: "an unsalted hash of a
+ * CPF would be the CPF"): this reaches the panel and is written into an event that is never erased.
+ * Both hashes are salted, with the salt kept in the row and gone with it; the ids name events. So
+ * what stays the SAME finding is only what none of the three can see: a `downgraded` field's inline
+ * value edited again (it has no salt of its own to hash it under), and a field put right and then
+ * tampered back into exactly the state that was acknowledged.
+ */
+export function observedOf(recorded: string | null, row: TextRow | undefined, removals: readonly string[]): string {
+  return [recorded ?? '', row ? hashText(row.value, row.salt) : '', [...removals].sort().join(',')].join('\u0000');
 }
 
 /**
@@ -369,8 +380,10 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
         out[field] = null;
         out[`${field}Removed`] = null;
         out[`${field}Tampered`] = true;
+        const key = textKey(e.id as string, field);
+        const observed = observedOf(null, rows.get(key), removed.ids.get(key) ?? []);
         reports?.push({ event: e.id as string, field, kind: 'downgraded',
-          finding: findingOf(e.id as string, field, 'downgraded', '') });
+          finding: findingOf(e.id as string, field, 'downgraded', observed) });
         continue;
       }
       out[`${field}Removed`] = null;
@@ -397,8 +410,7 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
     // "overwritten" case; no row is either simply unaccounted for, or the double-removal forgery.
     if (tampered) {
       const kind: TamperKind = row ? 'overwritten' : duplicated ? 'double_removal' : 'unaccounted';
-      const observed = kind === 'overwritten' ? hashText(row!.value, row!.salt)
-        : kind === 'double_removal' ? [...(removed.ids.get(key) ?? [])].sort().join(',') : '';
+      const observed = observedOf(hash, row, removed.ids.get(key) ?? []);
       reports?.push({ event: e.id as string, field, kind, finding: findingOf(e.id as string, field, kind, observed) });
     }
   }

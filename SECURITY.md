@@ -50,10 +50,15 @@ Worth knowing before you run it:
   ([holdrim#107](https://github.com/Holdrim/holdrim-core/issues/107)); the owner alone can
   acknowledge one finding, which records a `tamper_acknowledged` event and takes that one line of the
   banner down — never the log line, never the CLI's exit code, and never the text's own tampered
-  reading, which nothing repairs. A finding is its event, field and case plus what was found there (a
-  row's own salted hash, or the removals that claim it), so a new tampering of the same field is a
-  new finding and shows again; a case that has nothing more to it than its name (`unaccounted`,
-  `downgraded`), seen again after it was put right in between, is the same finding. The banner has a
+  reading, which nothing repairs. A finding is its event, field and case plus three things found
+  there (`observedOf`, `engine/api/texts.ts`): the hash the event itself carries, the row's own hash
+  under the row's own salt, and the ids of every removal that claims the field. Rewriting any of the
+  three, or changing the case, is a new finding and shows again. Two things stay the same finding,
+  because none of the three sees them: a `downgraded` field's inline value edited again (it has no
+  salt of its own, and an unsalted hash of it is what docs/PRIVACY.md section 4 forbids), and a field
+  put right and then tampered back into exactly the state that was acknowledged. Only a
+  `tamper_acknowledged` event counts, and never one marked as an agent's: the same id in any other
+  event's `data`, which a client writes, quiets nothing. The banner has a
   weaker footing than the log line, said plainly: the log line comes from code a direct writer to the
   store does not reach, while an acknowledgement is an event, and that same direct writer can insert
   one naming the finding — the banner then goes quiet while the CRITICAL line keeps firing. Closing

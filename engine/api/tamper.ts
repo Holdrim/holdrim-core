@@ -1,5 +1,5 @@
-import type { Event, NewEvent } from './types.ts';
-import type { TamperKind, TamperReport, TextField } from './texts.ts';
+import { AS_AGENT_FIELD, type Event, type NewEvent } from './types.ts';
+import { TAMPER_KINDS, type TamperKind, type TamperReport, type TextField } from './texts.ts';
 
 /**
  * Tampered texts, as a person sees them (issue #107): which findings are open, and the owner's
@@ -21,8 +21,8 @@ import type { TamperKind, TamperReport, TextField } from './texts.ts';
  */
 export const TAMPER_ACKNOWLEDGED = 'tamper_acknowledged';
 
-/** Every case `withTexts` reports, in one list, so a test can hold every dictionary to each key. */
-export const TAMPER_KINDS: readonly TamperKind[] = ['overwritten', 'unaccounted', 'double_removal', 'downgraded'];
+/** Every case `withTexts` reports — the one list, kept beside the type it defines (texts.ts). */
+export { TAMPER_KINDS };
 
 /** The sentence the panel says for a case — a key, never prose: the panel translates it. */
 export const tamperKey = (kind: TamperKind): string => `panel.tamper.${kind}`;
@@ -51,9 +51,7 @@ export interface Finding {
  * on reading as tampered, and `reportTampered` goes on logging it, on every read.
  */
 export function openFindings(reports: readonly TamperReport[], events: readonly Event[]): Finding[] {
-  const acknowledged = new Set(events
-    .filter((e) => e.type === TAMPER_ACKNOWLEDGED && typeof e.data?.finding === 'string')
-    .map((e) => e.data!.finding as string));
+  const acknowledged = new Set(events.filter(isAcknowledgement).map((e) => e.data!.finding as string));
   const byId = new Map(events.map((e) => [e.id, e]));
   const seen = new Set<string>();
   const out: Finding[] = [];
@@ -68,6 +66,17 @@ export function openFindings(reports: readonly TamperReport[], events: readonly 
     });
   }
   return out;
+}
+
+/**
+ * Whether an event quiets the finding its `data.finding` names. Its TYPE first: `data` on any other
+ * event is whatever a client posted through `POST /events` — a member's comment carrying
+ * `finding: <id>` would otherwise quiet the banner, walking round the owner-only route entirely.
+ * And never one recorded as an agent's: the route refuses an agent before it writes anything, so
+ * `asAgent: "true"` on an acknowledgement means it did not come through that route at all.
+ */
+function isAcknowledgement(e: Event): boolean {
+  return e.type === TAMPER_ACKNOWLEDGED && typeof e.data?.finding === 'string' && e.data?.[AS_AGENT_FIELD] !== 'true';
 }
 
 /** The two identity questions this needs of `createRoles` (engine/core/roles.js), and no more. */

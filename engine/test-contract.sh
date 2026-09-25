@@ -1915,10 +1915,18 @@ expect "an admin sending forged owner fields still cannot → 403" 403 \
   "$(acknowledge $LEAD "{\"finding\":\"$FINDING\",\"owner\":true,\"author\":\"$OWNER\",\"asAgent\":\"false\",\"data\":{\"asAgent\":\"false\"}}")"
 expect "nor through POST /events, even as the owner → 400" 400 \
   "$(post $OWNER "{\"type\":\"tamper_acknowledged\",\"page\":\"A01\",\"data\":{\"finding\":\"$FINDING\",\"event\":\"forged1\",\"field\":\"text\"}}")"
+# `data` on an ordinary event is the client's to write: a comment naming the finding must quiet
+# nothing, or any member — or the agent — walks round the owner-only route.
+expect "a member may still comment with the finding's id in its data → 201" 201 \
+  "$(post $REVIEWER "{\"type\":\"comment\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"text\":\"hi\",\"data\":{\"finding\":\"$FINDING\"}}")"
+expect "and so may the agent → 201"                        201 \
+  "$(post $AGENT "{\"type\":\"comment\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"text\":\"hi\",\"data\":{\"finding\":\"$FINDING\",\"asAgent\":\"false\"}}")"
+# Identity before the body: a non-owner is told "not yours", never what their body got wrong.
+expect "an admin naming no finding → 403, not 400"         403 "$(acknowledge $LEAD '{}')"
+expect "an admin sending a body that is not JSON → 403, not 400" 403 "$(acknowledge $LEAD 'not json')"
 expect "and none of that quieted it"                       "1 unaccounted@A01" "$(findings_of $REVIEWER)"
 expect "the owner naming no finding → 400"                 400 "$(acknowledge $OWNER '{}')"
 expect "the owner naming one nobody found → 409"           409 "$(acknowledge $OWNER "{\"finding\":\"$(printf 'a%.0s' $(seq 64))\"}")"
-BEFORE_ACK=$(criticals)
 ACK=$(curl -s -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d "{\"finding\":\"$FINDING\",\"asAgent\":\"true\"}" $B/api/tampered/acknowledge)
 expect "the owner acknowledges it: an event, by the owner"  "tamper_acknowledged $OWNER" "$(echo "$ACK" | jfield type) $(echo "$ACK" | jfield author)"
 expect "naming what the server found, not what was sent"   "forged1 text unaccounted $FINDING false" \
@@ -1927,8 +1935,15 @@ expect "and the banner has nothing left to show"           0 "$(findings_of $REV
 expect "a finding already acknowledged → 409"              409 "$(acknowledge $OWNER "{\"finding\":\"$FINDING\"}")"
 expect "the text still reads as tampered: nothing was repaired" true \
   "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.id==='forged1').textTampered))")"
-expect "and the CRITICAL line still fires on every read"   0 "$([ "$(criticals)" -gt "$BEFORE_ACK" ]; echo $?)"
-expect "the log names the acknowledgement, and its author by id" 1 "$(grep '"event":"tamper_acknowledged"' $WORK/tamper.log | has -F "$OWNER"; echo $?)"
+# Counted AFTER the acknowledgement and the reads above it, then one read more: the route's own read
+# logs the line too, so a count taken before the POST would grow even if acknowledging silenced it.
+AFTER_ACK=$(criticals)
+curl -s -o /dev/null -H "X-Dev-Email: $REVIEWER" $B/api/tampered
+expect "and the CRITICAL line still fires on the next read" 0 "$([ "$(criticals)" -gt "$AFTER_ACK" ]; echo $?)"
+ACK_AUTHOR_ID=$(echo "$ACK" | jfield authorId); require_id "$ACK_AUTHOR_ID" "the acknowledgement's authorId"
+expect "the log records the acknowledgement, once"         1 "$(grep -c '"event":"tamper_acknowledged"' $WORK/tamper.log)"
+expect "naming its author by id"                           "$ACK_AUTHOR_ID" "$(log_field $WORK/tamper.log tamper_acknowledged author)"
+expect "and never by address"                              0 "$(grep '"event":"tamper_acknowledged"' $WORK/tamper.log | grep -c -F "$OWNER")"
 # The same field, tampered again — a row put back that does not hold the recorded text.
 direct_write row
 expect "a new tampering of the same field raises it again" "1 overwritten@A01" "$(findings_of $REVIEWER)"

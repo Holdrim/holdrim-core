@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createRoles } from '../core/roles.js';
-import { withTexts, hashText, newSalt, textKey, findingOf, TEXT_REMOVED } from '../api/texts.ts';
+import { withTexts, hashText, newSalt, textKey, findingOf, observedOf, TEXT_REMOVED } from '../api/texts.ts';
 import {
   TAMPER_ACKNOWLEDGED, TAMPER_KINDS, tamperKey, tamperFieldKey, openFindings, mayAcknowledge,
   acknowledgementRefusal, acknowledgementOf,
@@ -54,9 +54,11 @@ test('an overwritten text is identified by its row\'s own salted hash — never 
   const rows = new Map([[textKey('e1', 'text'), { value: 'a forged text', salt: forgedSalt }]]);
   const { reports } = read([recorded('e1', 'the real text', salt)], rows);
   assert.deepEqual(reports.map((r) => [r.event, r.field, r.kind]), [['e1', 'text', 'overwritten']]);
-  assert.equal(reports[0].finding, findingOf('e1', 'text', 'overwritten', hashText('a forged text', forgedSalt)));
+  const recordedHash = hashText('the real text', salt);
+  assert.equal(reports[0].finding, findingOf('e1', 'text', 'overwritten',
+    observedOf(recordedHash, { value: 'a forged text', salt: forgedSalt }, [])));
   // docs/PRIVACY.md, section 4: nothing a guess of the text could be tested against without the salt.
-  assert.notEqual(reports[0].finding, findingOf('e1', 'text', 'overwritten', 'a forged text'));
+  assert.doesNotMatch(observedOf(recordedHash, { value: 'a forged text', salt: forgedSalt }, ['r1']), /forged/);
 });
 
 test('a second forged removal of a field is a new finding: the removals are what was found', () => {
@@ -68,6 +70,50 @@ test('a second forged removal of a field is a new finding: the removals are what
     removal('r3', '2026-01-04T00:00:00.000Z')], new Map()).reports;
   assert.deepEqual(two.map((r) => r.kind), ['double_removal']);
   assert.notEqual(three[0].finding, two[0].finding);
+});
+
+/** A removal of `e1`'s text, dated after it — `removalsOf` counts it as valid. */
+const removalOfE1 = (id, when) => ({ id, type: TEXT_REMOVED, page: 'A01', block: 'A01.1.1', author: OWNER, when,
+  data: { event: 'e1', field: 'text' }, text: null, snapshot: null, textHash: null, snapshotHash: null });
+
+test('an acknowledged overwrite, then two forged removals of the same field: a new finding', () => {
+  const event = recorded('e1', 'the real text', newSalt());
+  const rows = new Map([[textKey('e1', 'text'), { value: 'forged', salt: newSalt() }]]);
+  const [finding] = openFindings(read([event], rows).reports, [event]);
+  const ack = acknowledged(finding);
+  const later = [event, ack, removalOfE1('r1', '2026-01-03T00:00:00.000Z'), removalOfE1('r2', '2026-01-04T00:00:00.000Z')];
+  const again = openFindings(read(later, rows).reports, later);
+  assert.deepEqual(again.map((f) => [f.event, f.kind]), [['e1', 'overwritten']], 'the removals are part of what was found');
+  assert.notEqual(again[0].finding, finding.finding);
+});
+
+test('an acknowledged overwrite, then the event\'s own recorded hash rewritten: a new finding', () => {
+  const event = recorded('e1', 'the real text', newSalt());
+  const rows = new Map([[textKey('e1', 'text'), { value: 'forged', salt: newSalt() }]]);
+  const [finding] = openFindings(read([event], rows).reports, [event]);
+  const ack = acknowledged(finding);
+  const rewritten = { ...event, textHash: hashText('another claim', newSalt()) };
+  const again = openFindings(read([rewritten, ack], rows).reports, [rewritten, ack]);
+  assert.deepEqual(again.map((f) => [f.event, f.kind]), [['e1', 'overwritten']]);
+  assert.notEqual(again[0].finding, finding.finding);
+  // The same for a field with no row at all: its recorded hash is still what was found.
+  const bare = recorded('e1', 'gone', newSalt());
+  const [gone] = openFindings(read([bare], new Map()).reports, [bare]);
+  const rehashed = { ...bare, textHash: hashText('gone again', newSalt()) };
+  assert.notEqual(openFindings(read([rehashed], new Map()).reports, [rehashed])[0].finding, gone.finding);
+});
+
+test('two downgraded fields are two findings: acknowledging one leaves the other open', () => {
+  const downgraded = (id, field) => ({ id, type: 'comment', page: 'A01', block: 'A01.1.1', author: MEMBER,
+    when: '2026-01-01T00:00:00.000Z', data: null, text: field === 'text' ? 'inline' : null,
+    snapshot: field === 'snapshot' ? 'inline' : null, textHash: null, snapshotHash: null, afterExtraction: true });
+  const events = [downgraded('e1', 'text'), downgraded('e2', 'text'), downgraded('e3', 'snapshot')];
+  const open = openFindings(read(events, new Map()).reports, events);
+  assert.deepEqual(open.map((f) => [f.event, f.field, f.kind]),
+    [['e1', 'text', 'downgraded'], ['e2', 'text', 'downgraded'], ['e3', 'snapshot', 'downgraded']]);
+  assert.equal(new Set(open.map((f) => f.finding)).size, 3, 'one id per event and field, never one for the case');
+  const after = openFindings(read(events, new Map()).reports, [...events, acknowledged(open[0])]);
+  assert.deepEqual(after.map((f) => f.event), ['e2', 'e3']);
 });
 
 // ---------------------------------------------------------------- which findings are open
@@ -102,6 +148,22 @@ test('a new tampering of an acknowledged field raises the banner again', () => {
   // And the same field in another case: the row gone altogether.
   rows.delete(textKey('e1', 'text'));
   assert.deepEqual(openFindings(read([event, ack], rows).reports, [event, ack]).map((f) => f.kind), ['unaccounted']);
+});
+
+test('only an acknowledgement quiets a finding: not another event naming it, not one written as an agent', () => {
+  const events = [recorded('e1', 'real', newSalt())];
+  const { reports } = read(events, new Map());
+  const [finding] = openFindings(reports, events);
+  // What `POST /events` lets any member write: `data` is the client's.
+  const comment = { id: 'c1', type: 'comment', page: 'A01', block: 'A01.1.1', author: MEMBER,
+    when: '2026-01-02T00:00:00.000Z', data: { finding: finding.finding, asAgent: 'false' } };
+  assert.equal(openFindings(reports, [...events, comment]).length, 1, 'a comment carrying the id quiets nothing');
+  const byAgent = acknowledged(finding);
+  byAgent.data = { ...byAgent.data, asAgent: 'true' };
+  assert.equal(openFindings(reports, [...events, byAgent]).length, 1, 'an acknowledgement recorded as an agent\'s counts for nothing');
+  const byOwner = acknowledged(finding);
+  byOwner.data = { ...byOwner.data, asAgent: 'false' };
+  assert.equal(openFindings(reports, [...events, byOwner]).length, 0, 'the owner\'s, as the route writes it, does');
 });
 
 test('a finding reported twice by one read is drawn once', () => {
@@ -139,6 +201,14 @@ test('an acknowledgement is refused to a non-owner before the body is looked at,
     assert.deepEqual(acknowledgementRefusal(roles, who, forged, open), { refused: { status: 403, key: 'api.tamper.ownerOnly' } }, who);
   }
   assert.deepEqual(acknowledgementRefusal(roles, '', forged, open), { refused: { status: 403, key: 'api.tamper.ownerOnly' } }, 'nobody');
+  // Naming no finding, and naming one that is not open: a non-owner still hears only "not yours",
+  // never the 400 or the 409 the owner would — identity is asked before anything the body says.
+  for (const who of [ADMIN, MEMBER, AGENT]) {
+    for (const body of [{}, { finding: 'a'.repeat(64) }]) {
+      assert.deepEqual(acknowledgementRefusal(roles, who, body, open), { refused: { status: 403, key: 'api.tamper.ownerOnly' } },
+        `${who} ${JSON.stringify(body)}`);
+    }
+  }
 });
 
 test('the owner acknowledges only a finding that is open now', () => {

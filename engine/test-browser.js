@@ -924,6 +924,18 @@ try {
     await must('an admin sees it too', () => admin.page.locator('.rv-tamper .rv-tamper-line').waitFor());
     expect('and is offered nothing to quiet it with', 0, await admin.page.locator('.rv-tamper button').count());
 
+    const en = JSON.parse(readFileSync(join(ROOT, 'engine', 'locales', 'en.json'), 'utf8'));
+
+    // An acknowledgement the server refuses: the reason is shown on the line, and the line stays.
+    // Its own context, since the refusal it provokes is on purpose and not a problem of the page.
+    const refused = await person(OWNER);
+    await refused.page.route('**/api/tampered/acknowledge', (r) => r.fulfill({ status: 409, contentType: 'application/json',
+      body: JSON.stringify({ error: 'refused on purpose' }) }));
+    await refused.page.goto(url);
+    await refused.page.locator('.rv-tamper-ack').click();
+    await must('a refused acknowledgement says why', () => refused.page.locator('.rv-tamper-error', { hasText: 'refused on purpose' }).waitFor());
+    expect('and the line is still there', 1, await refused.page.locator('.rv-tamper-line').count());
+
     const owner = await person(OWNER);
     await owner.page.goto(url);
     await must('the owner sees it', () => owner.page.locator('.rv-tamper .rv-tamper-line').waitFor());
@@ -934,7 +946,13 @@ try {
     await settled(reader.page);
     expect('and every reader\'s', 0, await reader.page.locator('.rv-tamper').count());
     const events = await fetch(`${TAMPERED}/api/events?page=A01`, { headers: { 'X-Dev-Email': OWNER } }).then((r) => r.json());
-    expect('the acknowledgement is an event, by the owner, and the text still reads as tampered',
+    // The acknowledgement lands in the block's own history, as a sentence rather than its type.
+    await owner.page.reload();
+    await block(owner.page, 'A01.1.1').click();
+    await must('the block\'s history names the acknowledgement',
+      () => owner.page.locator('.rv-history', { hasText: en['panel.did.tamperAcknowledged'] }).waitFor());
+    await owner.page.keyboard.press('Escape');
+        expect('the acknowledgement is an event, by the owner, and the text still reads as tampered',
       `${OWNER} true`, `${events.find((e) => e.type === 'tamper_acknowledged')?.author} ${events.find((e) => e.id === 'forged1')?.textTampered}`);
 
     // The same field again: a row put back that does not hold the recorded text.
@@ -943,6 +961,13 @@ try {
     await must('a new tampering of the same field brings the banner back', () => reader.page.locator('.rv-tamper .rv-tamper-line').waitFor());
     expect('as a finding of its own', true, (await reader.page.locator('.rv-tamper-line').getAttribute('data-finding')) !== firstFinding);
     expect('and nothing failed on the way', '', [...reader.problems, ...admin.problems, ...owner.problems].join(' | '));
+
+    // A check that could not run says so, rather than reading as "nothing is tampered".
+    const unchecked = await person(READER);
+    await unchecked.page.route('**/api/tampered', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{}' }));
+    await unchecked.page.goto(url);
+    await must('a tamper check that fails says it could not check',
+      () => unchecked.page.locator('.rv-alert', { hasText: en['panel.tamper.unavailable'] }).waitFor());
 
     // The rest of the panel falls back to a static page when a page's events cannot load; the banner
     // must not go with it — only the owner's acknowledgement takes a line of it down.
