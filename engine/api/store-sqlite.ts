@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED, type TextField } from './texts.ts';
+import { log } from './log.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -73,8 +74,10 @@ export const GUARDS: Record<string, string> = {
   // ⚠️ This clause has no way to refuse an INSERT — none of the guards here do — so a direct writer
   // can still insert a text_removed event of their own and then satisfy this WHEN clause with a
   // forgery; the same writer could also just `DROP TRIGGER texts_no_delete` first and skip the
-  // forgery entirely. A dropped trigger is reinstalled, but only silently, on the next boot — a
-  // pre-existing gap, holdrim#89, this change does not close. `removalsOf` (engine/api/texts.ts)
+  // forgery entirely. A dropped trigger is reinstalled on the next boot, and that boot now names it
+  // in a warning (holdrim#89) — that catches a guard left dropped, not a person who puts it back:
+  // dropping this guard, deleting the row and recreating the trigger by its exact text leaves
+  // nothing this check can see, and neither does emptying every table. `removalsOf` (engine/api/texts.ts)
   // refuses a forged event dated, or placed, no later than the event it names, which closes the
   // easy version of the forgery path; one dated and ordered correctly, or a trigger dropped
   // outright, is not caught here and needs signed events (docs/PRIVACY.md, phase E) to close for
@@ -95,6 +98,22 @@ export const GUARDS: Record<string, string> = {
  * is compared with this list: one that differs is replaced, one that is not on it is dropped, and
  * both are said out loud. The same path carries a guard whose text changed between versions onto a
  * database an older version made.
+ *
+ * A guard from `guards` that is not held at all is put back the same way — but only said out loud
+ * once the database is not a first install. That is NOT "at least one guard is already held": a
+ * fresh file with one foreign trigger and none of ours would then report all nine of ours as
+ * missing on its very first boot, and — the sharper failure — someone who drops every guard of a
+ * database that already holds an approval, deletes it, and reopens would read as a first install
+ * too, since zero of our guards being held is exactly what a first install also looks like. So
+ * "first install" here means BOTH: none of `guards`' own names are held, AND the tables hold no row
+ * at all — no event, no person, no text. A file with data in it, whatever the reason, is not being
+ * installed for the first time, and a guard missing from it is said, naming it, whether that is
+ * `DROP TRIGGER events_no_delete` from outside this process (holdrim#89) or an old database that
+ * never had this guard to begin with. That catches a guard left dropped, not a person who puts it
+ * back: dropping a guard, changing the rows it protected and recreating the trigger by its exact
+ * text leaves nothing this check can see, and neither does emptying every table in the same
+ * sitting — both leave a file indistinguishable from a real first install. Only signed events
+ * (docs/PRIVACY.md, phase E) close that.
  *
  * The repair runs in one IMMEDIATE transaction: between a DROP and its CREATE the table would have
  * no guard, and another process with the file open could REPLACE a ✓ in that gap. A failure halfway
@@ -122,6 +141,15 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
     // Read again under the lock: another process may have repaired it while this one waited.
     const rows = held();
     const byName = new Map(rows.map((r) => [r.name, r]));
+    // Neither half alone is enough: a fresh file can hold a foreign trigger (still reported below,
+    // just not as one of OUR guards missing) before it ever holds a row, and an old, real database
+    // can hold rows with none of our guards on it at all — see the long comment above the function.
+    const noGuardOfOursHeld = !rows.some((r) => want.has(r.name));
+    const holdsNoRow = () =>
+      !db.prepare('SELECT 1 FROM events LIMIT 1').get() &&
+      !db.prepare('SELECT 1 FROM people LIMIT 1').get() &&
+      !db.prepare('SELECT 1 FROM texts LIMIT 1').get();
+    const firstInstall = noGuardOfOursHeld && holdsNoRow();
     for (const r of rows) {
       if (want.has(r.name)) continue;
       warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
@@ -133,6 +161,11 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
       if (r) {
         warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);
         drop(r.name);
+      } else if (!firstInstall) {
+        // Only the name goes out — never a row's contents — so this line is safe wherever the log
+        // ends up, unlike an event's own text or a person's e-mail (docs/PRIVACY.md).
+        warn(`holdrim: the database's guard ${name} is missing; installing it`);
+        log('WARNING', 'sqlite_guard_missing', { guard: name });
       }
       db.exec(sql);
     }

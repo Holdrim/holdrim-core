@@ -12,24 +12,56 @@ import { ONLY_LOSES } from '../api/people.ts';
 
 const approval = { type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null };
 
-// A file of its own, and the warnings the store says while the test runs; both undone afterwards.
+// A file of its own, the plain warnings AND the structured log() lines the store says while the
+// test runs; all three undone afterwards. `log()` (engine/api/log.ts) writes one JSON line per call
+// through `console.log`, which nothing else in this suite calls with a JSON string, so a line that
+// parses and carries a `severity` is one of ours; anything else is passed on to the real console.log
+// untouched, so the test runner's own output is not swallowed.
 function withFile(fn) {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'holdrim-guards-'));
     const said = [];
+    const logged = [];
     const warn = console.warn;
+    const info = console.log;
     console.warn = (line) => said.push(line);
+    console.log = (line) => {
+      const parsed = typeof line === 'string' ? tryParse(line) : undefined;
+      if (parsed && typeof parsed.severity === 'string') logged.push(parsed);
+      else info(line);
+    };
     try {
-      await fn(join(dir, 'events.db'), said);
+      await fn(join(dir, 'events.db'), said, logged);
     } finally {
       console.warn = warn;
+      console.log = info;
       rmSync(dir, { recursive: true, force: true });
     }
   };
 }
 
+const tryParse = (line) => { try { return JSON.parse(line); } catch { return undefined; } };
+
 const outside = (path, sql) => { const db = new DatabaseSync(path); db.exec(sql); db.close(); };
 const reopen = async (path) => { const s = new SqliteEventStore(path); await s.close(); };
+
+// Which guard a warn() line names, and which of the three things installGuards says it for — a
+// guard present but different ('replaced'), one not held at all ('missing'), or a trigger on these
+// tables that is not one of ours ('foreign'). Kept apart from the plain `line.match(/guard (\w+)/)`
+// used elsewhere in this file because a test asserting "these guards were said" must also be able to
+// tell a genuine repair from the exact wrong wording — reporting a missing guard with the "replacing
+// it" text would pass a name-only check and still be the wrong claim about what happened.
+function classify(line) {
+  let m = line.match(/guard (\S+) is missing/);
+  if (m) return { name: m[1], kind: 'missing' };
+  m = line.match(/guard (\S+) was not the one/);
+  if (m) return { name: m[1], kind: 'replaced' };
+  m = line.match(/trigger this version does not install, (\S+);/);
+  if (m) return { name: m[1], kind: 'foreign' };
+  return undefined;
+}
+const byName = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+const byGuard = (a, b) => a.guard < b.guard ? -1 : a.guard > b.guard ? 1 : 0;
 
 test('a guard swapped for a same-named one that does nothing is put back on the next open, out loud', withFile(async (path, said) => {
   const store = new SqliteEventStore(path);
@@ -118,10 +150,130 @@ test('a database whose guards are already right opens without a word', withFile(
   assert.deepEqual(said, [], 'a guard as installed is not replaced, and nothing is said');
 }));
 
-test('a database the previous version made: the changed guards are replaced once, the rest left alone', withFile(async (path, said) => {
+test('a brand-new database installs every guard on its first boot without a word', withFile(async (path, said, logged) => {
+  // Isolated from the "already right" test above on purpose: that one only proves the SECOND open
+  // of an already-guarded file is quiet. This is the first open of a file that has never held a
+  // guard at all — the one case installGuards must not mistake for a guard gone missing, or the
+  // very first boot anyone ever runs would open with a wall of "missing" warnings about guards that
+  // were simply never installed yet (holdrim#89's fix, read backwards).
+  await reopen(path);
+  assert.deepEqual(said, [], 'installing a guard for the first time is not the same as one going missing');
+  assert.deepEqual(logged, [], 'and no structured sqlite_guard_missing line either');
+}));
+
+test('a fresh file with a foreign trigger already on it is still a first install for our own guards', withFile(async (path, said) => {
+  // Round 1, finding 1(b): a database can hold a trigger that is not one of GUARDS before this
+  // store ever opens it — nothing stops a name colliding by accident, or another tool writing to
+  // the same file first. Counting every held trigger, ours or not, as evidence this is not a first
+  // install would report all nine of ours "missing" on a boot that never installed anything yet;
+  // only a trigger BY ONE OF OUR NAMES may say that. The schema here is exactly what the real
+  // constructor would create — `CREATE TABLE IF NOT EXISTS` is a no-op on it — so the only thing
+  // this file has that a truly brand-new one would not is the one foreign trigger.
+  outside(path, `
+      CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT, fingerprint TEXT,
+        text TEXT, snapshot TEXT, text_hash TEXT, snapshot_hash TEXT, author TEXT NOT NULL,
+        happened_at TEXT NOT NULL, data TEXT);
+      CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, email TEXT);
+      CREATE TRIGGER x_ignore BEFORE INSERT ON events WHEN NEW.type = 'approval'
+        BEGIN SELECT RAISE(IGNORE); END;
+  `);
+  await reopen(path);
+  const seen = said.map(classify).filter(Boolean);
+  assert.deepEqual(seen.filter((c) => c.kind === 'missing'), [],
+    'a first install with a foreign trigger on it must not report any of our own guards missing');
+  assert.deepEqual(seen.filter((c) => c.kind === 'foreign').map((c) => c.name), ['x_ignore'],
+    'the foreign trigger keeps its own, unrelated warning');
+}));
+
+test('every guard dropped from a database that still holds an approval is named, not read as a first install', withFile(async (path, said, logged) => {
+  // Round 1, finding 1(a), the CRITICAL one: the locks lens's own reproduction. `rows.length === 0`
+  // after every guard is dropped looks exactly like a brand-new file — the fix in this commit is
+  // that "no guard of ours is held" is necessary but not sufficient; the tables have to be empty
+  // too, and this database still holds the person row `personFor` made for the approval's author.
+  const store = new SqliteEventStore(path);
+  const written = await store.append(approval, 'owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name);
+  for (const n of names) db.exec(`DROP TRIGGER "${n}"`);
+  db.prepare('DELETE FROM events WHERE id = ?').run(written.id); // the approval itself, gone too
+  db.close();
+  await reopen(path);
+  const missing = said.map(classify).filter((c) => c?.kind === 'missing').sort(byName);
+  assert.deepEqual(missing.map((c) => c.name), Object.keys(GUARDS).sort(),
+    'a database with data in it and none of its guards is not a first install, whatever emptied the guards');
+  assert.deepEqual(logged.map((l) => l.guard).sort(), Object.keys(GUARDS).sort(),
+    'and each is a structured WARNING too, one line per guard');
+  for (const l of logged) assert.deepEqual(l, { severity: 'WARNING', event: 'sqlite_guard_missing', time: l.time, guard: l.guard });
+}));
+
+test('events and people emptied but a text left behind is not a first install either: every guard is named', withFile(async (path, said, logged) => {
+  // holdsNoRow checks all three tables, and this fixture is built to make the texts check the ONLY
+  // one still true: events and people are wiped below, so if that third check were `true` instead
+  // of a real SELECT, this database — one row in texts, nothing else — would pass as a first
+  // install and every guard would go back in silence, the exact failure holdrim#89 exists to name.
+  const store = new SqliteEventStore(path);
+  await store.append({ ...approval, text: 'a comment', snapshot: null }, 'owner@example.org');
+  await store.close();
+  // Foreign keys off on this connection (the store's own constructor is what turns them ON;
+  // node:sqlite otherwise enables them itself, so the plain `outside()` helper cannot be reused
+  // here), so the events row can be deleted below while a texts row still names it — leaving
+  // exactly one table, texts, non-empty.
+  const db = new DatabaseSync(path, { enableForeignKeyConstraints: false });
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name);
+  for (const n of names) db.exec(`DROP TRIGGER "${n}"`);
+  db.exec('DELETE FROM events; DELETE FROM people;');
+  db.close();
+  await reopen(path);
+  const missing = said.map(classify).filter((c) => c?.kind === 'missing').sort(byName);
+  assert.deepEqual(missing.map((c) => c.name), Object.keys(GUARDS).sort(),
+    'a text row alone, with no guard on any of the three tables, is not a first install: every guard is named missing');
+  assert.deepEqual(logged.map((l) => l.guard).sort(), Object.keys(GUARDS).sort(),
+    'and each is a structured WARNING too, one line per guard');
+}));
+
+test('all but one guard dropped: the other eight are named, the one left alone is not', withFile(async (path, said) => {
+  const store = new SqliteEventStore(path);
+  await store.append(approval, 'owner@example.org');
+  await store.close();
+  outside(path, `DROP TRIGGER ${Object.keys(GUARDS).filter((n) => n !== 'events_no_update').join('; DROP TRIGGER ')};`);
+  await reopen(path);
+  const missing = said.map(classify).filter((c) => c?.kind === 'missing').map((c) => c.name).sort();
+  assert.deepEqual(missing, Object.keys(GUARDS).filter((n) => n !== 'events_no_update').sort(),
+    'every guard but the one left standing is named as missing');
+}));
+
+test('a guard dropped from outside the store is put back on the next open, naming each one that was gone', withFile(async (path, said, logged) => {
+  const store = new SqliteEventStore(path); // first boot: installs every current guard
+  const written = await store.append({ ...approval, text: 'a comment', snapshot: null }, 'owner@example.org');
+  await store.close();
+  // From a second connection, the way anyone holding the file could: drop the guard "nothing is
+  // erased" rests on, and the one that keeps a text's removal honest — leaving the rest in place,
+  // so this is a guard gone missing, not a fresh database.
+  outside(path, 'DROP TRIGGER events_no_delete; DROP TRIGGER texts_no_delete;');
+  await reopen(path);
+  const seen = said.map(classify).filter(Boolean).sort(byName);
+  assert.deepEqual(seen, [{ name: 'events_no_delete', kind: 'missing' }, { name: 'texts_no_delete', kind: 'missing' }],
+    'each dropped guard has to be named as missing, not recreated in silence — holdrim#89 — and not worded as a replacement');
+  assert.deepEqual(logged.map((l) => ({ severity: l.severity, event: l.event, guard: l.guard })).sort(byGuard),
+    [{ severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'events_no_delete' },
+     { severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'texts_no_delete' }],
+    'and each is also said through log(), at WARNING, once per dropped guard');
+  const db = new DatabaseSync(path);
+  assert.throws(() => db.exec('DELETE FROM events'), /not deleted/, 'the real guard has to be back');
+  assert.throws(() => db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(written.id, 'text'),
+    /not deleted without a text_removed event/, 'the text guard has to be back too');
+  db.close();
+}));
+
+test('a database the previous version made: the changed guards are replaced, the missing ones installed, the rest left alone', withFile(async (path, said) => {
   // The schema and the triggers exactly as the version before this one wrote them, spacing
   // included: SQLite keeps the text as written, so a comparison that minds spacing would replace
-  // all five, and one that ignores the text would replace none.
+  // all five, and one that ignores the text would replace none. This fixture also predates
+  // events_no_replace and the whole texts table — the guard set an older release shipped with,
+  // not tampering — so those four are said as missing, the same as any other guard this open
+  // does not find, rather than staying the silent case (holdrim#89).
   outside(path, `
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT, fingerprint TEXT,
@@ -142,8 +294,9 @@ test('a database the previous version made: the changed guards are replaced once
   `);
   await reopen(path);
   const named = (line) => line.match(/guard (\w+)/)?.[1];
-  assert.deepEqual(said.map(named).sort(), ['people_no_replace', 'people_only_lose_email'],
-    'only the guards whose text changed are replaced, and each is said once');
+  assert.deepEqual(said.map(named).sort(),
+    ['events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
+    'the guards whose text changed are replaced, the ones this fixture never had are installed, and each is said once');
   const store = new SqliteEventStore(path);
   const ana = await store.personFor('ana@example.org');
   await store.close();
@@ -165,9 +318,11 @@ test('a text row can only ever name the field text or snapshot', withFile(async 
   db.close();
 }));
 
-test('a database from before texts were extracted gains the columns it needs and keeps its rows', withFile(async (path, said) => {
+test('a database from before texts were extracted gains the columns it needs, keeps its rows, and gets every guard, named', withFile(async (path, said) => {
   // The schema exactly as the version before this one wrote it: `events` with no `text_hash` or
-  // `snapshot_hash`, and no `texts` table at all.
+  // `snapshot_hash`, no `texts` table at all, and — because this fixture already holds a real row —
+  // no guard either, which is a database this check must NOT read as a first install: it already
+  // has something in it for a guard to protect (the sharper half of holdrim#89's fix).
   outside(path, `
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT, fingerprint TEXT,
@@ -183,7 +338,9 @@ test('a database from before texts were extracted gains the columns it needs and
     const after = await store.append({ type: 'comment', page: 'A01', text: 'a new one', snapshot: null, data: null }, 'owner@example.org');
     assert.equal(after.text, 'a new one', 'a fresh append works on a database ALTER just widened');
   } finally { await store.close(); }
-  assert.deepEqual(said, [], 'widening the schema is not a guard repair, and says nothing');
+  const named = (line) => line.match(/guard (\w+)/)?.[1];
+  assert.deepEqual(said.map(named).sort(), Object.keys(GUARDS).sort(),
+    'widening the schema says nothing on its own, but a real row with no guard on it is not a first install: every guard is named as missing');
 }));
 
 test('a text is written once: no UPDATE on the texts table goes through, from outside or in', withFile(async (path) => {
