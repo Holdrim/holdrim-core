@@ -109,12 +109,19 @@ export function trafficLight(blocks, records) {
  * What depends on a block — the question the other way round, and the one people actually ask:
  * *"if I touch this, what else do I have to look at?"*
  *
+ * Sorted by id, the same order `radiusOf` already returns and the database-backed
+ * `IndexStore#dependentsOf` already queries in (`ORDER BY block`, engine/api/index-store.ts): without
+ * this, `if-i-touch` printed its two lists — the direct hop from here, and the further reach from
+ * `radiusOf` — in two different orders, one by file position and one alphabetical, and a reader
+ * comparing them had to reorder one in their head (#110).
+ *
  * @param {string} id
  * @param {Map<string, Block>} blocks
  * @returns {string[]}
  */
 export function dependentsOf(id, blocks) {
-  return [...blocks.values()].filter((b) => (b.dependsOn ?? []).includes(id)).map((b) => b.id);
+  return [...blocks.values()].filter((b) => (b.dependsOn ?? []).includes(id))
+    .map((b) => b.id).sort();
 }
 
 /**

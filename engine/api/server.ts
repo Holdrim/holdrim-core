@@ -582,7 +582,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
 
   // ---------------------------------------------------------------- in and out (password identity)
   if (byPassword && req.method === 'POST' && route === '/sign-out') {
-    await byPassword.users.closeSession(req.headers.cookie?.match(/holdrim_session=([^;]+)/)?.[1]);
+    await byPassword.users.closeSession(byPassword.sessionIdFrom(req.headers));
     res.setHeader('set-cookie', byPassword.signOutCookie());
     return json(res, 200, { ok: true });
   }
@@ -594,15 +594,27 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     const next = typeof body.next === 'string' ? body.next : '';
     const checked = await byPassword.checkCurrent(email, current);
     if (!checked) return json(res, 403, { error: i18n.t(languageOf(req), 'api.password.currentWrong') });
+    // Issue #115: the caller's own session must survive a password THEY chose — dropping it too
+    // would sign them out of the very tab that just proved it is them. Read before `changePassword`
+    // runs, not after: the value never changes mid-request, and reading it after would only be a
+    // second place for the same cookie header to be misparsed.
+    const ownSession = byPassword.sessionIdFrom(req.headers);
+    let sessionsDropped: boolean;
     try {
-      await byPassword.users.changePassword(email, next);
+      ({ sessionsDropped } = await byPassword.users.changePassword(email, next, ownSession));
     } catch (error) {
       // Translated HERE, at the edge, and only here: the store throws a key, never a sentence.
       const failure = UserInputError.from(error, 'api.password.invalid');
       return json(res, 400, { error: i18n.t(languageOf(req), failure.key, failure.params) });
     }
     log('INFO', 'password_changed', { person: await idForLog(email) });
-    return json(res, 200, { ok: true });
+    // Same reasoning as the reset and the disable routes: the credential already changed either way,
+    // but a failed drop means every OTHER session for this account may still be alive — reported the
+    // same way theirs is, by id and at ERROR, never swallowed into a plain 200 nobody reads twice.
+    if (!sessionsDropped) {
+      log('ERROR', 'user_sessions_not_dropped', { person: await idForLog(email), reason: 'changing your own password' });
+    }
+    return json(res, 200, { ok: true, ...(sessionsDropped ? {} : { sessionsDropped }) });
   }
 
   if (req.method === 'GET' && route === '/me') {
