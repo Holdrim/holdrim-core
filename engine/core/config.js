@@ -12,11 +12,10 @@
  * and HOLDRIM_ADMINS, who else holds `lock` comes from HOLDRIM_LOCKS, who is an agent comes from
  * HOLDRIM_AGENTS, and a project's own roles and who holds them come from the owner, at a settings
  * screen (not yet built) — none of the five is ever read from this file (docs/ROLES.md, "Authority
- * comes from the deployment only"). The file
- * travels with the repository, and whoever can commit to it — a contributor, or the agent applying
- * an approved request — is not whoever deploys it: with a fallback to the file, editing one line
- * would name a new owner, a new lock-holder or a new role at the next deploy, or at the next
- * `holdrim sync` on somebody's machine.
+ * comes from the deployment only"). The file travels with the repository, and whoever can commit
+ * to it — a contributor, or the agent applying an approved request — is not whoever deploys it:
+ * with a fallback to the file, editing one line would name a new owner, a new lock-holder or a new
+ * role at the next deploy, or at the next `holdrim sync` on somebody's machine.
  * @module
  */
 
