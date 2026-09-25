@@ -177,7 +177,7 @@
   "people.reset": "Nueva contraseña",
   "people.role": "Rol",
   "people.role.admin": "Admin",
-  "people.role.other": "Revisor",
+  "people.role.member": "Miembro",
   "people.role.owner": "Dueño",
   "people.state": "Acceso",
   "people.state.active": "Activo",

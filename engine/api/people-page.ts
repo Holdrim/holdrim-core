@@ -26,12 +26,12 @@ import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
  * or the console. A reload loses it, on purpose: that is what "once" means.
  */
 
-type Role = 'owner' | 'admin' | 'other';
+type Role = 'owner' | 'admin' | 'member';
 
 /** The keys this screen reads, for the test that checks every dictionary has them. */
 export const PEOPLE_KEYS = [
   'people.title', 'people.lede', 'people.name', 'people.email', 'people.role', 'people.state',
-  'people.role.owner', 'people.role.admin', 'people.role.other', 'people.state.active',
+  'people.role.owner', 'people.role.admin', 'people.role.member', 'people.state.active',
   'people.state.mustChange', 'people.state.disabled', 'people.create.heading', 'people.create.submit',
   'people.reset', 'people.disable', 'people.enable', 'people.confirm.reset', 'people.confirm.disable',
   'people.onceNew',
@@ -53,33 +53,39 @@ export function engineNav(i18n: Translator, lang: string, current: 'home' | 'peo
 /**
  * What may be offered on one row. The owner's row offers nothing: their password is theirs to change
  * on the sign-in screen, and they cannot be disabled. The server enforces both anyway; see above.
+ *
+ * Takes `isOwner` as a plain boolean, never the display `Role`: being the owner is an identity, not
+ * one of the capabilities a role can hold, and comparing a role's NAME here is exactly the pattern
+ * `engine/tests/roles-boundary.test.js` refuses outside `engine/core/roles.js`.
  */
-export function actionsFor(person: User, role: Role): ('reset' | 'disable' | 'enable')[] {
-  if (role === 'owner') return [];
+export function actionsFor(person: User, isOwner: boolean): ('reset' | 'disable' | 'enable')[] {
+  if (isOwner) return [];
   return ['reset', person.enabled ? 'disable' : 'enable'];
 }
 
 /**
  * The screen in one language, for someone who may manage people.
  *
- * @param roleOf the role each address holds — from `createRoles`, the one source of it
+ * @param roleOf  the DISPLAY role each address holds, for the column and the sort order only
+ * @param isOwner whether an address is the owner — from `createRoles.isOwner`, never derived by
+ *                comparing `roleOf`'s result: see `actionsFor`
  */
 export function renderPeoplePage(
   i18n: Translator, lang: string,
-  data: { projectName: string; people: User[]; roleOf: (email: string) => Role },
+  data: { projectName: string; people: User[]; roleOf: (email: string) => Role; isOwner: (email: string) => boolean },
   theme: Theme, nonce: string,
 ): string {
   const t = (key: string, params?: Record<string, string | number>) => forHtml(i18n.t(lang, key, params));
 
   // The owner first, then admins, then everyone else; by name within each.
-  const rank: Record<Role, number> = { owner: 0, admin: 1, other: 2 };
+  const rank: Record<Role, number> = { owner: 0, admin: 1, member: 2 };
   const people = [...data.people].sort((a, b) =>
     rank[data.roleOf(a.email)] - rank[data.roleOf(b.email)] || a.name.localeCompare(b.name));
 
   const rows = people.map((p) => {
     const role = data.roleOf(p.email);
     const state = !p.enabled ? 'disabled' : p.mustChangePassword ? 'mustChange' : 'active';
-    const buttons = actionsFor(p, role).map((a) =>
+    const buttons = actionsFor(p, data.isOwner(p.email)).map((a) =>
       `<button type="button" class="holdrim-button holdrim-button--quiet" data-action="${a}" `
       + `data-email="${forHtml(p.email)}">${t(`people.${a}`)}</button>`).join(' ');
     return `<tr${p.enabled ? '' : ' class="people-off"'}><td>${forHtml(p.name)}</td><td>${forHtml(p.email)}</td>`

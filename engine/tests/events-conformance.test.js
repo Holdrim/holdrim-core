@@ -153,7 +153,7 @@ forEachStore('a forgotten owner\'s ✓ reads as an id, which is nobody\'s addres
   const [read] = await s.list('A01');
   assert.match(read.author, PERSON_ID);
   assert.equal(roles.isOwner(read.author), false);
-  assert.equal(roles.isAdmin(read.author), false);
+  assert.equal(roles.can('triage', read.author), false);
 });
 
 forEachStore('the same address, however it is typed, is one author, and reads back as the table writes it', async (s) => {

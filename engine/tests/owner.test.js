@@ -92,7 +92,7 @@ function cli(args, dir, env) {
 
 /**
  * What the server would boot with, under the case's environment: server.ts's own two calls, and
- * each request's state as server.ts derives it (`cycle.currentState` with `roles.isAdmin`).
+ * each request's state as server.ts derives it (`cycle.currentState` with `roles.can('triage', …)`).
  */
 function serverView({ dir, ids, events }, variables) {
   const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
@@ -104,7 +104,7 @@ function serverView({ dir, ids, events }, variables) {
     const roles = rolesOf(ofProject(dir));
     const threads = cycle.threadsOf(events);
     const states = Object.fromEntries(Object.entries(ids).map(([who, id]) =>
-      [who, cycle.currentState(id, threads.get(id) ?? [], roles.isAdmin(who))]));
+      [who, cycle.currentState(id, threads.get(id) ?? [], roles.can('triage', who))]));
     return { owner: roles.owner, states };
   } catch (e) {
     return { refused: e.message };
@@ -145,9 +145,11 @@ test('the CLI and the server name the same owner: HOLDRIM_OWNER', async (t) => {
   assert.deepEqual(cliView(p, { owner: OWNER }), expected, 'the CLI');
 });
 
-test('an admin named in HOLDRIM_ADMINS alone: their request starts approved, on both sides', async (t) => {
+test('an admin named in HOLDRIM_ADMINS alone: their request starts approved and their ✓ never locks, on both sides', async (t) => {
   // Not the owner, so only HOLDRIM_ADMINS can have made it skip triage — and a CLI that ignored the
   // variable would leave it open for the owner to triage while the server shows it approved.
+  // `cliView` also runs `sync` and asserts exactly one person's ✓ locks: this is the one test that
+  // catches an admin's ✓ locking too, so its name says both things it proves, not only the first.
   const p = await project(t);
   const variables = { owner: OWNER, admins: ADMIN };
   const expected = { owner: OWNER, states: { [OWNER]: ADMIN_START, [OTHER]: STRANGER_START, [ADMIN]: ADMIN_START } };

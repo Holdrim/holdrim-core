@@ -71,14 +71,14 @@ export function mustBeQueued(r: { state: string }) {
  * resolving them from the environment alone is how the CLI came to know a different owner than
  * the server. The callers take them from `projectRoles(root)`.
  */
-export function requests(events: Event[], roles: Pick<ReturnType<typeof projectRoles>, 'isAdmin'>): Request[] {
+export function requests(events: Event[], roles: Pick<ReturnType<typeof projectRoles>, 'can'>): Request[] {
   const cycle = loadCycle();
   const threads = cycle.threadsOf(events);
   return events.filter((e) => e.type === 'request').map((r) => {
     const thread = threads.get(r.id) ?? [];
     return {
       ...r,
-      state: cycle.currentState(r.id, thread, roles.isAdmin(r.author)),
+      state: cycle.currentState(r.id, thread, roles.can('triage', r.author)),
       history: thread.filter((e) => e.type !== 'request').sort((a, b) => a.when.localeCompare(b.when)),
     };
   });

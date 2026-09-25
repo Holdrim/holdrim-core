@@ -15,6 +15,13 @@ who ran the engine from `main` before it.
 
 ### Breaking
 
+- **`/api/me`'s `role` answers `member` where it used to answer `other`.** The engine now speaks of
+  three shipped roles — `owner`, `admin`, `member` — as sets of a closed capability list
+  (`engine/core/roles.js`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`), and
+  a role display name that only ever meant "one of the two above" now says so. What to change:
+  anything matching `/api/me`'s `role` against `'other'`, and the people screen's `people.role.other`
+  translation key, now `people.role.member`. `canApprove`, `canTriage` and every other field of
+  `/api/me` are unchanged.
 - **`owner` and `admins` are no longer read from `holdrim.json`, and a `holdrim.json` that names
   `owner`, `admins` or `locks` now refuses to start the service and to run the CLI.** Authority is
   set by the deployment: whoever can commit to the file — or the agent applying an approved
