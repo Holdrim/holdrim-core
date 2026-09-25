@@ -170,6 +170,16 @@ who ran the engine from `main` before it.
   their fields, the request states and categories, the CLI's commands and flags, what
   `holdrim list --json` prints, and the HTTP routes. CI derives each list from the code and fails
   when one moves, naming it, and the failure asks for the change to be recorded here.
+- **Feature toggles**, `holdrim.json`'s new `features` block: a closed list — `comments`,
+  `pageRequests`, `bugCategory`, `peopleScreen`, `graph`, `voice`, `sketch` — each with a default
+  equal to today's behaviour, so a project that sets none sees no change. An unknown key, or a
+  value that is not `true`/`false`, refuses to start the service. A toggle never reaches a guard:
+  `peopleScreen` off hides the people screen and its nav link, never the `/api/users*` routes' own
+  rules. `/api/me` sends the panel the three it needs, and it draws no control a project has turned
+  off. A request's category is now checked against `cycle.json`'s own list before anything else, so
+  a category the toggles do not recognise (a typo, a different case) is refused with 400 rather than
+  quietly bypassing `bugCategory`/`pageRequests`. `bash engine/test-contract.sh` runs every
+  server-gated toggle on and off against a real server.
 - **`HOLDRIM_LOCKS` names who else holds `lock`** (`docs/ROLES.md`, section 3), next to
   `HOLDRIM_OWNER`: `"ana@example.org:P0*; bea@example.org:F12"`, an e-mail, a colon and a scope per
   entry — a page, a page family (`"P0*"`) or a block id, validated the same way an event's own `page`
@@ -183,3 +193,17 @@ who ran the engine from `main` before it.
   (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
   them, are the owner's to define and grant from a settings screen — a later piece — never a file a
   committer, or the agent applying an approved request, can edit.
+
+### Security
+
+- **Disabling an account, or resetting its password, now drops every session already open under
+  it.** Before, a stolen cookie came back to life the moment the account was re-enabled, or even
+  sooner: a reset alone left an already-open session untouched, since only the disabled flag was
+  ever checked, at the next request. Resetting your own password now signs you out too — the drop
+  cannot tell a self-service reset apart from one that reached the account through a stolen
+  credential, so there is no exception for the person who pressed the button. A sign-in racing a
+  reset or a disable cannot come away holding a session either. When the drop itself fails — the
+  credential or the enabled flag has already changed regardless — the answer from
+  `POST /api/users/:email/password` and `.../enabled` carries `sessionsDropped: false`, the log
+  gets an `ERROR user_sessions_not_dropped` line naming the person by id, and the people screen
+  warns next to their row.

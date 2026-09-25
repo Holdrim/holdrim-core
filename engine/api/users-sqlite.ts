@@ -102,6 +102,10 @@ export class UsersSqlite extends UserStoreBase {
     this.#db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(instant);
   }
 
+  protected async deleteSessionsForEmail(email: string): Promise<void> {
+    this.#db.prepare('DELETE FROM sessions WHERE email = ?').run(email);
+  }
+
   async close(): Promise<void> {
     this.#db.close();
   }

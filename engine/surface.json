@@ -54,6 +54,7 @@
     "content.trimPrefix",
     "development.actAs",
     "development.port",
+    "features",
     "language",
     "name",
     "theme.brand",

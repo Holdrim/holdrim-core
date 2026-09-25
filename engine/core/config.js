@@ -20,6 +20,7 @@
  */
 
 import { HOME_SCREEN } from './screens.js';
+import { readFeatures } from './features.js';
 
 /**
  * The keys that would grant authority, refused in `holdrim.json`. `roles` and `grants` joined this
@@ -179,5 +180,14 @@ export function readConfig(root, io, env = {}) {
     },
     /** Why `holdrim.json` was there and ignored, or null: see where it is set, above. */
     unreadable,
+
+    /**
+     * FEATURE TOGGLES (docs/ROLES.md, section 7; the closed list and its defaults live in
+     * `engine/core/features.js`, next to `roles.js`'s own closed list). Checked here, at the one
+     * place every reader of `holdrim.json` already goes through, so a misspelled toggle refuses to
+     * start the service — louder than an unrecognised top-level key, which this function simply
+     * never reads, and louder than an invalid theme colour, which only warns and falls back.
+     */
+    features: readFeatures(file.features, root),
   };
 }

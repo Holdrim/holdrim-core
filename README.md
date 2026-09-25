@@ -327,6 +327,34 @@ two breakpoints — and every engine screen composes them. What goes *on* the br
 measured, not assumed: a light brand gets dark text instead of the white that would have made the
 button unreadable.
 
+## Feature toggles
+
+`holdrim.json` can turn parts of the engine off, in an optional `features` block — a **closed** list
+(`engine/core/features.js`), so a misspelled toggle refuses to start instead of silently doing
+nothing:
+
+```json
+"features": { "bugCategory": false, "peopleScreen": false }
+```
+
+| Toggle | Default | What it gates |
+|---|---|---|
+| `comments` | on | the panel's "Comment" button, and the server's acceptance of a `comment` event |
+| `pageRequests` | on | the home's "ask for a page" form, the panel's `page` category, and a request categorised `page` |
+| `bugCategory` | on | the panel's "Report a bug" category, and a request categorised `bug` |
+| `peopleScreen` | on | the people-management screen and its link in the nav |
+| `graph` | on | `holdrim graph` |
+| `voice` | off | not built yet — the key exists so a project can name it today |
+| `sketch` | off | not built yet, same reasoning |
+
+A toggle only ever hides or refuses a FEATURE, never a guard: turning `peopleScreen` off hides the
+screen, and the `/api/users*` routes behind it keep every rule they always had — who may create,
+reset or disable an access is unaffected. The panel obeys the same toggles: `/api/me` sends it
+`comments`, `pageRequests` and `bugCategory`, and it draws no control a project has turned off, so
+nobody types into a form the server would then refuse (docs/ROLES.md, "The front end obeys the
+server"). `docs/ROLES.md`, section 7, is the design; `bash engine/test-contract.sh` runs every
+server-gated toggle on and off against a real server.
+
 ## Design documents
 
 The design behind the engine, not repeated here:

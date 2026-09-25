@@ -15,6 +15,7 @@ import { readBlocks, sheetFiles } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, check, ifITouch } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests, queue, list } from '../cli/requests.ts';
+import { everyToggleFlipped } from '../core/features.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const EXAMPLE = join(ROOT, 'examples', 'hello-world');
@@ -301,6 +302,63 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
   assert.equal(registry['A01.1.2'], undefined, 'a ✓ for an earlier text does not hold');
   assert.equal(registry['A02.1.1'], undefined, 'a reviewer\'s ✓ never locks');
   assert.match(readFileSync(join(tmp, 'pages', 'A01.html'), 'utf8'), /data-id="A01\.1\.1" data-validated="2026-09-22"/);
+});
+
+/**
+ * The filter above (`isLocked(e, baseline)`) is exercised only against `holdrim.json`'s DEFAULT
+ * toggles by the test before this one — every toggle this project ships at the value it ships
+ * with. A filter that secretly asked something toggle-shaped instead of what the server wrote — the
+ * same worry `engine/test-contract.sh`'s "every toggle off" section answers for the SERVER — would
+ * have nowhere to show itself there, so this repeats the claim with every toggle at the OPPOSITE of
+ * its default, on the CLI's own path (`projectRoles`, real `HOLDRIM_OWNER`/`HOLDRIM_ADMINS`, no
+ * `options.owner` standing in for either).
+ *
+ * `isLocked` never recomputes a role live (decision B, `engine/api/types.ts`): it reads `data.locks`
+ * as the SERVER wrote it, at the moment the ✓ was given, against a `lock_baseline`. So each event
+ * here carries the `locks` field the server would itself have written for that author's role —
+ * `true` only for the owner — the same shape the test above this one (`sync brings in the owner's
+ * ✓...`) already seeds; a bare `data: null` with no baseline would fail closed to "not a lock" for
+ * every author here, owner included, and prove nothing about the toggles at all.
+ */
+test('sync\'s owner filter holds with every toggle at its non-default value', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-toggles-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const config = JSON.parse(readFileSync(join(tmp, 'holdrim.json'), 'utf8'));
+  // holdrim.json itself may never name `owner` or `admins` (AGENTS.md — "whoever commits to the
+  // file is not whoever deploys"): only `features` is added here, and who is the owner or an admin
+  // still comes from the environment, below.
+  config.features = everyToggleFlipped();
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify(config));
+
+  const blocks = await readBlocks(tmp);
+  // Dated before every approval below, so each one is read against a real baseline instead of
+  // falling back to `legacyLock` with none — the same shape `sync brings in the owner's ✓...` uses.
+  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
+    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
+  const approval = (author, when, locks) => ({
+    id: `approval-${author}`, type: 'approval', page: 'A01', block: 'A01.1.1',
+    fingerprint: blocks.get('A01.1.1').fingerprint, author, when, data: { locks: String(locks) },
+  });
+
+  const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
+  process.env.HOLDRIM_OWNER = 'owner@example.org';
+  process.env.HOLDRIM_ADMINS = 'admin@example.org';
+  t.after(() => {
+    if (before.owner === undefined) delete process.env.HOLDRIM_OWNER; else process.env.HOLDRIM_OWNER = before.owner;
+    if (before.admins === undefined) delete process.env.HOLDRIM_ADMINS; else process.env.HOLDRIM_ADMINS = before.admins;
+  });
+
+  // No `options.owner`: each call resolves through `projectRoles`, the real HOLDRIM_OWNER/
+  // HOLDRIM_ADMINS path `options.owner` exists only to bypass.
+  const reviewerRun = await sync(tmp, { events: async () => [baseline, approval('reviewer@example.org', '2026-09-22T10:00:00Z', false)] });
+  assert.equal(reviewerRun.added, 0, 'a reviewer\'s ✓ never locks, every toggle at its non-default value or not');
+
+  const adminRun = await sync(tmp, { events: async () => [baseline, approval('admin@example.org', '2026-09-22T10:01:00Z', false)] });
+  assert.equal(adminRun.added, 0, 'an admin\'s ✓ never locks either, same toggles');
+
+  const ownerRun = await sync(tmp, { events: async () => [baseline, approval('owner@example.org', '2026-09-22T10:02:00Z', true)] });
+  assert.equal(ownerRun.added, 1, 'the owner\'s ✓ still locks with every toggle at its non-default value');
 });
 
 // ===================================================================== issue #91: the CLI's own alert

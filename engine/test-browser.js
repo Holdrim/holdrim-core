@@ -54,6 +54,15 @@ if (await fetch(`${SIGN_IN}/api/health`).then(() => true, () => false)) {
   process.exit(1);
 }
 
+// A third server, with the panel's own toggles off, so a browser can prove what only a browser can:
+// that the bundle the page actually loads draws no control the server has turned off. The same
+// guard, the same reason.
+const TOGGLES_OFF = `http://127.0.0.1:${PORT + 2}`;
+if (await fetch(`${TOGGLES_OFF}/api/health`).then(() => true, () => false)) {
+  console.log(`port ${PORT + 2} is already in use — the test would run against ANOTHER server.`);
+  process.exit(1);
+}
+
 // The same guard as the contract test, for the same reason: a port already taken means the old
 // server keeps answering, and the whole run tests the previous build without saying so.
 if (await fetch(`${BASE}/api/health`).then(() => true, () => false)) {
@@ -185,12 +194,31 @@ signInServer.stdout.on('data', (chunk) => {
   firstAccess ||= String(chunk).match(/password:\s+(\S+)/)?.[1] ?? '';
 });
 
+// A third server, on its own copy of the site, with the three toggles the panel itself draws a
+// control for turned off (docs/ROLES.md, section 7). Its own project, not a flag on the one above:
+// a toggle is read once, at boot, from holdrim.json — there is no live way to flip it under a
+// running server, and there should not be one.
+const offSite = mkdtempSync(join(tmpdir(), 'holdrim-browser-off-'));
+cpSync(site, offSite, { recursive: true });
+const offConfig = JSON.parse(readFileSync(join(offSite, 'holdrim.json'), 'utf8'));
+offConfig.features = { comments: false, pageRequests: false, bugCategory: false };
+writeFileSync(join(offSite, 'holdrim.json'), JSON.stringify(offConfig, null, 2));
+const toggleServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
+  env: {
+    ...process.env, PORT: String(PORT + 2), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
+    HOLDRIM_OWNER: OWNER, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'memory', HOLDRIM_SITE: offSite,
+  },
+  stdio: ['ignore', 'ignore', 'inherit'],
+});
+
 let browser;
 const cleanUp = async () => {
   await browser?.close();
   server.kill();
   signInServer.kill();
+  toggleServer.kill();
   rmSync(site, { recursive: true, force: true });
+  rmSync(offSite, { recursive: true, force: true });
 };
 
 try {
@@ -595,6 +623,41 @@ try {
     expect('and nothing was refused on the way', '', owner.problems.join(' | '));
   }
 
+  console.log('the panel obeys the project\'s feature toggles:');
+  for (let i = 0; i < 40 && !(await fetch(`${TOGGLES_OFF}/api/health`).then((r) => r.ok, () => false)); i++) {
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  {
+    // comments, pageRequests and bugCategory are OFF on this server (docs/ROLES.md, section 7):
+    // `/api/me` sends the panel exactly these three, and `Panel.jsx` must draw no control for one
+    // that is off — a control the server would then 403 on is worse than none at all. Only a real
+    // browser, running the real bundle, can see this: a unit test on `Panel.jsx`'s exports would
+    // prove the same source that might still ship the wrong `panel-react.js`.
+    const reader = await person(READER);
+    await reader.page.goto(`${TOGGLES_OFF}/pages/A01.html`);
+    await block(reader.page, 'A01.1.3').click();
+    await must('the panel still opens', () => reader.page.locator('.rv-panel[open]').waitFor());
+    expect('with comments off, there is no Comment button', 0,
+      await reader.page.locator('.rv-actions').getByRole('button', { name: 'Comment' }).count());
+    await reader.page.getByRole('button', { name: 'Request a change' }).click();
+    const offCategories = await reader.page.locator('.rv-form select option').allTextContents();
+    expect('and neither the bug nor the page category is offered',
+      'Adjust the text,Replace a term,Remove,Doubt', offCategories.join(','));
+    expect('and nothing failed', '', reader.problems.join(' | '));
+
+    // The default server, above, leaves every toggle at its default — on — and offers every one.
+    const onReader = await person(READER);
+    await onReader.page.goto(`${BASE}/pages/A01.html`);
+    await block(onReader.page, 'A01.1.3').click();
+    expect('with every toggle on, Comment is offered', 1,
+      await onReader.page.locator('.rv-actions').getByRole('button', { name: 'Comment' }).count());
+    await onReader.page.getByRole('button', { name: 'Request a change' }).click();
+    const onCategories = await onReader.page.locator('.rv-form select option').allTextContents();
+    expect('and every category is offered, bug and page included',
+      'Adjust the text,Replace a term,Remove,Doubt,Report a bug,Ask for a new page', onCategories.join(','));
+    expect('and nothing failed', '', onReader.problems.join(' | '));
+  }
+
   console.log('the sign-in screen, under its own policy:');
   for (let i = 0; i < 40 && !(await fetch(`${SIGN_IN}/api/health`).then((r) => r.ok, () => false)); i++) {
     await new Promise((r) => setTimeout(r, 250));
@@ -713,7 +776,12 @@ try {
   await page.goto(`${SIGN_IN}/engine/home`);
   await page.locator('nav a[href="/engine/people"]').click();
   await must('the owner reaches it from the home', () => page.locator('#create').waitFor());
-  page.on('dialog', (d) => d.accept());
+  // Captured as well as accepted: the `confirm()` before a reset or a disable needs accepting for
+  // either action to run at all, and the `alert()` the two dialog tests below read from is the
+  // LAST one raised on the click that triggered it — there is nowhere else in this script that a
+  // `dialog` event's own text can be read from.
+  const dialogs = [];
+  page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
   await page.locator('#create input[name="name"]').fill('Someone New');
   await page.locator('#create input[name="email"]').fill('new@example.org');
   await page.locator('#create button[type="submit"]').click();
@@ -763,6 +831,53 @@ try {
   expect('on a phone the people screen does not scroll sideways', true,
     await page.evaluate(() => globalThis.document.documentElement.scrollWidth <= globalThis.innerWidth));
   await page.setViewportSize({ width: 1280, height: 900 });
+
+  console.log('the warning when the server cannot confirm the old sessions are gone:');
+  {
+    // Real requests all the way through: the route only substitutes the ONE field the store sets
+    // when its own delete of the old sessions fails, so what the page draws next — the password,
+    // the redrawn row — still comes from the genuine answer, and the alert is the only thing this
+    // is testing. `route.fetch()` performs the real request; the mutated body is what the page
+    // actually reads.
+    const enLocale = JSON.parse(readFileSync(join(ROOT, 'engine', 'locales', 'en.json'), 'utf8'));
+    // `{action}` stands for the button's own label — `people.reset` — never a hard-coded word, so
+    // this substitutes the same value the page does rather than restating it.
+    const warned = (key, email) => enLocale[key].replace('{email}', email).replace('{action}', enLocale['people.reset']);
+    const withFailedDrop = async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({ response, json: { ...body, sessionsDropped: false } });
+    };
+
+    dialogs.length = 0;
+    await page.route('**/api/users/*/password', withFailedDrop);
+    await page.locator('button[data-action="reset"][data-email="else@example.org"]').click();
+    // The reset path shows the new password via `showOnce` regardless of the drop's own outcome —
+    // `withFailedDrop` above kept the real `password` field, so this still has one to show.
+    await must('a reset that could not confirm the drop still shows the new password, once',
+      () => page.locator('#once', { hasText: 'else@example.org' }).locator('code').waitFor());
+    expect('and warns separately that the old sessions may still be alive',
+      warned('people.warn.sessionsNotDropped.reset', 'else@example.org'), dialogs.at(-1));
+    await page.unroute('**/api/users/*/password', withFailedDrop);
+
+    dialogs.length = 0;
+    await page.route('**/api/users/*/enabled', withFailedDrop);
+    await page.locator('button[data-action="disable"][data-email="else@example.org"]').click();
+    await must('disabling still redraws the row even when the drop could not be confirmed',
+      () => page.locator('button[data-action="enable"][data-email="else@example.org"]').waitFor());
+    // A DIFFERENT sentence from the reset one above: on a disabled row the obvious retry is
+    // enable-then-disable, and the enable half of that is what brings the sessions back — the
+    // warning here has to say not to take that retry, not the reset path's "try again".
+    expect('and the disable path warns with its own, different wording',
+      warned('people.warn.sessionsNotDropped', 'else@example.org'), dialogs.at(-1));
+    // The sentence used to say "Use Reset instead", a word that names no button on this row — the
+    // row's button reads "New password". This checks the alert carries the button's REAL label,
+    // not just that `warned()` above built the same string the page did from the same template.
+    expect('and names the button that actually drops the sessions',
+      true, dialogs.at(-1).includes(enLocale['people.reset']));
+    await page.unroute('**/api/users/*/enabled', withFailedDrop);
+  }
+
   expect('and nothing was refused on the way', '', problems.join(' | '));
 } catch (e) {
   console.log(`  FAIL ${e.message}`);

@@ -141,6 +141,7 @@ accident.
 |---|---|
 | **config** | the configuration of the project using the method, in `holdrim.json` at the root. It exists so the **engine** does not know the product. Environment variables beat the file, so the same repository serves more than one environment — except `language`, where `HOLDRIM_LANGUAGE` counts only when the file names none. Authority is not in it at all: a file naming `owner`, `admins` or `locks` refuses to load. `engine/core/config.js` |
 | **theme** | how the project dresses the engine: `theme.brand`, `theme.logo`, `theme.name` in `holdrim.json`. ⚠️ Untrusted input — it lands inside CSS and HTML, so it is validated in `engine/api/theme.ts`, next to the code that writes it |
+| **feature toggle** | a switch a project sets in `holdrim.json`'s `features` block: `comments`, `pageRequests`, `bugCategory`, `peopleScreen`, `graph`, `voice`, `sketch` — a **closed** list, `engine/core/features.js`, with a default equal to today's behaviour. An unknown key refuses to start. It never reaches a **guard**: it can hide a screen or refuse a kind of event, never who may triage, approve or lock (docs/ROLES.md, section 7) |
 | **i18n** | the core returns **keys**; the edge turns them into sentences, in the reader's language. `engine/core/i18n.js` |
 | **brief** | everything an agent needs to act on one approved request, in plain text. `holdrim apply <id>` writes it and hands it to the person's own agent CLI. `engine/cli/agent.ts` |
 

@@ -199,6 +199,11 @@ export function renderHomePage(
   i18n: Translator, lang: string,
   data: {
     projectName: string; pages: PageSummary[]; requests: RequestRow[]; canManagePeople: boolean;
+    /** `features.pageRequests` (docs/ROLES.md, section 7). Off, the form disappears — the server
+     *  still refuses a `category: "page"` request posted straight at the API (`server.ts`), so
+     *  this is decoration, not the guard. Defaults to true: every caller from before this toggle
+     *  existed, and every unit test that does not pass it, keeps seeing the form it always saw. */
+    pageRequestsEnabled?: boolean;
     ask?: HomeOutcome;
   },
   theme: Theme, nonce: string,
@@ -277,7 +282,7 @@ export function renderHomePage(
   // existing page because a request needs one, and "near which page" is a question anybody can answer.
   const options = data.pages.map((p) =>
     `<option value="${forHtml(p.page)}"${p.page === ask.near ? ' selected' : ''}>${forHtml(p.page)} · ${forHtml(p.title)}</option>`).join('');
-  const askForm = !data.pages.length ? '' : `<section aria-labelledby="${HOME_SECTION.ask}">
+  const askForm = !data.pages.length || data.pageRequestsEnabled === false ? '' : `<section aria-labelledby="${HOME_SECTION.ask}">
     <h2 id="${HOME_SECTION.ask}">${t('home.ask.heading')}</h2>
     <p class="holdrim-muted">${t('home.ask.lede')}</p>
     ${ask.asked ? `<p class="holdrim-alert holdrim-alert--ok" role="status">${t('home.ask.done')}</p>` : ''}

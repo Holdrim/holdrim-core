@@ -22,6 +22,7 @@
   "api.crossSite": "This form only takes posts from its own page.",
   "api.event.notFound": "event not found",
   "api.event.unknownType": "unknown event type",
+  "api.feature.disabled": "this project has turned {feature} off",
   "api.internal": "Something went wrong on the server. Quote {id} to whoever runs it.",
   "api.jsonOnly": "This address takes JSON only: send the body with Content-Type: application/json.",
   "api.name.empty": "write the name",
@@ -34,6 +35,7 @@
   "api.reason.required": "give the reason or the question",
   "api.request.needsRequestId": "give data.request",
   "api.request.notFound": "request not found on this page",
+  "api.request.unknownCategory": "unknown request category: {category}",
   "api.route.notFound": "no such method or route",
   "api.state.cannotGo": "cannot go from {from} to {to}",
   "api.state.required": "give data.state",
@@ -175,7 +177,7 @@
   "panel.unavailable": "Could not load the review state. Reload the page.",
   "panel.you": "You",
   "people.confirm.disable": "Take away the access of {email}? Their approvals stay, signed with their name.",
-  "people.confirm.reset": "Generate a new password for {email}? The current one stops working now.",
+  "people.confirm.reset": "Generate a new password for {email}? The current one stops working now, and so does every open session on the account — yours too, if this is you.",
   "people.create.heading": "Give someone access",
   "people.create.submit": "Create access",
   "people.disable": "Take access away",
@@ -196,6 +198,8 @@
   "people.state.disabled": "Taken away",
   "people.state.mustChange": "Active · must choose a password",
   "people.title": "People",
+  "people.warn.sessionsNotDropped": "The old sessions for {email} could not be confirmed closed; they may still be signed in. Do not re-enable the account to retry — that brings them back. Use {action} instead; it drops them again.",
+  "people.warn.sessionsNotDropped.reset": "The old sessions for {email} could not be confirmed closed; they may still be signed in. Reset the password again to drop them.",
   "site.notFound": "not found",
   "site.pathOutside": "that path is outside the site"
 }

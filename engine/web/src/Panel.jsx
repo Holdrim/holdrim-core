@@ -18,9 +18,20 @@ const who = (email, me) => (email === me ? t('panel.you') : email);
 // Names from the dictionaries, in the reader's language; which states and categories exist, and in
 // what order, from the cycle's own table.
 const labelOf = (state) => t(`cycle.${state}`);
-// A function, not a constant: a constant is translated when the module loads, before the server
-// has said which language this person reads, and stays in that one while the rest follows.
-const categoriesOf = () => Object.keys(cycle.request_categories).map((key) => [key, t(`cycle.category.${key}`)]);
+/**
+ * Which categories a request may pick from: every one `cycle.json` names, minus whichever of
+ * `bug`/`page` this project's `features.bugCategory`/`features.pageRequests` has turned off
+ * (docs/ROLES.md, section 7). `features` comes from `/api/me`, by way of `entry.jsx` — the panel
+ * never decides a toggle's state on its own, only draws what the server already answered. Missing a
+ * key reads as ON: a caller from before this toggle existed, and today's default, both see every
+ * category, exactly as before.
+ *
+ * A function, not a constant: a constant is translated when the module loads, before the server
+ * has said which language this person reads, and stays in that one while the rest follows.
+ */
+const categoriesOf = (features) => Object.keys(cycle.request_categories)
+  .filter((key) => (key !== 'bug' || features.bugCategory !== false) && (key !== 'page' || features.pageRequests !== false))
+  .map((key) => [key, t(`cycle.category.${key}`)]);
 
 function Badge({ situation, validatedOn, broken }) {
   // A green "validated" over a red explanation is two answers to one question; the red one is true.
@@ -192,7 +203,7 @@ function History({ events, me }) {
   );
 }
 
-export default function Panel({ block, me, canApprove, events, radiusElsewhere, onRecord, onClose }) {
+export default function Panel({ block, me, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {
   const dlg = useRef(null);
   const [tab, setTab] = useState(null);
   const [text, setText] = useState('');
@@ -276,11 +287,15 @@ export default function Panel({ block, me, canApprove, events, radiusElsewhere, 
         </button>
         {/* A remark that asks for nothing: a question, a note for the next reader. It is kept in
             the block's history like everything else, and changes no state — a request would put
-            it in the owner's queue, which is exactly what a remark should not do. */}
-        <button type="button" className={tab === 'comment' ? 'rv-active' : ''}
-                onClick={() => choose('comment')}>
-          {t('panel.comment.open')}
-        </button>
+            it in the owner's queue, which is exactly what a remark should not do. Hidden, not
+            merely disabled, when `features.comments` is off: an offered control that then 403s
+            reads as broken, and the panel draws only what the server would still accept. */}
+        {features.comments !== false ? (
+          <button type="button" className={tab === 'comment' ? 'rv-active' : ''}
+                  onClick={() => choose('comment')}>
+            {t('panel.comment.open')}
+          </button>
+        ) : null}
       </div>
 
       {tab === 'request' ? (
@@ -288,7 +303,7 @@ export default function Panel({ block, me, canApprove, events, radiusElsewhere, 
           <label>
             {t('panel.request.kind')}
             <select value={category} onChange={(e) => setCategory(e.target.value)}>
-              {categoriesOf().map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              {categoriesOf(features).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}

@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
@@ -139,6 +139,24 @@ test('graph refuses to guess a format, and refuses two at once', (t) => {
   const both = run(['graph', '--json', '--dot'], dir);
   assert.equal(both.code, 2);
   assert.match(both.out, /got json, dot/);
+});
+
+test('features.graph OFF refuses the command; on, or unset, it runs — the "graph" toggle', (t) => {
+  const dir = project(t);
+  // On by default: a project with no "features" block at all sees today's behaviour, unchanged.
+  assert.equal(run(['graph', '--json'], dir).code, 0);
+
+  const configPath = join(dir, 'holdrim.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, features: { graph: false } }));
+  const off = run(['graph', '--json'], dir);
+  assert.equal(off.code, 2, 'a turned-off command is a config refusal, like a bad --root or --only');
+  assert.match(off.out, /graph is turned off/);
+  assert.doesNotMatch(off.out, /"nodes"|"edges"/, 'no graph JSON leaks out when the command refuses to run at all');
+
+  writeFileSync(configPath, JSON.stringify({ ...config, features: { graph: true } }));
+  assert.equal(run(['graph', '--json'], dir).code, 0,
+    'set explicitly to true, it runs exactly as it did with no toggle at all');
 });
 
 test('graph prints the SAME dependencies and states `lights` and `if-i-touch` read', () => {

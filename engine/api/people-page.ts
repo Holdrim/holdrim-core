@@ -35,7 +35,8 @@ export const PEOPLE_KEYS = [
   'people.state.mustChange', 'people.state.disabled', 'people.create.heading', 'people.create.submit',
   'people.reset', 'people.disable', 'people.enable', 'people.confirm.reset', 'people.confirm.disable',
   'people.onceNew',
-  'people.once', 'people.noAnswer', 'nav.home', 'nav.people',
+  'people.once', 'people.noAnswer', 'people.warn.sessionsNotDropped', 'people.warn.sessionsNotDropped.reset',
+  'nav.home', 'nav.people',
 ] as const;
 
 /**
@@ -95,7 +96,8 @@ export function renderPeoplePage(
   // Everything the script says, handed over as data. `<` is escaped so a translation containing
   // `</script>` cannot close the tag it lives in — the same guard the sign-in page uses.
   const texts = Object.fromEntries(['people.confirm.reset', 'people.confirm.disable', 'people.once', 'people.onceNew',
-    'people.noAnswer'].map((k) => [k, i18n.t(lang, k)]));
+    'people.noAnswer', 'people.reset', 'people.warn.sessionsNotDropped', 'people.warn.sessionsNotDropped.reset']
+    .map((k) => [k, i18n.t(lang, k)]));
 
   return `<!doctype html>
 <html lang="${forHtml(lang)}">
@@ -189,11 +191,27 @@ ${rows}
     if (action === 'reset') {
       if (!confirm(say('people.confirm.reset', { email }))) return;
       const data = await post(path + '/password', {});
-      if (data) data.password ? showOnce(email, data.password) : fail(say('people.noAnswer'));
+      if (!data) return;
+      data.password ? showOnce(email, data.password) : fail(say('people.noAnswer'));
+      // The credential change went through regardless — \`data.password\` above already said so.
+      // This is a SEPARATE warning: the old sessions might still be alive, which \`alert\` states
+      // plainly rather than folding into the "once" box that is about the new password, not this.
+      // Its OWN key, not the disable branch's below: running reset again is exactly how this drop
+      // gets retried, so telling somebody to reset again is the right advice here — the wrong one
+      // on the other branch, where the equivalent retry is what brings the sessions back.
+      if (data.sessionsDropped === false) alert(say('people.warn.sessionsNotDropped.reset', { email }));
     } else {
       if (action === 'disable' && !confirm(say('people.confirm.disable', { email }))) return;
       const data = await post(path + '/enabled', { enabled: action === 'enable' });
-      if (data) location.reload();
+      if (!data) return;
+      // Not the reset branch's wording above: on a disabled row the obvious retry is
+      // enable-then-disable, and the enable half of that is exactly what brings back the sessions
+      // this warns about. So this message says not to take that retry, and points at Reset
+      // instead — a reset drops them again, the same way the other branch's does.
+      if (data.sessionsDropped === false) {
+        alert(say('people.warn.sessionsNotDropped', { email, action: TEXTS['people.reset'] }));
+      }
+      location.reload();
     }
   });
 

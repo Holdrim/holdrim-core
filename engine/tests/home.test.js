@@ -163,6 +163,25 @@ test('the home asks for a page near an existing one, keeps a refused text, and a
     'a request hangs on a page: with none, there is nothing to ask near');
 });
 
+// ---------------------------------------------------------------- the pageRequests toggle (docs/ROLES.md §7)
+
+test('features.pageRequests OFF hides the "ask for a page" form; on, or unset, it is there', () => {
+  const i18n = createI18n({ en: JSON.parse(readFileSync(`${ROOT}engine/locales/en.json`, 'utf8')) }, 'en');
+  const pages = [{ page: 'A01', href: '/a', title: 'First', tally: { valid: 0, stale: 0, broken: 0, none: 1 }, awaitingSync: 0 }];
+
+  const off = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], pageRequestsEnabled: false }, ENGINE_THEME, 'n');
+  assert.doesNotMatch(off, /<form method="post" action="\/engine\/home"/, 'the toggle hides the form entirely, not merely disables it');
+  assert.doesNotMatch(off, /home\.ask\.heading|Ask for a page/);
+
+  // The server always passes the toggle, but a caller from before it existed — and every other test
+  // in this file — passes none at all, and has to keep seeing the form it always saw.
+  const unset = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [] }, ENGINE_THEME, 'n');
+  assert.match(unset, /<form method="post" action="\/engine\/home"/, 'no value at all means on, same as today');
+
+  const on = renderHomePage(i18n, 'en', { projectName: 'P', pages, requests: [], pageRequestsEnabled: true }, ENGINE_THEME, 'n');
+  assert.match(on, /<form method="post" action="\/engine\/home"/);
+});
+
 test('whoever may decide gets one plain form per request, with the cycle\'s destinations and nothing run', () => {
   const i18n = createI18n({ en: JSON.parse(readFileSync(`${ROOT}engine/locales/en.json`, 'utf8')) }, 'en');
   const row = (extra = {}) => ({ id: 'r1', page: 'A01', block: 'A01.1.1', href: '/a#A01.1.1', state: 'open', category: 'text',
