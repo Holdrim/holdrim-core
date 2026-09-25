@@ -24,10 +24,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+// `package.json` pins `typescript` exactly, not with a range: `unstable/*` carries no semver promise.
 import { createScanner, SyntaxKind } from 'typescript/unstable/ast';
 import { transformSync, build } from 'esbuild';
 import { readConfig } from '../core/config.js';
-import { readFeatures, FEATURE_DEFAULTS, FEATURE_KEYS } from '../core/features.js';
+import { readFeatures, FEATURE_DEFAULTS, FEATURE_KEYS, everyToggleFlipped } from '../core/features.js';
 import { CAPABILITIES } from '../core/roles.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
@@ -116,6 +117,17 @@ test('voice and sketch exist, closed and validated, off by default: not built ye
 test('the first seven toggles are exactly the ones the issue names, no more, no fewer', () => {
   assert.deepEqual([...FEATURE_KEYS].sort(),
     ['bugCategory', 'comments', 'graph', 'pageRequests', 'peopleScreen', 'sketch', 'voice'].sort());
+});
+
+// `engine/test-contract.sh` (OFF_SITE and POFF_SITE) and `engine/tests/cli.test.js`'s sync toggle
+// test all call `everyToggleFlipped` to boot a server or build a fixture with every toggle at its
+// non-default state; this is the one place that claim is checked against `FEATURE_DEFAULTS` itself,
+// so a helper that flipped only some keys, or invented one `FEATURE_KEYS` does not have, would be
+// caught here rather than surviving in three call sites that never compare it to the source of truth.
+test('everyToggleFlipped flips every key in FEATURE_KEYS, and only those keys', () => {
+  const flipped = everyToggleFlipped();
+  assert.deepEqual(Object.keys(flipped).sort(), [...FEATURE_KEYS].sort());
+  for (const key of FEATURE_KEYS) assert.equal(flipped[key], !FEATURE_DEFAULTS[key], `${key} was not flipped`);
 });
 
 // ============================================================================ no toggle reaches a guard
@@ -573,8 +585,22 @@ function stripperMismatch(file, text) {
     : `${file}: withoutComments blanked real code — the result parses to something different`;
 }
 
-test('every scanned file survives the esbuild cross-check: the regex/division guess never blanks real code', () => {
-  const mismatches = sourceFiles().map((file) => stripperMismatch(file, read(file))).filter(Boolean);
+/**
+ * The union `sourceFiles()` ∪ `bundledInputs(ENTRY_POINTS)`, filtered to `isSourceFile` — the same
+ * set 'every real read of features' (below) scans for an unlisted read, factored out so the
+ * esbuild cross-check right after this runs over it too: a file only `bundledInputs` reaches (one
+ * under `examples/`, never `git ls-files -- engine`'s own listing) is exactly as real a place for
+ * `withoutComments` to misjudge a regex as one `sourceFiles()` already names, and a cross-check that
+ * never looked at it would prove nothing about it either way.
+ */
+async function scannedFiles() {
+  const files = new Set(sourceFiles());
+  for (const f of await bundledInputs(ENTRY_POINTS)) if (isSourceFile(f)) files.add(f);
+  return files;
+}
+
+test('every scanned file survives the esbuild cross-check: the regex/division guess never blanks real code', async () => {
+  const mismatches = [...await scannedFiles()].map((file) => stripperMismatch(file, read(file))).filter(Boolean);
   assert.deepEqual(mismatches, [],
     'withoutComments blanked real code in a file this scan cannot trust its own text-matching over — see MAJOR (N2)');
 });
@@ -715,11 +741,11 @@ test('TD1/EX1: a production import from a DENIED directory is caught by the meta
 });
 
 test('every real read of features, across the engine, is on the allow-list', async () => {
-  // ROUND 5 (MAJOR TD1/EX1): union, not `sourceFiles()` alone — `bundledInputs` reaches a file under
-  // `examples/` (never in `sourceFiles`'s own `git ls-files -- engine`) exactly as it would a new
-  // directory under `engine/`, on the same "found by what loads it, not by what lists it" terms.
-  const files = new Set(sourceFiles());
-  for (const f of await bundledInputs(ENTRY_POINTS)) if (isSourceFile(f)) files.add(f);
+  // ROUND 5 (MAJOR TD1/EX1): the union `scannedFiles()` builds, not `sourceFiles()` alone —
+  // `bundledInputs` reaches a file under `examples/` (never in `sourceFiles`'s own `git ls-files --
+  // engine`) exactly as it would a new directory under `engine/`, on the same "found by what loads
+  // it, not by what lists it" terms.
+  const files = await scannedFiles();
   const offenders = [];
   for (const file of files) {
     for (const found of offendersIn(read(file), file)) offenders.push(`${file}:${found}`);
@@ -787,7 +813,7 @@ test('D2b: a comment that legitimately follows a real regex literal is still bla
   assert.deepEqual(found, ['1: const re = /features\\//;']);
 });
 
-test('D2b: a read hidden inside a template literal\'s ${…} interpolation is caught', () => {
+test('D1: a read hidden inside a template literal\'s ${…} interpolation is caught', () => {
   const found = offendersIn('const msg = `blocked: ${project.features.peopleScreen}`;');
   assert.ok(found.length, 'a read inside a template literal\'s interpolation slipped through');
 });

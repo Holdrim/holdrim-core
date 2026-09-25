@@ -16,7 +16,7 @@ import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mar
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests, queue, list } from '../cli/requests.ts';
 import { createRoles } from '../core/roles.js';
-import { FEATURE_KEYS, FEATURE_DEFAULTS } from '../core/features.js';
+import { everyToggleFlipped } from '../core/features.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const EXAMPLE = join(ROOT, 'examples', 'hello-world');
@@ -316,7 +316,7 @@ test('sync\'s owner filter holds with every toggle at its non-default value', as
   // holdrim.json itself may never name `owner` or `admins` (AGENTS.md — "whoever commits to the
   // file is not whoever deploys"): only `features` is added here, and who is the owner or an admin
   // still comes from the environment, below.
-  config.features = Object.fromEntries(FEATURE_KEYS.map((k) => [k, !FEATURE_DEFAULTS[k]]));
+  config.features = everyToggleFlipped();
   writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify(config));
 
   const blocks = await readBlocks(tmp);

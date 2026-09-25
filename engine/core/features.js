@@ -58,6 +58,18 @@ export const FEATURE_DEFAULTS = Object.freeze({
 export const FEATURE_KEYS = Object.freeze(Object.keys(FEATURE_DEFAULTS));
 
 /**
+ * Every toggle at the opposite of its default — a project's `holdrim.json` with `graph` off,
+ * `voice`/`sketch` on, and so on for every key `FEATURE_DEFAULTS` names. It exists so the test
+ * servers that need every toggle exercised in its NON-default state (`engine/test-contract.sh`'s
+ * OFF_SITE and POFF_SITE, `engine/tests/cli.test.js`'s sync toggle test) derive it from the same
+ * closed list rather than each hand-writing the derivation: a change to what "flipped" means, or a
+ * toggle added to the list, lands here once instead of needing three call sites updated in step.
+ */
+export function everyToggleFlipped() {
+  return Object.fromEntries(FEATURE_KEYS.map((k) => [k, !FEATURE_DEFAULTS[k]]));
+}
+
+/**
  * The project's `features`, checked against the closed list — merged with `FEATURE_DEFAULTS`, never
  * replacing it, so a `holdrim.json` that sets one toggle leaves every other exactly as it was.
  *

@@ -363,17 +363,17 @@ kill $PID 2>/dev/null; wait $PID 2>/dev/null
 echo "feature toggles — every server-gated toggle, off, against something real:"
 OFF_SITE="$WORK/off-site"
 cp -r "$SITE" "$OFF_SITE"
-# ROUND 5: derived from `FEATURE_KEYS`/`FEATURE_DEFAULTS` the same way `POFF_SITE` further down now
-# is, instead of the hand-written four-key literal this used to be — that literal left `graph` ON
-# (its default) and `voice`/`sketch` untouched (also their default, `false`), so nothing on THIS
-# server ever exercised any of the three in its NON-default state, the exact gap ROUND 4 closed only
-# on the password server.
+# ROUND 5: every toggle at the opposite of its default (`everyToggleFlipped`, engine/core/
+# features.js), instead of the hand-written four-key literal this used to be — that literal left
+# `graph` ON (its default) and `voice`/`sketch` untouched (also their default, `false`), so nothing
+# on THIS server ever exercised any of the three in its NON-default state, the exact gap ROUND 4
+# closed only on the password server.
 node --input-type=module -e '
   const { readFileSync, writeFileSync } = await import("node:fs");
-  const { FEATURE_KEYS, FEATURE_DEFAULTS } = await import("./engine/core/features.js");
+  const { everyToggleFlipped } = await import("./engine/core/features.js");
   const path = process.argv[1];
   const config = JSON.parse(readFileSync(path, "utf8"));
-  config.features = Object.fromEntries(FEATURE_KEYS.map((k) => [k, !FEATURE_DEFAULTS[k]]));
+  config.features = everyToggleFlipped();
   writeFileSync(path, JSON.stringify(config, null, 2));
 ' "$OFF_SITE/holdrim.json"
 expect "the derived config turns graph off (on by default)" 0 \
@@ -446,21 +446,21 @@ echo "feature toggles — the screen goes dark, the guard behind it does not:"
 # too now, so a guard that secretly asked "is anything on" rather than "does roles.can say yes" has
 # nowhere left to hide.
 #
-# ROUND 4: read from `FEATURE_KEYS`/`FEATURE_DEFAULTS` (engine/core/features.js) instead of a
-# hand-written subset — the old literal turned four toggles off and left `graph` ON (its default)
-# and `voice`/`sketch` untouched (also their default, `false`), so nothing here ever exercised
-# `graph`, `voice` or `sketch` in their NON-default state. `!FEATURE_DEFAULTS[key]` for every key in
-# `FEATURE_KEYS` is the only way to keep this honest as the list grows: a toggle added to the closed
-# list lands here automatically, at the opposite of what it ships with, never at whatever this
-# script happened to hard-code the day it was written.
+# ROUND 4: every toggle at the opposite of its default (`everyToggleFlipped`, engine/core/
+# features.js) instead of a hand-written subset — the old literal turned four toggles off and left
+# `graph` ON (its default) and `voice`/`sketch` untouched (also their default, `false`), so nothing
+# here ever exercised `graph`, `voice` or `sketch` in their NON-default state. The helper keeps this
+# honest as the list grows: a toggle added to the closed list lands here automatically, at the
+# opposite of what it ships with, never at whatever this script happened to hard-code the day it
+# was written.
 POFF_SITE="$WORK/every-toggle-off-site"
 cp -r "$SITE" "$POFF_SITE"
 node --input-type=module -e '
   const { readFileSync, writeFileSync } = await import("node:fs");
-  const { FEATURE_KEYS, FEATURE_DEFAULTS } = await import("./engine/core/features.js");
+  const { everyToggleFlipped } = await import("./engine/core/features.js");
   const path = process.argv[1];
   const config = JSON.parse(readFileSync(path, "utf8"));
-  config.features = Object.fromEntries(FEATURE_KEYS.map((k) => [k, !FEATURE_DEFAULTS[k]]));
+  config.features = everyToggleFlipped();
   writeFileSync(path, JSON.stringify(config, null, 2));
 ' "$POFF_SITE/holdrim.json"
 # The derivation itself, checked directly against the file it wrote — not only against a route that
