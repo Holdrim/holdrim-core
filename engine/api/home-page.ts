@@ -133,12 +133,17 @@ export function pageTitle(html: string, code: string): string {
  * Every request someone is still waiting on, the oldest first: the one waiting longest is the one
  * most likely forgotten.
  *
- * @param stateOf the cycle's verdict on one request — passed in so this file does not rebuild the
- *                rule of who triages whom
- * @param hrefOf  where each page is served, from `summarisePages`
+ * @param stateOf  the cycle's verdict on one request — passed in so this file does not rebuild the
+ *                 rule of who triages whom
+ * @param hrefOf   where each page is served, from `summarisePages`
+ * @param authorOf what this reader is sent instead of the address — `server.ts`'s
+ *                 `authorDisplaysFor`, docs/ROLES.md, "How a person appears". Defaults to the address
+ *                 itself, today's behaviour, so a caller from before this setting existed — every
+ *                 test in this file among them — keeps seeing exactly what it always saw.
  */
 export function requestsInProgress(
   events: Event[], stateOf: (request: Event) => string, hrefOf: Map<string, string>,
+  authorOf: (email: string) => string = (email) => email,
 ): RequestRow[] {
   const rows: RequestRow[] = [];
   for (const e of events) {
@@ -150,7 +155,7 @@ export function requestsInProgress(
       id: e.id, page: e.page, block: e.block ?? null,
       href: page && e.block ? `${page}#${encodeURIComponent(e.block)}` : page,
       state, category: typeof e.data?.category === 'string' ? e.data.category : null,
-      author: e.author, when: e.when, text: e.text ?? '',
+      author: authorOf(e.author), when: e.when, text: e.text ?? '',
     });
   }
   return rows.sort((a, b) => a.when.localeCompare(b.when));

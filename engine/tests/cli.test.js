@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { readBlocks, sheetFiles } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, check, ifITouch } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
-import { setState, requests, queue, list } from '../cli/requests.ts';
+import { setState, requests, queue, list, show } from '../cli/requests.ts';
 import { createRoles } from '../core/roles.js';
 import { everyToggleFlipped } from '../core/features.js';
 
@@ -436,6 +436,64 @@ test('list() prints no warning and exits clean when nothing is tampered', async 
   }
   assert.equal(exitWorthy, false);
   assert.deepEqual(said, []);
+});
+
+/**
+ * `people.show` (docs/ROLES.md, "How a person appears"), applied at the one place `list()` prints a
+ * person: the default shows the address, exactly as every version before this one did, and a
+ * project's own `holdrim.json` can ask for the role instead — proved by what the printed line does
+ * and does not contain, not by calling `personLabel` directly, since it is not exported for that.
+ */
+test('list() shows the address by default, and the role when people.show asks for it', async (t) => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const events = [
+    { id: 'e1', type: 'request', page: 'A01', block: null, text: 'change this', author: 'owner@example.org',
+      when: '2026-01-01T00:00:00Z', data: { category: 'text' } },
+  ];
+  const log = console.log;
+  const printed = (root) => {
+    const said = [];
+    console.log = (line) => said.push(line);
+    return list(root, { events: async () => events }, { all: true }).finally(() => { console.log = log; }).then(() => said.join('\n'));
+  };
+
+  const byDefault = await printed(EXAMPLE);
+  assert.ok(byDefault.includes('owner@example.org'), 'the default keeps today\'s behaviour: the address');
+
+  const byRole = await printed(project(t, { people: { show: 'role' } }));
+  assert.ok(/\bowner\b/.test(byRole) && !byRole.includes('@'),
+    `people.show: "role" should print the role and never the address: ${byRole}`);
+});
+
+/**
+ * The same setting, applied to `show()`'s "Who" line and its thread — round 1 of the issue #31
+ * review, finding 6: nothing exercised `show()` at all before this, so a `personLabel` call
+ * reverted to the raw address in either place would have passed every test in the suite.
+ */
+test('show() shows the address by default, and the role when people.show asks for it', async (t) => {
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const events = [
+    { id: 'req0000001', type: 'request', page: 'A01', block: null, text: 'change this', author: 'reviewer@example.org',
+      when: '2026-01-01T00:00:00Z', data: { category: 'text' } },
+    { id: 'st00000001', type: 'request_state', page: 'A01', author: 'owner@example.org',
+      when: '2026-01-01T00:05:00Z', data: { request: 'req0000001', state: 'approved', from: 'open' } },
+  ];
+  const log = console.log;
+  const printed = (root) => {
+    const said = [];
+    console.log = (line) => said.push(line);
+    return show(root, { events: async () => events }, 'req0').finally(() => { console.log = log; }).then(() => said.join('\n'));
+  };
+
+  const byDefault = await printed(EXAMPLE);
+  assert.ok(byDefault.includes('reviewer@example.org'), 'the default keeps today\'s behaviour: the address');
+  assert.ok(byDefault.includes('owner@example.org'), 'and the thread\'s own author too');
+
+  const byRole = await printed(project(t, { people: { show: 'role' } }));
+  assert.ok(/\bmember\b/.test(byRole) && !byRole.includes('reviewer@example.org'),
+    `people.show: "role" should print the requester's role, never the address: ${byRole}`);
+  assert.ok(/\bowner\b/.test(byRole) && !byRole.includes('owner@example.org'),
+    `and the thread's own author's role too, never the address: ${byRole}`);
 });
 
 /**

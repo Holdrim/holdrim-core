@@ -463,7 +463,7 @@ const ALLOWED = [
     text: ".filter((key) => (key !== 'bug' || features.bugCategory !== false) && (key !== 'page' || features.pageRequests !== false))",
     why: 'the filter itself, reading the two toggles the panel draws a category for' },
   { file: 'engine/web/src/Panel.jsx',
-    text: 'export default function Panel({ block, me, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {',
+    text: 'export default function Panel({ block, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {',
     why: 'the prop `entry.jsx` passes down; missing reads as on, so an older caller sees every control ' +
       '— radiusElsewhere (#111) is a sibling prop on the same line, not a feature read of its own' },
   { file: 'engine/web/src/Panel.jsx', text: '{features.comments !== false ? (',

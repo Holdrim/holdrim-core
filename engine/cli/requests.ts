@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { createCycle } from '../core/cycle.js';
-import { readBlocks, projectRoles } from './pages.ts';
+import { readBlocks, ofProject, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
 import { suspectsOf } from '../api/texts.ts';
+import { personAs } from '../core/people-show.js';
 import type { Event } from '../api/types.ts';
 
 /**
@@ -111,6 +112,27 @@ export const formatWhen = (iso: string) => {
 };
 
 /**
+ * What the CLI prints for a person — docs/ROLES.md, "How a person appears" — applied at the two
+ * places a human (or the coding agent reading `agent.ts`'s brief) actually reads one: the console
+ * lines below, and `brief`'s own "Who:" line. `holdrim list --json` is untouched: `queue`'s own
+ * comment already calls it "the contract other tools read", and a display setting is not the kind
+ * of thing that contract should move under — it keeps naming the real address, exactly as before.
+ *
+ * The CLI never reaches the accounts store (docs/PRIVACY.md, section 1: "never the accounts") or a
+ * signed-in reader of its own, so two things `personAs` can do for the panel and the home, this
+ * cannot: "name" has nothing beyond the address to fall back to, and "id" the same — the row id
+ * lives behind a lookup this tool has no connection open for — and no override applies, because
+ * there is no viewer here to apply one TO. Both read as `personAs` already reads missing data: the
+ * address, which is what a project set "email" to mean in the first place.
+ */
+export function personLabel(show: ReturnType<typeof ofProject>['peopleShow'], roles: Pick<ReturnType<typeof projectRoles>, 'roleOf'>, email: string): string {
+  return personAs({
+    show, email, id: null, name: null,
+    role: roles.roleOf(email), alwaysNamed: false,
+  });
+}
+
+/**
  * The agent's queue: what the owner approved and nobody applied yet, with everything an agent
  * needs to act — as data. `--json` is the contract other tools read; the table is for a person.
  */
@@ -168,11 +190,13 @@ export async function list(root: string, source: Pick<Source, 'events'>, options
       (q.toTriage && !options.all ? ` (${q.toTriage} waiting for the owner's triage)` : ''));
     return q.tampered;
   }
+  const { peopleShow } = ofProject(root);
+  const roles = projectRoles(root);
   for (const r of q.requests) {
     const changed = r.blockChanged ? ' · ⚠ the block changed since the request' : '';
     const label = cycle.table.states[r.state]?.short ?? r.state;
     console.log(`${r.id.slice(0, 8)}  ${label.padEnd(10)} ${(r.block ?? r.page).padEnd(10)} ` +
-      `${formatWhen(r.when)}  ${r.author}${changed}`);
+      `${formatWhen(r.when)}  ${personLabel(peopleShow, roles, r.author)}${changed}`);
     console.log(`          “${r.text.replace(/\n/g, ' ').slice(0, 140)}”`);
   }
   return q.tampered;
@@ -181,13 +205,15 @@ export async function list(root: string, source: Pick<Source, 'events'>, options
 export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
   const cycle = loadCycle();
   const events = await source.events();
-  const r = find(requests(events, projectRoles(root)), prefix);
+  const roles = projectRoles(root);
+  const r = find(requests(events, roles), prefix);
   const blocks = await readBlocks(root);
   const block = r.block ? blocks.get(r.block) : undefined;
+  const { peopleShow } = ofProject(root);
 
   console.log(`Request  ${r.id}`);
   console.log(`State    ${labelOf(cycle, r.state)}`);
-  console.log(`Who      ${r.author}  ·  ${formatWhen(r.when)}`);
+  console.log(`Who      ${personLabel(peopleShow, roles, r.author)}  ·  ${formatWhen(r.when)}`);
   console.log(`Where    ${r.block ?? r.page}${block ? `  (${block.file})` : ''}`);
   console.log(`\nAsked for:\n  ${(r.text ?? '').replace(/\n/g, '\n  ')}`);
   if (r.snapshot) console.log(`\nThe block's text when they asked:\n  ${r.snapshot.slice(0, 500)}`);
@@ -203,7 +229,7 @@ export async function show(root: string, source: Pick<Source, 'events'>, prefix:
     for (const e of r.history) {
       const what = e.type === 'supplement' ? 'added more'
         : (labelOf(cycle, String(e.data?.state ?? '')) || e.type);
-      console.log(`  ${formatWhen(e.when)}  ${e.author}  ${what}`);
+      console.log(`  ${formatWhen(e.when)}  ${personLabel(peopleShow, roles, e.author)}  ${what}`);
       if (e.text) console.log(`      ${e.text.replace(/\n/g, ' ')}`);
     }
   }

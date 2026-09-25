@@ -42,7 +42,10 @@ export class FirestoreEventStore implements EventStore {
     const { textHash: _th, snapshotHash: _sh, ...withoutHashes } = this.#fromFirestore(read.id, read.data()!);
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
-    return { ...withoutHashes, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author) };
+    // `authorId: personId`, the same value `withAuthors` would capture off this document a moment
+    // later, so a fresh append and the list right after it answer it identically
+    // (events-conformance.test.js, "the answer to an append is what a list says a moment later").
+    return { ...withoutHashes, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId };
   }
 
   /**
@@ -74,7 +77,7 @@ export class FirestoreEventStore implements EventStore {
     });
     const read = await removalDoc.get();
     const { textHash: _th, snapshotHash: _sh, ...withoutHashes } = this.#fromFirestore(read.id, read.data()!);
-    return { ...withoutHashes, author: personEmail(by) };
+    return { ...withoutHashes, author: personEmail(by), authorId: personId };
   }
 
   /**
