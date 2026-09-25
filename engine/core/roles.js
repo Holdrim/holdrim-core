@@ -22,10 +22,11 @@
  * A project's OWN roles, and who holds them, are NOT read here yet, and never from `holdrim.json`
  * (docs/ROLES.md, "Authority comes from the deployment only"; `engine/core/config.js`'s
  * `AUTHORITY_KEYS` refuses the file the moment it names `roles` or `grants`). They come from the
- * owner, through events at a settings screen — a later piece. `ROLE_NAME_FORMAT` and `isValidScope`
- * below are validated and tested now anyway: they are the grammar that path will check a role's name
- * and a grant's scope against, and building them once, ahead of their first caller, means the settings
- * screen validates a name or a scope the same way `HOLDRIM_LOCKS` already does, not a second way.
+ * owner, through events at a settings screen — a later piece, which will need its own name grammar
+ * for a project role then, not before: a format with no caller is untested by construction, whatever
+ * a unit test that calls it directly says — the settings screen gets one when it exists, not sooner.
+ * `isValidScope` below is different: `HOLDRIM_LOCKS` (`parseLocks`) is a real caller of it TODAY, so
+ * its grammar is proved against the tier this change actually ships.
  *
  * `HOLDRIM_LOCKS` (below, `parseLocks`) is different: who holds `lock` besides the owner is read from
  * the environment, same as `owner` and `admins`, because a forged lock is the one thing signed events
@@ -33,7 +34,8 @@
  * comment for why.
  * @module
  */
-import { PAGE_FORMAT, ID_FORMAT } from './limits.js';
+import { PAGE_FORMAT } from './limits.js';
+import { normalizeEmail, isEmailAddress } from './email.js';
 
 /**
  * The closed list of capabilities the engine knows. A project combines these into roles; it can
@@ -93,22 +95,37 @@ export function capabilitiesOf(role) {
 }
 
 /**
- * A project-defined role's name, the shape the future settings screen will validate a typed name
- * against — lowercase, digits and hyphens only, the same restraint `PAGE_FORMAT` puts on a page code,
- * and for the same reason: a role's name is shown on the people screen and, per `people.show:
- * 'role'`, may be the ONLY thing a reader ever sees about who acted, so it has to be safe to put in
- * HTML before anything trusts it. No caller in this version asks it yet — `engine/tests/roles.test.js`
- * is the one that does, so this grammar is proved before its first real use, not invented after.
+ * A page-FAMILY scope: `PAGE_FORMAT`'s own shape with an explicit trailing `*`, and a prefix of at
+ * LEAST two characters before it (docs/ROLES.md, "A grant can be limited to pages or to blocks" —
+ * "P0*" reaches P01..P09 and nothing that merely starts with "P"). The minimum is not decorative:
+ * every real page code in this codebase's own examples (`engine/core/limits.js`'s comment — "D01,
+ * T03a, C02, UC-01 and DNN") is two characters or more, and a single-letter family ("P*") would not
+ * pick out a family at all — it would mean "everything whose code happens to start with the same
+ * letter as this one page", which for a scheme where every page in a whole SECTION shares that first
+ * letter is "every page", the exact bare wildcard the next paragraph refuses outright. Kept as its
+ * own pattern, not derived from `PAGE_FORMAT`, so the two stay two plain regexes anyone can read side
+ * by side rather than one built by string surgery on the other.
  */
-export const ROLE_NAME_FORMAT = /^[a-z][a-z0-9-]{0,31}$/;
+const SCOPE_FAMILY_FORMAT = /^[A-Za-z][A-Za-z0-9-]{1,7}\*$/;
 
 /**
- * A page-FAMILY scope: `PAGE_FORMAT`'s own shape with an explicit trailing `*` (docs/ROLES.md, "A
- * grant can be limited to pages or to blocks" — "P0*" reaches P01..P09 and nothing that merely
- * starts with "P"). Kept as its own pattern, not derived from `PAGE_FORMAT`, so the two stay two
- * plain regexes anyone can read side by side rather than one built by string surgery on the other.
+ * A block id: a page-code-shaped root, then one or more `.`-separated segments (`P03.2.1`), and
+ * optionally a namespace naming another project's block ahead of it (`supplier:C02.1.4`, the shape
+ * `docs/PROTOCOL.md`'s own `data-depends` example uses). The dot segment is not optional — a scope
+ * with none of them is a PAGE, the first branch of `isValidScope` below, or a FAMILY, the second; a
+ * block id is the one shape of the three that is neither, and asking for at least one dot is what
+ * tells it apart from a plain page code instead of overlapping it (see `isValidScope`'s own comment
+ * on why that overlap used to hide a whole branch behind an "equivalent mutant").
+ *
+ * This replaces reusing `ID_FORMAT` (`engine/core/limits.js`) here: that format exists to bound an
+ * EVENT's own `block` field — free text an author's fingerprint tool wrote, already scoped to one
+ * page by the event it sits on — and accepts any non-empty run of its allowed characters, `.`, `-`,
+ * `:` and a bare `1` among them. A grant's scope is different: it is untrusted input that itself
+ * SELECTS pages and blocks before anything else runs (docs/ROLES.md, "Configuration is untrusted
+ * input"), so it is checked against the actual shape a block id has, not merely the alphabet it is
+ * allowed to be drawn from.
  */
-const SCOPE_FAMILY_FORMAT = /^[A-Za-z][A-Za-z0-9-]{0,7}\*$/;
+const SCOPE_BLOCK_FORMAT = /^(?:[A-Za-z][A-Za-z0-9-]{0,15}:)?[A-Za-z][A-Za-z0-9-]{0,7}(?:\.[A-Za-z0-9-]{1,8}){1,8}$/;
 
 /**
  * Whether `scope` is one of the three shapes docs/ROLES.md allows on a grant or a `HOLDRIM_LOCKS`
@@ -117,14 +134,19 @@ const SCOPE_FAMILY_FORMAT = /^[A-Za-z][A-Za-z0-9-]{0,7}\*$/;
  * `engine/api/theme.ts` already refuses to trust raw — it would end up choosing which pages and
  * blocks a payload includes.
  *
- * `ID_FORMAT` alone would also accept a bare page code or a family with no `*`; checked in this
- * order, those are already true by the time this reaches it, so nothing is lost by asking it last —
- * it is here only for the third shape, a block id (`P03.2.1`), which `PAGE_FORMAT` never accepts.
+ * Order matters for what each branch actually proves, not merely for what it accepts: before round 2
+ * of #29's review, the third branch was the bare `ID_FORMAT` alphabet check, which is a SUPERSET of
+ * `PAGE_FORMAT` — every exact page code `PAGE_FORMAT` accepts, `ID_FORMAT` accepts too. Deleting the
+ * `PAGE_FORMAT` branch outright then changed nothing any test could see: an "equivalent mutant", the
+ * one shape a mutation this codebase's own method (`AGENTS.md`, rule 2) exists to catch. `PAGE_FORMAT`
+ * now proves something `SCOPE_BLOCK_FORMAT` cannot: a block id demands at least one `.` segment, so a
+ * plain page code like `P03` fails it, and only `PAGE_FORMAT` still accepts it — deleting that branch
+ * now fails `isValidScope('P03')` for real.
  * @param {unknown} scope
  */
 export function isValidScope(scope) {
   if (typeof scope !== 'string' || scope === '') return false;
-  return PAGE_FORMAT.test(scope) || SCOPE_FAMILY_FORMAT.test(scope) || ID_FORMAT.test(scope);
+  return PAGE_FORMAT.test(scope) || SCOPE_FAMILY_FORMAT.test(scope) || SCOPE_BLOCK_FORMAT.test(scope);
 }
 
 /**
@@ -134,13 +156,16 @@ export function isValidScope(scope) {
  * (`engine/core/config.js`'s `AUTHORITY_KEYS` refuses the file the key would otherwise sit in) —
  * docs/ROLES.md, section 3: "Set where the owner is set."
  *
- * The address is normalized exactly as the store normalizes one — trim, then lower-case
- * (`engine/api/users.ts`'s `normalizeEmail`) — repeated here rather than imported: this file is core
- * JavaScript the browser also loads (`AGENTS.md`, "JavaScript or TypeScript"), and `users.ts` is not.
+ * The address is normalized, and checked, by `engine/core/email.js` — the ONE module both this file
+ * and `engine/api/users.ts` import it from (round 2 of #29's review, findings 2 and 6: this used to
+ * repeat `users.ts`'s `normalizeEmail` by hand, with no shape check at all, so `<ana@x>` — a name, a
+ * bracket and an `@`, nothing a mail server would ever deliver to — parsed as a lock-holder because
+ * nothing here asked `isEmailAddress`, only `users.ts`'s own create route did, for a NEW account, far
+ * too late to stop a `HOLDRIM_LOCKS` typo from silently locking nobody).
  *
- * Anything that does not fit — no colon, an empty address, a scope `isValidScope` refuses — throws:
- * a malformed entry here is a lock silently never granted, which is worse than a service that will
- * not start, the same reasoning `HOLDRIM_OWNER`'s own parsing already follows.
+ * Anything that does not fit — no colon, an address `isEmailAddress` refuses, a scope `isValidScope`
+ * refuses — throws: a malformed entry here is a lock silently never granted, which is worse than a
+ * service that will not start, the same reasoning `HOLDRIM_OWNER`'s own parsing already follows.
  *
  * Naming the owner in it is harmless: the owner already holds `lock` from `isOwner` alone (below),
  * so nothing here treats that address specially.
@@ -160,10 +185,16 @@ export function parseLocks(raw) {
         `HOLDRIM_LOCKS has "${entry}", which is missing its scope: an entry is an e-mail, a colon, ` +
         'and a scope, like "ana@example.org:P0*". Entries are separated by ";".');
     }
-    const email = entry.slice(0, colon).trim().toLowerCase();
+    const rawEmail = entry.slice(0, colon).trim();
+    const email = normalizeEmail(rawEmail);
     const scope = entry.slice(colon + 1).trim();
-    if (!email) {
+    if (!rawEmail) {
       throw new Error(`HOLDRIM_LOCKS has "${entry}", which names no e-mail before the colon.`);
+    }
+    if (!isEmailAddress(email)) {
+      throw new Error(
+        `HOLDRIM_LOCKS names "${rawEmail}", which is not an e-mail address — the same check ` +
+        '`engine/api/users.ts` applies when an account is created.');
     }
     if (!isValidScope(scope)) {
       throw new Error(
@@ -180,8 +211,7 @@ export function parseLocks(raw) {
  * @param {string|undefined|null} [locksRaw] `HOLDRIM_LOCKS`, in `parseLocks`'s format
  */
 export function createRoles(owner, admins, locksRaw) {
-  const split = (s) =>
-    String(s ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  const split = (s) => String(s ?? '').split(',').map(normalizeEmail).filter(Boolean);
 
   const list = [...new Set(split(owner))];
   if (list.length !== 1) {
@@ -196,11 +226,14 @@ export function createRoles(owner, admins, locksRaw) {
   // The owner is an admin by consequence, not by configuration: there is no way to strip their
   // power by accident.
   const everyone = new Set([...split(admins), ownerEmail]);
-  const normalized = (e) => String(e ?? '').trim().toLowerCase();
+  // `normalizeEmail` itself (`engine/core/email.js`) is the one function every normalization in this
+  // file, and in `engine/api/users.ts`, now calls — see `parseLocks`'s own comment for why a second,
+  // hand-written copy of "trim, then lower-case" was the bug findings 2 and 6 closed.
+  const normalized = normalizeEmail;
 
-  // Validated once, at construction, exactly like `list` above: a malformed LOCKS entry is a config
-  // error, and a config error refuses to start rather than surfacing the first time something asks
-  // about it.
+  // Validated once, at construction, exactly like `list` above: a malformed HOLDRIM_LOCKS entry is
+  // a config error, and a config error refuses to start rather than surfacing the first time
+  // something asks about it.
   const lockHolders = new Set(parseLocks(locksRaw).map((l) => l.email));
 
   /** Whether `e` is THE owner — an identity check, not a capability. Defined once, here, so `can`
@@ -221,8 +254,8 @@ export function createRoles(owner, admins, locksRaw) {
     /**
      * Whether `e` is named in `HOLDRIM_LOCKS` — an identity check, like `isOwner`, never a
      * capability. This is the ONE function `engine/api/server.ts`'s account guards (create, reset,
-     * re-enable) and any future lock check both ask, so a rule added for one reaches the other
-     * (docs/ROLES.md, section 3, "One parser, one question").
+     * disable and re-enable) and any future lock check both ask, so a rule added for one reaches the
+     * other (docs/ROLES.md, section 3, "One parser, one question").
      *
      * Not yet read by `can('lock', …)` — see the comment there for why.
      */

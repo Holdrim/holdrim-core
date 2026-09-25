@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope, ROLE_NAME_FORMAT,
+  CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope,
 } from '../core/roles.js';
 
 test('exactly one owner: zero or two refuse to start', () => {
@@ -116,33 +116,61 @@ test('mutating what capabilitiesOf returns changes nothing the next caller reads
 });
 
 // ------------------------------------------------------------------ #29: the validation core, kept
-// ready for the settings screen. No caller in this version reads ROLE_NAME_FORMAT for a project role
-// or a grant — that path is events, by the owner, not yet built (docs/ROLES.md, "Roles and grants as
-// events") — so these prove the grammar directly, the same way `isValidScope`'s own tests do for the
-// scope grammar `HOLDRIM_LOCKS` (below) already uses.
-
-test('ROLE_NAME_FORMAT accepts lowercase letters, digits and hyphens, and nothing else', () => {
-  for (const good of ['admin2', 'clinical-lead', 'a']) assert.equal(ROLE_NAME_FORMAT.test(good), true, good);
-  for (const bad of ['Clinical-Lead', 'clinical_lead', '2fast', '', 'has space', '-lead']) {
-    assert.equal(ROLE_NAME_FORMAT.test(bad), false, bad);
-  }
-});
-
-test('ROLE_NAME_FORMAT is anchored — it does not merely find a match somewhere inside', () => {
-  assert.equal(ROLE_NAME_FORMAT.test('clinical-lead and then some junk'), false);
-});
+// ready for the settings screen. `isValidScope`'s tests prove the grammar directly because
+// `HOLDRIM_LOCKS` (below) is a real caller of it today; a project role's own name format has no
+// caller until the settings screen exists, so it is not built ahead of one any more — round 2 of
+// #29's review (finding 11): a format nothing calls is untested by construction, whatever a test
+// that calls it directly says.
 
 test('isValidScope accepts exactly the three shapes docs/ROLES.md describes', () => {
   assert.equal(isValidScope('P03'), true, 'an exact page');
   assert.equal(isValidScope('P0*'), true, 'a page family, with its explicit star');
   assert.equal(isValidScope('P03.2.1'), true, 'a single block id');
-  // "P0*" reaches P01..P09 and nothing that merely begins with "P" — the star has to be WRITTEN;
-  // "P*" is a different, wider family, and neither is the same question as "does this start with P".
+  assert.equal(isValidScope('supplier:C02.1.4'), true,
+    'a block id may carry a namespace ahead of it — docs/PROTOCOL.md\'s own data-depends example');
   assert.equal(isValidScope('P'), true, 'a one-letter page code is still an exact page, not a family');
   assert.equal(isValidScope(''), false, 'empty names nothing');
   assert.equal(isValidScope('P0**'), false, 'two stars is not a family');
   assert.equal(isValidScope('*P0'), false, 'a star that is not trailing is not a family either');
   assert.equal(isValidScope(42), false, 'not even a string');
+});
+
+/**
+ * A namespace names ANOTHER project's BLOCK, never one of its bare pages — `supplier:C02.1.4` is a
+ * scope, `supplier:C02` is not one of the three shapes docs/ROLES.md describes at all. Without the
+ * `{1,8}` on `SCOPE_BLOCK_FORMAT`'s dot group demanding at least one segment, a namespaced page with
+ * no block would slip through here — `PAGE_FORMAT` and `SCOPE_FAMILY_FORMAT` never accept the colon,
+ * so this is the one case only `SCOPE_BLOCK_FORMAT`'s own cardinality decides.
+ */
+test('isValidScope rejects a namespace with no block id after it', () => {
+  assert.equal(isValidScope('supplier:C02'), false);
+});
+
+/**
+ * Round 2 of #29's review, finding 4: before this, the third branch was the bare `ID_FORMAT`
+ * alphabet — any non-empty run of its allowed characters — so a handful of separators with nothing
+ * real between them slipped through as a "block id". Each of these pins one such form as REJECTED,
+ * against the tightened `SCOPE_BLOCK_FORMAT` and `SCOPE_FAMILY_FORMAT`.
+ */
+test('isValidScope rejects a separator, or a few of them, with nothing real between', () => {
+  for (const bad of ['::', '.', '...', '-', ':', '1']) {
+    assert.equal(isValidScope(bad), false, JSON.stringify(bad));
+  }
+});
+
+test('isValidScope rejects a bare "*" — a wildcard naming every page has no written form', () => {
+  assert.equal(isValidScope('*'), false);
+});
+
+/**
+ * A single-letter family ("P*") is not a family at all in a scheme where a whole section shares its
+ * first letter — it reaches every page in it, the same "all pages" `isValidScope` refuses outright
+ * for a bare "*". `SCOPE_FAMILY_FORMAT` now demands at least two characters before the star, the same
+ * length every real page code in this codebase's own examples already has ("D01", "T03a", "UC-01").
+ */
+test('isValidScope rejects a single-letter family — "P0*" is a family, "P*" is not', () => {
+  assert.equal(isValidScope('P*'), false);
+  assert.equal(isValidScope('P0*'), true, 'two characters before the star is still accepted');
 });
 
 // ------------------------------------------------------------------ HOLDRIM_LOCKS
@@ -170,6 +198,19 @@ test('parseLocks refuses an entry with no address before the colon', () => {
   assert.throws(() => parseLocks(':P03'), /names no e-mail before the colon/);
 });
 
+/**
+ * Round 2 of #29's review, finding 2: before this, ANY non-empty text before the colon was accepted
+ * as "the e-mail" — a plain typo like "notanemail" would silently, and permanently, name a lock-holder
+ * that can never sign in to use it. `isEmailAddress` is the SAME check `engine/api/users.ts` applies
+ * when a real account is created (`engine/core/email.js`, finding 6) — not a stricter one invented
+ * here, so the two doors agree on what an address is.
+ */
+test('parseLocks refuses an entry whose address is not one, by the same check account creation uses', () => {
+  for (const bad of ['notanemail', 'a name with spaces', 'a@b@c', '@example.org', 'ana@']) {
+    assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
+  }
+});
+
 test('parseLocks refuses a scope outside the known shapes', () => {
   for (const bad of ['', '**', 'P0**', '<script>', 'P0 3']) {
     assert.throws(() => parseLocks(`ana@example.org:${bad}`), /is none of a page, a page family/,
@@ -186,6 +227,17 @@ test('createRoles exposes isLockHolder from HOLDRIM_LOCKS, case-insensitively', 
   assert.equal(roles.isLockHolder('ana@example.org'), true);
   assert.equal(roles.isLockHolder('bea@example.org'), true);
   assert.equal(roles.isLockHolder('carl@example.org'), false);
+});
+
+/**
+ * Round 2 of #29's review, finding 7: the test above stores `HOLDRIM_LOCKS` mixed-case but always
+ * ASKS `isLockHolder` with an already-normalized address, so `lockHolders.has(normalized(e))` →
+ * `lockHolders.has(e)` changed nothing it checked. This asks with a differently-cased, padded
+ * address, which only the QUERY side's own normalization can still answer true for.
+ */
+test('isLockHolder normalizes the address it is ASKED with, not only the one it stored', () => {
+  const roles = createRoles('owner@example.org', '', 'ana@example.org:P0*');
+  assert.equal(roles.isLockHolder('  ANA@Example.ORG  '), true);
 });
 
 test('naming the owner in HOLDRIM_LOCKS is harmless', () => {
