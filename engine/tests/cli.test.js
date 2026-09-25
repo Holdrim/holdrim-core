@@ -499,6 +499,34 @@ test('a written "false" wins even before the baseline, unlike every other writte
 });
 
 /**
+ * The exception above only fires because `isLocked` asks `writtenBoolean(...) === false`, and
+ * `writtenBoolean` already answers `false` for a malformed value too (decision C), not only for the
+ * well-formed string `'false'` itself. So a malformed value, dated BEFORE the baseline and from the
+ * baseline's own author, must fail closed the same way a real `"false"` does: `legacyLock` would
+ * say yes given the chance (same author, predates the baseline), and only that carve-out stands
+ * between this ✓ and a lock. Checking `approval.data?.locks === 'false'` instead would miss every
+ * malformed value here and fall through to `legacyLock` — exactly the mutation this test is written
+ * to catch.
+ */
+test('a malformed locks value fails closed too, from the baseline\'s own author, before it', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
+    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
+  for (const malformed of ['TRUE', true, 1, ' true']) {
+    const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
+      fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
+      // Same author as the baseline, and predates it — the clock-stepped-back shape, but with a
+      // malformed value where the exception's own test used a well-formed "false".
+      when: '2026-09-22T08:00:00Z', data: { locks: malformed } };
+    const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
+    assert.equal(r.added, 0, `locks: ${JSON.stringify(malformed)} must fail closed before the baseline too`);
+  }
+});
+
+/**
  * `sync` asks the server's rule who the owner is. Two addresses read as one owner nobody matches
  * would sync nothing and say nothing, and the session would go on believing no ✓ was ever given.
  * The refusal has to come before the cloud is asked: the count proves it did.

@@ -174,6 +174,8 @@ test('firestoreEventOf: a whole-second timestampValue comes back normalized, the
     name: 'projects/p/databases/(default)/documents/events/abc123def456',
     fields: {
       type: { stringValue: 'approval' }, page: { stringValue: 'A01' },
+      block: { stringValue: 'A01.1.1' }, fingerprint: { stringValue: 'f1' },
+      text: { stringValue: 'this is the block, before texts were extracted' },
       author: { stringValue: 'owner@example.org' },
       when: { timestampValue: '2026-09-25T02:43:44Z' }, // 0 fractional digits: the un-normalized bug shape
       data: { mapValue: { fields: { locks: { stringValue: 'true' } } } },
@@ -184,4 +186,7 @@ test('firestoreEventOf: a whole-second timestampValue comes back normalized, the
   assert.equal(event.when, normalizeWhen('2026-09-25T02:43:44Z'), 'normalized the same way normalizeWhen would');
   assert.equal(event.when, '2026-09-25T02:43:44.000Z', 'and not the raw, un-normalized timestampValue string');
   assert.deepEqual(event.data, { locks: 'true' });
+  assert.equal(event.block, 'A01.1.1');
+  assert.equal(event.fingerprint, 'f1');
+  assert.equal(event.text, 'this is the block, before texts were extracted');
 });

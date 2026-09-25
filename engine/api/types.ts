@@ -89,7 +89,7 @@ export const AUTHOR_COULD_TRIAGE_FIELD = 'authorCouldTriage';
  * Written and read as the STRINGS `'true'`/`'false'`, never a JS `boolean`: every other value already
  * inside `data` (`state`, `category`, `commit`, `from`, …) is a string, and a bare boolean would
  * round-trip fine through SQLite and the in-memory store but come back `undefined` from the CLI's own
- * Firestore reader (`engine/cli/remote.ts`, `#fromFirestore`, which reads only `.stringValue`) —
+ * Firestore reader (`engine/cli/remote.ts`, `firestoreEventOf`, which reads only `.stringValue`) —
  * silently falling back to the very recompute this field exists to stop, and nothing would say so.
  */
 export function writtenBoolean(data: Event['data'], key: string): boolean | undefined {

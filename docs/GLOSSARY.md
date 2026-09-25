@@ -176,8 +176,12 @@ forever after") — an owner who hands over must not silently un-lock every ✓ 
 granting `triage` afterwards must not silently pre-approve a request already filed. Both are stored as
 the strings `'true'`/`'false'`, and trusted only on an event dated after the store's own `lock_baseline`
 (below); before it, or with none at all, they are ignored outright, since a store from before this
-existed could hold anything a client's own POST body once put there. `writtenBoolean`, `isLocked` and
-`authorCouldTriage` (`engine/api/types.ts`) are the one reading of them.
+existed could hold anything a client's own POST body once put there. One exception: a ✓ written
+`locks:"false"` is trusted even before the baseline, since a forged field can only ever help an
+attacker by claiming `"true"`, never `"false"` — guarding a former owner's own ✓ from misreading as a
+lock should the server's clock ever run behind the baseline's. `authorCouldTriage` has no matching
+exception — there, ignoring what was written already equals the fail-closed answer. `writtenBoolean`,
+`isLocked` and `authorCouldTriage` (`engine/api/types.ts`) are the one reading of them.
 
 ## Event types
 
