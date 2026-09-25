@@ -178,6 +178,31 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
 }
 
 /**
+ * The earliest `rowid` any event in this table already carries a text or a snapshot hash on — round
+ * 1 of the #91 review, finding 1, and the forge-proof line between "genuinely written before text
+ * extraction" and "written after, with the hash stripped to look like it".
+ *
+ * `rowid` only grows: nothing on `events` is ever deleted (the guards above), and a real `append`
+ * always takes the NEXT one — SQLite hands out an explicit rowid only when it is not already held, and
+ * every one below the current maximum always is, so no write, forged or not, can land BELOW an
+ * existing row. Once one hashed row exists, then, every row that sorts after it by rowid was written
+ * by a version of `append` that always salts and hashes whatever text or snapshot it is given
+ * (`saltFields`) — so a LATER row with no hash at all did not come from before extraction; its hash
+ * was taken off. `resolveOne` (engine/api/texts.ts) is the reader that acts on this, through
+ * `afterExtraction` on the event it is given.
+ *
+ * A database with no hashed row at all — a fresh install about to write its first event, or one
+ * whose every hashed row an attacker deleted after also dropping `events_no_delete` — answers `null`,
+ * and nothing downstream is marked `afterExtraction`: the same already-open gap a dropped-and-restored
+ * guard leaves (the long comment on `installGuards` above), not a new one this closes.
+ */
+export function extractionBoundary(db: DatabaseSync): number | null {
+  return (db.prepare(
+    'SELECT MIN(rowid) AS boundary FROM events WHERE text_hash IS NOT NULL OR snapshot_hash IS NOT NULL'
+  ).get() as { boundary: number | null }).boundary;
+}
+
+/**
  * Adds a column to a table that does not already have it — the migration path for a database a
  * version before this one made. `CREATE TABLE IF NOT EXISTS` only decides whether to create the
  * table; it does not add a column to one that already exists, so a database made before
@@ -400,29 +425,37 @@ export class SqliteEventStore implements EventStore {
     let rows: unknown[];
     let people: Map<string, string | null>;
     let texts: Map<string, { value: string; salt: string }>;
+    let boundary: number | null;
     try {
       rows = page == null
         // `rowid` breaks a tie inside one millisecond: recorded order, not whatever the planner
         // picks. Today's SQLite already hands ties back in rowid order, so dropping it changes
         // nothing a test can see; naming it turns that accident into a promise. `rowid DESC` fails
-        // the suite.
-        ? this.#db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all()
-        : this.#db.prepare('SELECT * FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
+        // the suite. Selected explicitly (not `SELECT *`, which hides it on a table with a non-integer
+        // primary key): `extractionBoundary` below is compared against it, per row.
+        ? this.#db.prepare('SELECT *, rowid FROM events ORDER BY happened_at, rowid').all()
+        : this.#db.prepare('SELECT *, rowid FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
       people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
         .map((p) => [p.id, p.email]));
       texts = new Map((this.#db.prepare('SELECT event, field, value, salt FROM texts').all() as
         { event: string; field: TextField; value: string; salt: string }[])
         .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt }]));
+      // Read over the WHOLE table, `page` filter or not: the boundary is a fact about this database,
+      // not about one page of it, and a page that happens to hold none of the earliest hashed rows
+      // must still judge ITS OWN rows against the database's real cutover.
+      boundary = extractionBoundary(this.#db);
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');
       throw err;
     }
-    const events = withAuthors((rows as Record<string, string | null>[]).map((r) => ({
-      id: r.id!, type: r.type!, page: r.page!, block: r.block, fingerprint: r.fingerprint,
-      text: r.text, snapshot: r.snapshot, textHash: r.text_hash, snapshotHash: r.snapshot_hash,
-      author: r.author!, when: r.happened_at!, data: r.data ? JSON.parse(r.data) : null,
+    const events = withAuthors((rows as Record<string, any>[]).map((r) => ({
+      id: r.id as string, type: r.type as string, page: r.page as string, block: r.block as string | null,
+      fingerprint: r.fingerprint as string | null, text: r.text as string | null, snapshot: r.snapshot as string | null,
+      textHash: r.text_hash as string | null, snapshotHash: r.snapshot_hash as string | null,
+      author: r.author as string, when: r.happened_at as string, data: r.data ? JSON.parse(r.data as string) : null,
       textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+      afterExtraction: boundary != null && (r.rowid as number) >= boundary,
     })), people);
     // Reported here, not left to whoever reads `list`'s answer next: issue #91 wants every read that
     // resolves a field to tampered to raise the alert, not only the one a person happens to be

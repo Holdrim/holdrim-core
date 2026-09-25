@@ -184,31 +184,66 @@ export class Source {
   /**
    * Reads events straight from the SQLite file. READ ONLY — never writes: writing through here
    * would bypass the cycle, the roles and the limits.
+   *
+   * The four reads — events, people, texts, the extraction boundary — inside one read transaction,
+   * the same fix `SqliteEventStore.list()` already has (store-sqlite.ts) and this file's own doc
+   * comment already claimed for itself: round 1 of the #91 review, finding 2, is that this reader
+   * never actually took it. Autocommitted one at a time on a WAL file, a `removeText` from the real
+   * server landing between the events SELECT and the texts SELECT reads back as tampering that never
+   * happened — a false CRITICAL alert, which is worse than none: it teaches whoever sees it that this
+   * alert cries wolf.
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
+    const { extractionBoundary } = await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
+    let rows: Record<string, any>[];
+    let people: Map<string, string | null>;
+    let texts: Map<string, TextRow>;
+    let boundary: number | null;
     try {
-      // `*`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no such
-      // columns at all, and naming them would fail the query outright rather than read the file's
-      // own, older shape — the same reason `hasPeople` below asks before it reads that table.
-      // `rowid`, same as the server's own `SqliteEventStore.list()` (store-sqlite.ts): a removal is
-      // always inserted after the event it names, so a tie inside one `happened_at` millisecond —
-      // `notBefore` clamping a removal to its target's own timestamp — has to keep breaking toward
-      // recorded order, not whatever the planner happens to pick, or the two readers of one file
-      // could disagree about which side of the tie a removal falls on. As store-sqlite.ts's own
-      // comment says of its identical clause: today's SQLite already hands ties back in rowid order,
-      // so dropping this changes nothing the suite below can see; naming it turns that accident into
-      // a promise. `rowid DESC` does fail it.
-      const rows = db.prepare('SELECT * FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
-      // A file written before the people table existed has no such table, and every author in it
-      // is an address: an empty table resolves none of them, which is what they need. The read
-      // is the same rule the server's store applies, through the same resolver.
-      const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
-      const people = new Map(hasPeople
-        ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
-          .map((p) => [p.id, p.email ?? null])
-        : []);
+      db.exec('BEGIN DEFERRED');
+      try {
+        // `*, rowid`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no
+        // such columns at all, and naming them would fail the query outright rather than read the
+        // file's own, older shape — the same reason `hasPeople` below asks before it reads that
+        // table. `rowid`, same as the server's own `SqliteEventStore.list()` (store-sqlite.ts): a
+        // removal is always inserted after the event it names, so a tie inside one `happened_at`
+        // millisecond — `notBefore` clamping a removal to its target's own timestamp — has to keep
+        // breaking toward recorded order, not whatever the planner happens to pick, or the two
+        // readers of one file could disagree about which side of the tie a removal falls on. As
+        // store-sqlite.ts's own comment says of its identical clause: today's SQLite already hands
+        // ties back in rowid order, so dropping this changes nothing the suite below can see; naming
+        // it turns that accident into a promise. `rowid DESC` does fail it. It is also what
+        // `extractionBoundary` below is compared against, per row, for the downgrade check.
+        rows = db.prepare('SELECT *, rowid FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
+        // A file written before the people table existed has no such table, and every author in it
+        // is an address: an empty table resolves none of them, which is what they need. The read
+        // is the same rule the server's store applies, through the same resolver.
+        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
+        people = new Map(hasPeople
+          ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
+            .map((p) => [p.id, p.email ?? null])
+          : []);
+        // A file written before texts were extracted has no `texts` table either, and every row's
+        // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
+        // an empty people map gives an author (docs/PRIVACY.md, section 4).
+        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
+        texts = new Map(hasTexts
+          ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
+              { event: string; field: TextField; value: string; salt: string }[])
+            .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt } as TextRow])
+          : []);
+        // Same rule again: a file with no `text_hash` column at all has never been touched by any
+        // version that hashes, so nothing in it can be proven `afterExtraction` either.
+        const hasHashColumns = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[])
+          .some((c) => c.name === 'text_hash');
+        boundary = hasHashColumns ? extractionBoundary(db) : null;
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
       const events = withAuthors(rows.map((row) => ({
         id: String(row.id), type: String(row.type), page: String(row.page),
         block: row.block ?? null, fingerprint: row.fingerprint ?? null, text: row.text ?? null,
@@ -216,16 +251,8 @@ export class Source {
         author: String(row.author), when: String(row.happened_at),
         data: row.data ? JSON.parse(String(row.data)) : null,
         textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+        afterExtraction: boundary != null && (row.rowid as number) >= boundary,
       })), people);
-      // A file written before texts were extracted has no `texts` table either, and every row's
-      // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
-      // an empty people map gives an author (docs/PRIVACY.md, section 4).
-      const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
-      const texts = new Map(hasTexts
-        ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
-            { event: string; field: TextField; value: string; salt: string }[])
-          .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt } as TextRow])
-        : []);
       // Read straight from the file, so this is one of the two CLI readers issue #91 names: the
       // server, reading through the API, already raises this alert on its own; a person pointing
       // `--db` at the file directly gets no such server in between, so this is the only place left

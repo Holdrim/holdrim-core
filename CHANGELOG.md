@@ -112,10 +112,12 @@ who ran the engine from `main` before it.
   putting it back without a word.
 - **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
   tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
-  field — logs a CRITICAL `text_tampered` line, once, from the one place every reader shares
-  (`reportTampered`, `engine/api/texts.ts`). `holdrim list --json` now carries a `tampered` key, and
-  `holdrim list`/`sync` warn and exit non-zero when it is set. See SECURITY.md for what this can and
-  cannot catch.
+  field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite
+  only) — logs a CRITICAL `text_tampered` line from the one place every reader shares (`reportTampered`,
+  `engine/api/texts.ts`), EVERY time a read resolves it: there is no acknowledgement yet to quiet it
+  (a follow-up issue), so it repeats rather than go silent after its first sighting. `holdrim list
+  --json` now carries a `tampered` key, and `holdrim list`/`sync` warn and exit non-zero when it is
+  set. See SECURITY.md for what this can and cannot catch, store by store.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a

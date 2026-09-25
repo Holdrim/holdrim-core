@@ -134,16 +134,23 @@ export interface Removed {
 }
 
 /**
- * Which of the three cases below made a field read as tampered — issue #91's "which of the three
- * cases it was", so an operator does not have to re-derive it from the raw rows:
+ * Which of the cases below made a field read as tampered — issue #91's "which of the three cases it
+ * was", so an operator does not have to re-derive it from the raw rows:
  *
  * - `overwritten`: a row is still there, but no longer hashes to what the event claims — the value
  *   was edited in place.
  * - `unaccounted`: no row, and nothing among `events` says it was let go on purpose.
  * - `double_removal`: no row, and TWO removals claim it — `removeText` can never produce a second
  *   one, so this is forgery even though a single one would have been a clean, ordinary removal.
+ * - `downgraded`: no hash at all, on an event a store can PROVE was made after text extraction began
+ *   — round 1 of the #91 review, finding 1. Stripping `textHash`/`snapshotHash` back to `null` and
+ *   writing the value straight into `text`/`snapshot` makes a forged event LOOK like one of the
+ *   genuinely unhashed rows `resolveOne`'s own "no hash" branch has always passed through unchanged
+ *   (a field never given, or a row from before extraction — see `RawEvent`'s own comment). Only a
+ *   store that can tell "before extraction" from "after, with the hash stripped" reports this kind;
+ *   see `afterExtraction` on `RawEvent` for which ones can.
  */
-export type TamperKind = 'overwritten' | 'unaccounted' | 'double_removal';
+export type TamperKind = 'overwritten' | 'unaccounted' | 'double_removal' | 'downgraded';
 
 /** One field a reader resolved to tampered — the text itself never travels in this, only where. */
 export interface TamperReport {
@@ -184,8 +191,19 @@ export function reportTampered(report: TamperReport): void {
  * `authorOf` gives an event from before authors were ids) — a fresh row keeps them `null` and carries
  * the field's hash instead, in `textHash`/`snapshotHash`, which never leaves this file: `withTexts`
  * deletes both before an event reaches any reader.
+ *
+ * `afterExtraction`, given `true`, is a store's own proof that THIS event was written after text
+ * extraction began — round 1 of the #91 review, finding 1: without it, `resolveOne` cannot tell a
+ * genuinely pre-extraction row from a forged one dressed to look like one (a direct writer sets
+ * `textHash: null` and writes the value straight into `text`), because both arrive here in exactly
+ * the same shape, a value with no hash. A store omits it, or gives `false`, when it has no such
+ * proof — Firestore's own ordering is a direct writer's to set (`when` is a plain field, not a
+ * server-enforced one, once someone is writing outside the SDK's own path — see store-firestore.ts's
+ * own comment), so it never claims one; `SqliteEventStore` and the CLI's own file reader can, and do
+ * — see `afterExtraction`'s own comment in store-sqlite.ts for the forge-proof reason `rowid` gives
+ * them one where Firestore has none.
  */
-export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string | null };
+export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string | null; afterExtraction?: boolean };
 
 /**
  * What an event's `text` and `snapshot` mean, for every reader: the two server stores and, in time,
@@ -193,7 +211,9 @@ export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string 
  * is for `author`. `rows` is what the texts table still holds, keyed by `textKey`. Per field:
  *
  * - no hash on the event: the field was never given (the ordinary `null`), or the row is from before
- *   texts were extracted and already holds its own plain value — returned exactly as it came in.
+ *   texts were extracted and already holds its own plain value — returned exactly as it came in,
+ *   UNLESS the store marks this event `afterExtraction`: then a value with no hash is the downgrade
+ *   forgery round 1 of the #91 review names, and reads as tampered instead (`RawEvent`'s own comment).
  * - a hash, and a row whose own hash matches it: the row is what was recorded. Its value is the text.
  * - a hash, and no row that still matches it: the text is gone, and MISSING IS NOT ABSENCE. A
  *   `TEXT_REMOVED` event naming this event and this field, found among `events` — the same list, so
@@ -274,6 +294,10 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
                        reports?: TamperReport[]): E {
   const e = event as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = { ...e };
+  // Internal to this decision, like the two hashes below: a store's own proof of ordering is not part
+  // of what an event means to any reader, and leaving it in would leak a fact — this store's rowid —
+  // no reader outside this file has any business seeing.
+  delete out.afterExtraction;
   for (const field of TEXT_FIELDS) {
     const hashKey = `${field}Hash`;
     const hash = (e[hashKey] as string | null | undefined) ?? null;
@@ -281,6 +305,19 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
     // Every branch sets both fields, deterministically: a caller of `withTexts` never has to seed
     // "nothing to say" defaults first, and an event resolved twice answers the same either time.
     if (hash == null) { // never given, or a pre-extraction row already holding its own value
+      const value = (e[field] as string | null | undefined) ?? null;
+      // A store that can PROVE this event postdates text extraction (`afterExtraction`) rules out
+      // "genuinely from before extraction" — see `RawEvent`'s own comment — so a value with no hash
+      // here is the downgrade forgery, not back-compat. `value == null` still passes through: a field
+      // legitimately never given has no value to have downgraded, whichever side of the boundary the
+      // event falls on.
+      if (e.afterExtraction === true && value != null) {
+        out[field] = null;
+        out[`${field}Removed`] = null;
+        out[`${field}Tampered`] = true;
+        reports?.push({ event: e.id as string, field, kind: 'downgraded' });
+        continue;
+      }
       out[`${field}Removed`] = null;
       out[`${field}Tampered`] = false;
       continue;

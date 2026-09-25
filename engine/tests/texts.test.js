@@ -515,6 +515,108 @@ test('an events file from before texts were extracted reads its own plain text, 
   assert.equal(read.textTampered, false);
 });
 
+// ===================================================================== the downgrade forgery
+// Round 1 of the #91 review, finding 1: a direct writer sets `text_hash` back to NULL and writes the
+// forged value straight into `text`, dressing a POST-extraction event as one of the genuinely
+// unhashed pre-extraction rows above. `rowid` is the forge-proof line between the two — nothing here
+// is ever deleted, and a real `append` always takes the NEXT one — so any row after the first
+// genuinely hashed one, with no hash, did not come from before extraction.
+
+async function tamperedByDowngrade(t) {
+  const path = tempFile(t);
+  const { DatabaseSync } = await import('node:sqlite');
+  // A genuine pre-extraction row, made directly the way an old server version would have: no
+  // text_hash column exists yet, so its own plain value is all `text` ever held.
+  const raw = new DatabaseSync(path);
+  raw.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT,
+    fingerprint TEXT, text TEXT, snapshot TEXT, author TEXT NOT NULL, happened_at TEXT NOT NULL, data TEXT)`);
+  raw.prepare("INSERT INTO events (id, type, page, author, happened_at, text) VALUES " +
+    "('old', 'comment', 'A01', 'owner@example.org', '2020-01-01T00:00:00.000Z', 'from before extraction')").run();
+  raw.close();
+
+  // Opening it for real migrates the schema (adds text_hash/snapshot_hash, both NULL on 'old') and
+  // appends one genuinely hashed event — the first row `extractionBoundary` will ever find.
+  const store = new SqliteEventStore(path);
+  const written = await store.append({ type: 'comment', page: 'A01', text: 'a real remark' }, 'r@example.org');
+  await store.close();
+
+  // The forgery: inserted straight into the file, dressed as pre-extraction — null hash, its own
+  // inline value — but its rowid sorts AFTER `written`'s, which already carries a hash.
+  const raw2 = new DatabaseSync(path);
+  raw2.prepare(`INSERT INTO events (id, type, page, author, happened_at, text)
+    VALUES ('forged', 'comment', 'A01', 'owner@example.org', '2020-01-01T00:00:00.000Z', 'forged inline text')`).run();
+  raw2.close();
+  return { path, oldId: 'old', realId: written.id, forgedId: 'forged' };
+}
+
+test('[sqlite] a value with no hash, on a row proven to postdate the first hashed one, reads as "downgraded" tampering',
+  async (t) => {
+    const { path, oldId, realId, forgedId } = await tamperedByDowngrade(t);
+    const store = new SqliteEventStore(path);
+    const out = await store.list(null);
+    await store.close();
+    const old = out.find((e) => e.id === oldId);
+    const real = out.find((e) => e.id === realId);
+    const forged = out.find((e) => e.id === forgedId);
+    assert.equal(old.text, 'from before extraction', 'a genuinely pre-extraction row still reads through');
+    assert.equal(old.textTampered, false);
+    assert.equal(real.text, 'a real remark');
+    assert.equal(real.textTampered, false);
+    assert.equal(forged.text, null, 'the forged inline text is never handed out, downgraded or not');
+    assert.equal(forged.textTampered, true, 'it postdates the first hashed row, so it cannot genuinely be pre-extraction');
+  });
+
+test('[sqlite] list() reports the downgrade forgery as its own kind', capturingReports(async (t, said, logged) => {
+  const { path, forgedId } = await tamperedByDowngrade(t);
+  const store = new SqliteEventStore(path);
+  await store.list(null);
+  await store.close();
+  assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.eventId === forgedId && l.kind === 'downgraded'));
+}));
+
+test('[sqlite] the CLI\'s own direct file reader catches the same downgrade forgery', async (t) => {
+  const { path, forgedId } = await tamperedByDowngrade(t);
+  const out = await new Source({ db: path }).events();
+  const forged = out.find((e) => e.id === forgedId);
+  assert.equal(forged.textTampered, true);
+});
+
+// Round 1 of the #91 review, finding 2: `Source#fromFile` read events, people and texts as three
+// separate, autocommitted SELECTs on a WAL file — a `removeText` from the real server, landing
+// between two of them, could read back as tampering that never happened, the false CRITICAL alert
+// that teaches whoever sees it that this one cries wolf. `node:sqlite` runs every statement
+// synchronously with no `await` between the reads in `#fromFile`'s own loop, so nothing can actually
+// land IN one of its gaps to prove the race directly (unlike the Firestore tests below, where
+// `Query.prototype.get` gives a real point to intercept between two awaited REST calls) — proving the
+// fix instead means proving the STRUCTURE: one `BEGIN`, all four reads, one `COMMIT`, the same shape
+// `SqliteEventStore.list()` already has.
+test('[sqlite] the CLI\'s direct file reader wraps its four reads in one transaction, not four autocommits',
+  async (t) => {
+    const path = tempFile(t);
+    const store = new SqliteEventStore(path);
+    await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+    await store.close();
+
+    const { DatabaseSync } = await import('node:sqlite');
+    const original = DatabaseSync.prototype.exec;
+    const execCalls = [];
+    // `exec` is how a transaction is opened and closed (`db.exec('BEGIN DEFERRED')`/`'COMMIT'`);
+    // node:sqlite's own autocommit for an ordinary, unwrapped statement never calls it at all. So a
+    // version with no transaction around the reads leaves `execCalls` empty here — not a different
+    // pair, none — which is exactly the regression this guards.
+    DatabaseSync.prototype.exec = function (sql, ...args) {
+      execCalls.push(sql);
+      return original.call(this, sql, ...args);
+    };
+    try {
+      await new Source({ db: path }).events();
+    } finally {
+      DatabaseSync.prototype.exec = original;
+    }
+    assert.deepEqual(execCalls, ['BEGIN DEFERRED', 'COMMIT'],
+      'exactly one transaction around the events, people, texts and boundary reads together');
+  });
+
 // ===================================================================== one snapshot, not three reads
 // Round 1, finding 6: FirestoreEventStore.list() read events, people and texts as three separate,
 // untransacted calls, and a removeText committing between the events read and the texts read read
@@ -558,6 +660,28 @@ test('[firestore] list reads a removal committed mid-read as the removal it was,
     Query.prototype.get = originalGet;
   }
 });
+
+// Round 1 of the #91 review, finding 4: nothing proved `FirestoreEventStore.list()`'s own report
+// loop actually fires — every existing tamper test above ran against memory or SQLite. CI's `stores`
+// job starts the emulator, so this runs there even where a local session has none.
+test('[firestore] list() raises the alert for a field it reads as tampered',
+  process.env.FIRESTORE_EMULATOR_HOST ? {} : { skip: 'needs the Firestore emulator, as above' }, capturingReports(
+  async (t, said, logged) => {
+    const project = freshFirestoreProject('holdrim-texts');
+    const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+    const store = new FirestoreEventStore(project);
+    t.after(async () => { await store.close(); });
+    const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
+    await store.removeText(kept.id, 'text', 'owner@example.org');
+    // A duplicate, forged removal — `removeText` itself can never produce a second one — reached
+    // through `append`, which validates no more than the store interface always has (docs/PRIVACY.md,
+    // section 4's own note on `TEXT_REMOVED`: the general events path is the one that refuses it).
+    await store.append({ type: TEXT_REMOVED, page: 'A01', data: { event: kept.id, field: 'text' } }, 'forger@example.org');
+    await store.list('A01');
+    assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(kept.id)));
+    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.event === 'text_tampered' && l.eventId === kept.id
+      && l.field === 'text' && l.kind === 'double_removal'));
+  }));
 
 // ===================================================================== the cloud, over REST
 const cloud = process.env.FIRESTORE_EMULATOR_HOST
@@ -614,6 +738,23 @@ test('[firestore] the CLI reads a removal committed mid-read as the removal it w
   assert.equal(read.textTampered, false, 'a removal mid-read must never look like tampering');
   assert.equal(read.textRemoved?.by, 'owner@example.org', 'and it has to read as the removal it was');
 });
+
+// Round 1 of the #91 review, finding 5: the CLI's OWN reader of the cloud (`Source.events()`, its
+// `withTextsRetrying` branch) has its own report loop, separate from `FirestoreEventStore.list()`'s —
+// nothing proved this one fires either.
+test('[firestore] the CLI\'s own reader of the cloud raises the alert too', cloud, capturingReports(
+  async (t, said, logged) => {
+    const project = freshFirestoreProject('holdrim-texts');
+    const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+    const store = new FirestoreEventStore(project);
+    t.after(async () => { await store.close(); });
+    const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
+    await store.removeText(kept.id, 'text', 'owner@example.org');
+    await store.append({ type: TEXT_REMOVED, page: 'A01', data: { event: kept.id, field: 'text' } }, 'forger@example.org');
+    await new Source({ project, account: 'ci@example.org' }).events();
+    assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(kept.id)));
+    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.eventId === kept.id && l.kind === 'double_removal'));
+  }));
 
 test('[firestore] the CLI pages through more documents than one page holds, and drops none', cloud, async (t) => {
   // Round 2, finding D: pagination was untested, and three of its lines can each fail silently —
