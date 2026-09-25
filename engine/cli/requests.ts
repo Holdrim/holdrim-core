@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createCycle } from '../core/cycle.js';
 import { readBlocks, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
-import { authorCouldTriage, type Event } from '../api/types.ts';
+import { authorCouldTriage, earliestLockBaseline, type Event } from '../api/types.ts';
 
 /**
  * The agent's tool: read the change requests reviewers made on the site, see the context, measure
@@ -91,15 +91,23 @@ function checkAuthority(root: string): void {
  * CLI came to know a different answer than the server in the first place: this runs in the agent's
  * own process, and a request granted `triage` afterwards must not read as pre-approved here with no
  * triage event to show for it.
+ *
+ * `authorCouldTriage` trusts what was written only for a request dated after the events' OWN
+ * `lock_baseline` (round 2's review, CRITICAL "fields written before this version are trusted"): the
+ * same store this reads from can hold a pre-version request with a client-forged `authorCouldTriage`,
+ * from back when `recordEvent` stored whatever `data` a client sent — and this file has no server
+ * process's `LOCK_BASELINE` to ask, only whatever `events` itself carries, which is exactly why the
+ * baseline is a written EVENT (`ensureLockBaseline`, types.ts) and not a value kept in memory.
  */
 export function requests(events: Event[]): Request[] {
   const cycle = loadCycle();
   const threads = cycle.threadsOf(events);
+  const baseline = earliestLockBaseline(events);
   return events.filter((e) => e.type === 'request').map((r) => {
     const thread = threads.get(r.id) ?? [];
     return {
       ...r,
-      state: cycle.currentState(r.id, thread, authorCouldTriage(r)),
+      state: cycle.currentState(r.id, thread, authorCouldTriage(r, baseline)),
       history: thread.filter((e) => e.type !== 'request').sort((a, b) => a.when.localeCompare(b.when)),
     };
   });

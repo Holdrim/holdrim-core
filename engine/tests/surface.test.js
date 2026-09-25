@@ -131,8 +131,14 @@ test('the data- attributes the engine reads and writes are the ones engine/surfa
 test('the event types are the ones engine/surface.json lists', () => {
   // `LOCK_BASELINE_TYPE` is unioned in here, by hand, rather than added to `EVENT_TYPES` itself:
   // `EVENT_TYPES` is also the client-accepted list `refusalOf` (server.ts) checks a POST's `type`
-  // against, and `lock_baseline` is written only by the server (types.ts, `ensureLockBaseline`) —
-  // adding it there would let a client post one and forge who the baseline owner was.
+  // against, and `lock_baseline` is written only by the server (types.ts, `ensureLockBaseline`).
+  //
+  // ⚠️ This test does NOT guard `lock_baseline` staying out of `EVENT_TYPES` (round 2's review,
+  // M-3): `sameAs` dedupes through `new Set(derived)`, so if a future edit merged `LOCK_BASELINE_TYPE`
+  // INTO `EVENT_TYPES` — which WOULD let a client post one and forge who the baseline owner was — the
+  // union here would list the exact same names either way, and this assertion would keep passing in
+  // silence. The actual guard is `refusalOf` refusing an unknown `type`, and `engine/test-contract.sh`
+  // (`lock_baseline via POST /events → 400, even from a member`) proves it stays refused.
   sameAs('event types', [...EVENT_TYPES, LOCK_BASELINE_TYPE], SURFACE['event-types']);
 });
 

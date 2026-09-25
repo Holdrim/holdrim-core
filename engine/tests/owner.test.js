@@ -26,7 +26,13 @@ import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { ofProject, readBlocks } from '../cli/pages.ts';
 import { rolesOf, createRoles } from '../core/roles.js';
 import { createCycle } from '../core/cycle.js';
-import { authorCouldTriage } from '../api/types.ts';
+import { authorCouldTriage, earliestLockBaseline } from '../api/types.ts';
+
+/** Order within one millisecond is not part of the contract (events-conformance.test.js): the
+ *  baseline `project` seeds has to land strictly BEFORE the events that follow it, or `authorCouldTriage`
+ *  and `isLocked` would read their written fields as predating the baseline and ignore them (round 2's
+ *  review) — the exact thing this file means to seed past, not test. */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -46,13 +52,15 @@ const BLOCK_OF = { [OWNER]: 'A01.1.1', [OTHER]: 'A01.1.2', [ADMIN]: 'A01.1.3' };
 const AUTHORITY = /authority is set by the deployment.*HOLDRIM_OWNER.*HOLDRIM_ADMINS/;
 
 /**
- * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding,
- * for each person, one request they made and one ✓ they gave — written exactly as `recordEvent`
- * would, from `variables`: `authorCouldTriage` and `locks` are baked in at creation, never left for a
- * reader to recompute (docs/ROLES.md §3). `variables` defaults to plain `{ owner: OWNER }` for the
- * callers that never read either field (the file/owner refusal cases, which refuse before reaching
- * them) — the two cases that DO read them pass the exact environment they mean to test both readers
- * against, so what is written here is what `serverView`/`cliView` later compare against each other.
+ * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding a
+ * `lock_baseline` (round 2's review: without one, every written field below predates it — there is
+ * none — and both `authorCouldTriage` and `isLocked` ignore what was written entirely), then, for
+ * each person, one request they made and one ✓ they gave — written exactly as `recordEvent` would,
+ * from `variables`: `authorCouldTriage` and `locks` are baked in at creation, never left for a reader
+ * to recompute (docs/ROLES.md §3). `variables` defaults to plain `{ owner: OWNER }` for the callers
+ * that never read either field (the file/owner refusal cases, which refuse before reaching them) —
+ * the two cases that DO read them pass the exact environment they mean to test both readers against,
+ * so what is written here is what `serverView`/`cliView` later compare against each other.
  */
 async function project(t, extra = {}, variables = { owner: OWNER }) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-owner-'));
@@ -63,6 +71,8 @@ async function project(t, extra = {}, variables = { owner: OWNER }) {
   const db = join(dir, 'events.db');
   const store = new SqliteEventStore(db);
   const roles = createRoles(variables.owner, variables.admins);
+  await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, variables.owner ?? OWNER);
+  await tick();
   const ids = {};
   for (const [who, block] of Object.entries(BLOCK_OF)) {
     const request = await store.append({ type: 'request', page: 'A01', block, fingerprint: 'x',
@@ -113,8 +123,9 @@ function serverView({ dir, ids, events }, variables) {
   try {
     const roles = rolesOf(ofProject(dir));
     const threads = cycle.threadsOf(events);
+    const baseline = earliestLockBaseline(events);
     const states = Object.fromEntries(Object.entries(ids).map(([who, id]) =>
-      [who, cycle.currentState(id, threads.get(id) ?? [], authorCouldTriage(events.find((e) => e.id === id)))]));
+      [who, cycle.currentState(id, threads.get(id) ?? [], authorCouldTriage(events.find((e) => e.id === id), baseline))]));
     return { owner: roles.owner, states };
   } catch (e) {
     return { refused: e.message };
@@ -146,6 +157,26 @@ function cliView({ dir, db, ids }, variables) {
   assert.match(sync.out, new RegExp(`owner: ${lockedBy[0]} \\(from HOLDRIM_OWNER\\)`),
     'sync names the owner it locked for, and where that came from');
   return { owner: lockedBy[0], states };
+}
+
+/**
+ * `show`, `impact`, `summary` and `state` (requests.ts) all call `checkAuthority` before doing
+ * anything else, exactly as `list` and `sync` do above — but through `projectRoles` directly, not
+ * through the `ofProject` call every command already goes through in `holdrim.ts`'s `main` (round 2's
+ * review, M-6). That top-level call alone catches a holdrim.json that CLAIMS authority (the
+ * `fileRefusals` cases below): it never asks whether HOLDRIM_OWNER resolves to exactly one address,
+ * which is `ownerRefusals`' whole point. So `checkAuthority` removed from any of these four would
+ * still refuse under `fileRefusals`, by accident, but run in SILENCE against a project with no owner
+ * at all, or two, under `ownerRefusals` — exactly where this drives them. `state` is included because
+ * it, alone of the four, WRITES an event once past the check.
+ */
+function otherCommandsRefuse(p, env, needs) {
+  const id = p.ids[OWNER];
+  for (const args of [['show', id], ['impact', id], ['summary'], ['state', id, 'rejected', 'no']]) {
+    const r = cli([...args, '--db', p.db], p.dir, env);
+    assert.notEqual(r.code, 0, `${args[0]} ran without refusing:\n${r.out}`);
+    assert.match(r.out, needs, args[0]);
+  }
 }
 
 test('the CLI and the server name the same owner: HOLDRIM_OWNER', async (t) => {
@@ -190,6 +221,7 @@ for (const c of fileRefusals) {
     assert.match(cliAnswer.refused ?? `ran with ${cliAnswer.owner}`, AUTHORITY, 'the CLI, list');
     assert.match(cliAnswer.syncRefused, AUTHORITY, 'the CLI, sync');
     assert.equal(readFileSync(join(p.dir, 'approvals.json'), 'utf8').trim(), '{}', 'and sync locked nothing');
+    otherCommandsRefuse(p, environment(c.variables), AUTHORITY);
   });
 }
 
@@ -207,5 +239,6 @@ for (const c of ownerRefusals) {
     const cliAnswer = cliView(p, c.variables);
     assert.match(cliAnswer.refused ?? `ran with ${cliAnswer.owner}`, needs, 'the CLI, list');
     assert.match(cliAnswer.syncRefused, needs, 'the CLI, sync');
+    otherCommandsRefuse(p, environment(c.variables), needs);
   });
 }

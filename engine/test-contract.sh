@@ -136,6 +136,10 @@ expect "unknown type → 400"            400 "$(post $OWNER '{"type":"delete","p
 # deletes (engine/api/texts.ts) — never by this general path, even signed in as the owner: a route
 # that accepted it could claim a removal with nothing to back it, no row actually gone.
 expect "text_removed via POST /events → 400, even as the owner" 400 "$(post $OWNER '{"type":"text_removed","page":"D01","data":{"event":"x","field":"text"}}')"
+# lock_baseline is written only by ensureLockBaseline, at boot, from HOLDRIM_OWNER — never by a
+# client (round 2's review, M-3): a member's own POST could otherwise plant a baseline naming
+# themselves as its author, and every one of their unwritten future ✓s would read as a lock.
+expect "lock_baseline via POST /events → 400, even from a member" 400 "$(post $REVIEWER '{"type":"lock_baseline","page":"A01"}')"
 # A body that parses as JSON but does not say so is what a form on another site can send without the
 # browser asking first. Refused before it is read, whoever it claims to come from.
 expect "an approval sent as text/plain → 415" 415 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: text/plain' -d '{"type":"approval","page":"D01","block":"D01.1.9","fingerprint":"forged"}' $B/api/events)"
@@ -808,6 +812,66 @@ expect "and the home offers it no triage form (in-progress list, frozen)" 1 \
 expect "a transition only valid from open is refused on the true, frozen state" 409 \
   "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"A02\",\"block\":\"A02.1.1\",\"text\":\"no\",\"data\":{\"request\":\"$GRANT_REQUEST\",\"state\":\"rejected\"}}")"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$GRANT_DIR"
+
+echo "a field written before this version is trusted only after the baseline (round 2's review, CRITICAL):"
+# Before this version, recordEvent stored whatever `data` a client sent — so a store from that time can
+# hold a plain, unwritten ✓ (`data: null`) from the owner and from an admin, and a CLIENT-FORGED
+# `locks:"true"`/`authorCouldTriage:"true"` on someone else's event, exactly as the finding reproduced
+# it against the pre-change build. All four are inserted straight into a fresh SQLite file, BEFORE any
+# server of this version ever starts against it — so all four predate the ONE `lock_baseline` event the
+# boot below is about to write, whichever of them carries a written field and whichever does not.
+BASELINE_DIR=$(mktemp -d)
+BASELINE_ADMIN=baseline-admin@example.org
+BASELINE_MEMBER=baseline-member@example.org
+BASELINE_FP=$(cli_fingerprint A01.1.1)
+SEEDED=$(node --input-type=module -e "
+const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
+const store = new SqliteEventStore(process.argv[1]);
+const [owner, admin, member, fp] = process.argv.slice(2);
+// A genuine pre-version ✓, never written on: locks only via legacyLock, and only for the OWNER.
+const ownerNull = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: fp, data: null }, owner);
+const adminNull = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'x', data: null }, admin);
+// The forgeries the finding reproduced: a field this version never wrote, on an event this old.
+const adminForged = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.3', fingerprint: 'x', data: { locks: 'true' } }, admin);
+const memberForged = await store.append({ type: 'request', page: 'A02', block: 'A02.1.1', fingerprint: 'x', text: 'a forged request', data: { authorCouldTriage: 'true' } }, member);
+console.log(JSON.stringify({ ownerNull: ownerNull.id, adminNull: adminNull.id, adminForged: adminForged.id, memberForged: memberForged.id }));
+await store.close();
+" "$BASELINE_DIR/events.db" "$OWNER" "$BASELINE_ADMIN" "$BASELINE_MEMBER" "$BASELINE_FP")
+OWNER_NULL_ID=$(echo "$SEEDED" | jfield ownerNull)
+ADMIN_NULL_ID=$(echo "$SEEDED" | jfield adminNull)
+ADMIN_FORGED_ID=$(echo "$SEEDED" | jfield adminForged)
+MEMBER_FORGED_ID=$(echo "$SEEDED" | jfield memberForged)
+
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$BASELINE_ADMIN \
+  HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$BASELINE_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/baseline-forged.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+event_of() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$1"; }
+home_waiting() { curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | has -F 'not yet in the repository'; echo $?; }
+# Decision B (round 1's review): a genuinely unwritten ✓ from before the field existed at all.
+expect "the owner's unwritten pre-version ✓ locks via the baseline"       true  "$(event_of $OWNER_NULL_ID | jfield locks)"
+expect "an admin's unwritten pre-version ✓ does not"                      false "$(event_of $ADMIN_NULL_ID | jfield locks)"
+expect "and the home counts the owner's as waiting for the repository"    0     "$(home_waiting)"
+# Round 2's review, CRITICAL: the forged fields must not fare any better than the unwritten ones above.
+expect "an admin's FORGED pre-version locks:true does not lock either"    false "$(event_of $ADMIN_FORGED_ID | jfield locks)"
+expect "a member's FORGED pre-version authorCouldTriage:true starts at triage, straight into nobody's queue" \
+  open "$(event_of $MEMBER_FORGED_ID | jfield status.state)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+# Restarted with HOLDRIM_OWNER moved to the admin: the baseline is FROZEN at the first boot (round 2's
+# review, CRITICAL(proof), catching the baseline held as `null`) — it does not move with a LATER
+# HOLDRIM_OWNER, and an admin who becomes owner earns no lock, retroactively, for a ✓ they gave before
+# anyone was, forged field or not.
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$BASELINE_ADMIN HOLDRIM_ADMINS= \
+  HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$BASELINE_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/baseline-forged.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "the admin is owner here now"                                       owner "$(curl -s -H "X-Dev-Email: $BASELINE_ADMIN" $B/api/me | jfield role)"
+expect "yet the old owner's pre-version ✓ still locks (the baseline is frozen)" true  "$(event_of $OWNER_NULL_ID | jfield locks)"
+expect "and the now-owner's own pre-version ✓ still does not"              false "$(event_of $ADMIN_NULL_ID | jfield locks)"
+expect "nor does their forged locks:true, even as owner now"               false "$(event_of $ADMIN_FORGED_ID | jfield locks)"
+expect "and the forged request still starts at triage"                     open  "$(event_of $MEMBER_FORGED_ID | jfield status.state)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$BASELINE_DIR"
 
 echo "the local runner pins its own environment, even when the caller's shell has one:"
 # A shell already exporting HOLDRIM_EVENTS=sqlite or HOLDRIM_IDENTITY=password, left over from some

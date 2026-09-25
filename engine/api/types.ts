@@ -1,4 +1,5 @@
 import type { Removed, TextField } from './texts.ts';
+import { normalizeEmail } from './users.ts';
 
 /** A fact from the review. Only created — never altered, never deleted. */
 export interface Event {
@@ -165,6 +166,15 @@ export const EVENT_TYPES = new Set([
 // the server, and never by a client: it is not in `EVENT_TYPES` above, so `POST /events` refuses it
 // as an unknown type before anything else runs, the same guard `text_removed` relies on (server.ts,
 // `refusalOf`).
+//
+// The baseline is also what decides whether a WRITTEN field is trusted at all (round 2's review,
+// CRITICAL "fields written before this version are trusted"): before this version existed,
+// `recordEvent` stored whatever `data` a client sent, so an old store can already hold a client-forged
+// `locks:"true"` or `authorCouldTriage:"true"`. `isLocked` and `authorCouldTriage` below trust a
+// written field only on an event dated AFTER the baseline — one this version itself recorded, and so
+// itself wrote the field onto. An event that predates the baseline gets `legacyLock`'s answer (a ✓) or
+// `false` (a request) instead, whatever `data` on it claims; a store with no baseline at all trusts
+// nothing written on anything, for the same reason `legacyLock` itself returns `false` with none.
 
 /** The one event kind this module writes on its own, never in answer to a client's POST. */
 export const LOCK_BASELINE_TYPE = 'lock_baseline';
@@ -215,28 +225,46 @@ export async function ensureLockBaseline(
  * dated AFTER the baseline, is either a bug or a forgery, and is trusted no more than a stranger's.
  * No baseline at all — a store this version has never started against, read straight from a file or
  * the cloud (`holdrim sync --db`, or the CLI reading Firestore directly) — fails closed: not a lock.
+ *
+ * Authors are compared through `normalizeEmail` (round 2's review, finding M-2), the same function
+ * every store uses to decide "the same address": an author recorded with different case or
+ * surrounding space than `HOLDRIM_OWNER` was typed in — the identity layer's job, not this file's —
+ * must not read as a stranger to the baseline it actually is.
  */
 export function legacyLock(approval: Pick<Event, 'author' | 'when'>, baseline: Event | null): boolean {
   if (!baseline) return false;
-  return approval.when < baseline.when && approval.author === baseline.author;
+  return approval.when < baseline.when && normalizeEmail(approval.author) === normalizeEmail(baseline.author);
 }
 
 /**
- * Whether an approval is a lock: what was written on it when the ✓ was GIVEN, or — only when nothing
- * was written at all — `legacyLock` against the baseline. The one implementation server.ts and
- * validation.ts (`holdrim sync`) both call, so the fallback is not three slightly different copies of
- * the same rule (round 1's review, finding 2).
+ * Whether an approval is a lock: what was written on it, but ONLY for a ✓ dated AFTER the baseline —
+ * never `legacyLock`'s fallback for one of those, since it carries its own answer. A ✓ that PREDATES
+ * the baseline, or one read against no baseline at all, is answered by `legacyLock` alone, which never
+ * looks at `data` (round 2's review, CRITICAL "fields written before this version are trusted"):
+ * before this version, `recordEvent` stored whatever `data` a client sent, so an old store can hold a
+ * client-forged `locks:"true"` on an admin's own ✓. Trusting a written field on an event this version
+ * never wrote would let that forgery through the moment the store gains a baseline — precisely the
+ * upgrade this field exists to protect. The one implementation server.ts and validation.ts (`holdrim
+ * sync`) both call, so the fallback is not three slightly different copies of the same rule (round 1's
+ * review, finding 2).
  */
 export function isLocked(approval: Pick<Event, 'data' | 'author' | 'when'>, baseline: Event | null): boolean {
-  return writtenBoolean(approval.data, LOCKS_FIELD) ?? legacyLock(approval, baseline);
+  if (baseline && approval.when > baseline.when) return writtenBoolean(approval.data, LOCKS_FIELD) ?? false;
+  return legacyLock(approval, baseline);
 }
 
 /**
- * Whether a request's author could already triage it: what was written on it when it was FILED, or
- * — only when nothing was written at all — `false` (decision A: a request fails closed to "at
- * triage", never to a live recompute of who holds `triage` today). The one implementation server.ts
- * and requests.ts (the agent's CLI) both call (round 1's review, finding 2).
+ * Whether a request's author could already triage it: what was written on it, but ONLY for a request
+ * dated AFTER the baseline — the same forgery as `isLocked`'s, on a request: before this version, a
+ * client could send `authorCouldTriage:"true"` on their own request, and `recordEvent` stored it
+ * verbatim (round 2's review, CRITICAL "fields written before this version are trusted"). A request
+ * that PREDATES the baseline, or one read with no baseline in the store at all, is `false` — at
+ * triage — unconditionally: there is no legacy rule for this field the way `legacyLock` is one for a
+ * ✓, so ignoring what was written leaves nothing else to fall back to (decision A: a request fails
+ * closed to "at triage", never to a live recompute of who holds `triage` today). The one
+ * implementation server.ts and requests.ts (the agent's CLI) both call (round 1's review, finding 2).
  */
-export function authorCouldTriage(request: Pick<Event, 'data'>): boolean {
-  return writtenBoolean(request.data, AUTHOR_COULD_TRIAGE_FIELD) ?? false;
+export function authorCouldTriage(request: Pick<Event, 'data' | 'when'>, baseline: Event | null): boolean {
+  if (baseline && request.when > baseline.when) return writtenBoolean(request.data, AUTHOR_COULD_TRIAGE_FIELD) ?? false;
+  return false;
 }

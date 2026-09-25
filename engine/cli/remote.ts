@@ -30,6 +30,21 @@ const exec = promisify(execFile);
  */
 const emulator = (): string | undefined => process.env.FIRESTORE_EMULATOR_HOST || undefined;
 
+/**
+ * A Firestore `timestampValue`, normalized to the plain ms ISO string the server itself writes and
+ * compares (round 2's review, MINOR). Firestore's own JSON mapping for a timestamp
+ * (`google.protobuf.Timestamp`) emits 0, 3, 6 or 9 fractional digits depending on the value, while
+ * every comparison of `when` in this codebase (`legacyLock`, `earliestLockBaseline`, this file's own
+ * history sort) is a plain `<`/`localeCompare` on the raw string. Left un-normalized, a whole-second
+ * timestamp sorts AFTER a fractional one from the same second — `'…10:00:00Z' > '…10:00:00.5Z'`
+ * lexically, because `Z` (0x5A) sorts after `.` (0x2E) — even though the first is the LATER instant.
+ * `Date` accepts any of the four shapes and always answers back with exactly three digits, matching
+ * the server's own `new Date().toISOString()` (store-sqlite.ts, `append`).
+ */
+export function normalizeWhen(timestampValue: string | null | undefined): string {
+  return timestampValue ? new Date(timestampValue).toISOString() : '';
+}
+
 export class Source {
   #local: boolean;
   #db?: string;
@@ -422,7 +437,7 @@ export class Source {
       // names — and `text`/`snapshot` there already hold their own plain value: read as such.
       text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
       author: s('author')!,
-      when: f.when?.timestampValue ?? '',
+      when: normalizeWhen(f.when?.timestampValue),
       data: Object.keys(data).length ? data : null,
       textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
     };
