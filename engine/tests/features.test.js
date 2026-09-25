@@ -249,21 +249,45 @@ function withoutComments(text) {
  * `engine/`, so a fifth one is exactly as real a place for a guard to live as the four this used to
  * trust by name.
  *
- * The fix inverts which list has to be kept up to date: every `.ts`/`.js`/`.jsx`/`.mjs`/`.cjs` file
- * under `engine/` is scanned, a file nobody committed yet included — the same reasoning
- * `engine/tests/surface.test.js` uses for a variable — and `DENIED`, below, is the closed, EXPLAINED
- * set of places that are not a guard a toggle could reach. A new directory is scanned the moment it
- * exists; only `DENIED` naming it, on purpose, with why, takes it back out — the opposite of the old
- * shape, where a new directory had to be ADDED to be seen at all.
+ * The fix inverts which list has to be kept up to date: every file under `engine/` is scanned, a
+ * file nobody committed yet included — the same reasoning `engine/tests/surface.test.js` uses for a
+ * variable — and `DENIED`, below, is the closed, EXPLAINED set of places that are not a guard a
+ * toggle could reach. A new directory is scanned the moment it exists; only `DENIED` naming it, on
+ * purpose, with why, takes it back out — the opposite of the old shape, where a new directory had to
+ * be ADDED to be seen at all.
+ *
+ * ROUND 5 (MAJOR, MTS): that inversion still ran an ALLOW-list underneath it —
+ * `/\.(ts|js|jsx|mjs|cjs)$/` — which is the same mistake at the extension instead of the directory.
+ * Node runs `.mts` and `.cts` exactly as it runs `.ts`, and the loader below has always known `.tsx`;
+ * none of the three was in that list, so a planted `engine/lib/gate.mts` with a plain
+ * `project.features.peopleScreen` read passed every gate the same way `gate.js` in a new directory
+ * used to. The fix is the same inversion applied one level down: every tracked or new file under
+ * `engine/` is scanned, whatever its extension, unless `DENIED` names it or `NOT_CODE`, below, says
+ * why its extension cannot hold a guard at all.
  */
 function isSourceFile(f) {
-  return /\.(ts|js|jsx|mjs|cjs)$/.test(f) && !DENIED.some((d) => (d.file ? f === d.file : f.startsWith(d.prefix)));
+  return !NOT_CODE.test(f) && !DENIED.some((d) => (d.file ? f === d.file : f.startsWith(d.prefix)));
 }
+
+/**
+ * Extensions that hold no JS/TS/JSX/TSX to scan, ever, by what they ARE rather than by where they
+ * live: a config file, translated strings, a page's markup, a stylesheet, an image. None of these
+ * can execute a read of `features` or wrap a guard in one, so excluding them here is the shape
+ * counterpart to `DENIED` excluding a LOCATION. Image extensions are listed even though `engine/`
+ * ships none today, on the same "scanned by default" principle `isSourceFile` argues for the rest:
+ * an icon added later must not need this list edited to stay green.
+ */
+const NOT_CODE = /\.(json|md|css|html?|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot)$/i;
 
 /** Every tracked or new file under `engine/`, minus `DENIED` — see the comment on `isSourceFile`. */
 function sourceFiles() {
+  // `git ls-files`'s output ends in a newline, so `split('\n')` always trails one empty string —
+  // harmless while `isSourceFile` was an ALLOW-list (no extension matches ''), but the inverted rule
+  // now scans anything `NOT_CODE` and `DENIED` do not name, and neither names an empty path: without
+  // `Boolean` here it reaches `readFileSync(join(ROOT, ''))`, which is the repository root itself, a
+  // directory, and every test that reads a "file" fails with EISDIR instead of naming a real offense.
   return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', 'engine'],
-    { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(isSourceFile);
+    { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(Boolean).filter(isSourceFile);
 }
 
 /**
@@ -284,6 +308,13 @@ const DENIED = [
   { file: 'engine/web/panel-react.js',
     why: 'the BUILT bundle, generated from engine/web/src — scanning it only repeats those reads, or, ' +
       'stale, reports ones the sources no longer have' },
+  // ROUND 5 (MTS): `NOT_CODE` excludes an extension by what it holds; these two are excluded by what
+  // they ARE — bash, not JS/TS — so esbuild has no loader for either and `stripperMismatch` (below)
+  // could never cross-check them. A shell script does not read `project.features` the way a route
+  // does, and `engine/test-contract.sh`'s own "every toggle off" section is where a reflective read
+  // that hides from every scan of the SOURCE is caught instead (its own header comment says so).
+  { file: 'engine/run-local.sh', why: 'a shell script, not JS/TS — no loader parses it, and no guard lives in it' },
+  { file: 'engine/test-contract.sh', why: 'same reason: a shell script, and the file that already backstops a reflective read no source scan can see' },
 ];
 
 /**
@@ -435,7 +466,11 @@ function staleEntries() {
 // self-test below. The fix is the same one: a real parser, told the file is JSX, does know.
 function loaderFor(file) {
   if (file.endsWith('.tsx')) return 'tsx';
-  if (file.endsWith('.ts')) return 'ts';
+  // `.mts`/`.cts` are `.ts` under Node's own module-kind rule (MAJOR MTS) — esbuild has no loader
+  // named after either, so without this a file `isSourceFile` now scans would reach `transformSync`
+  // with the DEFAULT loader guessed from an extension esbuild has never heard of, and fail to parse
+  // for a reason that has nothing to do with a real mismatch.
+  if (file.endsWith('.ts') || file.endsWith('.mts') || file.endsWith('.cts')) return 'ts';
   if (file.endsWith('.jsx')) return 'jsx';
   return 'js';
 }
@@ -444,6 +479,13 @@ function loaderFor(file) {
  * Why `withoutComments`'s guess disagrees with a real parser about `text` (named as `file`, for the
  * loader and for the message — a synthetic snippet may pass any extension it likes), or `null` when
  * the two agree.
+ *
+ * MINOR: the ORIGINAL failing to parse used to return `null` too, silently, as if the two agreed —
+ * but a file this scan cannot even hand to esbuild is exactly the file whose comment-stripping this
+ * check exists to cross-check, and "no mismatch reported" reads as "cross-checked and fine" to
+ * anyone running the suite. It never fires today (every scanned file parses), so this is loud with
+ * nothing yet to be loud ABOUT; the point is that the day a file stops parsing, this fails BY NAME
+ * instead of the check quietly stopping to watch it.
  * @param {string} file
  * @param {string} text
  */
@@ -452,8 +494,9 @@ function stripperMismatch(file, text) {
   let real;
   try {
     real = transformSync(text, opts).code;
-  } catch {
-    return null; // the ORIGINAL doesn't parse either — not this check's claim to make
+  } catch (error) {
+    return `${file}: does not parse at all — the esbuild cross-check has nothing to compare ` +
+      `withoutComments's guess against (${String(error.message).split('\n')[0]})`;
   }
   let blanked;
   try {
@@ -553,6 +596,20 @@ test('D4: a read planted in a brand-new directory, not only the four the old sca
   const offenders = offendersIn(text, path);
   assert.ok(offenders.some((f) => f.includes('project.features.peopleScreen')),
     'D4 — the planted read in the new directory was found but not recognised as an offense');
+});
+
+// MAJOR (MTS): the demonstrated mutant was `engine/lib/gate.mts`, exporting the same plain
+// `project.features.peopleScreen` read D4 planted in `gate.js` — Node runs `.mts` exactly as it
+// runs `.ts`, but the old `isSourceFile` regex named only `ts|js|jsx|mjs|cjs`, so `.mts` (and
+// `.cts`) never reached the scan at all. Proved the same way D4 is, from a path and a string alone,
+// with nothing written to disk: the shared-tree race that reasoning avoids applies here too.
+test('MTS: a read planted in a .mts file, a module kind the old extension list never named, is caught', () => {
+  const path = 'engine/lib-self-test/gate.mts';
+  assert.ok(isSourceFile(path), 'MTS — a .mts file is not scanned by default');
+  const text = 'export default (project: Project) => project.features.peopleScreen;\n';
+  const offenders = offendersIn(text, path);
+  assert.ok(offenders.some((f) => f.includes('project.features.peopleScreen')),
+    'MTS — the planted read in a .mts file was found but not recognised as an offense');
 });
 
 test('every real read of features, across the engine, is on the allow-list', () => {
