@@ -701,8 +701,10 @@ test('[sqlite] the --db reader compares the guards in the snapshot it reads the 
   // moment the reader asks for the event rows — after the comparison, before the rows. Both orders
   // the reader could get wrong are caught: a comparison made BEFORE the read transaction opens
   // passes the guards and then reads the forgery (the row, unflagged); one made AFTER it closes
-  // flags a drop the rows it returned never saw (the flag, with no forgery in hand). In one snapshot,
-  // neither: the forgery is not read, and the guards it was compared against were there.
+  // flags the drop, but the forgery is in hand too — the prepare hook fires before the rows
+  // statement's first step, so a snapshot opened only for the rows already starts past the forgery.
+  // In one snapshot, neither: the forgery is not read, and the guards it was compared against were
+  // there.
   const original = DatabaseSync.prototype.prepare;
   let forged = 0;
   DatabaseSync.prototype.prepare = function (sql, ...rest) {

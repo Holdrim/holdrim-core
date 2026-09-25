@@ -12,6 +12,7 @@ import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { jsonForTerminal } from '../api/log.ts';
 import { SqliteEventStore, GUARDS } from '../api/store-sqlite.ts';
 import { TEXT_REMOVED } from '../api/texts.ts';
 import { readBlocks } from '../cli/pages.ts';
@@ -40,6 +41,13 @@ function runApart(args, cwd, env = {}) {
     { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '', ...env } });
   return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+}
+
+/** Every code point from `start` to `end`, inclusive — for walking a Unicode range one by one. */
+function range(start, end) {
+  const points = [];
+  for (let p = start; p <= end; p += 1) points.push(p);
+  return points;
 }
 
 /** A disposable copy of the hello world, so a command that writes cannot dirty the repository. */
@@ -541,6 +549,34 @@ test('a foreign trigger\'s name reaches the terminal escaped, never as a raw con
     'the name, quoted, with the escapes spelled out');
   assert.deepEqual(guardLines(r.stderr).map((l) => [l.guard, l.kind]), [[name, 'foreign']],
     'and the structured line still parses back to the name itself, for a program to read');
+});
+
+test('jsonForTerminal escapes every code point the regex names, and nothing outside it', () => {
+  // The two tests above cover one C1 control and one bidi override; this walks every code point
+  // `jsonForTerminal`'s regex names, so a range narrowed by a future edit fails here first, on the
+  // exact point dropped, rather than in whichever caller happens to pass a name that used it.
+  const escaped = [
+    ...range(0x007f, 0x009f), // DEL and the C1 controls, ESC's own range
+    0x200e, 0x200f, // left-to-right / right-to-left marks
+    0x2028, 0x2029, // line and paragraph separator: a fresh line a terminal or log parser sees as new
+    ...range(0x202a, 0x202e), // bidi embeddings, override, and pop
+    ...range(0x2066, 0x2069), // bidi isolates
+  ];
+  for (const point of escaped) {
+    const input = `x${String.fromCharCode(point)}y`;
+    const out = jsonForTerminal(input);
+    const hex = point.toString(16).padStart(4, '0');
+    assert.ok(out.includes(`\\u${hex}`), `U+${hex} written as \\u${hex}, got ${out}`);
+    assert.ok(!out.includes(String.fromCharCode(point)), `U+${hex} not left raw, got ${out}`);
+    assert.equal(JSON.parse(out), input, `U+${hex} round-trips through JSON.parse`);
+  }
+
+  // Just outside each range: a point one step short of where the regex starts escaping.
+  for (const point of [0x007e, 0x00a0, 0x2065, 0x206a, 0x2027]) {
+    const input = `x${String.fromCharCode(point)}y`;
+    const out = jsonForTerminal(input);
+    assert.equal(out, JSON.stringify(input), `U+${point.toString(16).padStart(4, '0')} left to JSON.stringify alone`);
+  }
 });
 
 // ------------------------------------------------ acting refuses where reading warns
