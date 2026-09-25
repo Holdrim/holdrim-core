@@ -147,9 +147,9 @@ who ran the engine from `main` before it.
   SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
   putting it back without a word. The CLI reading that file with `--db` compares the guards too, on
   every read, and repairs nothing: it names each one missing or changed, and each trigger that is
-  not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; `list` and
-  `sync` exit non-zero when it is set; and `apply` (`--dry-run` included) and `state` refuse to
-  act on such a file at all, before any brief, agent or event. Every guard warning, the server's
+  not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; `list` exits
+  non-zero when it is set; and `sync`, `apply` (`--dry-run` included) and `state` refuse to act on
+  such a file at all, before any lock, brief, agent or event. Every guard warning, the server's
   included, now quotes the trigger's name as JSON, with control, C1 and bidirectional characters
   escaped, and so does every structured log line.
 - **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to

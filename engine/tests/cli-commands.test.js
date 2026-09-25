@@ -535,9 +535,10 @@ test('a foreign trigger\'s name reaches the terminal escaped, never as a raw con
 });
 
 // ------------------------------------------------ acting refuses where reading warns
-// `apply` and `state` act on the queue. With `events_no_update` dropped, a rejection can be rewritten
-// into an approval in `data`, which no text hash covers: reading such a file warns, acting on it
-// would hand a request the owner refused to an agent. So these two refuse, before anything happens.
+// `sync`, `apply` and `state` act. With `events_no_update` dropped, a rejection can be rewritten into
+// an approval in `data`, and an old ✓ onto today's text, which no text hash covers: reading such a
+// file warns, acting on it would hand a request the owner refused to an agent, or lock a text the
+// owner never saw. So these three refuse, before anything happens.
 const REFUSED = /refusing to act on this events file: its guards are not the ones this version installs/;
 
 test('apply --dry-run --db refuses on a dropped guard, and prints no brief', async (t) => {
@@ -568,6 +569,50 @@ test('apply --db refuses on a dropped guard, and never starts the agent', async 
   assert.equal(r.code, 1, r.stdout + r.stderr);
   assert.match(r.stderr, REFUSED);
   assert.equal(existsSync(started), false, 'the agent was never started');
+});
+
+/** Every file of the project but the events file itself, as bytes: what `sync` could have written. */
+function projectFiles(dir) {
+  return new Map(readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((f) => f.isFile() && !f.name.startsWith('events.db'))
+    .map((f) => { const file = join(f.parentPath, f.name); return [file, readFileSync(file)]; }));
+}
+
+/** A store holding the lock baseline and one owner's ✓ on A01.1.1, at `fingerprint`, and its id. */
+async function approvedDb(dir, fingerprint) {
+  const db = join(dir, 'events.db');
+  const store = new SqliteEventStore(db);
+  await store.append({ type: 'lock_baseline', page: '_lock_baseline' }, 'you@example.org');
+  // `isLocked` trusts a written `locks` only on a ✓ dated AFTER the baseline, and two appends can
+  // share one millisecond.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const approval = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint,
+    data: { locks: 'true' } }, 'you@example.org');
+  await store.close();
+  return { db, id: approval.id };
+}
+
+test('sync --db refuses on a dropped guard, and writes neither approvals.json nor a page', async (t) => {
+  const real = (await readBlocks(project(t))).get('A01.1.1').fingerprint;
+  // The fixture is proved to lock first, on an intact file: otherwise "nothing written" below could
+  // only mean this ✓ never locks anything.
+  const control = project(t);
+  const intact = await approvedDb(control, real);
+  const before = projectFiles(control);
+  const ok = runApart(['sync', '--db', intact.db], control);
+  assert.equal(ok.code, 0, ok.stdout + ok.stderr);
+  assert.notDeepEqual(projectFiles(control), before, 'on an intact file, the ✓ is written into the project');
+
+  // The attack: the owner's ✓ was for an older text; with `events_no_update` dropped, its
+  // fingerprint is rewritten to today's, and a sync that went on would lock what the owner never saw.
+  const dir = project(t);
+  const { db, id } = await approvedDb(dir, 'an-older-text');
+  outside(db, `DROP TRIGGER events_no_update; UPDATE events SET fingerprint = '${real}' WHERE id = '${id}';`);
+  const files = projectFiles(dir);
+  const r = runApart(['sync', '--db', db], dir);
+  assert.notEqual(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, REFUSED);
+  assert.deepEqual(projectFiles(dir), files, 'approvals.json and every page byte for byte as they were');
 });
 
 test('state --db refuses on a dropped guard, before anything is recorded', async (t) => {
