@@ -65,7 +65,12 @@ Worth knowing before you run it:
     and `events_no_low_rowid` (the same gap `sqlite_guard_missing` already admits for every other
     one) can delete every hashed row and start the boundary over, or delete an event and its texts
     row together and leave nothing to compare against at all — an erasure, not a mismatch, and the
-    panel already cannot tell an erased event from one that was never made.
+    panel already cannot tell an erased event from one that was never made. One more limit worth
+    naming plainly: `hashText` (`engine/api/texts.ts`) is an UNKEYED hash — plain sha256 of the salt,
+    a NUL byte and the value, with no secret the write access lacks — so that same write access can
+    just as easily compute a correct hash as strip one, and append a forged row at `MAX(rowid) + 1`
+    with a matching `texts` row and a `text_hash` that checks out. Nothing here catches that: the
+    rowid boundary only names a forgery that skips computing the hash and lands BELOW it instead.
   - **Firestore.** No equivalent boundary exists, and none is cheap to build: a direct writer sets
     `when` as a plain field, not a value Firestore itself enforces came from `FieldValue.serverTimestamp()`
     — there are no Firestore Security Rules in this project restricting it (identity is IAM, not

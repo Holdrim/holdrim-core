@@ -75,7 +75,8 @@ export const GUARDS: Record<string, string> = {
   // final one, and the row is already IN the table `MAX(rowid)` reads: a genuine append always
   // becomes the new highest rowid, so it compares equal to that MAX (not less than it) and passes;
   // only a row that landed BELOW one already there trips this — verified directly against
-  // `node:sqlite`, not assumed from SQLite's own docs, in store-sqlite-guards.test.js.
+  // `node:sqlite`, not assumed from SQLite's own docs, in users.test.js ("the database REFUSES an
+  // insert whose rowid lands below one already held, even when the rowid itself is free").
   events_no_low_rowid: `AFTER INSERT ON events
     WHEN NEW.rowid < (SELECT MAX(rowid) FROM events)
     BEGIN SELECT RAISE(ABORT, 'an event is not inserted below one already held: the trail is the product'); END`,
