@@ -233,7 +233,7 @@ theme colour does: a toggle misspelled is a toggle that silently did nothing. Fi
 | A commit renumbers a page into a lock-holder's scope | Not closed by design: the repository decides what a code means. Start logs each scope's coverage and refuses a scope that matches no page; the renumbering itself is a reviewed change |
 | An admin resets a lock-holder's password and signs in as them | Their accounts are the owner's to reset, create, disable and re-enable, on all four routes |
 | An admin disables a lock-holder to silence their ✓ right when it would matter | The same four routes: disabling one is the owner's alone too |
-| An admin probes candidate addresses to reconstruct the `HOLDRIM_LOCKS` list from which ones 409 | None of the four refusals says "holds a lock" or names `HOLDRIM_LOCKS` |
+| An admin probes candidate addresses to reconstruct the `HOLDRIM_LOCKS` list from which ones 409 | Not stopped, and not meant to be: the 409 itself already shows an address is reserved. What the refusal withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically — which is acceptable because the lock markers already in the event history name the holders anyway |
 | Someone with `people` makes themselves or an accomplice an approver | Only the owner grants roles |
 | A direct writer to the store forges a grant | Buys a role without `lock`, never `people` over a lock-holder; closed by signed events |
 | An agent approves its own text | An agent's credential is refused for any ✓; a lock ✓ needs an interactive session. Reuse of a person's session is the open gap in section 4 |

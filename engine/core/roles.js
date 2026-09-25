@@ -187,6 +187,11 @@ export function isValidScope(scope) {
  * round 3 of #29's review, finding 3). None of the four is something `parseLocks` should have to
  * guess the intent of — `HOLDRIM_LOCKS` is typed by whoever deploys, not pasted from a mail client.
  */
+// `;` inside the class is untestable by mutation: `parseLocks` splits `raw` on `;` before any entry
+// ever reaches this check, so an entry containing `;` was already cut into two entries upstream —
+// removing `;` here changes nothing a test could observe. It stays for the reason its own doc
+// comment above gives (a separator this grammar already means something else by), not because a
+// test proves it.
 const RESERVED_EMAIL_CHARS = /[<>"()[\],;]/;
 
 /**

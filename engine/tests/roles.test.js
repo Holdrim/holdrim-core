@@ -183,7 +183,7 @@ test('isValidScope rejects a single-letter family — "P0*" is a family, "P*" is
  *   - `P03.1<script>`            segment char class widened to `[^.]`
  *   - `<script>P03.1`            `^` removed (a valid SUFFIX would then be enough)
  *   - `<script>:P03.1`           namespace body widened to `[^.]*`
- *   - `.:P03.1`                  root's first-char letter requirement made optional
+ *   - `.:P03.1`                  `^` removed (a valid SUFFIX would then be enough)
  *   - `P03.1 x`, `P03.1\n<x>`,
  *     `P03.<b>`                  segment char class widened to `[^.]`
  *   - `P03.`, `P03..1`           segment `{1,8}` loosened to `{0,8}` (an empty segment)
@@ -249,6 +249,28 @@ test('parseLocks refuses an entry whose address is not one, by the same check ac
  */
 test('parseLocks refuses what isEmailAddress alone would let through: display forms, quoting, a trailing dot', () => {
   for (const bad of ['<ana@x>', '"ana"@x', 'ana@x.']) {
+    assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
+  }
+});
+
+/**
+ * Each of these also has exactly one `@` with something on both sides, so `isEmailAddress` alone
+ * accepts every one of them — only `RESERVED_EMAIL_CHARS` refuses them, one character of the class
+ * at a time: `>`, `<`, `(` and `)`, `[` and `]`, and a bare `,` as if a second address had been
+ * pasted in. `(c)ana@x` and `[ana]@x` are the realistic shapes (a comment wrapping the address, a
+ * bracketed display form), but each carries BOTH characters of its pair, so removing either alone
+ * from the class still leaves the other to catch it — neither pins its own character on its own.
+ * `(ana@x`, `[ana@x` and `ana]@x` do: an unclosed comment, an unclosed bracket, and a bracket with
+ * no opening partner, where the missing half never appears at all. `;` is not exercised here:
+ * `parseLocks` already split `raw` on `;` before an entry reaches this check, so a `;` inside one is
+ * never possible to construct as a test input (`RESERVED_EMAIL_CHARS`'s own comment, above, says why
+ * the character stays in the class regardless).
+ */
+test('parseLocks refuses every other reserved character, one at a time', () => {
+  for (const bad of [
+    'ana@x>', '<ana@x', '(c)ana@x', '(ana@x', 'ana)@x',
+    '[ana]@x', '[ana@x', 'ana]@x', 'ana,bo@x',
+  ]) {
     assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
   }
 });

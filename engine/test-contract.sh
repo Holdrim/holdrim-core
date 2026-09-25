@@ -640,6 +640,8 @@ expect "and the message says only the owner can reset it here" 0 \
   "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'only the owner can reset that password here'; echo $?)"
 expect "and the reset message does not name HOLDRIM_LOCKS" 1 \
   "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "and the reset message does not say the account holds a lock" 1 \
+  "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'holds a lock'; echo $?)"
 expect "the owner still can" 200 "$(code_owner -X POST $B/api/users/$LOCKED/password)"
 # Round 1 reasoned that disabling hands out no password, so it left this direction open — missing
 # that an admin who can disable a lock-holder at will can silence their ✓ at the exact moment it
@@ -653,12 +655,16 @@ expect "and the disable message says only the owner can disable it here" 0 \
   "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'only the owner can disable it here'; echo $?)"
 expect "and the disable message does not name HOLDRIM_LOCKS" 1 \
   "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "and the disable message does not say the account holds a lock" 1 \
+  "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'holds a lock'; echo $?)"
 expect "an admin cannot give the access back → 409" 409 \
   "$(code_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
 expect "and the enable message says only the owner can give it back" 0 \
   "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'only the owner can give that access back'; echo $?)"
 expect "and the enable message does not name HOLDRIM_LOCKS either" 1 \
   "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "and the enable message does not say the account holds a lock either" 1 \
+  "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'holds a lock'; echo $?)"
 expect "the owner CAN disable the lock-holder" 200 "$(code_owner -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
 expect "the owner re-enables it → 200" 200 "$(code_owner -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
 
