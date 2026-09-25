@@ -203,8 +203,10 @@ test('the traffic light reads the blocks the CLI reads, green when nothing moved
  * `if-i-touch` names the direct dependents as what will turn 🔴 — one hop, the same as the traffic
  * light itself (docs/IMPACT.md, "One hop, not the transitive closure") — and THEN the rest of the
  * radius as worth checking too. Both lists come from the one walk the panel also lights on
- * selection (`radiusOf`, built on `dependentsOf`): a version that swapped it back for a second hop
- * of `dependentsOf` would print the same one-hop list twice and never name C.
+ * selection (`radiusOf`, built on `dependentsOf`): the chain here is FOUR long (A→B→C→D) because a
+ * version that took only one extra hop past the direct dependents — `dependentsOf` of each
+ * dependent, instead of the whole `radiusOf` walk — would still find C from A on a 3-chain and pass;
+ * it only stops short, and misses D, once there is a real second hop for it to fail to reach.
  */
 test('if-i-touch names the direct hop as red, and the rest of the chain as worth checking', async (t) => {
   const tmp = project(t);
@@ -212,6 +214,7 @@ test('if-i-touch names the direct hop as red, and the rest of the chain as worth
     + '<div data-id="X01.1.1" data-code="1.1">A: the rule</div>'
     + '<div data-id="X01.1.2" data-code="1.2" data-depends="X01.1.1">B: stands on A</div>'
     + '<div data-id="X01.1.3" data-code="1.3" data-depends="X01.1.2">C: stands on B, not on A directly</div>'
+    + '<div data-id="X01.1.4" data-code="1.4" data-depends="X01.1.3">D: stands on C, three hops from A</div>'
     + '</main>');
 
   const lines = [];
@@ -224,19 +227,32 @@ test('if-i-touch names the direct hop as red, and the rest of the chain as worth
   assert.equal(code, 0);
   assert.match(out, /1 block\(s\) will turn 🔴 and need a check/, 'the red count stays ONE hop');
   assert.match(out, /X01\.1\.2\s+never validated/);
-  assert.match(out, /1 more, worth checking too — reached through another block/);
+  assert.match(out, /2 more, worth checking too — reached through another block/);
   assert.match(out, /X01\.1\.3\s+never validated/);
-  // C is worth checking, not red: it is two hops away, and the traffic light never claims that.
+  assert.match(out, /X01\.1\.4\s+never validated/, 'the radius reaches past the second hop, to D');
+  // C and D are worth checking, not red: they are two and three hops away, and the traffic light
+  // never claims that.
   assert.doesNotMatch(out.split('worth checking')[0], /X01\.1\.3/);
+  assert.doesNotMatch(out.split('worth checking')[0], /X01\.1\.4/);
 
-  // From B, only C is left to check — and there is nothing further, so no second section prints.
+  // From B, both C and D are left to check — the walk from B has a real second hop too.
   lines.length = 0;
   console.log = (line) => lines.push(line);
   try { await ifITouch(tmp, 'X01.1.2'); } finally { console.log = realLog; }
   const fromB = lines.join('\n');
   assert.match(fromB, /1 block\(s\) will turn 🔴 and need a check/);
   assert.match(fromB, /X01\.1\.3\s+never validated/);
-  assert.doesNotMatch(fromB, /worth checking/, 'nothing is left once the one direct hop is named');
+  assert.match(fromB, /1 more, worth checking too — reached through another block/);
+  assert.match(fromB, /X01\.1\.4\s+never validated/);
+
+  // From C, only D turns red directly, and nothing lies beyond it, so no second section prints.
+  lines.length = 0;
+  console.log = (line) => lines.push(line);
+  try { await ifITouch(tmp, 'X01.1.3'); } finally { console.log = realLog; }
+  const fromC = lines.join('\n');
+  assert.match(fromC, /1 block\(s\) will turn 🔴 and need a check/);
+  assert.match(fromC, /X01\.1\.4\s+never validated/);
+  assert.doesNotMatch(fromC, /worth checking/, 'nothing is left once the one direct hop is named');
 });
 
 /**

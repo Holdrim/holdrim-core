@@ -424,6 +424,11 @@ try {
       () => reader.page.locator('[data-id="R01.1.3"] .rv-num--radius').waitFor());
     expect('the block itself does not light up', 0, await reader.page.locator('[data-id="R01.1.1"] .rv-num--radius').count());
     expect('and the one nothing depends on stays dark', 0, await reader.page.locator('[data-id="R01.1.4"] .rv-num--radius').count());
+    // Every dependent of 1.1 (1.2 and 1.3) is on THIS page — nothing was left for the "elsewhere"
+    // note to name. Forcing the note to show regardless (or lighting it off an unrelated count)
+    // would still pass every check above; only asserting its absence here catches that.
+    expect('no elsewhere note when every dependent is on this page', 0,
+      await reader.page.locator('.rv-radius-note').count());
 
     // Selecting something ELSE has to clear the old radius, not just add to it — a light left over
     // from the last selection would show a person a blast radius that is no longer the one they asked
@@ -449,8 +454,11 @@ try {
     expect('and nothing lights up here — 1.4 has no dependent on THIS page', 0,
       await reader.page.locator('.rv-num--radius').count());
 
+    // This only shows the lights and the note leave the page with the dialog that held them — the
+    // dialog unmounting empties it either way, so it does not prove the `radiusElsewhere` state
+    // itself resets to 0. Nothing here builds the machinery to prove that separately.
     await reader.page.locator('.rv-close').click();
-    await must('closing the panel clears the radius, and the note, entirely', async () => {
+    await must('closing the panel takes the radius lights and the note off the page', async () => {
       await reader.page.locator('.rv-num--radius').waitFor({ state: 'detached' });
       await reader.page.locator('.rv-radius-note').waitFor({ state: 'detached' });
     });
