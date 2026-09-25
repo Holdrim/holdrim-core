@@ -9,9 +9,10 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { hashText, newSalt, textKey, withTexts, withTextsRetrying, reportTampered, suspectsOf,
   noText, TEXT_REMOVED } from '../api/texts.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
@@ -616,6 +617,48 @@ test('[sqlite] the CLI\'s direct file reader wraps its four reads in one transac
     assert.deepEqual(execCalls, ['BEGIN DEFERRED', 'COMMIT'],
       'exactly one transaction around the events, people, texts and boundary reads together');
   });
+
+// Round 3 of the #91 review, MAJOR: the catch above calls `rollbackQuietly` (engine/api/
+// store-sqlite.ts) before its own `throw err`, so a ROLLBACK that itself fails cannot replace the
+// read's real error with a complaint about undoing a failure that already happened — see
+// engine/tests/hooks/fake-sqlite-rollback-throws.js for why this needs a substitute DatabaseSync at
+// all. A real SQLite file never fails a ROLLBACK on an empty read-only transaction, so the read's
+// own failure has to come from somewhere else: a file that opens (so the constructor succeeds) but
+// is not a valid database, so the first real statement inside the transaction fails with SQLite's
+// own "file is not a database" — the smallest page SQLite reads before it can tell is 4096 bytes, so
+// anything shorter reads as a plain I/O error instead. `rollbackQuietly` has no test of its own:
+// this is that test, for all three sites that share it (`list` and `installGuards`, store-sqlite.ts,
+// call the identical helper).
+//
+// A child process, not a prototype patch in this process like the test just above: that test only
+// needs `exec` to keep working while it records calls, but this one needs `node:sqlite` itself
+// swapped out from under a fresh `import('node:sqlite')`, and a loader hook is the seam that reaches
+// that.
+test('[sqlite] a ROLLBACK that itself throws does not mask the read error that caused it', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-rollback-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const junkPath = join(dir, 'not-a-database.db');
+  writeFileSync(junkPath, 'x'.repeat(4096));
+
+  const hook = new URL('./hooks/fake-sqlite-rollback-throws.js', import.meta.url);
+  const remote = new URL('../cli/remote.ts', import.meta.url);
+  const code = `
+    const { Source } = await import(${JSON.stringify(remote.pathname)});
+    try {
+      await new Source({ db: ${JSON.stringify(junkPath)} }).events();
+      console.log(JSON.stringify({ threw: false }));
+    } catch (err) {
+      console.log(JSON.stringify({ threw: true, message: err.message }));
+    }
+  `;
+  const r = spawnSync(process.execPath, ['--import', hook.pathname, '--input-type=module', '-e', code],
+    { encoding: 'utf8' });
+  assert.equal(r.status, 0, `the child process itself must not crash: ${r.stderr}`);
+  const result = JSON.parse(r.stdout.trim());
+  assert.equal(result.threw, true, 'a file that is not a database must still fail the read');
+  assert.match(result.message, /file is not a database/,
+    'the ORIGINAL error must surface, not whatever the failing ROLLBACK throws instead');
+});
 
 // ===================================================================== one snapshot, not three reads
 // Round 1, finding 6: FirestoreEventStore.list() read events, people and texts as three separate,

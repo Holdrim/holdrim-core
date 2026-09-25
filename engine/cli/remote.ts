@@ -195,7 +195,7 @@ export class Source {
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
-    const { extractionBoundary } = await import('../api/store-sqlite.ts');
+    const { extractionBoundary, rollbackQuietly } = await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
     let rows: Record<string, any>[];
     let people: Map<string, string | null>;
@@ -243,10 +243,13 @@ export class Source {
       } catch (err) {
         // Round 3 of the #91 review, MINOR: a ROLLBACK that itself throws — the transaction was
         // never actually open, say — would otherwise replace `err`, the real reason this read
-        // failed, with a complaint about undoing a failure that already happened. The original is
-        // what a reader needs to fix; losing it to a housekeeping step is strictly worse than a
-        // ROLLBACK that silently does nothing because there was nothing to roll back.
-        try { db.exec('ROLLBACK'); } catch { /* the read's own error is the one that matters */ }
+        // failed, with a complaint about undoing a failure that already happened. `rollbackQuietly`
+        // (engine/api/store-sqlite.ts) is the one place the ROLLBACK-swallowing lives, so
+        // `SqliteEventStore.list()` and `installGuards` in that same file share the identical fix,
+        // not a second copy of it; the `throw err` stays here; a version that also rethrew inside
+        // the helper left `rows`/`people`/`texts` below "used before being assigned" to `tsc` — see
+        // the helper's own comment for why.
+        rollbackQuietly(db);
         throw err;
       }
       const events = withAuthors(rows.map((row) => ({
