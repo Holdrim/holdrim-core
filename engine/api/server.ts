@@ -601,6 +601,14 @@ async function userRoutes(
       json(res, 409, { error: say('api.users.ownerIsProvisionedAtBoot', { email: address }) });
       return true;
     }
+    // ⚠️ Their accounts are guarded like the owner's (docs/ROLES.md, section 3): a password handed
+    // out for a HOLDRIM_LOCKS address is a lock handed out, whoever ends up holding it. Guarded on
+    // all three routes with the SAME question, `roles.isLockHolder` — see the reset and enabled
+    // routes below.
+    if (roles.isLockHolder(address) && !roles.isOwner(email)) {
+      json(res, 409, { error: say('api.users.lockHolderIsOwnerToCreate', { email: address }) });
+      return true;
+    }
     if (await users.find(address)) {
       json(res, 400, { error: say('api.users.emailTaken', { email: address }) });
       return true;
@@ -655,6 +663,13 @@ async function userRoutes(
     if (roles.isOwner(target) && target !== email) {
       return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
     }
+    // Same guard, extended to LOCKS (docs/ROLES.md, section 3): "the owner's alone", with no
+    // exception for the lock-holder resetting themselves — unlike the owner's own guard above, which
+    // exists so the owner is never locked out of their own recovery. A lock-holder has no comparable
+    // need served by this admin-only route; `/change-password` is theirs already.
+    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+      return json(res, 409, { error: say('api.users.lockHolderPasswordIsOwnerToReset', { email: target }) }), true;
+    }
     const password = await users.resetPassword(target);
     // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
     log('INFO', 'user_password_reset', await actedOn(target, email));
@@ -687,6 +702,13 @@ async function userRoutes(
     // that the answer is in the configuration.
     if (!body.enabled && roles.isOwner(target)) {
       json(res, 409, { error: say('api.users.ownerCannotBeDisabled', { email: target }) });
+      return true;
+    }
+    // ⚠️ RE-enabling a LOCKS address is the owner's alone too (docs/ROLES.md, section 3) — DISABLING
+    // one is not: taking access away hands nobody a password, and drops the session on its own.
+    // `body.enabled` here, not `!body.enabled` as above: the two guards protect opposite directions.
+    if (body.enabled && roles.isLockHolder(target) && !roles.isOwner(email)) {
+      json(res, 409, { error: say('api.users.lockHolderIsOwnerToEnable', { email: target }) });
       return true;
     }
     await users.setEnabled(target, body.enabled);

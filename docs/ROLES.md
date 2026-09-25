@@ -252,10 +252,14 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Capabilities instead of role names (`can(capability, email)`) | built |
 | Owner and admins, from configuration | built |
 | The closed capability list, and roles as sets of it | built — `engine/core/roles.js`, `CAPABILITIES` and `capabilitiesOf` |
-| A project's own roles and grants, in `holdrim.json`, validated | built (#29) — `engine/core/roles.js`, `projectRoles` and `projectGrants`. An INTERIM path, ahead of the row below: a file a committer, or the agent applying an approved request, can edit — bounded exactly as "What that buys is bounded" already describes for a forged event, and never `lock` (see `can`) |
-| `LOCKS`, and lock-holders' accounts guarded like the owner's | not built |
-| Roles and grants as events, from a settings screen, by the owner | not built — will REPLACE the file-based path above, not sit beside it: `AGENTS.md`'s worry about the agent editing `holdrim.json` applies to a project role exactly as it does to `owner` and `admins` |
-| Scopes: exact pages, explicit wildcard, blocks | validated (#29, `isValidGrantScope`), not yet consulted by `can` — an unscoped grant already applies everywhere |
+| The validation grammar a project role and a grant's scope will be checked against | built (#29) — `ROLE_NAME_FORMAT` and `isValidScope`, `engine/core/roles.js`, proved by their own tests ahead of their first real caller |
+| `holdrim.json` refusing `roles` and `grants`, like `owner`, `admins` and `locks` | built (#29) — `engine/core/config.js`'s `AUTHORITY_KEYS`. Authority comes from the deployment only; a project's own roles are the owner's to define and grant, from the settings screen below, never a file a committer or the applying agent can edit |
+| `HOLDRIM_LOCKS`, parsed and validated at start | built (#29) — `engine/core/roles.js`'s `parseLocks` |
+| Lock-holders' accounts guarded like the owner's, on all three routes | built (#29) — `roles.isLockHolder`, asked by `engine/api/server.ts`'s create, reset and re-enable routes; proved end to end in `engine/test-contract.sh` |
+| `can('lock', …)` actually trusting a `HOLDRIM_LOCKS` entry | not built — stays owner-only until the rule below exists; see the comment on `can` |
+| The session-and-credential-history rule (a lock only from a session opened with a credential the person set after the owner's latest issuance) | not built |
+| Roles and grants as events, from a settings screen, by the owner | not built |
+| Scopes actually consulted by `can`, with a page or block in hand | not built — the grammar is validated (`isValidScope`), nothing reads it yet |
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | An agent's own credential, refused for any ✓ | not built |
 | `people.show`, applied by the server | not built |

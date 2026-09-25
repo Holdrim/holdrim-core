@@ -341,7 +341,11 @@ DATA_DIR=$(mktemp -d); COOKIES=$WORK/cookies.txt
 # an ADMIN is allowed to manage and still refused on the owner. Testing only with a member would
 # leave the escalation path — admin resets the owner, signs in as the owner — completely uncovered.
 ADMIN=admin@example.org
-HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$ADMIN HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=sqlite \
+# LOCKED is named in HOLDRIM_LOCKS (docs/ROLES.md, section 3): their account is guarded like the
+# owner's, end to end, below.
+LOCKED=locked@example.org
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$ADMIN HOLDRIM_LOCKS="$LOCKED:P0*" \
+  HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=sqlite \
   HOLDRIM_USERS_PATH=$DATA_DIR/users.db HOLDRIM_EVENTS_PATH=$DATA_DIR/events.db PORT=$PORT \
   HOLDRIM_SITE="$SITE" \
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/password.log 2>&1 & PID=$!
@@ -610,6 +614,28 @@ expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset by)"
 
+# ⚠️ LOCKS accounts are guarded like the owner's, on all three routes (docs/ROLES.md, section 3): a
+# password handed out for one is a lock handed out. Admin manages people in general (checked above)
+# and is still refused here, end to end — the escalation this closes is the same shape as the
+# owner's, just for whoever HOLDRIM_LOCKS names instead of HOLDRIM_OWNER.
+expect "an admin cannot create a lock-holder's account → 409" 409 \
+  "$(code_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users)"
+expect "and the message names HOLDRIM_LOCKS" 0 \
+  "$(as_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | has 'HOLDRIM_LOCKS'; echo $?)"
+LPASS=$(as_owner -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | jfield password)
+expect "the owner creates it → a real password" 0 "$([ -n "$LPASS" ] && echo 0 || echo 1)"
+expect "an admin cannot reset the lock-holder's password → 409" 409 "$(code_admin -X POST $B/api/users/$LOCKED/password)"
+expect "the owner still can" 200 "$(code_owner -X POST $B/api/users/$LOCKED/password)"
+# Taking access away hands nobody a password, so it is NOT owner-only: an admin disables like any
+# other account, and the session dies at once, exactly as for a member.
+expect "an admin CAN disable the lock-holder — that direction hands out no password" 200 \
+  "$(code_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
+expect "an admin cannot give the access back → 409" 409 \
+  "$(code_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
+expect "and the message names HOLDRIM_LOCKS too" 0 \
+  "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "the owner re-enables it → 200" 200 "$(code_owner -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
+
 expect "disabling somebody → 200"       200 "$(code_owner -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)"
 expect "disabling is logged as the member's id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
@@ -623,7 +649,7 @@ expect "and the right password no longer gets in → 401" 401 "$(mlogin "$MEMBER
 # whoever sorts first, and an admin added to the fixture takes that slot — a test that silently
 # changes what it asserts when somebody adds a row is worse than no test.
 expect "but they are still on the list"  false "$(as_owner $B/api/users | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const u=JSON.parse(s).users.find(u=>u.email===process.argv[1]);console.log(u?u.enabled:'not listed')})" "$MEMBER")"
-expect "disabling is not deleting"      "$ADMIN $MEMBER $OWNER" "$(emails)"
+expect "disabling is not deleting"      "$ADMIN $LOCKED $MEMBER $OWNER" "$(emails)"
 # A missing field is not "false": read as falsy, a typo in the key would silently revoke somebody.
 expect "a body with no enabled → 400"   400 "$(code_owner -d '{}' $B/api/users/$MEMBER/enabled)"
 
@@ -845,7 +871,7 @@ HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SI
   run_for 15 env -u HOLDRIM_OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/file-owner.log" 2>&1
 expect "the owner only in holdrim.json → exits 1"  1 "$?"
 expect "and says authority is the deployment's"    0 "$(grep -q 'holdrim.json names "owner", and it may not: authority is set by the deployment' $WORK/file-owner.log; echo $?)"
-expect "and names the variables to set"            0 "$(grep -q 'set HOLDRIM_OWNER (one e-mail) and HOLDRIM_ADMINS' $WORK/file-owner.log; echo $?)"
+expect "and names where it actually lives"         0 "$(grep -q '"owner" comes from HOLDRIM_OWNER (one e-mail), set where Holdrim runs' $WORK/file-owner.log; echo $?)"
 # refuseToStart prints error.message alone (see the comment above it in server.ts). A stack trace
 # reads the same to a human — the message is still in there somewhere — so nothing here would fail
 # if refuseToStart were changed to log the raw Error instead: this is what catches that.

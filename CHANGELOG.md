@@ -122,12 +122,15 @@ who ran the engine from `main` before it.
   their fields, the request states and categories, the CLI's commands and flags, what
   `holdrim list --json` prints, and the HTTP routes. CI derives each list from the code and fails
   when one moves, naming it, and the failure asks for the change to be recorded here.
-- **A project's own roles, in `holdrim.json`** (`docs/ROLES.md`): `roles` names a role and the
-  capabilities it holds (a subset of `read`, `comment`, `request`, `triage`, `approve`, `lock`,
-  `people`), and `grants` says who holds one — a role name a project already ships (`owner`, `admin`,
-  `member`) refuses to start, as does an unknown capability or a grant naming a role `roles` never
-  defined. `lock` may be listed like any other capability but is never actually granted by it: only
-  the owner holds it, identity alone, exactly as `HOLDRIM_ADMINS` already cannot make an admin the
-  owner. A grant may be limited to a page, a page family (`"P0*"`) or a block id; the scope is
-  validated now, and honoured once the engine asks a capability with a page in hand — an unscoped
-  grant applies everywhere already.
+- **`HOLDRIM_LOCKS` names who else holds `lock`** (`docs/ROLES.md`, section 3), next to
+  `HOLDRIM_OWNER`: `"ana@example.org:P0*; bea@example.org:F12"`, an e-mail, a colon and a scope per
+  entry — a page, a page family (`"P0*"`) or a block id, validated the same way an event's own `page`
+  and `block` are. A malformed entry refuses to start, exactly like a malformed `HOLDRIM_OWNER`. Their
+  accounts are guarded like the owner's: creating, resetting or re-enabling one is the owner's alone,
+  on all three routes. `can('lock', …)` does not trust one yet — it still asks only whether the caller
+  is the owner — because doing so safely needs the session-and-credential-history rule `docs/ROLES.md`
+  section 3 describes, which is not built.
+- **`holdrim.json` refuses `roles` and `grants` too**, alongside `owner`, `admins` and `locks`
+  (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
+  them, are the owner's to define and grant from a settings screen — a later piece — never a file a
+  committer, or the agent applying an approved request, can edit.

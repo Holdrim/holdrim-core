@@ -6,8 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CAPABILITIES, capabilitiesOf, createRoles, projectRoles, projectGrants, isValidGrantScope,
-  ROLE_NAME_FORMAT,
+  CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope, ROLE_NAME_FORMAT,
 } from '../core/roles.js';
 
 test('exactly one owner: zero or two refuse to start', () => {
@@ -116,116 +115,96 @@ test('mutating what capabilitiesOf returns changes nothing the next caller reads
   assert.equal(roles.can('lock', 'ana@example.org'), false, 'an admin\'s ✓ must not have just become a lock');
 });
 
-// ------------------------------------------------------------------ #29: project roles and grants
-/**
- * A project's own role (`holdrim.json`'s `roles`) grants exactly the capabilities it names, to
- * whoever an UNSCOPED grant names. This is the test #29's mutations are aimed at: change what a
- * granted capability answers, or let a scoped grant leak into `can` unconsulted, and this is the
- * named test that fails.
- */
-test('a project role granted without a scope reaches can() — "no scope means everywhere"', () => {
-  const roles = createRoles('owner@example.org', '',
-    { 'clinical-lead': ['triage', 'approve'] },
-    { 'bea@example.org': [{ role: 'clinical-lead' }] });
-  assert.equal(roles.can('triage', 'bea@example.org'), true);
-  assert.equal(roles.can('approve', 'bea@example.org'), true);
-  // Only what was granted — 'people' was never in the role's list.
-  assert.equal(roles.can('people', 'bea@example.org'), false);
-  assert.equal(roles.roleOf('bea@example.org'), 'clinical-lead');
-});
+// ------------------------------------------------------------------ #29: the validation core, kept
+// ready for the settings screen. No caller in this version reads ROLE_NAME_FORMAT for a project role
+// or a grant — that path is events, by the owner, not yet built (docs/ROLES.md, "Roles and grants as
+// events") — so these prove the grammar directly, the same way `isValidScope`'s own tests do for the
+// scope grammar `HOLDRIM_LOCKS` (below) already uses.
 
-test('a scoped grant is validated but not yet consulted by can() — scopes are not built', () => {
-  // docs/ROLES.md, "Built / not built": scopes are validated (this file, isValidGrantScope) but the
-  // engine does not yet ask `can` with a page or block in hand — so honouring one here would grant
-  // MORE than the file asked for, everywhere, instead of only where it said.
-  const roles = createRoles('owner@example.org', '',
-    { 'clinical-lead': ['triage'] },
-    { 'cara@example.org': [{ role: 'clinical-lead', scope: 'P03' }] });
-  assert.equal(roles.can('triage', 'cara@example.org'), false);
-  assert.equal(roles.roleOf('cara@example.org'), 'member', 'a scoped-only grant shows no display role either');
-});
-
-test('a role a project defines cannot grant lock — only the owner can hold what the file cannot grant', () => {
-  // `lock` is a KNOWN capability (no typo), so listing it does not refuse to start — but `can`'s
-  // `'lock'` branch never reads a role's capabilities, project-defined or shipped, so it changes
-  // nothing. This is the test the issue's "only the owner can hold what the file cannot grant"
-  // mutation is aimed at.
-  const roles = createRoles('owner@example.org', '',
-    { 'super-role': ['lock', 'triage', 'approve', 'people'] },
-    { 'zoe@example.org': [{ role: 'super-role' }] });
-  assert.equal(roles.can('lock', 'zoe@example.org'), false, 'the file cannot grant lock, whatever it lists');
-  assert.equal(roles.can('lock', 'owner@example.org'), true, 'only the owner holds it');
-  // Every OTHER capability the role names still applies — only lock is refused.
-  assert.equal(roles.can('triage', 'zoe@example.org'), true);
-  assert.equal(roles.can('people', 'zoe@example.org'), true);
-});
-
-test('an unknown capability in a project role refuses to start the server', () => {
-  assert.throws(
-    () => createRoles('owner@example.org', '', { 'clinical-lead': ['aproove'] }, {}),
-    /"clinical-lead" grants "aproove", which is not a capability/);
-});
-
-test('a role name outside the known format refuses to start', () => {
-  for (const bad of ['Clinical-Lead', 'clinical_lead', '2fast', '', 'has space']) {
-    assert.throws(() => createRoles('owner@example.org', '', { [bad]: ['read'] }, {}),
-      /role name must be lowercase letters, digits and hyphens/, JSON.stringify(bad));
+test('ROLE_NAME_FORMAT accepts lowercase letters, digits and hyphens, and nothing else', () => {
+  for (const good of ['admin2', 'clinical-lead', 'a']) assert.equal(ROLE_NAME_FORMAT.test(good), true, good);
+  for (const bad of ['Clinical-Lead', 'clinical_lead', '2fast', '', 'has space', '-lead']) {
+    assert.equal(ROLE_NAME_FORMAT.test(bad), false, bad);
   }
-});
-
-test('a project role cannot reuse a shipped role\'s name', () => {
-  for (const shipped of ['owner', 'admin', 'member']) {
-    assert.throws(() => createRoles('owner@example.org', '', { [shipped]: ['read'] }, {}),
-      /already ships/, shipped);
-  }
-});
-
-test('a grant naming a role the file never defined refuses to start', () => {
-  assert.throws(
-    () => createRoles('owner@example.org', '', { 'clinical-lead': ['read'] },
-      { 'x@example.org': [{ role: 'ghost-role' }] }),
-    /not one of the project's own roles/);
-});
-
-test('a grant scope outside the known shapes refuses to start', () => {
-  for (const bad of ['', '**', 'P0**', '<script>', 'P0 3']) {
-    assert.throws(
-      () => createRoles('owner@example.org', '', { 'clinical-lead': ['read'] },
-        { 'x@example.org': [{ role: 'clinical-lead', scope: bad }] }),
-      /is none of a page, a page family/, JSON.stringify(bad));
-  }
-});
-
-test('isValidGrantScope accepts exactly the three shapes docs/ROLES.md describes', () => {
-  assert.equal(isValidGrantScope('P03'), true, 'an exact page');
-  assert.equal(isValidGrantScope('P0*'), true, 'a page family, with its explicit star');
-  assert.equal(isValidGrantScope('P03.2.1'), true, 'a single block id');
-  assert.equal(isValidGrantScope(''), false, 'empty names nothing');
-  assert.equal(isValidGrantScope('P0**'), false, 'two stars is not a family');
-  assert.equal(isValidGrantScope(42), false, 'not even a string');
 });
 
 test('ROLE_NAME_FORMAT is anchored — it does not merely find a match somewhere inside', () => {
   assert.equal(ROLE_NAME_FORMAT.test('clinical-lead and then some junk'), false);
 });
 
-test('projectRoles and projectGrants read no file at all as no project role and no grant', () => {
-  assert.deepEqual(projectRoles(undefined), new Map());
-  assert.deepEqual(projectRoles(null), new Map());
-  assert.deepEqual(projectGrants(undefined, new Map()), new Map());
-  assert.deepEqual(projectGrants(null, new Map()), new Map());
+test('isValidScope accepts exactly the three shapes docs/ROLES.md describes', () => {
+  assert.equal(isValidScope('P03'), true, 'an exact page');
+  assert.equal(isValidScope('P0*'), true, 'a page family, with its explicit star');
+  assert.equal(isValidScope('P03.2.1'), true, 'a single block id');
+  // "P0*" reaches P01..P09 and nothing that merely begins with "P" — the star has to be WRITTEN;
+  // "P*" is a different, wider family, and neither is the same question as "does this start with P".
+  assert.equal(isValidScope('P'), true, 'a one-letter page code is still an exact page, not a family');
+  assert.equal(isValidScope(''), false, 'empty names nothing');
+  assert.equal(isValidScope('P0**'), false, 'two stars is not a family');
+  assert.equal(isValidScope('*P0'), false, 'a star that is not trailing is not a family either');
+  assert.equal(isValidScope(42), false, 'not even a string');
 });
 
-test('projectRoles refuses a "roles" that is not an object', () => {
-  for (const bad of ['nope', 42, ['a', 'b']]) {
-    assert.throws(() => projectRoles(bad), /must be an object mapping/, JSON.stringify(bad));
+// ------------------------------------------------------------------ HOLDRIM_LOCKS
+/**
+ * `parseLocks` is the one place `HOLDRIM_LOCKS` becomes data, and `createRoles` calls it once, at
+ * construction — a malformed entry refuses to start, the same as a malformed `HOLDRIM_OWNER`.
+ */
+test('parseLocks reads "email:scope" entries, separated by ";", trimmed', () => {
+  assert.deepEqual(parseLocks(' ana@example.org : P0* ; bea@example.org:F12 '),
+    [{ email: 'ana@example.org', scope: 'P0*' }, { email: 'bea@example.org', scope: 'F12' }]);
+  assert.deepEqual(parseLocks(''), [], 'empty names nobody, not an error');
+  assert.deepEqual(parseLocks(undefined), []);
+  assert.deepEqual(parseLocks(null), []);
+});
+
+test('parseLocks lower-cases the address, exactly as the store does', () => {
+  assert.deepEqual(parseLocks('Ana@Example.ORG:P03'), [{ email: 'ana@example.org', scope: 'P03' }]);
+});
+
+test('parseLocks refuses an entry with no colon, no scope', () => {
+  assert.throws(() => parseLocks('ana@example.org'), /missing its scope/);
+});
+
+test('parseLocks refuses an entry with no address before the colon', () => {
+  assert.throws(() => parseLocks(':P03'), /names no e-mail before the colon/);
+});
+
+test('parseLocks refuses a scope outside the known shapes', () => {
+  for (const bad of ['', '**', 'P0**', '<script>', 'P0 3']) {
+    assert.throws(() => parseLocks(`ana@example.org:${bad}`), /is none of a page, a page family/,
+      JSON.stringify(bad));
   }
 });
 
-test('projectGrants refuses a grant list that is not an array', () => {
-  const roles = projectRoles({ 'clinical-lead': ['read'] });
-  assert.throws(() => projectGrants({ 'x@example.org': { role: 'clinical-lead' } }, roles),
-    /must be an array of \{role, scope\} entries/);
+test('createRoles refuses to start on a malformed HOLDRIM_LOCKS, the same way as a bad owner', () => {
+  assert.throws(() => createRoles('owner@example.org', '', 'ana@example.org'), /missing its scope/);
+});
+
+test('createRoles exposes isLockHolder from HOLDRIM_LOCKS, case-insensitively', () => {
+  const roles = createRoles('owner@example.org', '', 'ANA@example.org:P0*; bea@example.org:F12');
+  assert.equal(roles.isLockHolder('ana@example.org'), true);
+  assert.equal(roles.isLockHolder('bea@example.org'), true);
+  assert.equal(roles.isLockHolder('carl@example.org'), false);
+});
+
+test('naming the owner in HOLDRIM_LOCKS is harmless', () => {
+  assert.doesNotThrow(() => createRoles('owner@example.org', '', 'owner@example.org:P0*'));
+  const roles = createRoles('owner@example.org', '', 'owner@example.org:P0*');
+  assert.equal(roles.isLockHolder('owner@example.org'), true);
+  assert.equal(roles.isOwner('owner@example.org'), true);
+});
+
+/**
+ * `can('lock', …)` stays owner-only in this change, whatever `HOLDRIM_LOCKS` says: making a LOCKS
+ * entry actually lock needs docs/ROLES.md section 3's session-and-credential-history rule, which is
+ * not built. This is the test the "can('lock', e) stays owner-only" mutation is aimed at.
+ */
+test('a lock holder does not yet lock — can(\'lock\', …) still asks isOwner alone', () => {
+  const roles = createRoles('owner@example.org', '', 'ana@example.org:P0*');
+  assert.equal(roles.isLockHolder('ana@example.org'), true, 'the guard sees them');
+  assert.equal(roles.can('lock', 'ana@example.org'), false, 'but can() does not, yet');
+  assert.equal(roles.can('lock', 'owner@example.org'), true);
 });
 
 test('the owner locks and admin and member do not, whatever a caller does to what capabilitiesOf returned', () => {

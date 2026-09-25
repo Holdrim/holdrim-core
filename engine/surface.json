@@ -21,6 +21,7 @@
       "HOLDRIM_IDENTITY",
       "HOLDRIM_LANGUAGE",
       "HOLDRIM_LOCAL_URL",
+      "HOLDRIM_LOCKS",
       "HOLDRIM_MODE",
       "HOLDRIM_NAME",
       "HOLDRIM_OWNER",
@@ -53,10 +54,8 @@
     "content.trimPrefix",
     "development.actAs",
     "development.port",
-    "grants",
     "language",
     "name",
-    "roles",
     "theme.brand",
     "theme.logo",
     "theme.name"

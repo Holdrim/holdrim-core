@@ -16,18 +16,21 @@
  *
  * The engine asks `can(capability, email)`, never a role's name: a role name changes with every
  * product this ships inside, and a caller that compared one directly (`role === 'admin'`) would stop
- * working the day a project renamed it, and could not be checked against a future holdrim.json grant
- * (#29) the way a capability from this closed list can. `engine/tests/roles-boundary.test.js` proves
- * no caller outside this file does.
+ * working the day a project renamed it. `engine/tests/roles-boundary.test.js` proves no caller
+ * outside this file does.
  *
- * #29 is that grant: a project may define its OWN roles under `holdrim.json`'s `roles` key — a name
- * and a subset of `CAPABILITIES`, the same shape `ROLE_CAPABILITIES` gives the three shipped ones —
- * and grant them to people under `grants`. Both are validated here, at the one door `readConfig`
- * already funnels every project setting through, so a typo in either refuses to start the same way
- * an unknown `holdrim.json` key does. `lock` stays out of reach exactly as it is for `admin`: a
- * project role MAY list it (it is a known capability, not a typo) but `can`'s `'lock'` branch never
- * consults a role's capabilities at all, project-defined or shipped, so listing it changes nothing —
- * see `can`, below, and docs/ROLES.md, "Authority comes from the deployment only".
+ * A project's OWN roles, and who holds them, are NOT read here yet, and never from `holdrim.json`
+ * (docs/ROLES.md, "Authority comes from the deployment only"; `engine/core/config.js`'s
+ * `AUTHORITY_KEYS` refuses the file the moment it names `roles` or `grants`). They come from the
+ * owner, through events at a settings screen — a later piece. `ROLE_NAME_FORMAT` and `isValidScope`
+ * below are validated and tested now anyway: they are the grammar that path will check a role's name
+ * and a grant's scope against, and building them once, ahead of their first caller, means the settings
+ * screen validates a name or a scope the same way `HOLDRIM_LOCKS` already does, not a second way.
+ *
+ * `HOLDRIM_LOCKS` (below, `parseLocks`) is different: who holds `lock` besides the owner is read from
+ * the environment, same as `owner` and `admins`, because a forged lock is the one thing signed events
+ * (phase E) have not closed yet. `can('lock', …)` does not consult it in this change — see `can`'s own
+ * comment for why.
  * @module
  */
 import { PAGE_FORMAT, ID_FORMAT } from './limits.js';
@@ -57,8 +60,8 @@ const GRANTABLE = Object.freeze(CAPABILITIES.filter((c) => c !== 'lock'));
  * — `capabilitiesOf('admin').add('lock')` — would otherwise reach into this table itself, and every
  * `can()` call for the rest of the process would read it too.
  *
- * `#29` (grants from `holdrim.json`) extends this shape rather than replacing it: a project-defined
- * role is the same kind of array, read from configuration instead of written here.
+ * A project-defined role, once the settings screen exists, will extend this shape rather than
+ * replace it: the same kind of array, held in the store instead of written here.
  *
  * `owner` is included for `capabilitiesOf` and the mapping test to read from one table, not two,
  * even though the owner is not a role a project can hold or grant (see the module comment) — its
@@ -90,17 +93,14 @@ export function capabilitiesOf(role) {
 }
 
 /**
- * A project-defined role's name, as `holdrim.json`'s `roles` key writes it. Lowercase, digits and
- * hyphens only — the same restraint `PAGE_FORMAT` puts on a page code, and for the same reason: a
- * role's name is shown on the people screen and, per `people.show: 'role'`, may be the ONLY thing a
- * reader ever sees about who acted, so it is validated before it is trusted the way a theme colour
- * is (`engine/api/theme.ts`) rather than interpolated as written.
+ * A project-defined role's name, the shape the future settings screen will validate a typed name
+ * against — lowercase, digits and hyphens only, the same restraint `PAGE_FORMAT` puts on a page code,
+ * and for the same reason: a role's name is shown on the people screen and, per `people.show:
+ * 'role'`, may be the ONLY thing a reader ever sees about who acted, so it has to be safe to put in
+ * HTML before anything trusts it. No caller in this version asks it yet — `engine/tests/roles.test.js`
+ * is the one that does, so this grammar is proved before its first real use, not invented after.
  */
 export const ROLE_NAME_FORMAT = /^[a-z][a-z0-9-]{0,31}$/;
-
-/** The names this version ships. A project's own role may never reuse one — see `projectRoles` —
- *  because `capabilitiesOf` and `can` both trust that these three mean exactly what this file says. */
-const SHIPPED_ROLE_NAMES = new Set(Object.keys(ROLE_CAPABILITIES));
 
 /**
  * A page-FAMILY scope: `PAGE_FORMAT`'s own shape with an explicit trailing `*` (docs/ROLES.md, "A
@@ -111,124 +111,75 @@ const SHIPPED_ROLE_NAMES = new Set(Object.keys(ROLE_CAPABILITIES));
 const SCOPE_FAMILY_FORMAT = /^[A-Za-z][A-Za-z0-9-]{0,7}\*$/;
 
 /**
- * Whether `scope` is one of the three shapes docs/ROLES.md allows on a grant: an exact page code, a
- * page family with its explicit `*`, or a block id. Nothing else, because a scope that reached the
- * panel unchecked would be exactly the kind of untrusted value `engine/api/theme.ts` already refuses
- * to trust raw — it would end up choosing which pages and blocks a payload includes.
+ * Whether `scope` is one of the three shapes docs/ROLES.md allows on a grant or a `HOLDRIM_LOCKS`
+ * entry: an exact page code, a page family with its explicit `*`, or a block id. Nothing else,
+ * because a scope that reached the panel unchecked would be exactly the kind of untrusted value
+ * `engine/api/theme.ts` already refuses to trust raw — it would end up choosing which pages and
+ * blocks a payload includes.
  *
  * `ID_FORMAT` alone would also accept a bare page code or a family with no `*`; checked in this
  * order, those are already true by the time this reaches it, so nothing is lost by asking it last —
  * it is here only for the third shape, a block id (`P03.2.1`), which `PAGE_FORMAT` never accepts.
  * @param {unknown} scope
  */
-export function isValidGrantScope(scope) {
+export function isValidScope(scope) {
   if (typeof scope !== 'string' || scope === '') return false;
   return PAGE_FORMAT.test(scope) || SCOPE_FAMILY_FORMAT.test(scope) || ID_FORMAT.test(scope);
 }
 
 /**
- * The project's own roles, from `holdrim.json`'s `roles` key — a name and the subset of
- * `CAPABILITIES` it holds, validated the same way an unknown key elsewhere refuses to start. Called
- * once, from `createRoles`, so a bad definition fails at boot rather than the first time somebody's
- * grant tries to use it.
+ * `HOLDRIM_LOCKS`, parsed once at start: `"ana@example.org:P0*; bea@example.org:F12"` — entries
+ * separated by `;`, each an e-mail, a colon, and a scope validated by `isValidScope`. Read from the
+ * environment only, next to `HOLDRIM_OWNER` and `HOLDRIM_ADMINS`, and never from `holdrim.json`
+ * (`engine/core/config.js`'s `AUTHORITY_KEYS` refuses the file the key would otherwise sit in) —
+ * docs/ROLES.md, section 3: "Set where the owner is set."
  *
- * @param {Record<string, unknown>|undefined|null} rolesConfig  `holdrim.json`'s `roles`, as
- *   `JSON.parse` returns it
- * @returns {Map<string, Set<string>>}
+ * The address is normalized exactly as the store normalizes one — trim, then lower-case
+ * (`engine/api/users.ts`'s `normalizeEmail`) — repeated here rather than imported: this file is core
+ * JavaScript the browser also loads (`AGENTS.md`, "JavaScript or TypeScript"), and `users.ts` is not.
+ *
+ * Anything that does not fit — no colon, an empty address, a scope `isValidScope` refuses — throws:
+ * a malformed entry here is a lock silently never granted, which is worse than a service that will
+ * not start, the same reasoning `HOLDRIM_OWNER`'s own parsing already follows.
+ *
+ * Naming the owner in it is harmless: the owner already holds `lock` from `isOwner` alone (below),
+ * so nothing here treats that address specially.
+ *
+ * @param {string|undefined|null} raw
+ * @returns {{email: string, scope: string}[]}
  */
-export function projectRoles(rolesConfig) {
-  const roles = new Map();
-  if (rolesConfig === undefined || rolesConfig === null) return roles;
-  if (typeof rolesConfig !== 'object' || Array.isArray(rolesConfig)) {
-    throw new Error('holdrim.json\'s "roles" must be an object mapping a role name to its capabilities.');
-  }
-  for (const [name, capabilities] of Object.entries(rolesConfig)) {
-    if (!ROLE_NAME_FORMAT.test(name)) {
+export function parseLocks(raw) {
+  const entries = String(raw ?? '').split(';').map((s) => s.trim()).filter(Boolean);
+  return entries.map((entry) => {
+    // The FIRST colon, not the only one: a scope may itself contain one (`ID_FORMAT` allows it, for
+    // a block id written with a namespace), so splitting on every colon would cut a valid scope in
+    // half the day somebody's block ids use one.
+    const colon = entry.indexOf(':');
+    if (colon === -1) {
       throw new Error(
-        `holdrim.json defines a role named "${name}", and a role name must be lowercase letters, ` +
-        'digits and hyphens (like a page code) — it can end up on the people screen, where anything ' +
-        'else would be untrusted input landing in HTML.');
+        `HOLDRIM_LOCKS has "${entry}", which is missing its scope: an entry is an e-mail, a colon, ` +
+        'and a scope, like "ana@example.org:P0*". Entries are separated by ";".');
     }
-    if (SHIPPED_ROLE_NAMES.has(name)) {
+    const email = entry.slice(0, colon).trim().toLowerCase();
+    const scope = entry.slice(colon + 1).trim();
+    if (!email) {
+      throw new Error(`HOLDRIM_LOCKS has "${entry}", which names no e-mail before the colon.`);
+    }
+    if (!isValidScope(scope)) {
       throw new Error(
-        `holdrim.json defines a role named "${name}", which this version of the engine already ships. ` +
-        'Give the project\'s role a different name — redefining a shipped one would make two different ' +
-        'things answer to it.');
+        `HOLDRIM_LOCKS grants ${email} the scope "${scope}", which is none of a page, a page family ` +
+        '("P0*") or a block id — see docs/ROLES.md, "A grant can be limited to pages or to blocks".');
     }
-    if (!Array.isArray(capabilities)) {
-      throw new Error(`holdrim.json's role "${name}" must list its capabilities as an array.`);
-    }
-    for (const capability of capabilities) {
-      if (!CAPABILITIES.includes(capability)) {
-        throw new Error(
-          `holdrim.json's role "${name}" grants "${capability}", which is not a capability this ` +
-          `version of the engine knows: ${CAPABILITIES.join(', ')}.`);
-      }
-    }
-    // `lock` is not stripped here, on purpose: a project that lists it made no typo (`lock` IS one
-    // of `CAPABILITIES`), and refusing to start over it would be refusing a file that changes
-    // nothing — `can`'s `'lock'` branch never reads a role's capabilities, this table included.
-    roles.set(name, new Set(capabilities));
-  }
-  return roles;
-}
-
-/**
- * Who the project's own roles are granted to, from `holdrim.json`'s `grants` key — each entry names
- * one of `roles` and, optionally, a scope. A grant naming a role `roles` does not hold, or a scope
- * that fails `isValidGrantScope`, refuses to start: both are untrusted input the moment they exist,
- * the same as a role's own name above.
- *
- * A scoped grant is validated here and carried on the result, but not yet CONSULTED by `can` —
- * scopes are read with no page or block in hand today (docs/ROLES.md, "Built / not built": "Scopes:
- * exact pages, explicit wildcard, blocks — not built"). Honouring one now, with no way to check it
- * against where a request or a ✓ actually landed, would hand out MORE than the file asked for —
- * exactly the "grant `'lock'`" mistake this module refuses, in a different shape. An UNSCOPED grant
- * ("no scope means everywhere") has no such gap, so it is live from this issue on.
- *
- * @param {Record<string, unknown>|undefined|null} grantsConfig  `holdrim.json`'s `grants`
- * @param {Map<string, Set<string>>} roles  from `projectRoles`
- * @returns {Map<string, {role: string, scope: string|null}[]>} keyed by the e-mail, normalized the
- *   same way `createRoles` normalizes the owner's and the admins'
- */
-export function projectGrants(grantsConfig, roles) {
-  const grants = new Map();
-  if (grantsConfig === undefined || grantsConfig === null) return grants;
-  if (typeof grantsConfig !== 'object' || Array.isArray(grantsConfig)) {
-    throw new Error('holdrim.json\'s "grants" must be an object mapping an e-mail to a list of grants.');
-  }
-  for (const [rawEmail, list] of Object.entries(grantsConfig)) {
-    if (!Array.isArray(list)) {
-      throw new Error(`holdrim.json's grant for "${rawEmail}" must be an array of {role, scope} entries.`);
-    }
-    const entries = list.map((entry) => {
-      const role = entry?.role;
-      if (typeof role !== 'string' || !roles.has(role)) {
-        const known = [...roles.keys()].join(', ') || 'none defined';
-        throw new Error(
-          `holdrim.json grants "${rawEmail}" the role "${role}", which is not one of the project's ` +
-          `own roles (${known}) — a grant can only name a role "roles" defines.`);
-      }
-      const scope = entry?.scope ?? null;
-      if (scope !== null && !isValidGrantScope(scope)) {
-        throw new Error(
-          `holdrim.json grants "${rawEmail}" the scope "${scope}", which is none of a page, a page ` +
-          'family ("P0*") or a block id — see docs/ROLES.md, "A grant can be limited to pages or to blocks".');
-      }
-      return { role, scope };
-    });
-    grants.set(String(rawEmail).trim().toLowerCase(), entries);
-  }
-  return grants;
+    return { email, scope };
+  });
 }
 
 /**
  * @param {string|undefined|null} owner  ONE e-mail. Zero or more than one is a config error.
  * @param {string|undefined|null} admins comma-separated e-mails; may be empty.
- * @param {Record<string, unknown>|undefined|null} [rolesConfig]  `holdrim.json`'s `roles` (#29)
- * @param {Record<string, unknown>|undefined|null} [grantsConfig] `holdrim.json`'s `grants` (#29)
+ * @param {string|undefined|null} [locksRaw] `HOLDRIM_LOCKS`, in `parseLocks`'s format
  */
-export function createRoles(owner, admins, rolesConfig = {}, grantsConfig = {}) {
+export function createRoles(owner, admins, locksRaw) {
   const split = (s) =>
     String(s ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 
@@ -247,33 +198,16 @@ export function createRoles(owner, admins, rolesConfig = {}, grantsConfig = {}) 
   const everyone = new Set([...split(admins), ownerEmail]);
   const normalized = (e) => String(e ?? '').trim().toLowerCase();
 
-  // Validated once, at construction, exactly like `list` above: a bad role or a bad grant is a
-  // config error, and a config error refuses to start rather than surfacing the first time somebody
-  // asks `can` about it.
-  const roles = projectRoles(rolesConfig);
-  const grants = projectGrants(grantsConfig, roles);
+  // Validated once, at construction, exactly like `list` above: a malformed LOCKS entry is a config
+  // error, and a config error refuses to start rather than surfacing the first time something asks
+  // about it.
+  const lockHolders = new Set(parseLocks(locksRaw).map((l) => l.email));
 
   /** Whether `e` is THE owner — an identity check, not a capability. Defined once, here, so `can`
    *  and the returned `isOwner` are provably the same question asked the same way. */
   const isOwner = (e) => normalized(e) === ownerEmail;
-  /** The SHIPPED role `e` holds — never handed to a caller, only used to look up its capabilities.
-   *  Never a project role's name: `capabilitiesOf` only knows the three this file ships, and asking
-   *  it for anything else is the bug `capabilitiesOf` itself refuses (see its own comment). */
-  const shippedRoleOf = (e) => (isOwner(e) ? 'owner' : everyone.has(normalized(e)) ? 'admin' : 'member');
-
-  /**
-   * The capabilities `e` holds through an UNSCOPED grant of a project's own role — "no scope means
-   * everywhere" (docs/ROLES.md). A grant WITH a scope is validated but not read here — see the
-   * comment on `projectGrants` for why consulting it without a page or block in hand would be
-   * exactly the kind of over-grant this module exists to refuse.
-   */
-  const globalCapabilitiesOf = (e) => {
-    const held = new Set();
-    for (const grant of grants.get(normalized(e)) ?? []) {
-      if (grant.scope === null) for (const capability of roles.get(grant.role)) held.add(capability);
-    }
-    return held;
-  };
+  /** The shipped role `e` holds — never handed to a caller, only used to look up its capabilities. */
+  const roleOf = (e) => (isOwner(e) ? 'owner' : everyone.has(normalized(e)) ? 'admin' : 'member');
 
   return {
     owner: ownerEmail,
@@ -285,37 +219,40 @@ export function createRoles(owner, admins, rolesConfig = {}, grantsConfig = {}) 
      */
     isOwner,
     /**
-     * The role `e` holds, for display only — the people screen's column, `/api/me`'s `role` field.
-     * Never compared against a string by a caller: that is exactly the check `can` replaces.
+     * Whether `e` is named in `HOLDRIM_LOCKS` — an identity check, like `isOwner`, never a
+     * capability. This is the ONE function `engine/api/server.ts`'s account guards (create, reset,
+     * re-enable) and any future lock check both ask, so a rule added for one reaches the other
+     * (docs/ROLES.md, section 3, "One parser, one question").
      *
-     * Owner and admin are never displaced: the shipped role wins over any project grant, so an admin
-     * granted a project role by mistake still reads as "admin" rather than something narrower.
-     * Otherwise, the first unscoped grant's role name is shown, or "member" with none.
+     * Not yet read by `can('lock', …)` — see the comment there for why.
      */
-    roleOf: (e) => {
-      const shipped = shippedRoleOf(e);
-      if (shipped !== 'member') return shipped;
-      const grant = (grants.get(normalized(e)) ?? []).find((g) => g.scope === null);
-      return grant?.role ?? 'member';
-    },
+    isLockHolder: (e) => lockHolders.has(normalized(e)),
+    /** The role `e` holds, for display only — the people screen's column, `/api/me`'s `role` field.
+     *  Never compared against a string by a caller: that is exactly the check `can` replaces. */
+    roleOf,
     /**
      * Whether `e` may `capability` — the one question every caller outside this file asks. Throws
      * on an unknown capability rather than silently answering false, for the same reason an unknown
      * `holdrim.json` key refuses to start: a typo that answered "no" would look exactly like a real
      * refusal.
      *
-     * `'lock'` is answered straight from `isOwner`, never from `capabilitiesOf` or a project grant —
-     * not merely because `ROLE_CAPABILITIES` happens to leave `lock` out today, but so that NO edit
-     * to either table, from anywhere in the process, could ever grant it. `docs/ROLES.md` section 3
-     * is what replaces this one line the day `LOCKS` exists: `isOwner(e) || locksHeldBy(e, scope)`,
-     * still never a table lookup by role.
+     * `'lock'` is answered straight from `isOwner`, never from `capabilitiesOf` and never from
+     * `isLockHolder` — not merely because `ROLE_CAPABILITIES` happens to leave `lock` out today, but
+     * because making a `HOLDRIM_LOCKS` entry actually lock needs docs/ROLES.md section 3's rule: a ✓
+     * is a lock only when the session that gave it opened with a credential the PERSON set
+     * themselves, after the latest issuance made by the OWNER. That test reads the account's whole
+     * credential history, which nothing here does yet. Without it, an admin who reset a
+     * soon-to-be-lock-holder's account before their address reached `HOLDRIM_LOCKS`, and kept the
+     * session open across the restart that added it, could give a ✓ in that person's name at the
+     * moment it starts reading as a lock — the exact forgery section 3 exists to close. `isOwner`
+     * alone has no such gap, so `lock` stays exactly that, in this change.
      */
     can: (capability, e) => {
       if (!CAPABILITIES.includes(capability)) {
         throw new Error(`"${capability}" is not a capability engine/core/roles.js knows: ${CAPABILITIES.join(', ')}.`);
       }
       if (capability === 'lock') return isOwner(e);
-      return capabilitiesOf(shippedRoleOf(e)).has(capability) || globalCapabilitiesOf(e).has(capability);
+      return capabilitiesOf(roleOf(e)).has(capability);
     },
   };
 }
@@ -326,17 +263,12 @@ export function createRoles(owner, admins, rolesConfig = {}, grantsConfig = {}) 
  * ⚠️ The one way from configuration to roles, for the server AND the CLI. Who the owner is decides
  * whose ✓ becomes a lock, so the two cannot be allowed to answer it differently: a CLI that read
  * the owner one way while the server read it another would lock nothing the owner approved, or
- * triage as the owner someone the server does not know as one. Where the two values come from —
- * HOLDRIM_OWNER and HOLDRIM_ADMINS, and never holdrim.json — is `readConfig`'s to say, once; this
- * adds no rule of its own, so there is no second copy of it to drift.
+ * triage as the owner someone the server does not know as one. Where the three values come from —
+ * HOLDRIM_OWNER, HOLDRIM_ADMINS and HOLDRIM_LOCKS, and never holdrim.json — is `readConfig`'s to
+ * say, once; this adds no rule of its own, so there is no second copy of it to drift.
  *
- * `roles` and `grants` (#29) are the opposite of `owner` and `admins`: `readConfig` reads them FROM
- * `holdrim.json`, on purpose — they are the project's own roles, never the three authorities
- * `AUTHORITY_KEYS` (`engine/core/config.js`) refuses to find there.
- *
- * @param {{ owner: string|null, admins: string, roles?: Record<string, unknown>,
- *           grants?: Record<string, unknown> }} config  as `readConfig` returns it
+ * @param {{ owner: string|null, admins: string, locks?: string }} config  as `readConfig` returns it
  */
 export function rolesOf(config) {
-  return createRoles(config.owner, config.admins, config.roles, config.grants);
+  return createRoles(config.owner, config.admins, config.locks);
 }
