@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { join, extname, normalize, sep } from 'node:path';
+import { join, extname, normalize, relative, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
@@ -22,6 +22,7 @@ import { renderPeoplePage } from './people-page.ts';
 import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
+import { graphOf } from '../cli/graph.ts';
 import { loadTheme } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
@@ -716,6 +717,33 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     return json(res, 200, { ids: radiusOf(id, blocks) });
   }
 
+  // The documentation graph (#38): every block as a node, `data-depends` as edges, the traffic
+  // light as colour — `graphOf`'s OWN answer (engine/cli/graph.ts), the same one `holdrim graph`
+  // prints, never a second walk of the same pages. `href` is added HERE, not inside `graphOf`,
+  // because it is a URL a BROWSER opens, not a fact about the graph — the same separation
+  // `summarisePages` (home-page.ts) already keeps between a page's traffic light and where it is
+  // served from. A `missing` node — a dangling `data-depends`, engine/cli/graph.ts's own doc
+  // comment — has no block behind it and so no page to open: `href` comes back `null`.
+  //
+  // No `features.graph` check: hiding a SCREEN must never mean disabling what it fronts
+  // (docs/ROLES.md, "no toggle may disable a guard" — `peopleScreenOn`, above, reads the same rule
+  // for `/api/users*`). The home renders no script to call this route when the toggle is off, but
+  // the route itself asks the one question every other block-reading route already asks — is
+  // anybody signed in at all — and, same as `/impact-radius` and `/fingerprints`, asks nothing more
+  // of WHO: any viewer sees the same graph the home's own tables already name every block in.
+  if (req.method === 'GET' && route === '/graph') {
+    const blocks = await readBlocks(projectRoot);
+    const registry = loadRegistry(projectRoot);
+    const graph = graphOf(blocks, registry);
+    const nodes = graph.nodes.map((n) => {
+      const block = blocks.get(n.id);
+      const href = block
+        ? `/${relative(cfg.site, block.path).split(sep).join('/')}#${encodeURIComponent(n.id)}` : null;
+      return { id: n.id, page: n.page, kind: n.kind, state: n.state, href };
+    });
+    return json(res, 200, { nodes, edges: graph.edges });
+  }
+
   if (req.method === 'GET' && route === '/requests/open') {
     const all = await events.list(null);
     const threads = cycle.threadsOf(all);
@@ -1120,11 +1148,17 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
     }
   }
   const nonce = randomBytes(16).toString('base64');
-  res.writeHead(status, screenHeaders(nonce, false));
+  // Script-free unless `features.graph` is on (#38) — the SAME toggle `renderHomePage` reads to
+  // decide whether it writes the graph's `<script>` tag at all. Read once, here, so the page's own
+  // policy and the markup it allows can never disagree about which one this response is: a script
+  // written under a policy that forbids it would simply not run; a policy that allows one the page
+  // never wrote is a door left open for nothing this route intended.
+  res.writeHead(status, screenHeaders(nonce, project.features.graph));
   res.end(renderHomePage(i18n, lang, {
     projectName: project.name, pages, requests,
     canManagePeople: peopleScreenOn() && managesPeople(viewer),
     pageRequestsEnabled: project.features.pageRequests, ask,
+    graphEnabled: project.features.graph,
   }, projectTheme, nonce));
 }
 

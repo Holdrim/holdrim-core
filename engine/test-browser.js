@@ -125,6 +125,30 @@ const elsewhereRadiusPage = `<!doctype html><html lang="en"><head><meta charset=
 </main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
 writeFileSync(join(site, 'pages', 'R02.html'), elsewhereRadiusPage);
 
+// The documentation graph (#38) has to hold up at 500+ blocks, and no page anybody would actually
+// write gets there — so this one is generated. Eight pages of seventy blocks each: a chain within
+// every page (block N depends on N-1), and every tenth block also depends on the block at the same
+// position on the PREVIOUS page, so the graph the home draws has real cross-page edges to lay out,
+// not only isolated chains. `S` for "scale", a prefix nothing else in this fixture uses.
+const SCALE_PAGES = 8;
+const SCALE_BLOCKS_PER_PAGE = 70;
+for (let p = 1; p <= SCALE_PAGES; p++) {
+  const code = `S${String(p).padStart(2, '0')}`;
+  const rows = [];
+  for (let b = 1; b <= SCALE_BLOCKS_PER_PAGE; b++) {
+    const deps = [];
+    if (b > 1) deps.push(`${code}.1.${b - 1}`);
+    if (p > 1 && b % 10 === 0) deps.push(`S${String(p - 1).padStart(2, '0')}.1.${b}`);
+    const dependsAttr = deps.length ? ` data-depends="${deps.join(' ')}"` : '';
+    rows.push(`<p data-id="${code}.1.${b}" data-code="1.${b}"${dependsAttr}>Generated block ${code}.1.${b}.</p>`);
+  }
+  writeFileSync(join(site, 'pages', `${code}.html`), `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>${code}</title><link rel="stylesheet" href="/engine/web/panel.css"></head><body><main>
+<h1 class="doc-title"><span class="doc-title__code">${code}</span> Generated, for scale</h1>
+${rows.join('\n')}
+</main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`);
+}
+
 // A page whose content tries to approve, in the name of whoever opens it, blocks of ANOTHER page
 // with their current fingerprints — the ✓ `holdrim sync` would turn into locks. Content is
 // written by people and by agents; an agent that obeyed an instruction hidden in a document could
@@ -627,6 +651,71 @@ try {
     await must('and the request shows its new state',
       () => owner.page.locator('tr', { hasText: 'Decide this one from the home' }).getByText('Approved').first().waitFor());
     expect('and nothing was refused on the way', '', owner.problems.join(' | '));
+  }
+
+  console.log('the documentation graph on the home (#38):');
+  {
+    const owner = await person(OWNER);
+    const started = Date.now();
+    await owner.page.goto(`${BASE}/engine/home`);
+    await must('at 500+ generated blocks, the graph still renders',
+      () => owner.page.locator('#holdrim-graph .home-graph__svg').waitFor());
+    const nodeCount = await owner.page.locator('#holdrim-graph [data-id]').count();
+    const elapsed = Date.now() - started;
+    // The eight generated S0x pages alone are 560 blocks (SCALE_PAGES * SCALE_BLOCKS_PER_PAGE,
+    // above) — every one of them has to be an actual node, not folded into a count the way the
+    // "Pages" table above sums a page's tally into four numbers.
+    expect('every generated block became a node of its own', true, nodeCount >= 500);
+    // Five seconds is already a failure everywhere else in this file (`person`, above); the graph
+    // gets the same bar, measured on the biggest project this run ever builds.
+    expect('and it rendered in well under five seconds', true, elapsed < 5000);
+    expect('nothing failed to load, nothing threw', '', owner.problems.join(' | '));
+
+    // Scrolled into view first: the graph sits below the "Pages" table, now hundreds of rows long,
+    // and a coordinate computed against an element still off-screen is not one the mouse can reach.
+    await owner.page.locator('#holdrim-graph').scrollIntoViewIfNeeded();
+    const transformOf = () => owner.page.locator('#holdrim-graph .home-graph__world').getAttribute('transform');
+    const box = await owner.page.locator('#holdrim-graph .home-graph__svg').boundingBox();
+    const identity = await transformOf();
+
+    await owner.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await owner.page.mouse.wheel(0, -200);
+    await must('scrolling over the graph zooms it', async () => {
+      if (await transformOf() === identity) throw new Error('the transform never moved');
+    });
+    const afterWheel = await transformOf();
+
+    await owner.page.mouse.move(box.x + 15, box.y + 15);
+    await owner.page.mouse.down();
+    await owner.page.mouse.move(box.x + 90, box.y + 70, { steps: 5 });
+    await owner.page.mouse.up();
+    expect('and dragging pans it — a further change on top of the zoom', true, await transformOf() !== afterWheel);
+
+    // Back to a known state: panned or zoomed away, a coordinate computed against the identity
+    // transform is not one that lands on the node any more.
+    await owner.page.locator('#holdrim-graph .home-graph__controls button', { hasText: '⟲' }).click();
+    expect('reset takes the view back to where it started', identity, await transformOf());
+
+    // A drag that STARTS on one node and ENDS on another must still pan, never open either one — the
+    // one case DRAG_THRESHOLD exists for. Ending the drag over a second node, not empty canvas, is
+    // the point: without a working threshold, `pointerup`'s click-detection finds THAT node under
+    // the cursor and opens it, which a release over empty space would never expose.
+    const from = await owner.page.locator('#holdrim-graph [data-id="A01.1.1"]').boundingBox();
+    const to = await owner.page.locator('#holdrim-graph [data-id="A01.1.2"]').boundingBox();
+    const beforeNodeDrag = await transformOf();
+    await owner.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await owner.page.mouse.down();
+    await owner.page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
+    await owner.page.mouse.up();
+    expect('a drag that starts on a node still pans the view', true, await transformOf() !== beforeNodeDrag);
+    expect('and does not navigate away mid-drag, though it ends over another node',
+      `${BASE}/engine/home`, owner.page.url());
+
+    // Back to identity again before the plain click below, for the same reason as above.
+    await owner.page.locator('#holdrim-graph .home-graph__controls button', { hasText: '⟲' }).click();
+    await owner.page.locator('#holdrim-graph [data-id="A01.1.2"]').click();
+    await must('clicking a node opens the block, at its page and its own anchor',
+      () => owner.page.waitForURL((u) => u.pathname === '/pages/A01.html' && u.hash === '#A01.1.2'));
   }
 
   console.log('the panel obeys the project\'s feature toggles:');

@@ -42,12 +42,14 @@ const filesUnder = (...paths) => execFileSync('git',
   .split('\n').filter((f) => f && !f.endsWith('.md') && existsSync(join(ROOT, f)));
 
 /**
- * What the engine ships. The panel's bundle is left out: it is built from `engine/web/src`, so it
- * would only repeat those names, or — when stale — report ones the sources no longer have.
+ * What the engine ships. The two built bundles are left out — panel-react.js, and home-graph.js
+ * (#38) — both built from `engine/web/src`, so scanning either would only repeat those names, or,
+ * stale, report ones the sources no longer have.
  */
+const BUNDLES = ['engine/web/panel-react.js', 'engine/web/home-graph.js'];
 const PRODUCT = filesUnder('engine/api', 'engine/cli', 'engine/core', 'engine/web',
   'engine/run-local.sh', 'compose.yaml', 'Dockerfile', '.env.example')
-  .filter((f) => f !== 'engine/web/panel-react.js');
+  .filter((f) => !BUNDLES.includes(f));
 
 /** What only proves the engine. This file is left out: it names no variable, only the pattern. */
 const PROOFS = filesUnder('engine/tests', 'engine/test-browser.js', 'engine/test-contract.sh',

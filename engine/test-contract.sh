@@ -293,6 +293,27 @@ expect "a block that does not exist → empty too, never an error" '{"ids":[]}' 
   "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/impact-radius?id=NOPE.1.1")"
 expect "and nobody unknown asks → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/impact-radius?id=A01.1.1")"
 
+echo "the documentation graph (#38), the same computation holdrim graph prints:"
+# graphOf ITSELF is holdrim graph's own function (engine/cli/graph.ts); its cases are already proved
+# without a server by engine/tests/graph.test.js. What a server has to prove, and only a server can,
+# is that this route calls that SAME function rather than a second walk of the same pages, and that
+# it sits behind the same session check as every other block-reading route.
+CLI_GRAPH_STATES=$(node --input-type=module -e "
+  const { readBlocks } = await import('./engine/cli/pages.ts');
+  const { loadRegistry } = await import('./engine/cli/validation.ts');
+  const { graphOf } = await import('./engine/cli/graph.ts');
+  const blocks = await readBlocks(process.argv[1]);
+  const registry = loadRegistry(process.argv[1]);
+  console.log(JSON.stringify(graphOf(blocks, registry).nodes.map((n) => [n.id, n.state]).sort()));
+" "$SITE")
+API_GRAPH_STATES=$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/graph" | node -e "
+  let s='';process.stdin.on('data',d=>s+=d).on('end',()=>
+    console.log(JSON.stringify(JSON.parse(s).nodes.map((n) => [n.id, n.state]).sort())))")
+expect "the route's nodes are graphOf's own, not a second walk"  "$CLI_GRAPH_STATES" "$API_GRAPH_STATES"
+expect "a real block gets a link to open, page and anchor both" 0 \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/graph" | has -F '"href":"/pages/A01.html#A01.1.1"'; echo $?)"
+expect "and nobody unknown asks → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/graph")"
+
 echo "the home counts only the owner's ✓ as waiting for the repository:"
 # An admin's ✓ is recorded and stays an opinion: `holdrim sync` brings in the owner's alone. Counted
 # on the home as "approved on the site", it would tell the owner a lock is one sync away when the
@@ -449,6 +470,16 @@ expect "an ungated category still works with the other three off" 201 \
 # page either way, so only the toggle explains the form disappearing.
 expect "pageRequests OFF: the home has no ask-for-a-page form" 1 \
   "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | has -F 'Ask for a page'; echo $?)"
+# graph OFF (#38, off on THIS server — everyToggleFlipped, above): the home is exactly what it was
+# before #38 ever shipped — no section, no script, and a policy that allows none at all. This is the
+# other half of the ON proof above; the two together are what "prove both states" (this issue's own
+# review) asked for, and neither is provable from the other — a script gated wrong could ship on
+# BOTH servers, or on neither, and either mistake would need this exact pairing to show up at all.
+GRAPH_OFF_HDR=$(curl -s -H "X-Dev-Email: $OWNER" -D "$WORK/graph-off.h" -o "$WORK/graph-off.html" $B/engine/home; grep -i '^content-security-policy:' "$WORK/graph-off.h")
+expect "graph OFF: its policy runs no script at all" 0 \
+  "$(echo "$GRAPH_OFF_HDR" | has "default-src 'none'" && ! echo "$GRAPH_OFF_HDR" | has 'script-src'; echo $?)"
+expect "graph OFF: and it has none to run"       0 "$(grep -c '<script' "$WORK/graph-off.html")"
+expect "graph OFF: and no graph section either"  1 "$(grep -qF 'id="holdrim-graph"' "$WORK/graph-off.html"; echo $?)"
 # MINOR (locks): the triage guard's `iap?.localMode && agentState` carve-out is a code path the
 # PASSWORD server's own "every toggle OFF" section (further down) never runs, since it never sets
 # `HOLDRIM_MODE=local` — so this repeats that check here instead, in local mode, with every toggle
@@ -930,12 +961,17 @@ expect "and never by the e-mail it carried"    0 \
   "$(grep '"event":"event_recorded"' $WORK/password.log | grep -Fc -e "$OWNER")"
 expect "the first-access password requires a change" true "$(curl -s -b $COOKIES $B/api/me | jfield mustChangePassword)"
 expect "now the docs open → 200"       200 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' $B/pages/A01.html)"
-# The project home is a report and needs no script, so its policy allows none at all: a request's
-# text is typed by any reviewer and shown there to the owner.
+# The project home is mostly a report — and, with graph on (#38's toggle, ON by default), a graph
+# of the whole documentation too, which is the one thing on this screen that needs a script. Its
+# policy allows exactly that one nonced script and nothing else: a request's text is typed by any
+# reviewer and shown there to the owner, and the rest of the screen still runs no script of its own.
 HOME_HDR=$(curl -s -b $COOKIES -D "$WORK/home.h" -o "$WORK/home.html" $B/engine/home; grep -i '^content-security-policy:' "$WORK/home.h")
 expect "with a session, the project home opens → 200" 200 "$(sed -n 's/^HTTP[^ ]* \([0-9]*\).*/\1/p' "$WORK/home.h" | head -1)"
-expect "and its policy runs no script at all" 0 "$(echo "$HOME_HDR" | has "default-src 'none'" && ! echo "$HOME_HDR" | has 'script-src'; echo $?)"
-expect "and it has none to run"               0 "$(grep -c '<script' "$WORK/home.html")"
+expect "graph ON (default): its policy allows exactly a nonced script" 0 \
+  "$(echo "$HOME_HDR" | has "script-src 'nonce-" && ! echo "$HOME_HDR" | has "'unsafe-inline'"; echo $?)"
+expect "and it has exactly the one script to run"      1 "$(grep -c '<script' "$WORK/home.html")"
+expect "and it fetches the same graph holdrim graph prints" 0 \
+  "$(grep -qF 'src="/engine/web/home-graph.js"' "$WORK/home.html"; echo $?)"
 expect "and it links every page it tallies"   0 "$(grep -qF 'href="/pages/A01.html"' "$WORK/home.html"; echo $?)"
 # The HTML must NOT be cached: otherwise a text fix never reaches someone who already opened the
 # page — and, worse, the fingerprint the browser computes ends up matching text that has already

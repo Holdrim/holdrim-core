@@ -14,6 +14,8 @@ export default [
       // The panel bundle is generated and committed. Linting minified React output produces
       // hundreds of errors about code nobody wrote and nobody will fix.
       'engine/web/panel-react.js',
+      // Same reasoning, same generated shape, for the home screen's graph (#38).
+      'engine/web/home-graph.js',
     ],
   },
 

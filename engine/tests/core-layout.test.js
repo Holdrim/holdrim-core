@@ -49,8 +49,12 @@ test('the core imports only itself and node:', () => {
 test('what the panel loads from the core, and everything that pulls in, imports no node:', () => {
   // The panel's own sources, not the bundle: the bundle is built from these and keeps the core
   // external, so the browser still fetches the same files.
+  // Two built bundles live here now (#38): panel-react.js and home-graph.js. Both are generated
+  // from `src/`, so scanning either only repeats what scanning `src/` already does, or, stale,
+  // reports names the sources no longer have.
+  const BUNDLES = ['panel-react.js', 'home-graph.js'];
   const sources = [
-    ...readdirSync(WEB).filter((f) => f.endsWith('.js') && f !== 'panel-react.js'),
+    ...readdirSync(WEB).filter((f) => f.endsWith('.js') && !BUNDLES.includes(f)),
     ...readdirSync(join(WEB, 'src')).filter((f) => /\.jsx?$/.test(f)).map((f) => join('src', f)),
   ];
   const queue = sources
