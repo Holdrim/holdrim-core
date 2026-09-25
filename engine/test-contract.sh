@@ -638,6 +638,10 @@ expect "the owner still can, on themselves" 200 "$OWN_RESET_CODE"
 # Nothing failed here, so the answer must not carry the field that means it did — see the failure
 # phase far below, on its own broken store, for the one case where this is allowed to appear.
 expect "and the owner's own reset carries no failed drop" 1 "$(echo "$OWN_RESET" | has 'sessionsDropped":false'; echo $?)"
+# Not merely "not false" — absent. A route that always sent the field, true on success and false
+# on failure, would still pass the check above and still be a caller reading the wrong thing on
+# the far more common path: success.
+expect "and the field is not there at all on success" 1 "$(echo "$OWN_RESET" | has 'sessionsDropped'; echo $?)"
 expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset person)"
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
@@ -709,6 +713,8 @@ DISABLE=$(as_owner -w '\n%{http_code}' -d '{"enabled":false}' $B/api/users/$MEMB
 DISABLE_CODE=$(echo "$DISABLE" | tail -1); DISABLE=$(echo "$DISABLE" | sed '$d')
 expect "disabling somebody → 200"       200 "$DISABLE_CODE"
 expect "and the member's disable carries no failed drop" 1 "$(echo "$DISABLE" | has 'sessionsDropped":false'; echo $?)"
+# Same distinction as the owner's own reset above: absent, not merely not-false.
+expect "and the field is not there at all on success either" 1 "$(echo "$DISABLE" | has 'sessionsDropped'; echo $?)"
 expect "disabling is logged as the member's id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
 expect "and it is the owner who did it, not the member themselves" "$OWNER_ID" \

@@ -465,7 +465,7 @@ forEachStore('re-enabling an already enabled account keeps its session', async (
     'enabling an account that was already enabled must not drop a session that never needed dropping');
 });
 
-forEachStore('a reset still changes the password when dropping sessions fails, and says so loudly', async (s) => {
+forEachStore('a reset still changes the password when dropping sessions fails, and admits the drop failed', async (s) => {
   const first = await s.create('x@example.org', 'X', 'a-long-enough-password');
   s.deleteSessionsForEmail = async () => { throw new Error('boom'); };
 
@@ -483,7 +483,7 @@ forEachStore('a reset still changes the password when dropping sessions fails, a
     'a delete that fails has to say so, not report a success it did not have');
 });
 
-forEachStore('disabling still takes effect when dropping sessions fails, and says so loudly', async (s) => {
+forEachStore('disabling still takes effect when dropping sessions fails, and admits the drop failed', async (s) => {
   await s.create('x@example.org', 'X', 'a-long-enough-password');
   s.deleteSessionsForEmail = async () => { throw new Error('boom'); };
 

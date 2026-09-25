@@ -157,3 +157,17 @@ who ran the engine from `main` before it.
   (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
   them, are the owner's to define and grant from a settings screen — a later piece — never a file a
   committer, or the agent applying an approved request, can edit.
+
+### Security
+
+- **Disabling an account, or resetting its password, now drops every session already open under
+  it.** Before, a stolen cookie came back to life the moment the account was re-enabled, or even
+  sooner: a reset alone left an already-open session untouched, since only the disabled flag was
+  ever checked, at the next request. Resetting your own password now signs you out too — the drop
+  cannot tell a self-service reset apart from one that reached the account through a stolen
+  credential, so there is no exception for the person who pressed the button. A sign-in racing a
+  reset or a disable cannot come away holding a session either. When the drop itself fails — the
+  credential or the enabled flag has already changed regardless — the answer from
+  `POST /api/users/:email/password` and `.../enabled` carries `sessionsDropped: false`, the log
+  gets an `ERROR user_sessions_not_dropped` line naming the person by id, and the people screen
+  warns next to their row.
