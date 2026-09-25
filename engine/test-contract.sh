@@ -246,6 +246,17 @@ MANY=$(node -e "console.log([...Array(600)].map((_, i) => 'X' + i + '.1.1').conc
 expect "the 601st id is answered like the first" "$FP_WANT" "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/fingerprints?ids=$MANY" | fp_of A02.1.1)"
 expect "and nobody unknown asks → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/fingerprints?ids=A02.1.1")"
 
+echo "the impact radius, from the same walk if-i-touch uses:"
+# The hello world declares no dependency at all, so the only thing this proves over HTTP is the
+# wiring — the route exists, answers 200, shapes its answer as {ids:[...]}, and is behind the same
+# auth as every other block-reading route. The walk ITSELF, including going past one hop, is
+# engine/tests/validity.test.js's job (`radiusOf`), which does not need a server to prove.
+expect "a block nothing depends on → empty, not missing" '{"ids":[]}' \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/impact-radius?id=A01.1.1")"
+expect "a block that does not exist → empty too, never an error" '{"ids":[]}' \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/impact-radius?id=NOPE.1.1")"
+expect "and nobody unknown asks → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/impact-radius?id=A01.1.1")"
+
 echo "the home counts only the owner's ✓ as waiting for the repository:"
 # An admin's ✓ is recorded and stays an opinion: `holdrim sync` brings in the owner's alone. Counted
 # on the home as "approved on the site", it would tell the owner a lock is one sync away when the
@@ -359,7 +370,11 @@ DATA_DIR=$(mktemp -d); COOKIES=$WORK/cookies.txt
 # an ADMIN is allowed to manage and still refused on the owner. Testing only with a member would
 # leave the escalation path — admin resets the owner, signs in as the owner — completely uncovered.
 ADMIN=admin@example.org
-HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$ADMIN HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=sqlite \
+# LOCKED is named in HOLDRIM_LOCKS (docs/ROLES.md, section 3): their account is guarded like the
+# owner's, end to end, below.
+LOCKED=locked@example.org
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$ADMIN HOLDRIM_LOCKS="$LOCKED:P0*" \
+  HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=sqlite \
   HOLDRIM_USERS_PATH=$DATA_DIR/users.db HOLDRIM_EVENTS_PATH=$DATA_DIR/events.db PORT=$PORT \
   HOLDRIM_SITE="$SITE" \
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/password.log 2>&1 & PID=$!
@@ -629,6 +644,60 @@ expect "and it is logged as the owner's own id, both sides" "$OWNER_ID" \
 expect "and by the owner too — acting on themselves" "$OWNER_ID" \
   "$(log_field $WORK/password.log user_password_reset by)"
 
+# ⚠️ HOLDRIM_LOCKS accounts are guarded like the owner's, on all four routes now (docs/ROLES.md, "the
+# `people` capability's own table entry: disable and re-enable — never … the account of anyone who
+# holds `lock`" — round 2 of #29's review, finding 1: round 1 guarded only re-enabling). Admin manages
+# people in general (checked above) and is still refused here, end to end — the escalation this
+# closes is the same shape as the owner's, just for whoever HOLDRIM_LOCKS names instead of
+# HOLDRIM_OWNER.
+#
+# None of the four messages say "holds a lock" or name HOLDRIM_LOCKS (round 2's finding 5). This does
+# NOT stop an admin from telling a lock-holder's account apart — the refusal necessarily shows that
+# the address is reserved, and the lock-holder check runs before the ordinary "already taken" one, so
+# even the STATUS CODE differs; the lock markers already in the event history name the holders anyway
+# (round 3 of #29's review, finding 5). What "reserved" withholds is only the MECHANISM — that the
+# reservation is HOLDRIM_LOCKS specifically, and not something else the deployment did.
+expect "an admin cannot create a lock-holder's account → 409" 409 \
+  "$(code_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users)"
+expect "and the message does not name HOLDRIM_LOCKS" 1 \
+  "$(as_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "it says the account is reserved instead" 0 \
+  "$(as_admin -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | has 'is reserved'; echo $?)"
+LPASS=$(as_owner -d "{\"email\":\"$LOCKED\",\"name\":\"Locked\"}" $B/api/users | jfield password)
+expect "the owner creates it → a real password" 0 "$([ -n "$LPASS" ] && echo 0 || echo 1)"
+expect "an admin cannot reset the lock-holder's password → 409" 409 "$(code_admin -X POST $B/api/users/$LOCKED/password)"
+expect "and the message says only the owner can reset it here" 0 \
+  "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'only the owner can reset that password here'; echo $?)"
+expect "and the reset message does not name HOLDRIM_LOCKS" 1 \
+  "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "and the reset message does not say the account holds a lock" 1 \
+  "$(as_admin -X POST $B/api/users/$LOCKED/password | has 'holds a lock'; echo $?)"
+expect "the owner still can" 200 "$(code_owner -X POST $B/api/users/$LOCKED/password)"
+# Round 1 reasoned that disabling hands out no password, so it left this direction open — missing
+# that an admin who can disable a lock-holder at will can silence their ✓ at the exact moment it
+# would matter, no password needed. Both directions are the owner's alone now.
+expect "an admin cannot disable the lock-holder either → 409" 409 \
+  "$(code_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
+# Round 3 of #29's review, finding 2: this used to check only the STATUS code on this route — a
+# swapped or collapsed ternary in server.ts (picking the Enable text for a disable request, or
+# always picking one of the two) still answers 409 and would have slipped past every check here.
+expect "and the disable message says only the owner can disable it here" 0 \
+  "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'only the owner can disable it here'; echo $?)"
+expect "and the disable message does not name HOLDRIM_LOCKS" 1 \
+  "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "and the disable message does not say the account holds a lock" 1 \
+  "$(as_admin -d '{"enabled":false}' $B/api/users/$LOCKED/enabled | has 'holds a lock'; echo $?)"
+expect "an admin cannot give the access back → 409" 409 \
+  "$(code_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
+expect "and the enable message says only the owner can give it back" 0 \
+  "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'only the owner can give that access back'; echo $?)"
+expect "and the enable message does not name HOLDRIM_LOCKS either" 1 \
+  "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'HOLDRIM_LOCKS'; echo $?)"
+expect "and the enable message does not say the account holds a lock either" 1 \
+  "$(as_admin -d '{"enabled":true}' $B/api/users/$LOCKED/enabled | has 'holds a lock'; echo $?)"
+expect "the owner CAN disable the lock-holder" 200 "$(code_owner -d '{"enabled":false}' $B/api/users/$LOCKED/enabled)"
+expect "the owner re-enables it → 200" 200 "$(code_owner -d '{"enabled":true}' $B/api/users/$LOCKED/enabled)"
+
 expect "disabling somebody → 200"       200 "$(code_owner -d '{"enabled":false}' $B/api/users/$MEMBER/enabled)"
 expect "disabling is logged as the member's id, not the owner's" "$MEMBER_ID" \
   "$(log_field $WORK/password.log user_enabled_changed person)"
@@ -642,7 +711,7 @@ expect "and the right password no longer gets in → 401" 401 "$(mlogin "$MEMBER
 # whoever sorts first, and an admin added to the fixture takes that slot — a test that silently
 # changes what it asserts when somebody adds a row is worse than no test.
 expect "but they are still on the list"  false "$(as_owner $B/api/users | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const u=JSON.parse(s).users.find(u=>u.email===process.argv[1]);console.log(u?u.enabled:'not listed')})" "$MEMBER")"
-expect "disabling is not deleting"      "$ADMIN $MEMBER $OWNER" "$(emails)"
+expect "disabling is not deleting"      "$ADMIN $LOCKED $MEMBER $OWNER" "$(emails)"
 # A missing field is not "false": read as falsy, a typo in the key would silently revoke somebody.
 expect "a body with no enabled → 400"   400 "$(code_owner -d '{}' $B/api/users/$MEMBER/enabled)"
 
@@ -1017,7 +1086,7 @@ HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_DEV_EMAIL= HOLDRIM_SI
   run_for 15 env -u HOLDRIM_OWNER node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/file-owner.log" 2>&1
 expect "the owner only in holdrim.json → exits 1"  1 "$?"
 expect "and says authority is the deployment's"    0 "$(grep -q 'holdrim.json names "owner", and it may not: authority is set by the deployment' $WORK/file-owner.log; echo $?)"
-expect "and names the variables to set"            0 "$(grep -q 'set HOLDRIM_OWNER (one e-mail) and HOLDRIM_ADMINS' $WORK/file-owner.log; echo $?)"
+expect "and names where it actually lives"         0 "$(grep -q '"owner" comes from HOLDRIM_OWNER (one e-mail), set where Holdrim runs' $WORK/file-owner.log; echo $?)"
 # refuseToStart prints error.message alone (see the comment above it in server.ts). A stack trace
 # reads the same to a human — the message is still in there somewhere — so nothing here would fail
 # if refuseToStart were changed to log the raw Error instead: this is what catches that.

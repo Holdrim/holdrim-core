@@ -15,13 +15,19 @@
  */
 
 /**
- * The three levels, and nothing else.
+ * The four levels, and nothing else.
  *
  * A union rather than `string` because a misspelt level is exactly the kind of typo that a reviewer
  * misses and a compiler never does. There is no DEBUG on purpose: a level nobody has configured a
  * filter for is a level that only makes the important lines harder to find.
+ *
+ * CRITICAL sits above ERROR, and is spent on exactly one thing so far: a text that no longer matches
+ * its own hash (`reportTampered`, engine/api/texts.ts). An ordinary bug can also log ERROR, so an
+ * alert rule keyed on ERROR alone would fire on both and teach whoever reads it to ignore the pager —
+ * CRITICAL is reserved for "the store was written to outside the product", which is never a bug to
+ * file, only a credential to rotate.
  */
-export type LogLevel = 'INFO' | 'WARNING' | 'ERROR';
+export type LogLevel = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
 /**
  * One JSON line per fact: log collectors understand `severity`, and an event can be found by id.

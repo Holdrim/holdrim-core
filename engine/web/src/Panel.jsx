@@ -192,7 +192,7 @@ function History({ events, me }) {
   );
 }
 
-export default function Panel({ block, me, canApprove, events, onRecord, onClose }) {
+export default function Panel({ block, me, canApprove, events, radiusElsewhere, onRecord, onClose }) {
   const dlg = useRef(null);
   const [tab, setTab] = useState(null);
   const [text, setText] = useState('');
@@ -245,6 +245,12 @@ export default function Panel({ block, me, canApprove, events, onRecord, onClose
 
       <p className="rv-summary">{block.summary}</p>
       <p className="rv-status"><Badge situation={situation} validatedOn={block.validated} broken={block.light?.color === 'broken'} /></p>
+
+      {/* The blocks lit on the page ARE the radius that lives here; the ones elsewhere have no
+          element to light, so without this line they would simply be invisible — which for a block
+          whose only dependents are on other pages would read as "nothing depends on this" and is
+          the opposite of true. */}
+      {radiusElsewhere > 0 ? <p className="rv-radius-note">{t('panel.radius.elsewhere', { n: radiusElsewhere })}</p> : null}
 
       {/* Red with no reason makes a person re-approve out of fright — which is exactly what the lock
           exists to prevent. So the panel says WHAT changed, and sends them to look there before

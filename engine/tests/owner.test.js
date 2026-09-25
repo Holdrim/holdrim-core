@@ -49,7 +49,15 @@ const ADMIN = 'admin@example.org';
 const BLOCK_OF = { [OWNER]: 'A01.1.1', [OTHER]: 'A01.1.2', [ADMIN]: 'A01.1.3' };
 
 /** What refuses a holdrim.json that claims authority, on both paths. */
-const AUTHORITY = /authority is set by the deployment.*HOLDRIM_OWNER.*HOLDRIM_ADMINS/;
+const AUTHORITY = /authority is set by the deployment, never by the repository/;
+
+/** Where each authority key actually lives (docs/ROLES.md, "Where everything lives", section 5) —
+ *  checked per key, since the refusal names the actual destination and not the same two variables
+ *  for every key alike (#29's rework: `roles` and `grants` have no variable at all yet). */
+const HOME_OF = {
+  owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS',
+  roles: 'the settings screen', grants: 'the settings screen',
+};
 
 /**
  * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding a
@@ -216,15 +224,24 @@ const fileRefusals = [
   // A revoked admin, still listed in the file: their requests would read as approved.
   { name: 'an admin named only in holdrim.json', variables: { owner: OWNER }, file: { admins: [ADMIN] } },
   { name: 'lock-holders named in holdrim.json', variables: { owner: OWNER }, file: { locks: `${OTHER}:A01` } },
+  // #29's rework: a project's own roles and grants refuse exactly like the three above — they are
+  // events from the settings screen, by the owner, never a key in the file (docs/ROLES.md,
+  // "Authority comes from the deployment only").
+  { name: 'a project role named only in holdrim.json', variables: { owner: OWNER },
+    file: { roles: { 'clinical-lead': ['triage'] } } },
+  { name: 'a grant named only in holdrim.json', variables: { owner: OWNER },
+    file: { grants: { [OTHER]: [{ role: 'clinical-lead' }] } } },
 ];
 
 for (const c of fileRefusals) {
   test(`the CLI and the server both refuse: ${c.name}`, async (t) => {
     const p = await project(t, c.file);
     const [key] = Object.keys(c.file);
+    const home = new RegExp(HOME_OF[key]);
     const server = serverView(p, c.variables);
     assert.match(server.refused ?? `booted with ${server.owner}`, AUTHORITY, 'the server');
     assert.match(server.refused, new RegExp(`names "${key}"`), 'and names the key');
+    assert.match(server.refused, home, 'and says where it actually lives');
     const cliAnswer = cliView(p, c.variables);
     assert.match(cliAnswer.refused ?? `ran with ${cliAnswer.owner}`, AUTHORITY, 'the CLI, list');
     assert.match(cliAnswer.syncRefused, AUTHORITY, 'the CLI, sync');

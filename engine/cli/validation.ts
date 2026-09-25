@@ -3,11 +3,13 @@ import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, projectRoles, type Block } from './pages.ts';
-import { trafficLight, dependentsOf, COLOURS } from '../core/validity.js';
+import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
 import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
+import { suspectsOf } from '../api/texts.ts';
+import { warnOfTampering } from './requests.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -277,8 +279,12 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
     const registry = loadRegistry(root);
     console.log(`⚠ could not reach the cloud, so no new ✓ from the site came in:\n  ${(e as Error).message}`);
     console.log(`  Going on with the registry in the repository: ${Object.keys(registry).length} validated (a frozen snapshot).`);
-    return { added: 0, unchanged: 0, expired: 0, offline: true };
+    return { added: 0, unchanged: 0, expired: 0, offline: true, tampered: false };
   }
+  // Which of the three cases it was already went out through `reportTampered`, wherever `events` was
+  // resolved — this is only the flag `sync` warns from and exits non-zero on (issue #91).
+  const tampered = suspectsOf(events).length > 0;
+  if (tampered) warnOfTampering();
   const approvals = events.filter((e) => e.type === 'approval');
   // Read from what the server wrote when the ✓ was GIVEN, never recomputed from who holds `lock`
   // NOW (docs/ROLES.md §3): this call runs in a SEPARATE process from the server, so a stale
@@ -324,7 +330,7 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
   }
   saveRegistry(root, registry);
   console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${Object.keys(registry).length} validated in all`);
-  return { added, unchanged, expired, offline: false };
+  return { added, unchanged, expired, offline: false, tampered };
 }
 
 /**
@@ -451,6 +457,12 @@ export async function ifITouch(root: string, id: string) {
 
   const dependents = dependentsOf(id, blocks);
   const registry = loadRegistry(root);
+  const list = (ids: string[]) => {
+    for (const d of ids) {
+      const validated = registry[d] ? `✓ validated on ${registry[d].date}` : 'never validated';
+      console.log(`  ${d.padEnd(14)} ${validated}`);
+    }
+  };
 
   console.log(`\nIf you touch ${id}:\n`);
   if (!dependents.length) {
@@ -459,9 +471,17 @@ export async function ifITouch(root: string, id: string) {
     return 0;
   }
   console.log(`  ${dependents.length} block(s) will turn 🔴 and need a check:\n`);
-  for (const d of dependents) {
-    const validated = registry[d] ? `✓ validated on ${registry[d].date}` : 'never validated';
-    console.log(`  ${d.padEnd(14)} ${validated}`);
+  list(dependents);
+
+  // The traffic light itself only ever advances one hop per human confirmation (docs/IMPACT.md,
+  // "One hop, not the transitive closure") — this line does not change that. But BEFORE editing, a
+  // person benefits from seeing further than the light will paint today. `radiusOf` is the SAME
+  // walk the panel lights when a block is selected (engine/core/validity.js): the CLI and the panel
+  // answer "what could this touch" from the one function, not two.
+  const further = radiusOf(id, blocks).filter((d) => !dependents.includes(d));
+  if (further.length) {
+    console.log(`\n  ${further.length} more, worth checking too — reached through another block:\n`);
+    list(further);
   }
   console.log('');
   return 0;

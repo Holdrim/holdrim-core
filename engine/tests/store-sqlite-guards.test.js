@@ -271,9 +271,9 @@ test('a database the previous version made: the changed guards are replaced, the
   // The schema and the triggers exactly as the version before this one wrote them, spacing
   // included: SQLite keeps the text as written, so a comparison that minds spacing would replace
   // all five, and one that ignores the text would replace none. This fixture also predates
-  // events_no_replace and the whole texts table — the guard set an older release shipped with,
-  // not tampering — so those four are said as missing, the same as any other guard this open
-  // does not find, rather than staying the silent case (holdrim#89).
+  // events_no_replace, events_no_low_rowid and the whole texts table — the guard set an older
+  // release shipped with, not tampering — so those five are said as missing, the same as any other
+  // guard this open does not find, rather than staying the silent case (holdrim#89).
   outside(path, `
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT, fingerprint TEXT,
@@ -295,7 +295,7 @@ test('a database the previous version made: the changed guards are replaced, the
   await reopen(path);
   const named = (line) => line.match(/guard (\w+)/)?.[1];
   assert.deepEqual(said.map(named).sort(),
-    ['events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
+    ['events_no_low_rowid', 'events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
     'the guards whose text changed are replaced, the ones this fixture never had are installed, and each is said once');
   const store = new SqliteEventStore(path);
   const ana = await store.personFor('ana@example.org');

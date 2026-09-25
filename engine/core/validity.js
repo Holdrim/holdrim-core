@@ -116,3 +116,42 @@ export function trafficLight(blocks, records) {
 export function dependentsOf(id, blocks) {
   return [...blocks.values()].filter((b) => (b.dependsOn ?? []).includes(id)).map((b) => b.id);
 }
+
+/**
+ * The impact radius of a block: not just what depends on it, but what depends on THOSE too, hop
+ * after hop — "seeing what a change would touch, before making it" (docs/IMPACT.md). Built by
+ * walking `dependentsOf` one hop at a time rather than a second graph algorithm: it is the CLI's
+ * `if-i-touch` question, asked repeatedly, so a dependency rule that changes there changes here
+ * too, instead of two walks of "depends on" drifting apart.
+ *
+ * ⚠️ This is deliberately NOT the rule that paints the traffic light red. `stateOf` still advances
+ * one hop per human confirmation (docs/IMPACT.md, "One hop, not the transitive closure") — painting
+ * the whole radius red on day one is the exact failure that section warns against. This function
+ * answers a different, narrower question: what should a person look at before they edit, which is
+ * useful precisely because seeing it costs nothing and locks nothing.
+ *
+ * @param {string} id
+ * @param {Map<string, Block>} blocks
+ * @returns {string[]} every id reachable from `id` by following "depends on" backwards, sorted, and
+ *   never including `id` itself even when a cycle in the declared dependencies loops back to it
+ */
+export function radiusOf(id, blocks) {
+  const seen = new Set([id]);
+  let frontier = [id];
+  while (frontier.length) {
+    const next = [];
+    for (const current of frontier) {
+      for (const dependent of dependentsOf(current, blocks)) {
+        // A documentation graph is not guaranteed to be a DAG, and revisiting an id already in the
+        // radius finds nothing new — without this a cycle (A depends on B depends on A) spins
+        // forever instead of terminating.
+        if (seen.has(dependent)) continue;
+        seen.add(dependent);
+        next.push(dependent);
+      }
+    }
+    frontier = next;
+  }
+  seen.delete(id);
+  return [...seen].sort();
+}

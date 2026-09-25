@@ -4,6 +4,7 @@ import { join, extname, normalize, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
+import { radiusOf } from '../core/validity.js';
 import { createRoles, rolesOf } from '../core/roles.js';
 import { overLimit, validCommit } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
@@ -550,6 +551,25 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       .map((id) => [id, blocks.get(id)!.fingerprint])));
   }
 
+  // What would need checking, transitively, before touching this block — the panel's "impact
+  // radius" (docs/IMPACT.md). Computed here, from the SAME `radiusOf` the CLI's `if-i-touch` is
+  // built on (engine/core/validity.js), because the panel only has the DOM of the page it is on:
+  // a dependent three pages away is invisible to it unless the server names it.
+  //
+  // No `blocks.has(id)` guard: an id nobody declares any more still answers correctly, because
+  // `radiusOf` looks at what OTHER blocks point at, not at whether `id` itself is there — the same
+  // reasoning `stateOf` already relies on for "red when the dependency vanishes, too".
+  //
+  // ⚠️ Every dependent is named, with no visibility filter — the same gap `/fingerprints` already
+  // has. Fine today, when a session only needs to be signed in at all; once grants can be scoped to
+  // pages or blocks (#33), this has to filter by what the viewer may see, or the radius becomes a
+  // way to learn the ids of blocks a scoped grant was meant to hide.
+  if (req.method === 'GET' && route === '/impact-radius') {
+    const id = url.searchParams.get('id') ?? '';
+    const blocks = await readBlocks(projectRoot);
+    return json(res, 200, { ids: radiusOf(id, blocks) });
+  }
+
   if (req.method === 'GET' && route === '/requests/open') {
     const all = await events.list(null);
     const threads = cycle.threadsOf(all);
@@ -640,6 +660,22 @@ async function userRoutes(
       json(res, 409, { error: say('api.users.ownerIsProvisionedAtBoot', { email: address }) });
       return true;
     }
+    // ⚠️ Their accounts are guarded like the owner's (docs/ROLES.md, section 3): a password handed
+    // out for a HOLDRIM_LOCKS address is a lock handed out, whoever ends up holding it. Guarded on
+    // all four routes with the SAME question, `roles.isLockHolder` — see the reset and enabled
+    // routes below.
+    //
+    // The MESSAGE never says "holds a lock" or names `HOLDRIM_LOCKS`. That does NOT stop an admin
+    // from telling this account apart from an ordinary one — the refusal necessarily shows the
+    // address is reserved, and this check runs before "already taken" below, so even the STATUS
+    // CODE differs; the lock markers already in the event history name the holders anyway. What the
+    // message withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically
+    // — never the fact of the reservation itself, which the 409 already gives away (round 3 of #29's
+    // review, finding 5; round 2's finding 5 first wrote this check, overclaiming what it hides).
+    if (roles.isLockHolder(address) && !roles.isOwner(email)) {
+      json(res, 409, { error: say('api.users.lockHolderIsOwnerToCreate', { email: address }) });
+      return true;
+    }
     if (await users.find(address)) {
       json(res, 400, { error: say('api.users.emailTaken', { email: address }) });
       return true;
@@ -694,6 +730,16 @@ async function userRoutes(
     if (roles.isOwner(target) && target !== email) {
       return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
     }
+    // Same guard, extended to HOLDRIM_LOCKS (docs/ROLES.md, section 3): "the owner's alone", with no
+    // exception for the lock-holder resetting themselves — unlike the owner's own guard above, which
+    // exists so the owner is never locked out of their own recovery. A lock-holder has no comparable
+    // need served by this admin-only route; `/change-password` is theirs already.
+    //
+    // The message does not say "holds a lock" here either — see the create route's own comment,
+    // above, for why (round 2 of #29's review, finding 5).
+    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+      return json(res, 409, { error: say('api.users.lockHolderPasswordIsOwnerToReset', { email: target }) }), true;
+    }
     const password = await users.resetPassword(target);
     // Said once, here, and nowhere else. Not in the log line below, not in any later GET.
     log('INFO', 'user_password_reset', await actedOn(target, email));
@@ -726,6 +772,18 @@ async function userRoutes(
     // that the answer is in the configuration.
     if (!body.enabled && roles.isOwner(target)) {
       json(res, 409, { error: say('api.users.ownerCannotBeDisabled', { email: target }) });
+      return true;
+    }
+    // ⚠️ BOTH directions on a lock-holder's account are the owner's alone (docs/ROLES.md, "Capabilities
+    // are the engine's": the `people` capability's own entry reads "disable and re-enable — never …
+    // the account of anyone who holds `lock`"). Round 1 of this issue guarded only re-enabling, on the
+    // reasoning that disabling hands out no password — true, but it misses the other half: an admin
+    // who can disable a lock-holder at will can silence their ✓ at the exact moment it would matter,
+    // with no password needed to do it. One check now, not two: `roles.isLockHolder` does not care
+    // which direction `body.enabled` asks for, only who is asking (round 2 of #29's review, finding 1).
+    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+      const key = body.enabled ? 'api.users.lockHolderIsOwnerToEnable' : 'api.users.lockHolderIsOwnerToDisable';
+      json(res, 409, { error: say(key, { email: target }) });
       return true;
     }
     await users.setEnabled(target, body.enabled);

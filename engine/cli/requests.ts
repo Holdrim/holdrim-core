@@ -3,6 +3,7 @@ import { createCycle } from '../core/cycle.js';
 import { readBlocks, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
 import { authorCouldTriage, earliestLockBaseline, type Event } from '../api/types.ts';
+import { suspectsOf } from '../api/texts.ts';
 
 /**
  * The agent's tool: read the change requests reviewers made on the site, see the context, measure
@@ -152,6 +153,10 @@ export async function queue(root: string, source: Pick<Source, 'events'>, all: b
   const blocks = await readBlocks(root);
   return {
     toTriage: found.filter((r) => r.state === 'open').length,
+    // Which of the three cases it was already went out through `reportTampered`, wherever `events`
+    // was actually resolved (the server, or one of `Source`'s two direct readers) — this is only
+    // the flag `list` warns from and exits non-zero on (issue #91's "same warning").
+    tampered: suspectsOf(events).length > 0,
     requests: showing.map((r) => {
       const block = r.block ? blocks.get(r.block) : undefined;
       return {
@@ -169,15 +174,29 @@ export async function queue(root: string, source: Pick<Source, 'events'>, all: b
   };
 }
 
+/**
+ * The one line `list` and `sync` (validation.ts) both print when a field they read comes back
+ * tampered — issue #91's "the CLI prints the same warning". `reportTampered` (engine/api/texts.ts)
+ * has already put the specifics — the event, the field, which of the three cases it was — through the
+ * CRITICAL log, wherever the read actually happened; this is the terminal's own notice that a person
+ * running the command is looking at data it does not trust, not a second copy of that alert.
+ */
+export function warnOfTampering() {
+  console.error('⚠ CRITICAL: a text read back does not match its own hash. The store was written to '
+    + 'outside the product — this almost always means a credential leaked. Rotate it, and see the '
+    + 'server log (or run this again where the log is written) for which event and field.');
+}
+
 export async function list(root: string, source: Pick<Source, 'events'>, options: { all?: boolean; json?: boolean } = {}) {
   const cycle = loadCycle();
   const q = await queue(root, source, options.all ?? false);
-  if (options.json) { console.log(JSON.stringify(q, null, 2)); return; }
+  if (options.json) { console.log(JSON.stringify(q, null, 2)); if (q.tampered) warnOfTampering(); return q.tampered; }
+  if (q.tampered) warnOfTampering();
 
   if (!q.requests.length) {
     console.log(`no requests ${options.all ? 'recorded' : 'approved and waiting to be applied'}.` +
       (q.toTriage && !options.all ? ` (${q.toTriage} waiting for the owner's triage)` : ''));
-    return;
+    return q.tampered;
   }
   for (const r of q.requests) {
     const changed = r.blockChanged ? ' · ⚠ the block changed since the request' : '';
@@ -186,6 +205,7 @@ export async function list(root: string, source: Pick<Source, 'events'>, options
       `${formatWhen(r.when)}  ${r.author}${changed}`);
     console.log(`          “${r.text.replace(/\n/g, ' ').slice(0, 140)}”`);
   }
+  return q.tampered;
 }
 
 export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
