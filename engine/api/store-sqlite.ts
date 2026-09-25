@@ -36,6 +36,27 @@ export const GUARDS: Record<string, string> = {
   events_no_replace: `BEFORE INSERT ON events
     WHEN EXISTS (SELECT 1 FROM events WHERE id = NEW.id OR rowid = NEW.rowid)
     BEGIN SELECT RAISE(ABORT, 'an event is not replaced: the trail is the product'); END`,
+  // Round 3 of the #91 review, MAJOR: `events_no_replace` above only refuses a rowid that is
+  // ALREADY held — nothing stopped an explicit `INSERT INTO events (rowid, ...) VALUES (-7, ...)`,
+  // since a negative rowid (or 0) is always free; SQLite's rowid space runs from -2^63 to 2^63-1,
+  // and a real `append` never asks for anything but the next positive one. A row forged that way
+  // sorts BELOW `extractionBoundary` by rowid, and stripped of its hash it reads as a genuine
+  // pre-extraction row with no alert at all — the very forgery `extractionBoundary` exists to name,
+  // walked around with a plain INSERT and no trigger dropped. This closes that: an insert may only
+  // ever become the new highest rowid, so `extractionBoundary`'s own claim that rowid only grows
+  // is enforced here, not merely assumed of every past and future write to this table.
+  //
+  // AFTER, not BEFORE: in a BEFORE INSERT trigger, `NEW.rowid` is still -1 for an ordinary insert
+  // that leaves SQLite to pick the rowid itself — the real value is not assigned until the row is
+  // actually written — so a BEFORE trigger comparing NEW.rowid here would reject every normal
+  // insert, not only a forged one. By the time an AFTER trigger runs, NEW.rowid is the row's real,
+  // final one, and the row is already IN the table `MAX(rowid)` reads: a genuine append always
+  // becomes the new highest rowid, so it compares equal to that MAX (not less than it) and passes;
+  // only a row that landed BELOW one already there trips this — verified directly against
+  // `node:sqlite`, not assumed from SQLite's own docs, in store-sqlite-guards.test.js.
+  events_no_low_rowid: `AFTER INSERT ON events
+    WHEN NEW.rowid < (SELECT MAX(rowid) FROM events)
+    BEGIN SELECT RAISE(ABORT, 'an event is not inserted below one already held: the trail is the product'); END`,
   // A row may only lose its e-mail, as an event may not change at all: an UPDATE that does anything
   // but empty the address is refused, and so is every DELETE. A re-pointed row would hand every
   // event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3). The rowid may not move
@@ -182,14 +203,23 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
  * 1 of the #91 review, finding 1, and the forge-proof line between "genuinely written before text
  * extraction" and "written after, with the hash stripped to look like it".
  *
- * `rowid` only grows: nothing on `events` is ever deleted (the guards above), and a real `append`
- * always takes the NEXT one — SQLite hands out an explicit rowid only when it is not already held, and
- * every one below the current maximum always is, so no write, forged or not, can land BELOW an
- * existing row. Once one hashed row exists, then, every row that sorts after it by rowid was written
- * by a version of `append` that always salts and hashes whatever text or snapshot it is given
+ * `rowid` only grows: nothing on `events` is ever deleted (the guards above), a real `append` always
+ * takes the next one, and `events_no_low_rowid` (round 3 of the #91 review) now refuses an explicit
+ * INSERT that lands below one already held — round 1 of this same review shipped this function
+ * trusting that no write, forged or not, ever could, which was true of every rowid `events_no_replace`
+ * already refused to reuse but left every UNHELD low one, negative and 0 included, free for a plain
+ * INSERT to claim. Once one hashed row exists, then, every row that sorts after it by rowid was
+ * written by a version of `append` that always salts and hashes whatever text or snapshot it is given
  * (`saltFields`) — so a LATER row with no hash at all did not come from before extraction; its hash
  * was taken off. `resolveOne` (engine/api/texts.ts) is the reader that acts on this, through
  * `afterExtraction` on the event it is given.
+ *
+ * `events` has no INTEGER PRIMARY KEY (its primary key is the TEXT `id`), so it is a plain rowid
+ * table, and SQLite's own docs allow `VACUUM` to renumber rowids on one of those — the promise here
+ * is only that today's SQLite keeps them in their RELATIVE order when it does, which every test that
+ * runs `VACUUM` between writes and a `list()` rests on same as this comment does; it is not a promise
+ * a future SQLite version owes this file. Newly appended rows land above whatever `VACUUM` leaves
+ * behind either way, since `events_no_low_rowid` refuses anything that would not.
  *
  * A database with no hashed row at all — a fresh install about to write its first event, or one
  * whose every hashed row an attacker deleted after also dropping `events_no_delete` — answers `null`,

@@ -50,12 +50,22 @@ Worth knowing before you run it:
     genuine pre-extraction rows the reader has always passed through unchanged. `rowid` closes this
     for anything appended after the FIRST row this database ever hashed (`extractionBoundary`,
     store-sqlite.ts) — a stripped hash on any later row now reads as `downgraded` tampering, since
-    rowid only grows and nothing on `events` is ever deleted, so no insert, forged or not, can land
-    below one already held. What it does not close: an attacker who also drops and restores
-    `events_no_delete` (the same gap `sqlite_guard_missing` already admits) can delete every hashed
-    row and start the boundary over, or delete an event and its texts row together and leave nothing
-    to compare against at all — an erasure, not a mismatch, and the panel already cannot tell an
-    erased event from one that was never made.
+    rowid only grows and nothing on `events` is ever deleted. Getting there took two guards, not
+    one: `events_no_replace` alone only refuses a rowid ALREADY held, which used to leave every
+    UNHELD low one — a negative rowid, or 0, are always free; a real `append` never asks for
+    anything but the next positive one — open to a plain `INSERT INTO events (rowid, ...) VALUES
+    (-7, ...)`, no trigger dropped and nothing replaced, sorting below the boundary with no alert at
+    all (round 3 of this review; this paragraph used to claim the closed version of this without it).
+    `events_no_low_rowid` closes that: an insert may only ever become this table's new highest
+    rowid, so no insert, forged or not, now can land below one already held. `events` has no
+    INTEGER PRIMARY KEY, so it is a plain rowid table SQLite's own docs allow `VACUUM` to renumber;
+    today's SQLite keeps that renumbering in RELATIVE order, which is what the boundary and this
+    guard both rest on, and neither this file nor the code that reads it can make a future SQLite
+    promise that. What no guard closes: an attacker who also drops and restores `events_no_delete`
+    and `events_no_low_rowid` (the same gap `sqlite_guard_missing` already admits for every other
+    one) can delete every hashed row and start the boundary over, or delete an event and its texts
+    row together and leave nothing to compare against at all — an erasure, not a mismatch, and the
+    panel already cannot tell an erased event from one that was never made.
   - **Firestore.** No equivalent boundary exists, and none is cheap to build: a direct writer sets
     `when` as a plain field, not a value Firestore itself enforces came from `FieldValue.serverTimestamp()`
     — there are no Firestore Security Rules in this project restricting it (identity is IAM, not

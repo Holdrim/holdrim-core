@@ -117,7 +117,11 @@ who ran the engine from `main` before it.
   `engine/api/texts.ts`), EVERY time a read resolves it: there is no acknowledgement yet to quiet it
   (a follow-up issue), so it repeats rather than go silent after its first sighting. `holdrim list
   --json` now carries a `tampered` key, and `holdrim list`/`sync` warn and exit non-zero when it is
-  set. See SECURITY.md for what this can and cannot catch, store by store.
+  set. See SECURITY.md for what this can and cannot catch, store by store. No released version
+  predates text extraction, so there is nothing to roll a pin back to yet — but once a later version
+  exists, moving the pin back to one from before this alert would write fresh events with their text
+  stored inline again, above where this version's own hashed rows begin, and every one of those reads
+  as `downgraded` tampering the next time any version opens the same file.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a

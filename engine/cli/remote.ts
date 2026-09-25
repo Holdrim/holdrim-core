@@ -241,7 +241,12 @@ export class Source {
         boundary = hasHashColumns ? extractionBoundary(db) : null;
         db.exec('COMMIT');
       } catch (err) {
-        db.exec('ROLLBACK');
+        // Round 3 of the #91 review, MINOR: a ROLLBACK that itself throws — the transaction was
+        // never actually open, say — would otherwise replace `err`, the real reason this read
+        // failed, with a complaint about undoing a failure that already happened. The original is
+        // what a reader needs to fix; losing it to a housekeeping step is strictly worse than a
+        // ROLLBACK that silently does nothing because there was nothing to roll back.
+        try { db.exec('ROLLBACK'); } catch { /* the read's own error is the one that matters */ }
         throw err;
       }
       const events = withAuthors(rows.map((row) => ({
