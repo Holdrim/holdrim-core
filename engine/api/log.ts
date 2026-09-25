@@ -36,7 +36,11 @@ export type LogLevel = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
  * @param event  snake_case, English, and stable — this is what someone greps for
  * @param extra  the facts. Contract VALUES (`type`, the states) go in as they are, so a log line
  *               still matches the record it is evidence about.
+ * @param write  where the line goes. The server's stdout is its log. The CLI's stdout is its answer
+ *               — `holdrim list --json` is data another program parses — so a line the CLI logs goes
+ *               to stderr, and the envelope stays this one either way.
  */
-export function log(level: LogLevel, event: string, extra: Record<string, unknown> = {}) {
-  console.log(JSON.stringify({ severity: level, event, time: new Date().toISOString(), ...extra }));
+export function log(level: LogLevel, event: string, extra: Record<string, unknown> = {},
+                    write: (line: string) => void = console.log) {
+  write(JSON.stringify({ severity: level, event, time: new Date().toISOString(), ...extra }));
 }

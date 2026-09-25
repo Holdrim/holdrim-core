@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { SqliteEventStore, installGuards, GUARDS } from '../api/store-sqlite.ts';
+import { SqliteEventStore, installGuards, guardMismatches, GUARDS } from '../api/store-sqlite.ts';
 import { ONLY_LOSES } from '../api/people.ts';
 
 const approval = { type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null };
@@ -606,5 +606,31 @@ test('two boots repairing one file at once: the second waits for the first and t
   } finally {
     db.close();
     await new Promise((resolve) => first.once('exit', resolve));
+  }
+}));
+
+test('guardMismatches names what installGuards would repair, foreign first, on a read-only connection', withFile(async (path) => {
+  // The CLI's `--db` reader (holdrim#108) asks the same question on a connection that cannot write,
+  // so the comparison must not: a version that repaired as it compared would throw here.
+  await reopen(path);
+  outside(path, `DROP TRIGGER events_no_delete;
+    DROP TRIGGER texts_no_update; CREATE TRIGGER texts_no_update BEFORE UPDATE ON texts BEGIN SELECT 1; END;
+    CREATE TRIGGER x_ignore BEFORE INSERT ON events BEGIN SELECT RAISE(IGNORE); END;`);
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(db), [
+      { name: 'x_ignore', kind: 'foreign' },
+      { name: 'events_no_delete', kind: 'missing' },
+      { name: 'texts_no_update', kind: 'changed' },
+    ]);
+  } finally {
+    db.close();
+  }
+  await reopen(path);
+  const repaired = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(repaired), [], 'and once the server repaired it, nothing is left to name');
+  } finally {
+    repaired.close();
   }
 }));

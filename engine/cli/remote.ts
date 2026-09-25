@@ -5,6 +5,7 @@ import type { Event } from '../api/types.ts';
 import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
 import { textKey, withTexts, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent as Raw, type TextField, type TextRow, type TamperReport } from '../api/texts.ts';
+import { log } from '../api/log.ts';
 
 /** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
 type RawEvent = Raw<Event>;
@@ -83,6 +84,7 @@ export class Source {
   #account?: string;
   #preferredAccount?: string;
   #pageSize: number;
+  #guardsTampered = false;
 
   constructor(options: { local?: boolean; project?: string; localUrl?: string; account?: string;
                         db?: string; pageSize?: number } = {}) {
@@ -225,6 +227,17 @@ export class Source {
   }
 
   /**
+   * Whether the last read of the events file found its guards not as this version installs them —
+   * one missing, one changed, or a trigger that is not a guard (holdrim#108). Apart from a text's
+   * own `…Tampered` flags on purpose: a dropped guard is not a forged row, only the door one could
+   * have come through, and a caller has to be able to tell the two apart. `false` for every other
+   * source: the cloud and the local server have no triggers for this reader to compare.
+   */
+  get guardsTampered(): boolean {
+    return this.#guardsTampered;
+  }
+
+  /**
    * Reads events straight from the SQLite file. READ ONLY — never writes: writing through here
    * would bypass the cycle, the roles and the limits.
    *
@@ -238,8 +251,10 @@ export class Source {
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
-    const { extractionBoundary, rollbackQuietly } = await import('../api/store-sqlite.ts');
+    const { extractionBoundary, rollbackQuietly, guardMismatches, guardMismatchSaid } =
+      await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
+    let mismatches: ReturnType<typeof guardMismatches>;
     let rows: Record<string, any>[];
     let people: Map<string, string | null>;
     let texts: Map<string, TextRow>;
@@ -247,6 +262,11 @@ export class Source {
     try {
       db.exec('BEGIN DEFERRED');
       try {
+        // The guards in the same snapshot as the rows: compared outside it, a server repairing the
+        // file between the two reads would have this say a guard was missing from rows it never
+        // read without one. Only the server's next boot compared before (holdrim#108), so a guard
+        // dropped was enough, for this reader, to forge a row and never be named.
+        mismatches = guardMismatches(db);
         // `*, rowid`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no
         // such columns at all, and naming them would fail the query outright rather than read the
         // file's own, older shape — the same reason `hasPeople` below asks before it reads that
@@ -294,6 +314,19 @@ export class Source {
         // the helper's own comment for why.
         rollbackQuietly(db);
         throw err;
+      }
+      // Warned, never refused: the server, finding the same, repairs and warns, and a text that
+      // fails its hash is read and warned about too — refusing would leave the owner unable to look
+      // at the very file they need to judge. And never repaired: this connection is read-only.
+      // stderr, both lines, so `list --json` stays parseable with `guardsTampered` in it.
+      this.#guardsTampered = mismatches.length > 0;
+      for (const m of mismatches) {
+        console.error(`holdrim: WARNING — ${guardMismatchSaid(m)}; read as it is, nothing repaired. `
+          + 'Whatever was written while it was so may be forged; the server repairs it on its next start.');
+        // `kind`, which the server's line does not carry: the server logs only a guard gone missing,
+        // while this reader says all three, and an alert rule keyed on the one event name still
+        // has to tell a foreign trigger from a guard that is not there.
+        log('WARNING', 'sqlite_guard_missing', { guard: m.name, kind: m.kind }, console.error);
       }
       const events = withAuthors(rows.map((row) => ({
         id: String(row.id), type: String(row.type), page: String(row.page),

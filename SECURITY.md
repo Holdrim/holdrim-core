@@ -17,10 +17,16 @@ Worth knowing before you run it:
   `INSERT`: someone with write access to the file can `DROP TRIGGER` before touching a row, or
   simply insert a forged event, so the triggers stop mistakes and ordinary tools, not that person.
   (A dropped trigger is reinstalled on the next boot, and that boot names it in a warning
-  [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89). That catches a guard left
-  dropped, not a person who puts it back: dropping a guard, changing rows and recreating it by its
-  exact text leaves nothing this check can see, and neither does emptying every table. Only signed
-  events close that.) For an event's own text, moved
+  [holdrim#89](https://github.com/Holdrim/holdrim-core/issues/89). The CLI reading the file with
+  `--db` makes the same comparison on every read
+  ([holdrim#108](https://github.com/Holdrim/holdrim-core/issues/108)), with the file opened
+  read-only, so it repairs nothing and refuses nothing: it names each guard missing or changed, and
+  each trigger that is not a guard, in a `sqlite_guard_missing` warning on stderr; `holdrim list
+  --json` carries `guardsTampered`; `list` and `sync` exit non-zero, and `show`, `impact` and
+  `summary` warn and go on reading. Both catch a guard left dropped, not a person who puts it back:
+  dropping a guard, changing rows and recreating it by its exact text before anything reads the
+  file leaves nothing either check can see, and — for the server — neither does emptying every
+  table. Only signed events close that.) For an event's own text, moved
   out of the event into its own table, a forged removal dated and ordered after the text it targets
   can still pass as a genuine one; a backdated one cannot (docs/PRIVACY.md, section 4). Closing this
   for every kind of forgery, or for a trigger dropped outright, needs the events themselves signed —
@@ -62,14 +68,16 @@ Worth knowing before you run it:
     today's SQLite keeps that renumbering in RELATIVE order, which is what the boundary and this
     guard both rest on, and neither this file nor the code that reads it can make a future SQLite
     promise that. What no guard closes: an attacker who also drops and restores `events_no_delete`
-    and `events_no_low_rowid` (the same gap `sqlite_guard_missing` already admits for every other
-    one) can delete every hashed row and start the boundary over, or delete an event and its texts
-    row together and leave nothing to compare against at all — an erasure, not a mismatch, and the
-    panel already cannot tell an erased event from one that was never made. One more limit worth
-    naming plainly: `hashText` (`engine/api/texts.ts`) is an UNKEYED hash — plain sha256 of the salt,
-    a NUL byte and the value, with no secret the write access lacks — so that same write access can
-    just as easily compute a correct hash as strip one, and append a forged row at `MAX(rowid) + 1`
-    with a matching `texts` row and a `text_hash` that checks out. Nothing here catches that: the
+    and `events_no_low_rowid` between two reads (the same gap `sqlite_guard_missing` already admits
+    for every other one: the server on its next boot, and the CLI's `--db` reader on every read,
+    name a guard still dropped, and neither names one put back) can delete every hashed row and
+    start the boundary over, or delete an event and its texts row together and leave nothing to
+    compare against at all — an erasure, not a mismatch, and the panel already cannot tell an
+    erased event from one that was never made. One more limit worth naming plainly: `hashText`
+    (`engine/api/texts.ts`) is an UNKEYED hash — plain sha256 of the salt, a NUL byte and the value,
+    with no secret the write access lacks — so that same write access can just as easily compute
+    a correct hash as strip one, and append a forged row at `MAX(rowid) + 1` with a matching
+    `texts` row and a `text_hash` that checks out. Nothing here catches that: the
     rowid boundary only names a forgery that skips computing the hash and lands BELOW it instead.
   - **Firestore.** No equivalent boundary exists, and none is cheap to build: a direct writer sets
     `when` as a plain field, not a value Firestore itself enforces came from `FieldValue.serverTimestamp()`

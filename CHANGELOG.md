@@ -145,7 +145,10 @@ who ran the engine from `main` before it.
   `UPDATE` and `DELETE` by trigger. People go to SQLite, Postgres or Firestore. Every event store
   and every user store passes its own conformance suite in CI, against real databases. Reopening a
   SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
-  putting it back without a word.
+  putting it back without a word. The CLI reading that file with `--db` compares the guards too, on
+  every read, and repairs nothing: it names each one missing or changed, and each trigger that is
+  not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; and `list` and
+  `sync` exit non-zero when it is set.
 - **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
   tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
   field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite

@@ -7,11 +7,12 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SqliteEventStore } from '../api/store-sqlite.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { SqliteEventStore, GUARDS } from '../api/store-sqlite.ts';
 import { TEXT_REMOVED } from '../api/texts.ts';
 import { readBlocks } from '../cli/pages.ts';
 
@@ -24,13 +25,19 @@ const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
  * so an owner exported in the shell running the suite does not decide whose triage counts.
  */
 function run(args, cwd, env = {}) {
-  try {
-    return { out: execFileSync(process.execPath, [CLI, ...args],
-      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '', ...env } }), code: 0 };
-  } catch (e) {
-    return { out: String(e.stdout ?? '') + String(e.stderr ?? ''), code: e.status };
-  }
+  const r = runApart(args, cwd, env);
+  return { out: r.code === 0 ? r.stdout : r.stdout + r.stderr, code: r.code };
+}
+
+/**
+ * `run`, with stdout and stderr kept apart — for a command that warns and still exits 0, whose
+ * warning `run` would not show, and for `list --json`, whose stdout has to parse as JSON on its own.
+ */
+function runApart(args, cwd, env = {}) {
+  const r = spawnSync(process.execPath, [CLI, ...args],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '', ...env } });
+  return { stdout: r.stdout, stderr: r.stderr, code: r.status };
 }
 
 /** A disposable copy of the hello world, so a command that writes cannot dirty the repository. */
@@ -325,6 +332,144 @@ test('sync exits non-zero and prints the warning when a field reads as tampered'
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /CRITICAL/);
 });
+
+// ===================================================================== issue #108: the guards, through --db
+// `Source#fromFile` opens the file read-only and never compared its triggers with GUARDS: only the
+// server's next boot did. So for the CLI, dropping a guard was enough — nobody had to put it back
+// for a row forged in the meantime to read in silence. Every guard in GUARDS is dropped in turn, and
+// changed in turn, so a guard added later is covered by these without anyone writing a test for it.
+
+/** A file the store made — every guard in place — holding one approved request, and its id. */
+async function guardedDb(dir) {
+  const db = join(dir, 'events.db');
+  const store = new SqliteEventStore(db);
+  const request = await store.append({ type: 'request', page: 'A01', block: 'A01.1.2', fingerprint: 'x',
+    text: 'say header, not menu', data: { category: 'term' } }, 'reviewer@example.org');
+  await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.2', text: 'yes',
+    data: { request: request.id, state: 'approved', from: 'open' } }, 'you@example.org');
+  await store.close();
+  return { db, id: request.id };
+}
+
+/** SQL run on the file from outside the store, the way anyone holding it could. */
+const outside = (path, sql) => { const db = new DatabaseSync(path); db.exec(sql); db.close(); };
+
+const triggerNames = (path) => {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try { return db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name).sort(); }
+  finally { db.close(); }
+};
+
+/** The structured lines on stderr, `time` left out: it is the only field no test can know. */
+const guardLines = (stderr) => stderr.split('\n')
+  .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+  .filter((l) => l?.event === 'sqlite_guard_missing')
+  .map((l) => { const rest = { ...l }; delete rest.time; return rest; });
+
+/**
+ * What every mismatch has to come out as: `list --json` still parses — every warning went to
+ * stderr — with `guardsTampered` set and `tampered` not, since no text was touched; a non-zero exit;
+ * the server's own words for it, and one structured line naming it, and nothing else named. The
+ * file is left exactly as found: this reader warns, it never repairs.
+ */
+function assertNamed(db, dir, name, kind, words) {
+  const before = triggerNames(db);
+  const r = runApart(['list', '--db', db, '--json'], dir);
+  assert.equal(r.code, 1, r.stderr);
+  const q = JSON.parse(r.stdout);
+  assert.equal(q.guardsTampered, true);
+  assert.equal(q.tampered, false, 'no text was touched: the two flags say different things');
+  assert.equal(q.requests.length, 1, 'the file is still read: this warns, it does not refuse');
+  assert.match(r.stderr, words);
+  assert.deepEqual(guardLines(r.stderr), [{ severity: 'WARNING', event: 'sqlite_guard_missing', guard: name, kind }]);
+  assert.deepEqual(triggerNames(db), before, 'nothing repaired: the file is opened read-only');
+}
+
+for (const name of Object.keys(GUARDS)) {
+  test(`list --db exits non-zero and names ${name} when it is dropped`, async (t) => {
+    const dir = project(t);
+    const { db } = await guardedDb(dir);
+    outside(db, `DROP TRIGGER ${name}`);
+    assertNamed(db, dir, name, 'missing', new RegExp(`the database's guard ${name} is missing; read as it is, nothing repaired`));
+  });
+
+  test(`list --db exits non-zero and names ${name} when it is changed, not dropped`, async (t) => {
+    const dir = project(t);
+    const { db } = await guardedDb(dir);
+    // Same name, same table, same moment — and it lets the write through in silence instead of
+    // refusing it: the swap `CREATE TRIGGER IF NOT EXISTS` alone would never see.
+    const neutered = GUARDS[name].replace(/RAISE\(ABORT, '[^']*'\)/, 'RAISE(IGNORE)');
+    assert.notEqual(neutered, GUARDS[name], 'the substitute has to differ from the guard for this to prove anything');
+    outside(db, `DROP TRIGGER ${name}; CREATE TRIGGER ${name} ${neutered}`);
+    assertNamed(db, dir, name, 'changed',
+      new RegExp(`the database's guard ${name} was not the one this version installs; read as it is, nothing repaired`));
+  });
+}
+
+test('list --db exits non-zero and names a trigger that is not a guard at all', async (t) => {
+  const dir = project(t);
+  const { db } = await guardedDb(dir);
+  // Every guard intact, and still no ✓ would ever land.
+  outside(db, "CREATE TRIGGER x_ignore BEFORE INSERT ON events WHEN NEW.type = 'approval' BEGIN SELECT RAISE(IGNORE); END");
+  assertNamed(db, dir, 'x_ignore', 'foreign', /the database holds a trigger this version does not install, x_ignore/);
+});
+
+test('list --db with every guard in place: guardsTampered false, exit 0, and nothing said about a guard', async (t) => {
+  const dir = project(t);
+  const { db } = await guardedDb(dir);
+  const r = runApart(['list', '--db', db, '--json'], dir);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).guardsTampered, false);
+  assert.doesNotMatch(r.stderr, /guard|trigger/);
+});
+
+test('sync --db exits non-zero and names a dropped guard', async (t) => {
+  const dir = project(t);
+  const { db } = await guardedDb(dir);
+  outside(db, 'DROP TRIGGER events_no_delete');
+  const r = runApart(['sync', '--db', db], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /the database's guard events_no_delete is missing/);
+});
+
+test('show, impact and summary --db name a dropped guard and keep their exit code', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  outside(db, 'DROP TRIGGER events_no_delete');
+  for (const args of [['show', id.slice(0, 6)], ['impact', id.slice(0, 6), '--term', 'header'], ['summary']]) {
+    const r = runApart([...args, '--db', db], dir);
+    assert.equal(r.code, 0, `${args[0]}: ${r.stderr}`);
+    assert.match(r.stderr, /the database's guard events_no_delete is missing/, args[0]);
+    assert.deepEqual(guardLines(r.stderr),
+      [{ severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'events_no_delete', kind: 'missing' }], args[0]);
+  }
+});
+
+test('the locks lens\'s reproduction: a request forged below every hashed row, events_no_low_rowid dropped, is no longer read in silence',
+  async (t) => {
+    const dir = project(t);
+    const db = join(dir, 'events.db');
+    const store = new SqliteEventStore(db);
+    await store.append({ type: 'comment', page: 'A01', text: 'a real, hashed remark' }, 'r@example.org');
+    await store.close();
+    // Negative rowids, no hash, the text inline: below `extractionBoundary`, so it reads as a row
+    // from before texts were extracted, and nothing about the text itself can say otherwise.
+    outside(db, `DROP TRIGGER events_no_low_rowid;
+      INSERT INTO events (rowid, id, type, page, block, fingerprint, text, author, happened_at, data) VALUES
+        (-7, 'forged', 'request', 'A01', 'A01.1.1', 'x', 'forged inline text', 'reviewer@example.org',
+         '2026-01-01T00:00:00.000Z', '{"category":"text"}');
+      INSERT INTO events (rowid, id, type, page, block, fingerprint, text, author, happened_at, data) VALUES
+        (-6, 'forged-ok', 'request_state', 'A01', 'A01.1.1', NULL, 'yes', 'you@example.org',
+         '2026-01-01T00:00:01.000Z', '{"request":"forged","state":"approved","from":"open"}');`);
+    const r = runApart(['list', '--db', db, '--json'], dir);
+    const q = JSON.parse(r.stdout);
+    assert.deepEqual(q.requests.map((x) => [x.id, x.state]), [['forged', 'approved']],
+      'the forgery still reads as approved: the text check alone cannot see it');
+    assert.equal(q.tampered, false);
+    assert.equal(q.guardsTampered, true, 'the dropped guard is what gives it away');
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /the database's guard events_no_low_rowid is missing/);
+  });
 
 test('the pre-commit lock over every example passes on a clean checkout', () => {
   for (const example of ['hello-world', 'template']) {
