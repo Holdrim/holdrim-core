@@ -523,6 +523,12 @@ expect "the new person signs in → 200"  200 "$(mlogin "$MEMBER_PASSWORD")"
 # session, not survival of this one.
 STOLEN_COOKIES=$WORK/cookies-member-stolen.txt
 cp $MCOOKIES $STOLEN_COOKIES
+# An empty or malformed jar would pass every "→ 401" check below for a reason that has nothing to do
+# with the fix: curl sends no cookie, the server sees no session, and refuses it the same way it
+# would refuse a thief's. Proving the copy actually holds a LIVE session first is what makes a later
+# 401 mean "this session died", rather than "this file never had one to begin with".
+expect "the cookie just captured is a live session, not an empty jar → 200" 200 \
+  "$(curl -s -b $STOLEN_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 expect "and it logs no person either — nobody has acted on anything yet" null \
   "$(log_field $WORK/password.log signed_in person)"
 expect "and is nobody special"          member "$(as_member $B/api/me | jfield role)"
@@ -680,6 +686,8 @@ expect "and a sign-in by someone who has acted logs their own id" "$MEMBER_ID" \
 # involved anywhere in its story.
 ACTIVE_COOKIES=$WORK/cookies-member-active.txt
 cp $MCOOKIES $ACTIVE_COOKIES
+expect "this cookie is a live session too, not an empty jar → 200" 200 \
+  "$(curl -s -b $ACTIVE_COOKIES -o /dev/null -w '%{http_code}' $B/api/me)"
 
 RESET=$(as_owner -X POST $B/api/users/$MEMBER/password)
 NEW_PASSWORD=$(echo "$RESET" | jfield password)
