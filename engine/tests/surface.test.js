@@ -47,7 +47,7 @@ const filesUnder = (...paths) => execFileSync('git',
  */
 const PRODUCT = filesUnder('engine/api', 'engine/cli', 'engine/core', 'engine/web',
   'engine/run-local.sh', 'compose.yaml', 'Dockerfile', '.env.example')
-  .filter((f) => f !== 'engine/web/panel-react.js');
+  .filter((f) => f !== 'engine/web/panel-react.js' && !f.startsWith('engine/web/generated/'));
 
 /** What only proves the engine. This file is left out: it names no variable, only the pattern. */
 const PROOFS = filesUnder('engine/tests', 'engine/test-browser.js', 'engine/test-contract.sh',
