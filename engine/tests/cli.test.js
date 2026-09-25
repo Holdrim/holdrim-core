@@ -15,7 +15,6 @@ import { readBlocks, sheetFiles } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, check } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests } from '../cli/requests.ts';
-import { createRoles } from '../core/roles.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const EXAMPLE = join(ROOT, 'examples', 'hello-world');
@@ -225,11 +224,11 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
   const blocks = await readBlocks(tmp);
   const events = [
     { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
-      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: null },
+      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
     { id: 'e2', type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'stale-fingerprint',
-      author: 'owner@example.org', when: '2026-09-22T10:01:00Z', data: null },
+      author: 'owner@example.org', when: '2026-09-22T10:01:00Z', data: { locks: 'true' } },
     { id: 'e3', type: 'approval', page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
-      author: 'reviewer@example.org', when: '2026-09-22T10:02:00Z', data: null },
+      author: 'reviewer@example.org', when: '2026-09-22T10:02:00Z', data: { locks: 'false' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
   assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false });
@@ -280,19 +279,80 @@ test('sync does not lock a ✓ written as no lock, even once its author becomes 
   assert.equal(r.added, 0, 'an admin\'s ✓ does not retroactively lock by becoming the owner later');
 });
 
-test('sync falls back to today\'s roles for a ✓ from before the lock bit existed', async (t) => {
+/**
+ * Decision B (round 1's review): a ✓ with nothing written at all is measured against the BASELINE —
+ * who HOLDRIM_OWNER was the moment a server of this version first read the store — never against
+ * `sync`'s own `--owner`/HOLDRIM_OWNER, which is exactly the value a stale shell or a handover since
+ * would get wrong (the bug this whole change exists to close, moved one step earlier if it fell back
+ * to live roles here instead).
+ */
+test('sync measures an unwritten ✓ against the baseline, never against its own --owner', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
+    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
+  const before = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
+    fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
+    when: '2026-09-22T08:00:00Z', data: null }; // predates the baseline, same author: locks
+  const after = { id: 'e2', type: 'approval', page: 'A01', block: 'A01.1.2',
+    fingerprint: blocks.get('A01.1.2').fingerprint, author: 'owner@example.org',
+    when: '2026-09-22T10:00:00Z', data: null }; // AFTER the baseline: not a lock, whoever wrote it
+  const strangersToo = { id: 'e3', type: 'approval', page: 'A01', block: 'A01.1.3',
+    fingerprint: blocks.get('A01.1.3').fingerprint, author: 'somebody-else@example.org',
+    when: '2026-09-22T08:30:00Z', data: null }; // predates the baseline, WRONG author: not a lock
+
+  const r = await sync(tmp, { events: async () => [baseline, before, after, strangersToo] },
+    { owner: 'somebody-else@example.org' }); // this call's own --owner must not matter at all
+  assert.equal(r.added, 1, 'only the one that predates the baseline, by the baseline\'s own author, locks');
+  assert.ok(loadRegistry(tmp)['A01.1.1'], 'A01.1.1 (before, same author) locks');
+  assert.equal(loadRegistry(tmp)['A01.1.2'], undefined, 'A01.1.2 (after the baseline) does not');
+  assert.equal(loadRegistry(tmp)['A01.1.3'], undefined, 'A01.1.3 (a stranger to the baseline) does not');
+});
+
+test('sync fails closed with no baseline event in the store at all, and warns once', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
   cpSync(EXAMPLE, tmp, { recursive: true });
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const blocks = await readBlocks(tmp);
   const events = [
-    // No `locks` field at all: an event from before this change. History is not rewritten, so this
-    // must still read exactly as it always did — recomputed from the roles `sync` is given.
+    // No baseline anywhere in this store, and nothing written on the ✓ either — a store no server of
+    // this version has ever started against (read straight from a file, or the cloud).
     { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
       author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: null },
   ];
-  const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-  assert.equal(r.added, 1, 'an old ✓ with no written bit still locks when its author is the owner now');
+  const logged = [];
+  const original = console.log;
+  console.log = (...args) => logged.push(args.join(' '));
+  try {
+    const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
+    assert.equal(r.added, 0, 'no baseline: fails closed, not a lock, whoever the owner is');
+  } finally {
+    console.log = original;
+  }
+  assert.ok(logged.some((l) => l.includes('no lock_baseline event')), 'and says why, once');
+});
+
+/**
+ * Decision C (round 1's review): a `locks` value that is present but not exactly `'true'`/`'false'`
+ * fails closed too, and is never treated as absent — so it must never reach the baseline either, even
+ * for a ✓ that would otherwise have locked against it.
+ */
+test('a malformed locks value fails closed, and never reaches the baseline', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const blocks = await readBlocks(tmp);
+  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
+    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
+  for (const malformed of ['TRUE', true, 1, ' true']) {
+    const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
+      fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
+      when: '2026-09-22T08:00:00Z', data: { locks: malformed } }; // predates the baseline; would lock if this fell through
+    const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
+    assert.equal(r.added, 0, `locks: ${JSON.stringify(malformed)} must fail closed, not reach the baseline`);
+  }
 });
 
 /**
@@ -320,9 +380,9 @@ test('sync knows the owner however the address is typed, in the configuration or
   const blocks = await readBlocks(tmp);
   const events = [
     { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
-      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: null },
+      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
     { id: 'e2', type: 'approval', page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
-      author: ' OWNER@example.org ', when: '2026-09-22T10:01:00Z', data: null },
+      author: ' OWNER@example.org ', when: '2026-09-22T10:01:00Z', data: { locks: 'true' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: '  Owner@Example.org ' });
   const registry = loadRegistry(tmp);
@@ -427,13 +487,16 @@ function trail(t, ...events) {
     if (before.admins === undefined) delete process.env.HOLDRIM_ADMINS; else process.env.HOLDRIM_ADMINS = before.admins;
   });
   const added = [];
-  const request = (id, author) => ({
+  // `authorCouldTriage` is written explicitly, as `recordEvent` would: since decision A, a request
+  // with nothing written reads as "at triage" no matter whose it is, so an id claiming to be
+  // "approved-by-the-owner" has to carry the field itself to actually read as approved.
+  const request = (id, author, authorCouldTriage) => ({
     id, type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f', text: 'please', snapshot: 's',
-    author, when: '2026-09-20T10:00:00.000Z', data: { category: 'text' },
+    author, when: '2026-09-20T10:00:00.000Z', data: { category: 'text', authorCouldTriage: String(authorCouldTriage) },
   });
   const all = [
-    request('open-by-a-reader', 'reader@y.org'),
-    request('approved-by-the-owner', 'owner@y.org'),
+    request('open-by-a-reader', 'reader@y.org', false),
+    request('approved-by-the-owner', 'owner@y.org', true),
     ...events,
   ];
   return { root, added, source: { events: async () => all, add: async (e) => { added.push(e); } } };
@@ -509,12 +572,14 @@ test('a request\'s history comes from its own thread, oldest first, whatever ord
   const move = (id, state, from, when) => ({ id, type: 'request_state', page: 'A01', author: 'owner@y.org', when,
     data: { request: 'q', state, from } });
   const [found] = requests([
-    { id: 'q', type: 'request', page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:00Z' },
+    { id: 'q', type: 'request', page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:00Z',
+      data: { authorCouldTriage: 'false' } },
     move('m3', 'applied', 'applying', '2026-09-22T10:03:00Z'),
-    { id: 'other', type: 'request', page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:30Z' },
+    { id: 'other', type: 'request', page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:30Z',
+      data: { authorCouldTriage: 'false' } },
     move('m1', 'approved', 'open', '2026-09-22T10:01:00Z'),
     move('m2', 'applying', 'approved', '2026-09-22T10:02:00Z'),
-  ], createRoles('owner@y.org', ''));
+  ]);
   assert.deepEqual(found.history.map((e) => e.id), ['m1', 'm2', 'm3']);
   assert.equal(found.state, 'applied');
 });
@@ -522,30 +587,50 @@ test('a request\'s history comes from its own thread, oldest first, whatever ord
 /**
  * The state a request starts in is read from what was written on it when it was FILED, never
  * recomputed from whether its author can triage TODAY (docs/ROLES.md §3, "the same holds for a
- * request") — the second finding in the issue's own comment: `holdrim list --all --json` deciding
- * this from its own HOLDRIM_ADMINS would let an untriaged request read as approved the moment its
- * author is granted `triage`, with no triage event ever recorded.
+ * request"): granting or revoking `triage` afterwards must not silently decide, or undecide, a
+ * request already filed, with no triage event ever recorded (round 1's review, decision A: there is
+ * no live-roles fallback at all any more — see the next test for the absent-field case).
  */
-test('a request starts where it was written to start, not from whether its author can triage now', () => {
+test('a request starts where it was written to start, whatever grants change afterwards', () => {
   const [grantedSince] = requests([
     { id: 'q', type: 'request', page: 'A01', author: 'later-admin@x.org', when: '2026-09-22T10:00:00Z',
       data: { authorCouldTriage: 'false' } },
-  ], createRoles('owner@y.org', 'later-admin@x.org')); // now an admin — was not, when this was filed
+  ]);
   assert.equal(grantedSince.state, 'open', 'granting triage afterwards must not retroactively approve it');
 
   const [revokedSince] = requests([
     { id: 'q', type: 'request', page: 'A01', author: 'former-admin@x.org', when: '2026-09-22T10:00:00Z',
       data: { authorCouldTriage: 'true' } },
-  ], createRoles('owner@y.org', '')); // no longer an admin
+  ]);
   assert.equal(revokedSince.state, 'approved', 'revoking triage afterwards must not retroactively un-approve it');
 });
 
-test('a request with no written field falls back to today\'s roles — an old request is not rewritten', () => {
-  const [found] = requests([
-    // No `data.authorCouldTriage` at all: a request from before this field existed.
+/**
+ * Decision A (round 1's review): a request with NOTHING written for `authorCouldTriage` fails closed
+ * to "at triage" — it does NOT fall back to asking any roles, live or otherwise. The worst this costs
+ * is an old request the owner has to triage once more; the alternative — falling back to whatever
+ * this process's own HOLDRIM_ADMINS says — is the exact bug this file exists to close, reappearing
+ * for every request that predates the field.
+ */
+test('a request with no written field at all fails closed to "at triage"', () => {
+  const [absent] = requests([
     { id: 'q', type: 'request', page: 'A01', author: 'admin@x.org', when: '2026-09-22T10:00:00Z', data: null },
-  ], createRoles('owner@y.org', 'admin@x.org'));
-  assert.equal(found.state, 'approved', 'an old request still reads from the roles it is given');
+  ]);
+  assert.equal(absent.state, 'open', 'missing entirely: at triage, never pre-approved');
+});
+
+/**
+ * Decision C (round 1's review): a field that is PRESENT but not exactly `'true'`/`'false'` also
+ * fails closed — it is not "absent", so it must never reach the legacy rule either.
+ */
+test('a malformed authorCouldTriage fails closed, and is never treated as absent', () => {
+  for (const malformed of ['TRUE', true, 1, ' true']) {
+    const [r] = requests([
+      { id: 'q', type: 'request', page: 'A01', author: 'admin@x.org', when: '2026-09-22T10:00:00Z',
+        data: { authorCouldTriage: malformed } },
+    ]);
+    assert.equal(r.state, 'open', `authorCouldTriage: ${JSON.stringify(malformed)} must fail closed`);
+  }
 });
 
 test('the request list is linear in its history: 30 000 requests read in well under a second', () => {
@@ -560,7 +645,7 @@ test('the request list is linear in its history: 30 000 requests read in well un
       when: '2026-09-22T10:01:00Z', data: { request: id, state: 'approved', from: 'open' } });
   }
   const started = performance.now();
-  const found = requests(events, createRoles('owner@y.org', ''));
+  const found = requests(events);
   const took = performance.now() - started;
   assert.equal(found.length, 30000);
   assert.ok(found.every((r) => r.state === 'approved' && r.history.length === 1));

@@ -261,6 +261,20 @@ expect "and the owner's as the lock"           true "$(locks_of $OWNER)"
 LEAD_ID=$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A02" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.type==='approval'&&e.author===process.argv[1]).id))" "$LEAD")
 expect "one event read alone says the same"   false "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/events/$LEAD_ID | jfield locks)"
 
+echo "the server writes the lock and a request's own capability itself, never the client's (round 1's review, finding 1):"
+# A member holds no 'approve' at all, so the strongest forgery worth proving is an ADMIN's: their ✓ is
+# recorded but never a lock, and a forged "locks":"true" in the body must be OVERWRITTEN, not merged
+# in after it — a spread in the wrong order would let it through, and nothing above would notice.
+FORGED_APPROVAL=$(body $LEAD '{"type":"approval","page":"A02","block":"A02.1.3","fingerprint":"forged","data":{"locks":"true"}}')
+expect "an admin's forged locks:true is overwritten by the server"        false "$(echo "$FORGED_APPROVAL" | jfield data.locks)"
+expect "and the served .locks agrees: still no lock"                     false \
+  "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/events/$(echo "$FORGED_APPROVAL" | jfield id) | jfield locks)"
+# Anyone who may file a request at all (a member included) can shape the body; a forged
+# "authorCouldTriage":"true" must not let their own request start pre-approved.
+FORGED_REQUEST=$(body $REVIEWER '{"type":"request","page":"A02","text":"a forged request","data":{"authorCouldTriage":"true"}}')
+expect "a member's forged authorCouldTriage is overwritten by the server" false "$(echo "$FORGED_REQUEST" | jfield data.authorCouldTriage)"
+expect "and it starts at triage like any other"                          open "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$(echo "$FORGED_REQUEST" | jfield id)" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status.state))")"
+
 echo "asking for a page from the home:"
 # A plain form, no script: what a person who is not a developer uses to say "this is missing". It
 # goes through the same checks as the API, and the author is whoever is signed in, never a field.
@@ -414,11 +428,12 @@ expect "and a refused sign-in still logs the address that was typed" 1 \
   "$(grep '"event":"sign_in_refused"' $WORK/password.log | grep -Fc -e "\"email\":\"$OWNER\"")"
 expect "correct password → 200"        200 "$(login "$PASSWORD")"
 expect "and the session identifies the owner" owner "$(curl -s -b $COOKIES $B/api/me | jfield role)"
-# Signing in does not itself name a person: nobody has a row until they file a request, a comment
-# or a ✓. This is the owner's first action of any kind against this fresh server, so there is no
-# row yet to find — and the log says so honestly, `null`, never the e-mail it also must not carry.
-expect "and a sign-in with no act behind it yet logs no person" null \
-  "$(log_field $WORK/password.log signed_in person)"
+# Signing in does not ITSELF name a person — but the owner's row already exists by the time anyone
+# can sign in: this store's first boot wrote the `lock_baseline` event authored by the owner (decision
+# B), which mints their row before any request, comment or ✓ of theirs ever could. So the log finds a
+# real person here, never the e-mail — the id it finds is a real one, not merely something id-shaped.
+expect "and a sign-in finds the owner's row, made by the baseline at boot" 1 \
+  "$(log_field $WORK/password.log signed_in person | grep -cE '^p_[0-9a-f]{24}$')"
 expect "and the owner truly approves"  201 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc123"}' $B/api/events)"
 # The owner's first real act mints their row. Captured once here, by name, so every later line that
 # claims to be the owner's can be checked against this EXACT id — a shape check alone, "something
@@ -679,8 +694,18 @@ rm -f $MCOOKIES
 # (docs/ROLES.md §3): HOLDRIM_OWNER is the only way authority moves today, sessions and events both
 # persist in $DATA_DIR across it, and $OWNER's own cookie ($COOKIES) is still a valid SESSION after
 # the restart — signing in does not stop just because the person it names is no longer the owner.
-LOCK_ID=$(curl -s -b $COOKIES "$B/api/events?page=D01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.type==='approval'&&e.block==='D01.1.4'&&e.author===process.argv[1]).id))" "$OWNER")
+#
+# A REAL block, with its REAL current fingerprint — not D01.1.4, a fixture id that names no actual
+# content — so the home's own `ownerApprovals` reading of this ✓ (below) is one `summarisePages` can
+# also match against the text on disk, and count as waiting for the repository.
+A01_1_1_FP=$(cli_fingerprint A01.1.1)
+expect "and the owner approves a real block too, for the home's own count" 201 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A01_1_1_FP\"}" $B/api/events)"
+LOCK_ID=$(curl -s -b $COOKIES "$B/api/events?page=A01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.type==='approval'&&e.block==='A01.1.1'&&e.author===process.argv[1]).id))" "$OWNER")
 expect "the owner's ✓ locks, before any handover" true "$(curl -s -b $COOKIES $B/api/events/$LOCK_ID | jfield locks)"
+# The home's OWN reading of the same fact (`ownerApprovals`, round 1's review, finding 3): A01.1.1 is
+# locked, matches the text on disk, and was never synced, so the home counts it as waiting.
+waiting_password() { curl -s -b $COOKIES -H 'Accept-Language: en' $B/engine/home | has -F 'not yet in the repository'; echo $?; }
+expect "the home counts the owner's past ✓ as waiting for the repository" 0 "$(waiting_password)"
 HANDOVER=newowner@example.org
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$HANDOVER HOLDRIM_ADMINS=$ADMIN HOLDRIM_IDENTITY=password \
@@ -699,6 +724,7 @@ expect "so nobody signed in as the new owner" 401 "$(curl -s -o /dev/null -w '%{
 # the owner hands over, which is the exact bug this issue closes.
 expect "the old owner is no longer treated as owner"   member "$(curl -s -b $COOKIES $B/api/me | jfield role)"
 expect "and their PAST ✓ still locks, mid-handover"    true "$(curl -s -b $COOKIES $B/api/events/$LOCK_ID | jfield locks)"
+expect "and the home still counts it (ownerApprovals), mid-handover" 0 "$(waiting_password)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$ADMIN HOLDRIM_IDENTITY=password \
@@ -741,11 +767,47 @@ expect "no second server was started"  1 "$(echo "$RUNNER" | has 'Holdrim local'
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 # The recorded events have to survive shutdown — that's the difference between sqlite and memory.
-# Two by now: the owner's approval and the member's comment, minted for the exact-id checks above.
-expect "the events are still there after shutdown" 2 "$(node -e "
+# Four by now: the owner's two approvals (D01.1.4 and A01.1.1) and the member's comment, minted for
+# the exact-id checks above, plus the one `lock_baseline` event this store's first boot wrote and
+# every restart since found already there (round 1's review, decision B) — the fact this whole
+# section's ✓-through-a-handover checks rest on.
+expect "the events are still there after shutdown" 4 "$(node -e "
   const {DatabaseSync}=require('node:sqlite');
   console.log(new DatabaseSync('$DATA_DIR/events.db').prepare('SELECT COUNT(*) c FROM events').get().c)")"
 rm -rf $DATA_DIR
+
+echo "a request's start survives an admin's grant changing, in every reader of it (round 1's review, finding 3):"
+# Reverting ANY ONE of withStatus, recordEvent's own transition check, /requests/open or the home's
+# in-progress list back to a LIVE roles.can('triage', …) survives the whole suite unless the grant
+# actually changes between when the request was filed and when it is read again — a fresh store, one
+# admin's request filed while they hold the grant, then every reader of it asked again once it is gone.
+GRANT_DIR=$(mktemp -d)
+GRANT_ADMIN=grant-admin@example.org
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$GRANT_ADMIN \
+  HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$GRANT_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/grant.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+GRANT_REQUEST=$(new_request $GRANT_ADMIN '{"type":"request","page":"A02","block":"A02.1.1","fingerprint":"x","text":"an admin, for now, asks"}')
+gstate() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$GRANT_REQUEST" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status.state))"; }
+expect "born approved, while the grant holds"      approved "$(gstate)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+# The SAME store, restarted with the grant gone — nobody is $GRANT_ADMIN any more.
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS= \
+  HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$GRANT_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/grant.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "the revoked admin is a stranger here now" member "$(curl -s -H "X-Dev-Email: $GRANT_ADMIN" $B/api/me | jfield role)"
+expect "still approved (withStatus)"              approved "$(gstate)"
+expect "and /requests/open does not count it"     0 "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/requests/open" | jfield toTriage)"
+expect "and the home offers it no triage form (in-progress list, frozen)" 1 \
+  "$(curl -s -H "X-Dev-Email: $OWNER" $B/engine/home | has -F "name=\"request\" value=\"$GRANT_REQUEST\""; echo $?)"
+# recordEvent's OWN transition check: from the true, frozen 'approved' this transition is refused
+# (only open/question go to rejected); a recompute that thought this request was still open — since
+# $GRANT_ADMIN no longer holds triage — would let it through.
+expect "a transition only valid from open is refused on the true, frozen state" 409 \
+  "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"A02\",\"block\":\"A02.1.1\",\"text\":\"no\",\"data\":{\"request\":\"$GRANT_REQUEST\",\"state\":\"rejected\"}}")"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$GRANT_DIR"
 
 echo "the local runner pins its own environment, even when the caller's shell has one:"
 # A shell already exporting HOLDRIM_EVENTS=sqlite or HOLDRIM_IDENTITY=password, left over from some

@@ -24,8 +24,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { ofProject, readBlocks } from '../cli/pages.ts';
-import { rolesOf } from '../core/roles.js';
+import { rolesOf, createRoles } from '../core/roles.js';
 import { createCycle } from '../core/cycle.js';
+import { authorCouldTriage } from '../api/types.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -46,9 +47,14 @@ const AUTHORITY = /authority is set by the deployment.*HOLDRIM_OWNER.*HOLDRIM_AD
 
 /**
  * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding,
- * for each person, one request they made and one ✓ they gave.
+ * for each person, one request they made and one ✓ they gave — written exactly as `recordEvent`
+ * would, from `variables`: `authorCouldTriage` and `locks` are baked in at creation, never left for a
+ * reader to recompute (docs/ROLES.md §3). `variables` defaults to plain `{ owner: OWNER }` for the
+ * callers that never read either field (the file/owner refusal cases, which refuse before reaching
+ * them) — the two cases that DO read them pass the exact environment they mean to test both readers
+ * against, so what is written here is what `serverView`/`cliView` later compare against each other.
  */
-async function project(t, extra = {}) {
+async function project(t, extra = {}, variables = { owner: OWNER }) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-owner-'));
   cpSync(EXAMPLE, dir, { recursive: true });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -56,13 +62,14 @@ async function project(t, extra = {}) {
   const blocks = await readBlocks(dir);
   const db = join(dir, 'events.db');
   const store = new SqliteEventStore(db);
+  const roles = createRoles(variables.owner, variables.admins);
   const ids = {};
   for (const [who, block] of Object.entries(BLOCK_OF)) {
     const request = await store.append({ type: 'request', page: 'A01', block, fingerprint: 'x',
-      text: `asked by ${who}`, snapshot: null, data: null }, who);
+      text: `asked by ${who}`, snapshot: null, data: { authorCouldTriage: String(roles.can('triage', who)) } }, who);
     ids[who] = request.id;
     await store.append({ type: 'approval', page: 'A01', block,
-      fingerprint: blocks.get(block).fingerprint, text: null, data: null }, who);
+      fingerprint: blocks.get(block).fingerprint, text: null, data: { locks: String(roles.can('lock', who)) } }, who);
   }
   const events = await store.list();
   await store.close();
@@ -92,7 +99,10 @@ function cli(args, dir, env) {
 
 /**
  * What the server would boot with, under the case's environment: server.ts's own two calls, and
- * each request's state as server.ts derives it (`cycle.currentState` with `roles.can('triage', …)`).
+ * each request's state as server.ts derives it — `cycle.currentState` with `authorCouldTriage`
+ * (types.ts), which reads what was WRITTEN on the request, never a live `roles.can('triage', …)`.
+ * `roles` is still built here, and still what refuses an invalid environment before either field is
+ * ever read — that refusal is what this function's `try` still proves.
  */
 function serverView({ dir, ids, events }, variables) {
   const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
@@ -104,7 +114,7 @@ function serverView({ dir, ids, events }, variables) {
     const roles = rolesOf(ofProject(dir));
     const threads = cycle.threadsOf(events);
     const states = Object.fromEntries(Object.entries(ids).map(([who, id]) =>
-      [who, cycle.currentState(id, threads.get(id) ?? [], roles.can('triage', who))]));
+      [who, cycle.currentState(id, threads.get(id) ?? [], authorCouldTriage(events.find((e) => e.id === id)))]));
     return { owner: roles.owner, states };
   } catch (e) {
     return { refused: e.message };
@@ -139,10 +149,11 @@ function cliView({ dir, db, ids }, variables) {
 }
 
 test('the CLI and the server name the same owner: HOLDRIM_OWNER', async (t) => {
-  const p = await project(t);
+  const variables = { owner: OWNER };
+  const p = await project(t, {}, variables);
   const expected = { owner: OWNER, states: { [OWNER]: ADMIN_START, [OTHER]: STRANGER_START, [ADMIN]: STRANGER_START } };
-  assert.deepEqual(serverView(p, { owner: OWNER }), expected, 'the server');
-  assert.deepEqual(cliView(p, { owner: OWNER }), expected, 'the CLI');
+  assert.deepEqual(serverView(p, variables), expected, 'the server');
+  assert.deepEqual(cliView(p, variables), expected, 'the CLI');
 });
 
 test('an admin named in HOLDRIM_ADMINS alone: their request starts approved and their ✓ never locks, on both sides', async (t) => {
@@ -150,8 +161,8 @@ test('an admin named in HOLDRIM_ADMINS alone: their request starts approved and 
   // variable would leave it open for the owner to triage while the server shows it approved.
   // `cliView` also runs `sync` and asserts exactly one person's ✓ locks: this is the one test that
   // catches an admin's ✓ locking too, so its name says both things it proves, not only the first.
-  const p = await project(t);
   const variables = { owner: OWNER, admins: ADMIN };
+  const p = await project(t, {}, variables);
   const expected = { owner: OWNER, states: { [OWNER]: ADMIN_START, [OTHER]: STRANGER_START, [ADMIN]: ADMIN_START } };
   assert.deepEqual(serverView(p, variables), expected, 'the server');
   assert.deepEqual(cliView(p, variables), expected, 'the CLI');

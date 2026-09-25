@@ -71,10 +71,19 @@ export const LOCKS_FIELD = 'locks';
 export const AUTHOR_COULD_TRIAGE_FIELD = 'authorCouldTriage';
 
 /**
- * A boolean the server wrote into an event's `data` at record time, or `undefined` for an event from
- * before that field existed — every caller falls back to asking today's roles for one of those,
- * exactly as every reader did before this existed: there is no rewrite of history, so an old event
- * still reads (docs/ROLES.md §3).
+ * A boolean the server wrote into an event's `data` at record time. Three answers, not two:
+ *
+ *   - `undefined` — the key is ABSENT. An event from before this field existed (there is no rewrite
+ *     of history), so the caller falls back to its own legacy rule for that field.
+ *   - `true`      — the key holds exactly the string `'true'`.
+ *   - `false`     — the key holds exactly the string `'false'`, OR holds anything else at all.
+ *
+ * The third case is decision C of round 1's review: a field that is PRESENT but malformed — `'TRUE'`,
+ * the JS boolean `true` (a client that sends a real boolean, not a string, past the `String(...)` the
+ * server always writes), `1`, `' true'` — fails closed. It never falls through to the legacy rule,
+ * which is for a field that was never written at all; a malformed value is not that, and treating it
+ * as if it were would let whoever can shape `data` (a forged POST, or a bug elsewhere) pick the more
+ * favourable of "what I wrote" and "what the legacy rule would have said" by writing garbage.
  *
  * Written and read as the STRINGS `'true'`/`'false'`, never a JS `boolean`: every other value already
  * inside `data` (`state`, `category`, `commit`, `from`, …) is a string, and a bare boolean would
@@ -84,7 +93,8 @@ export const AUTHOR_COULD_TRIAGE_FIELD = 'authorCouldTriage';
  */
 export function writtenBoolean(data: Event['data'], key: string): boolean | undefined {
   const v = (data as Record<string, unknown> | null | undefined)?.[key];
-  return v === 'true' ? true : v === 'false' ? false : undefined;
+  if (v === undefined || v === null) return undefined;
+  return v === 'true';
 }
 
 /** A row of the people table. `email` is null once the person was forgotten; the id stays. */
@@ -139,3 +149,94 @@ export interface EventStore extends PeopleTable {
 export const EVENT_TYPES = new Set([
   'approval', 'request', 'comment', 'decision_reply', 'request_state', 'supplement',
 ]);
+
+// ---------------------------------------------------------------- the lock baseline (decision B)
+//
+// A REQUEST with no written `authorCouldTriage` fails closed to `false` (decision A): the worst it
+// can do is send an old request back to triage, which the owner can approve again in a click. A ✓
+// with no written `locks` cannot fail closed the same way — that would silently un-lock every
+// ✓ every existing adopter's database already holds the moment this version starts, which is a much
+// larger and quieter loss than one request needing a second look. It also cannot fall back to
+// TODAY's HOLDRIM_OWNER: that is the exact bug this whole change closes, moved one step earlier, and
+// a handover would still re-lock an old admin's ✓s or un-lock the old owner's.
+//
+// So an unwritten ✓ is measured against a FROZEN fact instead: who HOLDRIM_OWNER was the moment this
+// version first read the store. That fact is itself one event — `lock_baseline` — written once, by
+// the server, and never by a client: it is not in `EVENT_TYPES` above, so `POST /events` refuses it
+// as an unknown type before anything else runs, the same guard `text_removed` relies on (server.ts,
+// `refusalOf`).
+
+/** The one event kind this module writes on its own, never in answer to a client's POST. */
+export const LOCK_BASELINE_TYPE = 'lock_baseline';
+
+/** Where the baseline event lives. Never a real content page — no kind numbers a page `_…` — so it
+ *  can never collide with one a project adds later, and it never shows up inside a page's own event
+ *  list; only something that asks for it by this name finds it. */
+export const LOCK_BASELINE_PAGE = '_lock_baseline';
+
+/**
+ * The earliest `lock_baseline` event in a list, or `null` when there is none. More than one can exist
+ * — two servers starting at once against an empty store could each append one, since the store is
+ * insert-only and nothing here takes a lock on "is there a baseline yet?" across processes — and
+ * every reader, `ensureLockBaseline` included, resolves the race the same way: the EARLIEST one, by
+ * `when`, is the one everybody trusts. A duplicate left over from a lost race is harmless once every
+ * reader agrees which one that is.
+ */
+export function earliestLockBaseline(events: Pick<Event, 'type' | 'when'>[]): Event | null {
+  const found = events.filter((e) => e.type === LOCK_BASELINE_TYPE) as Event[];
+  return found.length ? found.reduce((a, b) => (a.when <= b.when ? a : b)) : null;
+}
+
+/**
+ * Makes sure this store holds a baseline event, appending one — its author `ownerEmail`, HOLDRIM_OWNER
+ * right now — only if it does not already. Called once, at boot, before the server answers anything
+ * (server.ts): "on the first start of this version" is decided here, by what the store already holds,
+ * never by a flag that could be reset.
+ *
+ * `store` is typed as the two methods this needs, not the whole `EventStore`, so a test can hand it a
+ * stub without building a full store.
+ */
+export async function ensureLockBaseline(
+  store: Pick<EventStore, 'list' | 'append'>, ownerEmail: string,
+): Promise<Event> {
+  const already = earliestLockBaseline(await store.list(LOCK_BASELINE_PAGE));
+  if (already) return already;
+  await store.append({ type: LOCK_BASELINE_TYPE, page: LOCK_BASELINE_PAGE, data: null }, ownerEmail);
+  // Read back rather than trust what was just appended: another process may have won the race above,
+  // and the EARLIEST of however many now exist is the one every reader — this one included — has to
+  // agree on.
+  return earliestLockBaseline(await store.list(LOCK_BASELINE_PAGE))!;
+}
+
+/**
+ * Whether an unwritten ✓ counts as a lock (decision B): its author must be the baseline's own author
+ * — HOLDRIM_OWNER at the moment this version first started against this store — and the ✓ itself must
+ * predate the baseline. Every ✓ recorded since carries its own written `locks`; one that does not,
+ * dated AFTER the baseline, is either a bug or a forgery, and is trusted no more than a stranger's.
+ * No baseline at all — a store this version has never started against, read straight from a file or
+ * the cloud (`holdrim sync --db`, or the CLI reading Firestore directly) — fails closed: not a lock.
+ */
+export function legacyLock(approval: Pick<Event, 'author' | 'when'>, baseline: Event | null): boolean {
+  if (!baseline) return false;
+  return approval.when < baseline.when && approval.author === baseline.author;
+}
+
+/**
+ * Whether an approval is a lock: what was written on it when the ✓ was GIVEN, or — only when nothing
+ * was written at all — `legacyLock` against the baseline. The one implementation server.ts and
+ * validation.ts (`holdrim sync`) both call, so the fallback is not three slightly different copies of
+ * the same rule (round 1's review, finding 2).
+ */
+export function isLocked(approval: Pick<Event, 'data' | 'author' | 'when'>, baseline: Event | null): boolean {
+  return writtenBoolean(approval.data, LOCKS_FIELD) ?? legacyLock(approval, baseline);
+}
+
+/**
+ * Whether a request's author could already triage it: what was written on it when it was FILED, or
+ * — only when nothing was written at all — `false` (decision A: a request fails closed to "at
+ * triage", never to a live recompute of who holds `triage` today). The one implementation server.ts
+ * and requests.ts (the agent's CLI) both call (round 1's review, finding 2).
+ */
+export function authorCouldTriage(request: Pick<Event, 'data'>): boolean {
+  return writtenBoolean(request.data, AUTHOR_COULD_TRIAGE_FIELD) ?? false;
+}

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createCycle } from '../core/cycle.js';
 import { readBlocks, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
-import { AUTHOR_COULD_TRIAGE_FIELD, writtenBoolean, type Event } from '../api/types.ts';
+import { authorCouldTriage, type Event } from '../api/types.ts';
 
 /**
  * The agent's tool: read the change requests reviewers made on the site, see the context, measure
@@ -65,26 +65,41 @@ export function mustBeQueued(r: { state: string }) {
 }
 
 /**
+ * Refuses to run against a project whose authority is not the deployment's alone — a holdrim.json
+ * naming `owner`, `admins` or `locks`, or HOLDRIM_OWNER missing or malformed — exactly as `sync`
+ * refuses it (docs/ROLES.md, "Authority comes from the deployment only").
+ *
+ * Every command below calls this and throws away the `roles` it gets back: since decision A, a
+ * request's own state no longer depends on them (`authorCouldTriage`, types.ts, reads what was
+ * WRITTEN, never a live `roles.can(...)`), so nothing here needs the VALUE any more — but the
+ * VALIDATION is still owed. Dropping this call would leave `list`, `show`, `summary`, `impact` and
+ * `state` silently running against a project with no owner at all, or one whose repository claims to
+ * be it, while `sync` alone still refused — exactly the asymmetry `engine/tests/owner.test.js` was
+ * written to catch.
+ */
+function checkAuthority(root: string): void {
+  projectRoles(root);
+}
+
+/**
  * Reduces events to requests with a state — using the SAME core as the server and the browser.
  *
- * The roles are handed in, not looked up here: this has no project root to resolve them from, and
- * resolving them from the environment alone is how the CLI came to know a different owner than
- * the server. The callers take them from `projectRoles(root)`.
+ * No roles are handed in any more: a request's starting state is read from what `recordEvent` wrote
+ * on it when it was FILED (`authorCouldTriage`, types.ts — the one implementation this file and
+ * server.ts both call, round 1's review, finding 2), and a request with nothing written fails closed
+ * to "at triage" (decision A) rather than asking this process's own HOLDRIM_ADMINS — which is how the
+ * CLI came to know a different answer than the server in the first place: this runs in the agent's
+ * own process, and a request granted `triage` afterwards must not read as pre-approved here with no
+ * triage event to show for it.
  */
-export function requests(events: Event[], roles: Pick<ReturnType<typeof projectRoles>, 'can'>): Request[] {
+export function requests(events: Event[]): Request[] {
   const cycle = loadCycle();
   const threads = cycle.threadsOf(events);
   return events.filter((e) => e.type === 'request').map((r) => {
     const thread = threads.get(r.id) ?? [];
-    // Read from what the server wrote when the request was FILED, never recomputed from whether its
-    // author can triage TODAY (docs/ROLES.md §3): this runs in the agent's own process, against
-    // whatever HOLDRIM_ADMINS its shell happens to hold, and a request granted `triage` afterwards
-    // must not read as pre-approved with no triage event to show for it. `undefined` (a request from
-    // before this field existed) falls back to `roles`, exactly as every version before this one.
-    const authorCouldTriage = writtenBoolean(r.data, AUTHOR_COULD_TRIAGE_FIELD) ?? roles.can('triage', r.author);
     return {
       ...r,
-      state: cycle.currentState(r.id, thread, authorCouldTriage),
+      state: cycle.currentState(r.id, thread, authorCouldTriage(r)),
       history: thread.filter((e) => e.type !== 'request').sort((a, b) => a.when.localeCompare(b.when)),
     };
   });
@@ -120,9 +135,10 @@ export const formatWhen = (iso: string) => {
  * needs to act — as data. `--json` is the contract other tools read; the table is for a person.
  */
 export async function queue(root: string, source: Pick<Source, 'events'>, all: boolean) {
+  checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
-  const found = requests(events, projectRoles(root));
+  const found = requests(events);
   const agentQueue = cycle.table.agent_queue ?? ['approved', 'applying', 'waiting'];
   const showing = all ? found : found.filter((r) => agentQueue.includes(r.state));
   const blocks = await readBlocks(root);
@@ -165,9 +181,10 @@ export async function list(root: string, source: Pick<Source, 'events'>, options
 }
 
 export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
+  checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
-  const r = find(requests(events, projectRoles(root)), prefix);
+  const r = find(requests(events), prefix);
   const blocks = await readBlocks(root);
   const block = r.block ? blocks.get(r.block) : undefined;
 
@@ -197,8 +214,9 @@ export async function show(root: string, source: Pick<Source, 'events'>, prefix:
 
 /** Where else the subject shows up — the impact analysis you run before editing. As data. */
 export async function impactOf(root: string, source: Pick<Source, 'events'>, prefix: string, terms: string[]) {
+  checkAuthority(root);
   const events = await source.events();
-  const r = find(requests(events, projectRoles(root)), prefix);
+  const r = find(requests(events), prefix);
   const blocks = await readBlocks(root);
   const searching = terms.length ? terms : [(r.text ?? '').split(/\s+/).slice(0, 3).join(' ')];
   return {
@@ -227,8 +245,9 @@ export async function impact(root: string, source: Pick<Source, 'events'>, prefi
 }
 
 export async function summary(root: string, source: Pick<Source, 'events'>) {
+  checkAuthority(root);
   const events = await source.events();
-  const all = requests(events, projectRoles(root));
+  const all = requests(events);
   const perPage = new Map<string, { approvals: number; requests: number; open: number }>();
   for (const e of events) {
     const v = perPage.get(e.page) ?? { approvals: 0, requests: 0, open: 0 };
@@ -256,9 +275,10 @@ export async function summary(root: string, source: Pick<Source, 'events'>) {
  */
 export async function setState(root: string, source: Pick<Source, 'events' | 'add'>, prefix: string, target: string,
                                message: string, extra: { commit?: string; blocks?: string } = {}) {
+  checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
-  const r = find(requests(events, projectRoles(root)), prefix);
+  const r = find(requests(events), prefix);
 
   if (!cycle.agentStates.includes(target)) {
     throw new Error(`the agent only uses: ${cycle.agentStates.join(', ')} ` +

@@ -7,7 +7,7 @@ import { trafficLight, dependentsOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
 import { Source } from './remote.ts';
-import { LOCKS_FIELD, writtenBoolean } from '../api/types.ts';
+import { isLocked, earliestLockBaseline } from '../api/types.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -283,9 +283,20 @@ export async function sync(root: string, source: Pick<Source, 'events'>, options
   // Read from what the server wrote when the ✓ was GIVEN, never recomputed from who holds `lock`
   // NOW (docs/ROLES.md §3): this call runs in a SEPARATE process from the server, so a stale
   // HOLDRIM_OWNER left in this shell — or a real handover since — must not decide a past ✓
-  // differently than the server did when it recorded it. `undefined` (a ✓ from before this field
-  // existed) falls back to the roles this call was given, exactly as every version before this one.
-  const theOwners = approvals.filter((e) => writtenBoolean(e.data, LOCKS_FIELD) ?? roles.can('lock', e.author));
+  // differently than the server did when it recorded it. A ✓ with nothing written at all is measured
+  // against the BASELINE (decision B, round 1's review) — who HOLDRIM_OWNER was the moment a server
+  // of this version first read this store — never against `roles.owner` above, which is only this
+  // CALL's own HOLDRIM_OWNER and exactly the value a stale shell or a handover since would get wrong.
+  const baseline = earliestLockBaseline(events);
+  if (!baseline) {
+    // A store no server of this version has ever started against — read straight from a file, or
+    // from the cloud without HOLDRIM_EVENTS=firestore ever running here. `isLocked` already fails
+    // closed for it; this just says why nothing unwritten is about to lock, once, rather than let it
+    // look like every old ✓ simply stopped existing.
+    console.log('  ⚠ no lock_baseline event in this store yet — a ✓ with nothing written on it reads as no '
+      + 'lock. Start a server of this version against it once (it writes the baseline itself), then sync again.');
+  }
+  const theOwners = approvals.filter((e) => isLocked(e, baseline));
   if (approvals.length !== theOwners.length) {
     console.log(`  · ${approvals.length - theOwners.length} approval(s) by somebody else ignored: only the owner's ✓ locks`);
   }

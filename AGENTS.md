@@ -105,12 +105,13 @@ Each has a test. If you change the code around one, run the contract test and re
   ever gave (`docs/PRIVACY.md`, section 5, is the procedure for both, run by hand until there is a
   screen for it).
 - **A ✓ is a lock only when its author held `lock` at the moment they gave it, and it stays one.**
-  Today only the owner holds `lock` (`docs/ROLES.md` §3 names who else will, once `LOCKS` exists —
-  not built yet); whoever holds it, the server writes the decision onto the event when the ✓ is
-  given and every reader uses what was written, never a recomputation from who holds `lock` now — an
-  owner who hands over must not silently un-lock every ✓ they gave before. An agent may *close* an
-  impact — "this change did not reach here" — and never *approve* — "this text is correct", and never
-  gives a ✓ at all.
+  Who holds `lock` is set by the deployment alone — never by the repository, the store or a screen.
+  Today that is the owner only (`docs/ROLES.md` §3 names who else will, once `LOCKS` exists — not
+  built yet); whoever holds it, the server writes the decision onto the event when the ✓ is given
+  and every reader uses what was written, never a recomputation from who holds `lock` now — an owner
+  who hands over must not silently un-lock every ✓ they gave before. An agent may *close* an impact
+  — "this change did not reach here" — and never *approve* — "this text is correct", and never gives
+  a ✓ at all.
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
   known format; interpolating a raw string lets `red; } body { display:none } /*` through.
 
