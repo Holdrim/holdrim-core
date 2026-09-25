@@ -15,6 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { SqliteEventStore, GUARDS } from '../api/store-sqlite.ts';
 import { TEXT_REMOVED } from '../api/texts.ts';
 import { readBlocks } from '../cli/pages.ts';
+import { outside } from './helpers/sqlite.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -351,9 +352,6 @@ async function guardedDb(dir) {
   return { db, id: request.id };
 }
 
-/** SQL run on the file from outside the store, the way anyone holding it could. */
-const outside = (path, sql) => { const db = new DatabaseSync(path); db.exec(sql); db.close(); };
-
 const triggerNames = (path) => {
   const db = new DatabaseSync(path, { readOnly: true });
   try { return db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name).sort(); }
@@ -390,7 +388,7 @@ for (const name of Object.keys(GUARDS)) {
     const dir = project(t);
     const { db } = await guardedDb(dir);
     outside(db, `DROP TRIGGER ${name}`);
-    assertNamed(db, dir, name, 'missing', new RegExp(`the database's guard ${name} is missing; read as it is, nothing repaired`));
+    assertNamed(db, dir, name, 'missing', new RegExp(`the database's guard "${name}" is missing; read as it is, nothing repaired`));
   });
 
   test(`list --db exits non-zero and names ${name} when it is changed, not dropped`, async (t) => {
@@ -402,7 +400,7 @@ for (const name of Object.keys(GUARDS)) {
     assert.notEqual(neutered, GUARDS[name], 'the substitute has to differ from the guard for this to prove anything');
     outside(db, `DROP TRIGGER ${name}; CREATE TRIGGER ${name} ${neutered}`);
     assertNamed(db, dir, name, 'changed',
-      new RegExp(`the database's guard ${name} was not the one this version installs; read as it is, nothing repaired`));
+      new RegExp(`the database's guard "${name}" was not the one this version installs; read as it is, nothing repaired`));
   });
 }
 
@@ -411,7 +409,7 @@ test('list --db exits non-zero and names a trigger that is not a guard at all', 
   const { db } = await guardedDb(dir);
   // Every guard intact, and still no ✓ would ever land.
   outside(db, "CREATE TRIGGER x_ignore BEFORE INSERT ON events WHEN NEW.type = 'approval' BEGIN SELECT RAISE(IGNORE); END");
-  assertNamed(db, dir, 'x_ignore', 'foreign', /the database holds a trigger this version does not install, x_ignore/);
+  assertNamed(db, dir, 'x_ignore', 'foreign', /the database holds a trigger this version does not install, "x_ignore"/);
 });
 
 test('list --db with every guard in place: guardsTampered false, exit 0, and nothing said about a guard', async (t) => {
@@ -429,7 +427,7 @@ test('sync --db exits non-zero and names a dropped guard', async (t) => {
   outside(db, 'DROP TRIGGER events_no_delete');
   const r = runApart(['sync', '--db', db], dir);
   assert.equal(r.code, 1, r.stdout + r.stderr);
-  assert.match(r.stderr, /the database's guard events_no_delete is missing/);
+  assert.match(r.stderr, /the database's guard "events_no_delete" is missing/);
 });
 
 test('show, impact and summary --db name a dropped guard and keep their exit code', async (t) => {
@@ -439,7 +437,7 @@ test('show, impact and summary --db name a dropped guard and keep their exit cod
   for (const args of [['show', id.slice(0, 6)], ['impact', id.slice(0, 6), '--term', 'header'], ['summary']]) {
     const r = runApart([...args, '--db', db], dir);
     assert.equal(r.code, 0, `${args[0]}: ${r.stderr}`);
-    assert.match(r.stderr, /the database's guard events_no_delete is missing/, args[0]);
+    assert.match(r.stderr, /the database's guard "events_no_delete" is missing/, args[0]);
     assert.deepEqual(guardLines(r.stderr),
       [{ severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'events_no_delete', kind: 'missing' }], args[0]);
   }
@@ -468,8 +466,67 @@ test('the locks lens\'s reproduction: a request forged below every hashed row, e
     assert.equal(q.tampered, false);
     assert.equal(q.guardsTampered, true, 'the dropped guard is what gives it away');
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /the database's guard events_no_low_rowid is missing/);
+    assert.match(r.stderr, /the database's guard "events_no_low_rowid" is missing/);
   });
+
+test('plain list --db (the table) exits non-zero on a dropped guard, with approved requests to show', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  outside(db, 'DROP TRIGGER events_no_delete');
+  const r = runApart(['list', '--db', db], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, new RegExp(`${id.slice(0, 8)}\\s+Approved`), 'the table itself did print: this is its return');
+  assert.match(r.stderr, /the database's guard "events_no_delete" is missing/);
+});
+
+test('plain list --db exits non-zero on a dropped guard with nothing in the queue, on the "no requests" path', async (t) => {
+  const dir = project(t);
+  const db = join(dir, 'events.db');
+  const store = new SqliteEventStore(db);
+  await store.append({ type: 'comment', page: 'A01', text: 'an ordinary remark' }, 'r@example.org');
+  await store.close();
+  outside(db, 'DROP TRIGGER events_no_delete');
+  const r = runApart(['list', '--db', db], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /no requests approved/, 'the early return, not the table');
+  assert.match(r.stderr, /the database's guard "events_no_delete" is missing/);
+});
+
+test('list --db names every mismatch at once — foreign, missing and changed — in guardMismatches order', async (t) => {
+  const dir = project(t);
+  const { db } = await guardedDb(dir);
+  // A foreign trigger first in the output must not be the only one said: the missing guard behind
+  // it is the one that lets a forged row in below every hashed one.
+  outside(db, `CREATE TRIGGER x_ignore BEFORE INSERT ON events WHEN NEW.type = 'approval' BEGIN SELECT RAISE(IGNORE); END;
+    DROP TRIGGER events_no_low_rowid;
+    DROP TRIGGER texts_no_update; CREATE TRIGGER texts_no_update BEFORE UPDATE ON texts BEGIN SELECT 1; END;`);
+  const r = runApart(['list', '--db', db, '--json'], dir);
+  assert.equal(r.code, 1, r.stderr);
+  assert.equal(JSON.parse(r.stdout).guardsTampered, true);
+  assert.deepEqual(guardLines(r.stderr), [
+    { severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'x_ignore', kind: 'foreign' },
+    { severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'events_no_low_rowid', kind: 'missing' },
+    { severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'texts_no_update', kind: 'changed' },
+  ]);
+  assert.match(r.stderr, /the database holds a trigger this version does not install, "x_ignore"; read as it is/);
+  assert.match(r.stderr, /the database's guard "events_no_low_rowid" is missing; read as it is/);
+  assert.match(r.stderr, /the database's guard "texts_no_update" was not the one this version installs; read as it is/);
+});
+
+test('a foreign trigger\'s name reaches the terminal escaped, never as a raw control character', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  // ESC [2K ESC [1A: erase the line and move up — enough to wipe the warning it sits in off the
+  // screen of `show`, which exits 0 and has nothing else to say that anything is wrong.
+  const name = 'x\x1b[2K\x1b[1A';
+  outside(db, `CREATE TRIGGER "${name}" BEFORE INSERT ON events BEGIN SELECT 1; END`);
+  const r = runApart(['show', id.slice(0, 6), '--db', db], dir);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(!r.stderr.includes('\x1b'), 'no raw ESC byte on stderr');
+  assert.ok(r.stderr.includes('"x\\u001b[2K\\u001b[1A"'), 'the name, quoted, with the escapes spelled out');
+  assert.deepEqual(guardLines(r.stderr).map((l) => [l.guard, l.kind]), [[name, 'foreign']],
+    'and the structured line still carries the name itself, for a program to read');
+});
 
 test('the pre-commit lock over every example passes on a clean checkout', () => {
   for (const example of ['hello-world', 'template']) {

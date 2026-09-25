@@ -147,8 +147,10 @@ who ran the engine from `main` before it.
   SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
   putting it back without a word. The CLI reading that file with `--db` compares the guards too, on
   every read, and repairs nothing: it names each one missing or changed, and each trigger that is
-  not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; and `list` and
-  `sync` exit non-zero when it is set.
+  not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; `list` and
+  `sync` exit non-zero when it is set. Every guard warning, the server's
+  included, now quotes the trigger's name as JSON, so a name carrying control characters is
+  printed escaped.
 - **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
   tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
   field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite

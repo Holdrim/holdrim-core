@@ -231,8 +231,13 @@ export type GuardMismatch = { name: string; kind: 'missing' | 'changed' | 'forei
  * after each real event, leaves every guard intact and the lock off all the same.
  */
 export function guardMismatches(db: DatabaseSync, guards: Record<string, string> = GUARDS): GuardMismatch[] {
-  // SQLite keeps the text as written, spacing included.
-  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+  // SQLite keeps the text as written, spacing included, so a run of spacing is read as one space —
+  // but only the five characters SQLite's own tokenizer skips between tokens. JavaScript's `\s`
+  // (and `.trim()`) also take U+00A0 and the other Unicode spaces, which SQLite reads as part of an
+  // identifier: `rowid\u00A0= NEW.rowid`, beside an added column named `"rowid\u00A0"` that is
+  // always NULL, is a guard that compares nothing, and `\s` would have called it the same text as
+  // the real one. No trim either: both sides start at `CREATE` and end at `END`, as SQLite stores them.
+  const flat = (sql: string) => sql.replace(/[ \t\n\f\r]+/g, ' ');
   // A Map, not `name in guards`: a trigger named `constructor` would be "in" any plain object.
   const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
   // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
@@ -253,12 +258,18 @@ export function guardMismatches(db: DatabaseSync, guards: Record<string, string>
  * What a mismatch is, in the words both readers say it in — the server before "installing it",
  * "replacing it" or "dropping it", the CLI before saying it repairs nothing. One sentence per kind,
  * so whoever greps a server log for a guard's name finds the CLI's line with the same words.
+ *
+ * The name is quoted as JSON because a foreign trigger's name is whatever whoever wrote the file
+ * chose: raw, an escape sequence in it reaches the terminal and can clear the very warning it sits
+ * in — and `show`, `impact` and `summary` exit 0, so that warning is all a person gets. Quoted, a
+ * control character comes out as `\u001b`, the same for the server's log as for the CLI's stderr.
  */
 export function guardMismatchSaid(m: GuardMismatch): string {
+  const name = JSON.stringify(m.name);
   switch (m.kind) {
-    case 'missing': return `the database's guard ${m.name} is missing`;
-    case 'changed': return `the database's guard ${m.name} was not the one this version installs`;
-    case 'foreign': return `the database holds a trigger this version does not install, ${m.name}`;
+    case 'missing': return `the database's guard ${name} is missing`;
+    case 'changed': return `the database's guard ${name} was not the one this version installs`;
+    case 'foreign': return `the database holds a trigger this version does not install, ${name}`;
   }
 }
 
