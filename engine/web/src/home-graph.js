@@ -59,6 +59,11 @@ if (container) {
    *  before the graph finished loading. */
   const filters = document.querySelector('.home-graph__filters');
   const noMatch = document.querySelector('.home-graph__empty');
+  // Enter in the prefix box would submit the form, reloading the whole home for a filter that never
+  // needed the server — and losing every tick in the process. Cancelled HERE, not once the graph is
+  // drawn: the form is live from the moment the page is, and a reader who types and presses Enter
+  // while `/api/graph` is still on its way would otherwise send it for real.
+  filters.addEventListener('submit', (event) => event.preventDefault());
   /** What the filters say right now. Every state is the VALUE of a ticked box — this script keeps
    *  no list of states of its own, so a state the legend names is one a reader can hide. */
   const filterOf = () => ({
@@ -145,9 +150,6 @@ if (container) {
     // A new filter is a new layout, so the view goes back to where it starts: a pan or zoom set for
     // the old layout would point at wherever some other node now happens to sit.
     filters.addEventListener('input', () => { render(); resetView(); });
-    // Enter in the prefix box would submit the form, reloading the whole home for a filter that
-    // never needed the server — and losing every tick in the process.
-    filters.addEventListener('submit', (event) => event.preventDefault());
 
     view.addEventListener('pointerdown', (event) => {
       dragging = true; dragged = false;

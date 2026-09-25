@@ -763,7 +763,19 @@ try {
 
     expect('unfiltered, every node the API sent is drawn', apiGraph.nodes.length, (await drawnIds()).length);
 
+    // Zoomed first, so the filter below has a view to take back: a pan or zoom set for the full
+    // layout points at wherever some other node sits in the filtered one, so a new filter has to
+    // return the view to the same identity `reset` does (`identity`, captured above).
+    await owner.page.locator('#holdrim-graph').scrollIntoViewIfNeeded();
+    const filterBox = await owner.page.locator('#holdrim-graph .home-graph__svg').boundingBox();
+    await owner.page.mouse.move(filterBox.x + filterBox.width / 2, filterBox.y + filterBox.height / 2);
+    await owner.page.mouse.wheel(0, -200);
+    await must('zoomed in before filtering', async () => {
+      if (await transformOf() === identity) throw new Error('the transform never moved');
+    });
+
     await prefixBox.fill('S03');
+    expect('a new filter takes the view back to where it starts', identity, await transformOf());
     const onS03 = await drawnIds();
     expect('a page prefix leaves only that page\'s blocks', SCALE_BLOCKS_PER_PAGE, onS03.length);
     expect('and every one drawn is on that page', true, onS03.every((id) => id.startsWith('S03.')));
@@ -791,6 +803,31 @@ try {
     expect('and the "nothing matches" line is gone', false, await noMatch.isVisible());
     expect('filtering never navigated, and nothing threw', `${BASE}/engine/home | `,
       `${owner.page.url()} | ${owner.problems.join(' | ')}`);
+
+    // The form is live from the moment the page is, before `/api/graph` answers. `/api/graph` is held
+    // back here until the test lets it go, so Enter is pressed while there is still no graph at all —
+    // the case a submit cancelled only once the graph is drawn gets wrong: the form goes to the
+    // server for real, the home reloads with `?prefix=…` in its address, and the typed filter is lost.
+    let letGraphThrough;
+    const graphHeld = new Promise((resolve) => { letGraphThrough = resolve; });
+    await owner.page.route('**/api/graph', async (route) => { await graphHeld; await route.continue(); });
+    await owner.page.goto(`${BASE}/engine/home`);
+    await prefixBox.fill('S03');
+    await prefixBox.press('Enter');
+    await owner.page.waitForTimeout(300);
+    expect('Enter in the prefix box before the graph loads submits nothing', `${BASE}/engine/home`, owner.page.url());
+    expect('(the graph really had not loaded yet)', 0,
+      await owner.page.locator('#holdrim-graph .home-graph__svg').count());
+    letGraphThrough();
+    await must('the held-back graph then draws',
+      () => owner.page.locator('#holdrim-graph .home-graph__svg').waitFor());
+    await owner.page.unroute('**/api/graph');
+    const typedEarly = await drawnIds();
+    expect('and the prefix typed before it loaded applies once it is drawn', true,
+      typedEarly.length === SCALE_BLOCKS_PER_PAGE && typedEarly.every((id) => id.startsWith('S03.')));
+    await prefixBox.press('Enter');
+    await owner.page.waitForTimeout(300);
+    expect('Enter once the graph is drawn submits nothing either', `${BASE}/engine/home`, owner.page.url());
   }
 
   console.log('the panel obeys the project\'s feature toggles:');
