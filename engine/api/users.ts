@@ -1,5 +1,13 @@
 import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
+import { normalizeEmail, isEmailAddress, MAX_EMAIL_LENGTH } from '../core/email.js';
+
+// Re-exported: every route and store implementation already imports these three from here, and
+// `engine/core/roles.js` (HOLDRIM_LOCKS) needs the SAME check without pulling in this file's
+// node:crypto import — core JavaScript the browser also loads, and this one is not
+// (`engine/core/email.js`'s own module comment says why). One definition, two doors onto it,
+// rather than two definitions that quietly drift apart.
+export { normalizeEmail, isEmailAddress, MAX_EMAIL_LENGTH };
 
 /**
  * Who gets in, with user and password, depending on no provider — and WHERE that is kept.
@@ -128,8 +136,13 @@ export interface UserStore {
   /**
    * Generates a new password, stores it and returns it to be shown ONCE. Demands a change, because
    * somebody other than its owner has seen it.
+   *
+   * `sessionsDropped` is `false` when the credential change went through but the delete of the
+   * account's old sessions failed — the caller decides what to do with that (log it, tell whoever
+   * asked), because this class knows neither a request nor a language. The password is returned
+   * regardless: the credential already changed, and withholding it would not undo that.
    */
-  resetPassword(email: string): Promise<string>;
+  resetPassword(email: string): Promise<{ password: string; sessionsDropped: boolean }>;
   find(email: string): Promise<User | null>;
   /**
    * Everyone, ordered by e-mail, disabled people included.
@@ -142,8 +155,14 @@ export interface UserStore {
    * to an HTTP response.
    */
   list(): Promise<User[]>;
-  /** Takes the access away, or gives it back. Never deletes: see the note on `User.enabled`. */
-  setEnabled(email: string, enabled: boolean): Promise<void>;
+  /**
+   * Takes the access away, or gives it back. Never deletes: see the note on `User.enabled`.
+   *
+   * `sessionsDropped` is `false` only when the flag flipped but the delete of the account's old
+   * sessions — the one that runs on the way OUT — failed. Giving the access back never attempts a
+   * delete, so it is always `true` there: nothing failed because nothing needed to happen.
+   */
+  setEnabled(email: string, enabled: boolean): Promise<{ sessionsDropped: boolean }>;
   /** Changes the display name. The e-mail is the identity and does not change. */
   rename(email: string, name: string): Promise<void>;
   /** True when nobody has been created yet: the first-access condition. */
@@ -167,34 +186,8 @@ export interface StoredSession {
   expiresAt: string;
 }
 
-/** One place, so every store agrees on what "the same e-mail" means. */
-export function normalizeEmail(email: string): string {
-  return email.toLowerCase().trim();
-}
-
-/** The longest address RFC 5321 allows. Anything past it is not a typo, it is a payload. */
-export const MAX_EMAIL_LENGTH = 320;
-
-/**
- * Is this something that can be an address here?
- *
- * ⚠️ Deliberately NOT an RFC 5322 parse, and the restraint is the point. The exhaustive regular
- * expressions for that are famous for rejecting addresses that work, and the only thing this check
- * is here to catch is the empty field and the obvious typo — somebody typing a NAME into the
- * e-mail box, which would otherwise create an access nobody can ever sign in to, and which cannot
- * be deleted afterwards because nothing here is deleted.
- *
- * No dot is demanded in the domain: `root@localhost` and internal single-label hosts are real, and
- * refusing them would be this checker deciding what someone else's network looks like.
- */
-export function isEmailAddress(value: string): boolean {
-  const email = value.trim();
-  if (email.length === 0 || email.length > MAX_EMAIL_LENGTH) return false;
-  if (/\s/.test(email)) return false;
-  const at = email.indexOf('@');
-  // Exactly one `@`, with something on both sides of it.
-  return at > 0 && at === email.lastIndexOf('@') && at < email.length - 1;
-}
+// normalizeEmail, isEmailAddress and MAX_EMAIL_LENGTH moved to `engine/core/email.js` and are
+// re-exported at the top of this file — see the comment there for why.
 
 /**
  * Everything that must not differ between databases: the hashing, the constant-time comparison,
@@ -225,6 +218,12 @@ export abstract class UserStoreBase implements UserStore {
   protected abstract readSession(id: string): Promise<StoredSession | null>;
   protected abstract deleteSession(id: string): Promise<void>;
   protected abstract deleteSessionsExpiredBefore(instant: string): Promise<void>;
+  /**
+   * Every session open under this e-mail, gone. See `setEnabled` and `resetPassword` for why this
+   * exists as its own primitive rather than a loop of `deleteSession` calls at the call site: three
+   * databases with three ways to "delete where email = X" is still one rule, decided once, here.
+   */
+  protected abstract deleteSessionsForEmail(email: string): Promise<void>;
 
   abstract close(): Promise<void>;
 
@@ -304,12 +303,19 @@ export abstract class UserStoreBase implements UserStore {
    * the credential of a person whose ✓ is evidence in the record. Forcing the change makes that
    * window as short as one login.
    */
-  async resetPassword(email: string): Promise<string> {
+  async resetPassword(email: string): Promise<{ password: string; sessionsDropped: boolean }> {
     const chosen = this.#generatePassword();
     const salt = randomBytes(SALT_LENGTH);
     const hash = await this.#hash(chosen, salt);
-    await this.writeCredential(normalizeEmail(email), salt, hash, true);
-    return chosen;
+    const normalized = normalizeEmail(email);
+    await this.writeCredential(normalized, salt, hash, true);
+    // A reset means somebody OTHER than the account's owner has just seen a credential that used to
+    // be secret. A session opened under the OLD one is exactly as exposed as that password is — it
+    // was handed out over the same "somebody stole it" premise that made the reset worth doing — so
+    // it is dropped here, not left to ride out its remaining hours on the strength of a password
+    // that no longer means anything.
+    const sessionsDropped = await this.#dropSessions(normalized);
+    return { password: chosen, sessionsDropped };
   }
 
   /**
@@ -327,8 +333,51 @@ export abstract class UserStoreBase implements UserStore {
     return (await this.readAllUsers()).map(profileOf);
   }
 
-  async setEnabled(email: string, enabled: boolean): Promise<void> {
-    await this.writeEnabled(normalizeEmail(email), enabled);
+  async setEnabled(email: string, enabled: boolean): Promise<{ sessionsDropped: boolean }> {
+    const normalized = normalizeEmail(email);
+    await this.writeEnabled(normalized, enabled);
+    // Only on the way OUT. Re-enabling opens no session by itself — the person has to sign in again
+    // — so there is nothing to drop, and dropping here would do nothing but cost a query on the
+    // path that gives access back. `true`: vacuously, nothing failed, because nothing ran.
+    //
+    // ⚠️ This is what turns "disabling drops the open session" from true for twelve hours into true
+    // for good. A stolen cookie is 401 the moment it is disabled either way — `fromSession` refuses
+    // it below — but that alone means "dead while disabled". Without THIS delete, the day the
+    // account is re-enabled the row is still there with a still-valid expiry, and the same stolen
+    // cookie is 200 again for whatever is left of its twelve hours: exactly the story issue #113
+    // reproduced, where disable → reset → re-enable ends with the thief still in.
+    if (!enabled) return { sessionsDropped: await this.#dropSessions(normalized) };
+    return { sessionsDropped: true };
+  }
+
+  /**
+   * Deletes every session for an e-mail, and says whether it worked — never by throwing.
+   *
+   * ⚠️ By the time this runs, `writeCredential` or `writeEnabled` has ALREADY committed — the
+   * access change is real, whatever happens next. Letting a failed delete here reject the whole
+   * `resetPassword` or `setEnabled` call would turn a real, already-applied change into a 500 with
+   * NO `user_password_reset` or `user_enabled_changed` line in the audit log: the one record of who
+   * did this and to whom simply would not exist, for a change that certainly happened. The
+   * write-then-delete order stays — the alternative was rejected once already, in the sign-in race
+   * `identity-password.ts` guards against — so what changes here is only that the delete's own
+   * failure does not also swallow the record of the write that preceded it.
+   *
+   * The failure is not allowed to vanish either: it means some number of that account's sessions
+   * may still be alive, silently, which is a real gap in exactly the guarantee issue #113 exists
+   * for. It used to be `console.error` with the e-mail in the message — this class knows no
+   * request, no actor and no i18n, so it had no other channel to reach. That put the one thing
+   * docs/PRIVACY.md says a log must never carry (the address, where an id belongs) into the log,
+   * and told nobody who asked that anything had gone wrong. Both are fixed the same way: the
+   * failure is handed back as a plain boolean, so the route above — which HAS the request, the
+   * person's id and the JSON answer the caller reads — can log it and report it instead.
+   */
+  async #dropSessions(email: string): Promise<boolean> {
+    try {
+      await this.deleteSessionsForEmail(email);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async rename(email: string, name: string): Promise<void> {
@@ -368,13 +417,16 @@ export abstract class UserStoreBase implements UserStore {
     // "now". A session that is dead in SQLite and alive in Postgres is not one product.
     if (!session || session.expiresAt < new Date().toISOString()) return null;
     const person = await this.find(session.email);
-    // ⚠️ Checked on EVERY request, not only at login. Without this, disabling someone would take
-    // effect whenever their cookie happened to expire — up to twelve hours of a person who has
-    // just been removed still reading, still commenting, still approving. "Their access was
-    // revoked" has to mean the next request, or it does not mean anything.
-    //
-    // The session row is deliberately left where it is: it expires on its own, and deleting it
-    // here would turn a read into a write on the hot path of every page load.
+    // ⚠️ Checked on EVERY request, not only at login — DEFENCE IN DEPTH, not the only guard any
+    // more. `setEnabled(false)` and `resetPassword` delete every session for the account (see
+    // both, in this file), so the row this call just read should not exist at all once somebody has
+    // been disabled or reset. This check is what still catches it when that deletion did not
+    // happen: a store whose `deleteSessionsForEmail` silently no-ops, a future write path that
+    // flips `enabled` without going through `setEnabled`, or the narrow window between a login's
+    // `check()` passing and its `openSession()` landing, racing a concurrent disable. Deleting the
+    // row was added because relying on THIS alone let a stolen cookie come back to life on
+    // re-enable — the row survived the disable, still valid, waiting — so the two now do different
+    // jobs: the delete makes "disabled" permanent, this makes a missed delete non-fatal.
     if (!person?.enabled) return null;
     return person;
   }

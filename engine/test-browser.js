@@ -95,6 +95,36 @@ writeFileSync(join(site, 'pages', 'X01.html'), crossPage('a-text-it-no-longer-ha
   .replace('FP1', `data-validated-fingerprint="${own.get('X01.1.1').fingerprint}"`)
   .replace('FP2', `data-validated-fingerprint="${own.get('X01.1.2').fingerprint}"`));
 
+// A same-page chain, for the impact radius: 1.3 depends on 1.2, which depends on 1.1. Selecting
+// 1.1 has to light BOTH — the case a single hop of `dependentsOf` alone gets wrong. 1.4 has no
+// dependent ON THIS PAGE, so it never lights up here — but R02.1.1, below, depends on it, which is
+// what proves the "N block(s) elsewhere" note, not just the on-page lights.
+const radiusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>R01</title>
+<link rel="stylesheet" href="/engine/web/panel.css">
+<!-- panel.css positions each button absolutely, against the nearest positioned ancestor — a
+     project's own sheet is what normally gives a block that. Without it every button anchors to
+     the same spot (the page itself) and the last one in the DOM sits on top of the rest, so clicks
+     meant for an earlier block land on that one instead. -->
+<style>[data-id] { position: relative; display: block; padding: 1.2rem 3rem 1.2rem 0; }</style>
+</head><body><main>
+<h1 class="doc-title"><span class="doc-title__code">R01</span> Impact radius</h1>
+<p data-id="R01.1.1" data-code="1.1">The root of the chain.</p>
+<p data-id="R01.1.2" data-code="1.2" data-depends="R01.1.1">One hop from 1.1.</p>
+<p data-id="R01.1.3" data-code="1.3" data-depends="R01.1.2">Two hops from 1.1, through 1.2.</p>
+<p data-id="R01.1.4" data-code="1.4">Nothing on THIS page depends on this — R02.1.1 does.</p>
+</main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
+writeFileSync(join(site, 'pages', 'R01.html'), radiusPage);
+
+// The dependent that lives elsewhere. The panel's own DOM cannot light it — there is no element for
+// it on R01 — so it can only ever surface as a COUNT, which is exactly what the "elsewhere" note
+// exists to prove is not silently dropped.
+const elsewhereRadiusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>R02</title>
+<link rel="stylesheet" href="/engine/web/panel.css"></head><body><main>
+<h1 class="doc-title"><span class="doc-title__code">R02</span> Impact radius, elsewhere</h1>
+<p data-id="R02.1.1" data-code="1.1" data-depends="R01.1.4">On another page from what it depends on.</p>
+</main><script type="module" src="/engine/web/panel-react.js"></script></body></html>`;
+writeFileSync(join(site, 'pages', 'R02.html'), elsewhereRadiusPage);
+
 // A page whose content tries to approve, in the name of whoever opens it, blocks of ANOTHER page
 // with their current fingerprints — the ✓ `holdrim sync` would turn into locks. Content is
 // written by people and by agents; an agent that obeyed an instruction hidden in a document could
@@ -410,6 +440,59 @@ try {
     expect('and nothing failed', '', reader.problems.join(' | '));
   }
 
+  console.log('the impact radius:');
+  {
+    const reader = await person(OWNER);
+    await reader.page.goto(`${BASE}/pages/R01.html`);
+    await must('the panel turns on', () => reader.page.locator('[data-id="R01.1.4"] .rv-num').waitFor());
+
+    await block(reader.page, 'R01.1.1').click();
+    await must('one hop away lights up', () => reader.page.locator('[data-id="R01.1.2"] .rv-num--radius').waitFor());
+    await must('so does two hops away, THROUGH it — the whole point of a radius over one hop',
+      () => reader.page.locator('[data-id="R01.1.3"] .rv-num--radius').waitFor());
+    expect('the block itself does not light up', 0, await reader.page.locator('[data-id="R01.1.1"] .rv-num--radius').count());
+    expect('and the one nothing depends on stays dark', 0, await reader.page.locator('[data-id="R01.1.4"] .rv-num--radius').count());
+    // Every dependent of 1.1 (1.2 and 1.3) is on THIS page — nothing was left for the "elsewhere"
+    // note to name. Forcing the note to show regardless (or lighting it off an unrelated count)
+    // would still pass every check above; only asserting its absence here catches that.
+    expect('no elsewhere note when every dependent is on this page', 0,
+      await reader.page.locator('.rv-radius-note').count());
+
+    // Selecting something ELSE has to clear the old radius, not just add to it — a light left over
+    // from the last selection would show a person a blast radius that is no longer the one they asked
+    // for.
+    await reader.page.locator('.rv-close').click();
+    await block(reader.page, 'R01.1.2').click();
+    await must('the new selection still lights what depends on it',
+      () => reader.page.locator('[data-id="R01.1.3"] .rv-num--radius').waitFor());
+    // 1.2 itself was lit a moment ago, under 1.1's radius. It must not still be, now that 1.2 is
+    // the block selected — a block never lights itself, and a light that survives the switch is
+    // exactly the stale one this test exists to catch.
+    expect('and the PREVIOUS selection is no longer lit', 0,
+      await reader.page.locator('[data-id="R01.1.2"] .rv-num--radius').count());
+
+    // 1.4 has a dependent, R02.1.1 — but on ANOTHER page, with no element here for the panel to
+    // light. Forcing the count to zero (never asking, or dropping what the server answered) would
+    // still pass every check above; only reading this note proves the count itself is not silently
+    // dropped.
+    await reader.page.locator('.rv-close').click();
+    await block(reader.page, 'R01.1.4').click();
+    await must('a dependent elsewhere is named as a count, not silently dropped',
+      () => reader.page.getByText('1 more block(s)').waitFor());
+    expect('and nothing lights up here — 1.4 has no dependent on THIS page', 0,
+      await reader.page.locator('.rv-num--radius').count());
+
+    // This only shows the lights and the note leave the page with the dialog that held them — the
+    // dialog unmounting empties it either way, so it does not prove the `radiusElsewhere` state
+    // itself resets to 0. Nothing here builds the machinery to prove that separately.
+    await reader.page.locator('.rv-close').click();
+    await must('closing the panel takes the radius lights and the note off the page', async () => {
+      await reader.page.locator('.rv-num--radius').waitFor({ state: 'detached' });
+      await reader.page.locator('.rv-radius-note').waitFor({ state: 'detached' });
+    });
+    expect('and nothing failed', '', reader.problems.join(' | '));
+  }
+
   console.log('when the panel cannot work:');
   {
     // No session: the page is read, not reviewed — whole, with nothing half-built on it. The 401 is
@@ -693,7 +776,12 @@ try {
   await page.goto(`${SIGN_IN}/engine/home`);
   await page.locator('nav a[href="/engine/people"]').click();
   await must('the owner reaches it from the home', () => page.locator('#create').waitFor());
-  page.on('dialog', (d) => d.accept());
+  // Captured as well as accepted: the `confirm()` before a reset or a disable needs accepting for
+  // either action to run at all, and the `alert()` the two dialog tests below read from is the
+  // LAST one raised on the click that triggered it — there is nowhere else in this script that a
+  // `dialog` event's own text can be read from.
+  const dialogs = [];
+  page.on('dialog', (d) => { dialogs.push(d.message()); d.accept(); });
   await page.locator('#create input[name="name"]').fill('Someone New');
   await page.locator('#create input[name="email"]').fill('new@example.org');
   await page.locator('#create button[type="submit"]').click();
@@ -743,6 +831,53 @@ try {
   expect('on a phone the people screen does not scroll sideways', true,
     await page.evaluate(() => globalThis.document.documentElement.scrollWidth <= globalThis.innerWidth));
   await page.setViewportSize({ width: 1280, height: 900 });
+
+  console.log('the warning when the server cannot confirm the old sessions are gone:');
+  {
+    // Real requests all the way through: the route only substitutes the ONE field the store sets
+    // when its own delete of the old sessions fails, so what the page draws next — the password,
+    // the redrawn row — still comes from the genuine answer, and the alert is the only thing this
+    // is testing. `route.fetch()` performs the real request; the mutated body is what the page
+    // actually reads.
+    const enLocale = JSON.parse(readFileSync(join(ROOT, 'engine', 'locales', 'en.json'), 'utf8'));
+    // `{action}` stands for the button's own label — `people.reset` — never a hard-coded word, so
+    // this substitutes the same value the page does rather than restating it.
+    const warned = (key, email) => enLocale[key].replace('{email}', email).replace('{action}', enLocale['people.reset']);
+    const withFailedDrop = async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({ response, json: { ...body, sessionsDropped: false } });
+    };
+
+    dialogs.length = 0;
+    await page.route('**/api/users/*/password', withFailedDrop);
+    await page.locator('button[data-action="reset"][data-email="else@example.org"]').click();
+    // The reset path shows the new password via `showOnce` regardless of the drop's own outcome —
+    // `withFailedDrop` above kept the real `password` field, so this still has one to show.
+    await must('a reset that could not confirm the drop still shows the new password, once',
+      () => page.locator('#once', { hasText: 'else@example.org' }).locator('code').waitFor());
+    expect('and warns separately that the old sessions may still be alive',
+      warned('people.warn.sessionsNotDropped.reset', 'else@example.org'), dialogs.at(-1));
+    await page.unroute('**/api/users/*/password', withFailedDrop);
+
+    dialogs.length = 0;
+    await page.route('**/api/users/*/enabled', withFailedDrop);
+    await page.locator('button[data-action="disable"][data-email="else@example.org"]').click();
+    await must('disabling still redraws the row even when the drop could not be confirmed',
+      () => page.locator('button[data-action="enable"][data-email="else@example.org"]').waitFor());
+    // A DIFFERENT sentence from the reset one above: on a disabled row the obvious retry is
+    // enable-then-disable, and the enable half of that is what brings the sessions back — the
+    // warning here has to say not to take that retry, not the reset path's "try again".
+    expect('and the disable path warns with its own, different wording',
+      warned('people.warn.sessionsNotDropped', 'else@example.org'), dialogs.at(-1));
+    // The sentence used to say "Use Reset instead", a word that names no button on this row — the
+    // row's button reads "New password". This checks the alert carries the button's REAL label,
+    // not just that `warned()` above built the same string the page did from the same template.
+    expect('and names the button that actually drops the sessions',
+      true, dialogs.at(-1).includes(enLocale['people.reset']));
+    await page.unroute('**/api/users/*/enabled', withFailedDrop);
+  }
+
   expect('and nothing was refused on the way', '', problems.join(' | '));
 } catch (e) {
   console.log(`  FAIL ${e.message}`);

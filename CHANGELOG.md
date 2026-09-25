@@ -96,6 +96,13 @@ who ran the engine from `main` before it.
   every page, so a page needs no link of its own that an exported copy would leave dead.
   Only the owner's ✓ turns a block green, as only theirs becomes a lock: an admin's is recorded,
   and the panel shows it as an admin's.
+- **The impact radius.** Selecting a block lights every block that depends on it, directly or
+  through another — asked of the server (`GET /api/impact-radius`) and drawn on the page, since a
+  dependent three pages away has no element the panel can find on its own. `holdrim if-i-touch`
+  still names the ONE hop that would turn 🔴, as the traffic light itself does, and now also lists
+  the rest of the radius as worth checking too — the CLI and the panel share the one walk
+  (`radiusOf`, `engine/core/validity.js`) rather than each answering "what could this touch" its
+  own way.
 - **A page runs the panel and nothing else.** Every documentation page is served with a
   Content-Security-Policy whose nonce only the panel's tag carries, so a script written into the
   content — by a person, or by an agent following an instruction hidden in a document — cannot act
@@ -113,6 +120,18 @@ who ran the engine from `main` before it.
   and every user store passes its own conformance suite in CI, against real databases. Reopening a
   SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
   putting it back without a word.
+- **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
+  tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
+  field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite
+  only) — logs a CRITICAL `text_tampered` line from the one place every reader shares (`reportTampered`,
+  `engine/api/texts.ts`), EVERY time a read resolves it: there is no acknowledgement yet to quiet it
+  (a follow-up issue), so it repeats rather than go silent after its first sighting. `holdrim list
+  --json` now carries a `tampered` key, and `holdrim list`/`sync` warn and exit non-zero when it is
+  set. See SECURITY.md for what this can and cannot catch, store by store. No released version
+  predates text extraction, so there is nothing to roll a pin back to yet — but once a later version
+  exists, moving the pin back to one from before this alert would write fresh events with their text
+  stored inline again, above where this version's own hashed rows begin, and every one of those reads
+  as `downgraded` tampering the next time any version opens the same file.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a
@@ -135,3 +154,30 @@ who ran the engine from `main` before it.
   a category the toggles do not recognise (a typo, a different case) is refused with 400 rather than
   quietly bypassing `bugCategory`/`pageRequests`. `bash engine/test-contract.sh` runs every
   server-gated toggle on and off against a real server.
+- **`HOLDRIM_LOCKS` names who else holds `lock`** (`docs/ROLES.md`, section 3), next to
+  `HOLDRIM_OWNER`: `"ana@example.org:P0*; bea@example.org:F12"`, an e-mail, a colon and a scope per
+  entry — a page, a page family (`"P0*"`) or a block id, validated the same way an event's own `page`
+  and `block` are. A malformed entry refuses to start, exactly like a malformed `HOLDRIM_OWNER`. Their
+  accounts are guarded like the owner's: creating, resetting, disabling and re-enabling one — all four
+  routes — is the owner's alone, and none of the four refusals names `HOLDRIM_LOCKS`, so an admin who
+  may not act on the address is not told the mechanism that reserved it. `can('lock', …)` does not
+  trust one yet — it still asks only whether the caller is the owner — because doing so safely needs
+  the session-and-credential-history rule `docs/ROLES.md` section 3 describes, which is not built.
+- **`holdrim.json` refuses `roles` and `grants` too**, alongside `owner`, `admins` and `locks`
+  (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
+  them, are the owner's to define and grant from a settings screen — a later piece — never a file a
+  committer, or the agent applying an approved request, can edit.
+
+### Security
+
+- **Disabling an account, or resetting its password, now drops every session already open under
+  it.** Before, a stolen cookie came back to life the moment the account was re-enabled, or even
+  sooner: a reset alone left an already-open session untouched, since only the disabled flag was
+  ever checked, at the next request. Resetting your own password now signs you out too — the drop
+  cannot tell a self-service reset apart from one that reached the account through a stolen
+  credential, so there is no exception for the person who pressed the button. A sign-in racing a
+  reset or a disable cannot come away holding a session either. When the drop itself fails — the
+  credential or the enabled flag has already changed regardless — the answer from
+  `POST /api/users/:email/password` and `.../enabled` carries `sessionsDropped: false`, the log
+  gets an `ERROR user_sessions_not_dropped` line naming the person by id, and the people screen
+  warns next to their row.

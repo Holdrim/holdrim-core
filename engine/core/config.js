@@ -9,11 +9,13 @@
  * one exception is `language`, below, where HOLDRIM_LANGUAGE counts only when the file names none.
  *
  * ⚠️ AUTHORITY IS NOT IN THE FILE AT ALL. Who the owner and the admins are comes from HOLDRIM_OWNER
- * and HOLDRIM_ADMINS, and from nowhere else (docs/ROLES.md, "Authority comes from the deployment
- * only"). The file travels with the repository, and whoever can commit to it — a contributor, or
- * the agent applying an approved request — is not whoever deploys it: with a fallback to the file,
- * editing one line would name a new owner at the next deploy, or at the next `holdrim sync` on
- * somebody's machine.
+ * and HOLDRIM_ADMINS, who else holds `lock` comes from HOLDRIM_LOCKS, and a project's own roles and
+ * who holds them come from the owner, at a settings screen (not yet built) — none of the four is
+ * ever read from this file (docs/ROLES.md, "Authority comes from the deployment only"). The file
+ * travels with the repository, and whoever can commit to it — a contributor, or the agent applying
+ * an approved request — is not whoever deploys it: with a fallback to the file, editing one line
+ * would name a new owner, a new lock-holder or a new role at the next deploy, or at the next
+ * `holdrim sync` on somebody's machine.
  * @module
  */
 
@@ -21,14 +23,34 @@ import { HOME_SCREEN } from './screens.js';
 import { readFeatures } from './features.js';
 
 /**
- * The keys that would grant authority, refused in `holdrim.json`. `locks` is here before the
- * lock-holders exist (docs/ROLES.md, section 3) so that no file ever learns to carry them.
+ * The keys that would grant authority, refused in `holdrim.json`. `roles` and `grants` joined this
+ * list in the rework of #29: reading a project's own roles and who holds them from the file would
+ * let a committer, or the agent applying an approved request, widen anyone's power at the next
+ * deploy or the next `holdrim sync` — the exact hole this list already exists to close for `owner`
+ * and `admins`. docs/ROLES.md, "Authority comes from the deployment only": role definitions and
+ * grants are events from the settings screen, by the owner alone — a later piece, not this file.
  *
  * Refused, not ignored: an adopter who wrote `owner` there believes it counts. Ignored, the key
  * would sit in the file looking authoritative while the variable decided — and the day someone
  * read the file to find out who the owner is, it would answer wrong.
  */
-const AUTHORITY_KEYS = ['owner', 'admins', 'locks'];
+const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'roles', 'grants'];
+
+/**
+ * Where each authority key actually lives — docs/ROLES.md, "Where everything lives" (section 5) —
+ * named in the refusal so removing the key is not the only thing an adopter learns from it. `roles`
+ * and `grants` name no variable: unlike `owner`, `admins` and `locks`, they have no environment
+ * fallback AT ALL yet, because the piece that lets the owner set them (the settings screen) is not
+ * built. Saying so, rather than pointing at a variable that does not exist, is the whole reason this
+ * is a lookup instead of one string reused for every key.
+ */
+const AUTHORITY_HOMES = {
+  owner: 'HOLDRIM_OWNER (one e-mail), set where Holdrim runs',
+  admins: 'HOLDRIM_ADMINS (comma separated), set where Holdrim runs',
+  locks: 'HOLDRIM_LOCKS, set where Holdrim runs',
+  roles: 'the owner, from the settings screen — not built yet, and never this file',
+  grants: 'the owner, from the settings screen — not built yet, and never this file',
+};
 
 /**
  * @param {unknown} file  the parsed `holdrim.json`
@@ -41,8 +63,8 @@ function refuseAuthority(file, root) {
   throw new Error(
     `${root}/holdrim.json names ${named.map((k) => `"${k}"`).join(', ')}, and it may not: ` +
     'authority is set by the deployment, never by the repository. Remove ' +
-    (named.length === 1 ? 'the key' : 'the keys') + ' from the file and set HOLDRIM_OWNER (one e-mail) ' +
-    'and HOLDRIM_ADMINS (comma separated) where Holdrim runs.');
+    (named.length === 1 ? 'the key' : 'the keys') + ' from the file. ' +
+    named.map((key) => `"${key}" comes from ${AUTHORITY_HOMES[key]}.`).join(' '));
 }
 
 /**
@@ -89,6 +111,10 @@ export function readConfig(root, io, env = {}) {
     // two into roles, for the server and the CLI alike.
     owner: env.HOLDRIM_OWNER ?? null,
     admins: env.HOLDRIM_ADMINS ?? '',
+    // Who holds `lock` besides the owner (docs/ROLES.md, section 3) — the environment only, exactly
+    // like the two above and for the same reason. `rolesOf` (engine/core/roles.js) parses and
+    // validates it; `can('lock', …)` does not consult it yet (see `roles.js`'s own comment on why).
+    locks: env.HOLDRIM_LOCKS ?? '',
     project: env.HOLDRIM_PROJECT ?? cloud.project ?? null,
     account: env.HOLDRIM_ACCOUNT ?? cloud.account ?? null,
     region: cloud.region ?? null,

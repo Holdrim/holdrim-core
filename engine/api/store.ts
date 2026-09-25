@@ -1,7 +1,7 @@
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
-import { noText, notBefore, saltFields, textKey, withTexts, TEXT_REMOVED,
-  type RawEvent, type TextField, type TextRow } from './texts.ts';
+import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
+  type RawEvent, type TextField, type TextRow, type TamperReport } from './texts.ts';
 
 /*
  * The Firestore store lives in store-firestore.ts, loaded only when HOLDRIM_EVENTS=firestore.
@@ -47,7 +47,12 @@ export class MemoryEventStore implements EventStore {
     const events = withAuthors(this.#events
       .filter((e) => page == null || e.page === page)
       .sort((a, b) => a.when.localeCompare(b.when)), people);
-    return withTexts(events, this.#texts);
+    // `reports` is this list's own read of every field it resolved to tampered — issue #91 wants it
+    // raised right here, at the one store every `run-local.sh` session and every unit test use.
+    const reports: TamperReport[] = [];
+    const out = withTexts(events, this.#texts, reports);
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   async removeText(event: string, field: TextField, by: string): Promise<Event> {

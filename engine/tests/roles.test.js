@@ -5,7 +5,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CAPABILITIES, capabilitiesOf, createRoles } from '../core/roles.js';
+import {
+  CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope,
+} from '../core/roles.js';
 
 test('exactly one owner: zero or two refuse to start', () => {
   assert.throws(() => createRoles('', ''), /HOLDRIM_OWNER needs exactly one e-mail \(got 0\)/);
@@ -111,6 +113,214 @@ test('mutating what capabilitiesOf returns changes nothing the next caller reads
   // an earlier call's answer.
   assert.equal(capabilitiesOf('admin').has('lock'), false);
   assert.equal(roles.can('lock', 'ana@example.org'), false, 'an admin\'s ✓ must not have just become a lock');
+});
+
+// ------------------------------------------------------------------ #29: the validation core, kept
+// ready for the settings screen. `isValidScope`'s tests prove the grammar directly because
+// `HOLDRIM_LOCKS` (below) is a real caller of it today; a project role's own name format has no
+// caller until the settings screen exists, so it is not built ahead of one any more — round 2 of
+// #29's review (finding 11): a format nothing calls is untested by construction, whatever a test
+// that calls it directly says.
+
+test('isValidScope accepts exactly the three shapes docs/ROLES.md describes', () => {
+  assert.equal(isValidScope('P03'), true, 'an exact page');
+  assert.equal(isValidScope('P0*'), true, 'a page family, with its explicit star');
+  assert.equal(isValidScope('P03.2.1'), true, 'a single block id');
+  assert.equal(isValidScope('supplier:C02.1.4'), true,
+    'a block id may carry a namespace ahead of it — docs/PROTOCOL.md\'s own data-depends example');
+  assert.equal(isValidScope('P'), true, 'a one-letter page code is still an exact page, not a family');
+  assert.equal(isValidScope(''), false, 'empty names nothing');
+  assert.equal(isValidScope('P0**'), false, 'two stars is not a family');
+  assert.equal(isValidScope('*P0'), false, 'a star that is not trailing is not a family either');
+  assert.equal(isValidScope(42), false, 'not even a string');
+});
+
+/**
+ * A namespace names ANOTHER project's BLOCK, never one of its bare pages — `supplier:C02.1.4` is a
+ * scope, `supplier:C02` is not one of the three shapes docs/ROLES.md describes at all. Without the
+ * `{1,8}` on `SCOPE_BLOCK_FORMAT`'s dot group demanding at least one segment, a namespaced page with
+ * no block would slip through here — `PAGE_FORMAT` and `SCOPE_FAMILY_FORMAT` never accept the colon,
+ * so this is the one case only `SCOPE_BLOCK_FORMAT`'s own cardinality decides.
+ */
+test('isValidScope rejects a namespace with no block id after it', () => {
+  assert.equal(isValidScope('supplier:C02'), false);
+});
+
+/**
+ * Round 2 of #29's review, finding 4: before this, the third branch was the bare `ID_FORMAT`
+ * alphabet — any non-empty run of its allowed characters — so a handful of separators with nothing
+ * real between them slipped through as a "block id". Each of these pins one such form as REJECTED,
+ * against the tightened `SCOPE_BLOCK_FORMAT` and `SCOPE_FAMILY_FORMAT`.
+ */
+test('isValidScope rejects a separator, or a few of them, with nothing real between', () => {
+  for (const bad of ['::', '.', '...', '-', ':', '1']) {
+    assert.equal(isValidScope(bad), false, JSON.stringify(bad));
+  }
+});
+
+test('isValidScope rejects a bare "*" — a wildcard naming every page has no written form', () => {
+  assert.equal(isValidScope('*'), false);
+});
+
+/**
+ * A single-letter family ("P*") is not a family at all in a scheme where a whole section shares its
+ * first letter — it reaches every page in it, the same "all pages" `isValidScope` refuses outright
+ * for a bare "*". `SCOPE_FAMILY_FORMAT` now demands at least two characters before the star, the same
+ * length every real page code in this codebase's own examples already has ("D01", "T03a", "UC-01").
+ */
+test('isValidScope rejects a single-letter family — "P0*" is a family, "P*" is not', () => {
+  assert.equal(isValidScope('P*'), false);
+  assert.equal(isValidScope('P0*'), true, 'two characters before the star is still accepted');
+});
+
+/**
+ * Round 3 of #29's review, finding 1: most of `SCOPE_BLOCK_FORMAT` had no test that could fail —
+ * the tests above exercise its overall shape, but the anchors, the segment cardinality and the
+ * namespace's own grammar were never individually pinned. Each string below is one thing that shape
+ * must NOT be — a script tag hiding in a segment, an anchor missing so a suffix or prefix of the
+ * string is enough, a namespace with no real name in front of its colon, a segment that is empty,
+ * missing or one too many — and together they kill every mutant the finding names:
+ *   - `P03.1<script>`            segment char class widened to `[^.]`
+ *   - `<script>P03.1`            `^` removed (a valid SUFFIX would then be enough)
+ *   - `<script>:P03.1`           namespace body widened to `[^.]*`
+ *   - `.:P03.1`                  `^` removed (a valid SUFFIX would then be enough)
+ *   - `P03.1 x`, `P03.1\n<x>`,
+ *     `P03.<b>`                  segment char class widened to `[^.]`
+ *   - `P03.`, `P03..1`           segment `{1,8}` loosened to `{0,8}` (an empty segment)
+ *   - `.1`, `-.1`                root's first-char letter requirement made optional
+ *   - `1ab:P03.1`                namespace first char widened to allow digits, or body → `[^.]*`
+ *   - `P03.1.2.3.4.5.6.7.8.9`    `$` removed, or the segment count `{1,8}` loosened to `{1,}`
+ * (ten segments, one past the eight `SCOPE_BLOCK_FORMAT` allows).
+ */
+test('isValidScope rejects every one of these — each pins one piece of SCOPE_BLOCK_FORMAT\'s grammar', () => {
+  const bad = [
+    'P03.1<script>', '<script>P03.1', '<script>:P03.1', '.:P03.1',
+    'P03.1 x', 'P03.1\n<x>', 'P03.<b>',
+    'P03.', 'P03..1', '.1', '-.1',
+    '1ab:P03.1', 'P03.1.2.3.4.5.6.7.8.9',
+  ];
+  for (const scope of bad) assert.equal(isValidScope(scope), false, JSON.stringify(scope));
+});
+
+// ------------------------------------------------------------------ HOLDRIM_LOCKS
+/**
+ * `parseLocks` is the one place `HOLDRIM_LOCKS` becomes data, and `createRoles` calls it once, at
+ * construction — a malformed entry refuses to start, the same as a malformed `HOLDRIM_OWNER`.
+ */
+test('parseLocks reads "email:scope" entries, separated by ";", trimmed', () => {
+  assert.deepEqual(parseLocks(' ana@example.org : P0* ; bea@example.org:F12 '),
+    [{ email: 'ana@example.org', scope: 'P0*' }, { email: 'bea@example.org', scope: 'F12' }]);
+  assert.deepEqual(parseLocks(''), [], 'empty names nobody, not an error');
+  assert.deepEqual(parseLocks(undefined), []);
+  assert.deepEqual(parseLocks(null), []);
+});
+
+test('parseLocks lower-cases the address, exactly as the store does', () => {
+  assert.deepEqual(parseLocks('Ana@Example.ORG:P03'), [{ email: 'ana@example.org', scope: 'P03' }]);
+});
+
+test('parseLocks refuses an entry with no colon, no scope', () => {
+  assert.throws(() => parseLocks('ana@example.org'), /missing its scope/);
+});
+
+test('parseLocks refuses an entry with no address before the colon', () => {
+  assert.throws(() => parseLocks(':P03'), /names no e-mail before the colon/);
+});
+
+/**
+ * Round 2 of #29's review, finding 2: before this, ANY non-empty text before the colon was accepted
+ * as "the e-mail" — a plain typo like "notanemail" would silently, and permanently, name a lock-holder
+ * that can never sign in to use it. `isEmailAddress` is the SAME check `engine/api/users.ts` applies
+ * when a real account is created (`engine/core/email.js`, finding 6) — not a stricter one invented
+ * here, so the two doors agree on what an address is.
+ */
+test('parseLocks refuses an entry whose address is not one, by the same check account creation uses', () => {
+  for (const bad of ['notanemail', 'a name with spaces', 'a@b@c', '@example.org', 'ana@']) {
+    assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
+  }
+});
+
+/**
+ * Round 3 of #29's review, finding 3: before this, `isEmailAddress` alone decided the question, and
+ * it is deliberately lenient (its own comment) because account creation shares it — `<ana@x>`,
+ * `"ana"@x` and `ana@x.` all passed it, though none is a bare address a mail server would ever
+ * deliver to. `parseLocks` asks a second, stricter question of its own now; `isEmailAddress` and
+ * account creation are untouched — `engine/tests/email.test.js` still proves the lenient side.
+ */
+test('parseLocks refuses what isEmailAddress alone would let through: display forms, quoting, a trailing dot', () => {
+  for (const bad of ['<ana@x>', '"ana"@x', 'ana@x.']) {
+    assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
+  }
+});
+
+/**
+ * Each of these also has exactly one `@` with something on both sides, so `isEmailAddress` alone
+ * accepts every one of them — only `RESERVED_EMAIL_CHARS` refuses them, one character of the class
+ * at a time: `>`, `<`, `(` and `)`, `[` and `]`, and a bare `,` as if a second address had been
+ * pasted in. `(c)ana@x` and `[ana]@x` are the realistic shapes (a comment wrapping the address, a
+ * bracketed display form), but each carries BOTH characters of its pair, so removing either alone
+ * from the class still leaves the other to catch it — neither pins its own character on its own.
+ * `(ana@x`, `[ana@x` and `ana]@x` do: an unclosed comment, an unclosed bracket, and a bracket with
+ * no opening partner, where the missing half never appears at all. `;` is not exercised here:
+ * `parseLocks` already split `raw` on `;` before an entry reaches this check, so a `;` inside one is
+ * never possible to construct as a test input (`RESERVED_EMAIL_CHARS`'s own comment, above, says why
+ * the character stays in the class regardless).
+ */
+test('parseLocks refuses every other reserved character, one at a time', () => {
+  for (const bad of [
+    'ana@x>', '<ana@x', '(c)ana@x', '(ana@x', 'ana)@x',
+    '[ana]@x', '[ana@x', 'ana]@x', 'ana,bo@x',
+  ]) {
+    assert.throws(() => parseLocks(`${bad}:P03`), /is not an e-mail address/, JSON.stringify(bad));
+  }
+});
+
+test('parseLocks refuses a scope outside the known shapes', () => {
+  for (const bad of ['', '**', 'P0**', '<script>', 'P0 3']) {
+    assert.throws(() => parseLocks(`ana@example.org:${bad}`), /is none of a page, a page family/,
+      JSON.stringify(bad));
+  }
+});
+
+test('createRoles refuses to start on a malformed HOLDRIM_LOCKS, the same way as a bad owner', () => {
+  assert.throws(() => createRoles('owner@example.org', '', 'ana@example.org'), /missing its scope/);
+});
+
+test('createRoles exposes isLockHolder from HOLDRIM_LOCKS, case-insensitively', () => {
+  const roles = createRoles('owner@example.org', '', 'ANA@example.org:P0*; bea@example.org:F12');
+  assert.equal(roles.isLockHolder('ana@example.org'), true);
+  assert.equal(roles.isLockHolder('bea@example.org'), true);
+  assert.equal(roles.isLockHolder('carl@example.org'), false);
+});
+
+/**
+ * Round 2 of #29's review, finding 7: the test above stores `HOLDRIM_LOCKS` mixed-case but always
+ * ASKS `isLockHolder` with an already-normalized address, so `lockHolders.has(normalized(e))` →
+ * `lockHolders.has(e)` changed nothing it checked. This asks with a differently-cased, padded
+ * address, which only the QUERY side's own normalization can still answer true for.
+ */
+test('isLockHolder normalizes the address it is ASKED with, not only the one it stored', () => {
+  const roles = createRoles('owner@example.org', '', 'ana@example.org:P0*');
+  assert.equal(roles.isLockHolder('  ANA@Example.ORG  '), true);
+});
+
+test('naming the owner in HOLDRIM_LOCKS is harmless', () => {
+  assert.doesNotThrow(() => createRoles('owner@example.org', '', 'owner@example.org:P0*'));
+  const roles = createRoles('owner@example.org', '', 'owner@example.org:P0*');
+  assert.equal(roles.isLockHolder('owner@example.org'), true);
+  assert.equal(roles.isOwner('owner@example.org'), true);
+});
+
+/**
+ * `can('lock', …)` stays owner-only in this change, whatever `HOLDRIM_LOCKS` says: making a LOCKS
+ * entry actually lock needs docs/ROLES.md section 3's session-and-credential-history rule, which is
+ * not built. This is the test the "can('lock', e) stays owner-only" mutation is aimed at.
+ */
+test('a lock holder does not yet lock — can(\'lock\', …) still asks isOwner alone', () => {
+  const roles = createRoles('owner@example.org', '', 'ana@example.org:P0*');
+  assert.equal(roles.isLockHolder('ana@example.org'), true, 'the guard sees them');
+  assert.equal(roles.can('lock', 'ana@example.org'), false, 'but can() does not, yet');
+  assert.equal(roles.can('lock', 'owner@example.org'), true);
 });
 
 test('the owner locks and admin and member do not, whatever a caller does to what capabilitiesOf returned', () => {
