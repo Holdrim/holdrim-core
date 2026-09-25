@@ -35,6 +35,7 @@
   "api.reason.required": "give the reason or the question",
   "api.request.needsRequestId": "give data.request",
   "api.request.notFound": "request not found on this page",
+  "api.request.unknownCategory": "unknown request category: {category}",
   "api.route.notFound": "no such method or route",
   "api.state.cannotGo": "cannot go from {from} to {to}",
   "api.state.required": "give data.state",

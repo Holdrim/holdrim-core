@@ -128,7 +128,10 @@ who ran the engine from `main` before it.
 - **Feature toggles**, `holdrim.json`'s new `features` block: a closed list — `comments`,
   `pageRequests`, `bugCategory`, `peopleScreen`, `graph`, `voice`, `sketch` — each with a default
   equal to today's behaviour, so a project that sets none sees no change. An unknown key, or a
-  value that is not `true`/`false`, refuses to start, the same way an invalid theme colour does. A
-  toggle never reaches a guard: `peopleScreen` off hides the people screen and its nav link, never
-  the `/api/users*` routes' own rules. `bash scripts/toggle-matrix.sh` runs every server-gated
-  toggle on and off against a real server.
+  value that is not `true`/`false`, refuses to start the service. A toggle never reaches a guard:
+  `peopleScreen` off hides the people screen and its nav link, never the `/api/users*` routes' own
+  rules. `/api/me` sends the panel the three it needs, and it draws no control a project has turned
+  off. A request's category is now checked against `cycle.json`'s own list before anything else, so
+  a category the toggles do not recognise (a typo, a different case) is refused with 400 rather than
+  quietly bypassing `bugCategory`/`pageRequests`. `bash engine/test-contract.sh` runs every
+  server-gated toggle on and off against a real server.

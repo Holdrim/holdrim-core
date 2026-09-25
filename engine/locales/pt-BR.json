@@ -23,6 +23,7 @@
   "api.reason.required": "diga o motivo ou a pergunta",
   "api.request.needsRequestId": "informe data.request",
   "api.request.notFound": "pedido não encontrado nesta página",
+  "api.request.unknownCategory": "categoria de pedido desconhecida: {category}",
   "api.route.notFound": "método ou rota não existe",
   "api.state.cannotGo": "não dá para ir de {from} para {to}",
   "api.state.required": "informe data.state",

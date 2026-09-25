@@ -163,6 +163,12 @@ expect "applied with a commit → 201"   201 "$(state agent@test $P applied 'don
 # The check is here and not only in the unit tests because the category crosses the whole edge: the
 # JSON body, the limits on `data`, and the record.
 expect "a request categorised as bug → 201" 201 "$(post $REVIEWER '{"type":"request","page":"D02","block":"D02.1.3","fingerprint":"x","text":"the screen does not do what this block says","snapshot":"the earlier text","data":{"category":"bug"}}')"
+# A category outside cycle.json's own list is refused before it can silently side-step a toggle:
+# `data.category` is compared by exact string in `gatingFeatureOf`, so "Bug" or "page " would
+# otherwise reach the store as an ungated category, never having asked the bugCategory/pageRequests
+# gate the right spelling would have.
+expect "an unknown category → 400"    400 "$(post $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":"Bug"}}')"
+expect "and the message names it"       0 "$(body $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":"Bug"}}' | has 'Bug'; echo $?)"
 # The race guard is written INTO the record: `from` names the state the change departed from.
 expect "the record says where it came from" approved "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=D02" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type==='request_state').pop();console.log(e.data.from)})")"
 
@@ -318,6 +324,125 @@ expect "a language nobody has falls back" 0 "$(say_it 'ja-JP' $B/api/events/does
 expect "but the log stays English"        0 "$(grep -q '"event":"event_recorded"' $WORK/tests.log; echo $?)"
 expect "with the contract values as they are" 0 "$(grep -q '"type":"request_state".*"to":"applied"' $WORK/tests.log; echo $?)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+# ----------------------------------------------------------------------------- feature toggles
+# `npm test` never boots the server (AGENTS.md): `engine/tests/features.test.js` proves
+# `readFeatures` validates `holdrim.json` and that no toggle wraps a guard, but not that the SERVER
+# actually 403s a `comment` event when `comments: false`. That needs a live process, started twice,
+# against projects whose `holdrim.json` disagree about what is on — which is why this lives here and
+# not only as a unit test, and why it uses THIS file's own $PORT and the port-in-use guard above,
+# rather than a port of its own nobody checks (the stale-server trap AGENTS.md warns about). This
+# used to be `scripts/toggle-matrix.sh`, outside every gate; folded in here, `npm test`'s companion
+# contract run is the only place it runs, same as every other HTTP check in this file.
+echo "feature toggles — every server-gated toggle, off, against something real:"
+OFF_SITE="$WORK/off-site"
+cp -r "$SITE" "$OFF_SITE"
+node -e '
+  const fs = require("fs");
+  const path = process.argv[1];
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  config.features = { comments: false, pageRequests: false, bugCategory: false, peopleScreen: false };
+  fs.writeFileSync(path, JSON.stringify(config, null, 2));
+' "$OFF_SITE/holdrim.json"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$OFF_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/toggles-off.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "comments OFF: a comment is refused"          403 "$(post $OWNER '{"type":"comment","page":"UC-01","text":"hi"}')"
+expect "pageRequests OFF: asking for a page is refused" 403 "$(post $OWNER '{"type":"request","page":"UC-01","text":"a new page","data":{"category":"page"}}')"
+expect "bugCategory OFF: a bug report is refused"    403 "$(post $OWNER '{"type":"request","page":"UC-01","text":"broken","data":{"category":"bug"}}')"
+# Everything else off must not mean everything off: an ungated category still goes through — S5.
+expect "an ungated category still works with the other three off" 201 \
+  "$(post $OWNER '{"type":"request","page":"UC-01","text":"still fine","data":{"category":"text"}}')"
+# S10: decoration follows the toggle too, on a page nobody's role gates — the OWNER could ask for a
+# page either way, so only the toggle explains the form disappearing.
+expect "pageRequests OFF: the home has no ask-for-a-page form" 1 \
+  "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | has -F 'Ask for a page'; echo $?)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+echo "feature toggles — one off does not put the others off too:"
+# S4: pageRequests and bugCategory each read their OWN key (gatingFeatureOf); a mutant that swaps
+# which toggle gates which category survives when a test only ever moves both at once. Here
+# pageRequests is off ALONE and bugCategory stays on, so the wrong mapping shows up as one of these
+# two failing on the wrong side.
+ASYM_SITE="$WORK/asymmetric-site"
+cp -r "$SITE" "$ASYM_SITE"
+node -e '
+  const fs = require("fs");
+  const path = process.argv[1];
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  config.features = { pageRequests: false };
+  fs.writeFileSync(path, JSON.stringify(config, null, 2));
+' "$ASYM_SITE/holdrim.json"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$ASYM_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/toggles-asym.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "pageRequests OFF alone: a page request is still refused" 403 \
+  "$(post $OWNER '{"type":"request","page":"UC-01","text":"a new page","data":{"category":"page"}}')"
+expect "and bugCategory, left on, still works"       201 \
+  "$(post $OWNER '{"type":"request","page":"UC-01","text":"broken","data":{"category":"bug"}}')"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+echo "feature toggles — the screen goes dark, the guard behind it does not:"
+# peopleScreen OFF, this time under password identity: the /api/users* routes are what the finding
+# calls "still enforces its guard" — proved here as more than "the owner gets 201", which is all the
+# old matrix checked. A member and an admin get the SAME refusals they would with the screen on.
+POFF_SITE="$WORK/peoplescreen-off-site"
+cp -r "$SITE" "$POFF_SITE"
+node -e '
+  const fs = require("fs");
+  const path = process.argv[1];
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  config.features = { peopleScreen: false };
+  fs.writeFileSync(path, JSON.stringify(config, null, 2));
+' "$POFF_SITE/holdrim.json"
+PDATA=$(mktemp -d)
+TADMIN=toggle-admin@example.org
+TMEMBER=toggle-member@example.org
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$TADMIN HOLDRIM_IDENTITY=password \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_USERS_PATH=$PDATA/users.db HOLDRIM_EVENTS_PATH=$PDATA/events.db PORT=$PORT \
+  HOLDRIM_SITE="$POFF_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/toggles-people.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+TFIRST=$(grep -A2 'FIRST ACCESS' $WORK/toggles-people.log | sed -n -E 's/.*password: *//p' | head -1)
+TCOOKIES=$WORK/toggle-owner-cookies.txt
+curl -s -c $TCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OWNER\",\"password\":\"$TFIRST\"}" $B/api/sign-in >/dev/null
+tas_owner() { curl -s -b $TCOOKIES -H 'Content-Type: application/json' "$@"; }
+
+expect "peopleScreen OFF: the screen redirects home, even for the owner" 0 \
+  "$(curl -s -b $TCOOKIES -D- -o /dev/null $B/engine/people | has -i 'location: /engine/home'; echo $?)"
+# S9: canManagePeople has to stay `peopleScreenOn() && managesPeople(viewer)`, not just the second
+# half — the owner truly manages people here (a real password session, unlike the dev-mode server
+# above, where managesPeople is always false and this same check would prove nothing).
+expect "peopleScreen OFF: the owner's own home has no People link either" 1 \
+  "$(tas_owner $B/engine/home | has -F 'href="/engine/people"'; echo $?)"
+expect "peopleScreen OFF: /api/users still enforces its guard — the owner still creates an access" 201 \
+  "$(tas_owner -o /dev/null -w '%{http_code}' -d '{"email":"toggle-new@example.org","name":"New"}' $B/api/users)"
+
+TAPASS=$(tas_owner -d "{\"email\":\"$TADMIN\",\"name\":\"An Admin\"}" $B/api/users | jfield password)
+TACOOKIES=$WORK/toggle-admin-cookies.txt
+curl -s -c $TACOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$TADMIN\",\"password\":\"$TAPASS\"}" $B/api/sign-in >/dev/null
+tas_admin() { curl -s -b $TACOOKIES -H 'Content-Type: application/json' "$@"; }
+
+expect "peopleScreen OFF: an admin still cannot create the owner" 409 \
+  "$(tas_admin -o /dev/null -w '%{http_code}' -d "{\"email\":\"$OWNER\",\"name\":\"Not Me\"}" $B/api/users)"
+expect "peopleScreen OFF: an admin still cannot reset the owner's password" 409 \
+  "$(tas_admin -o /dev/null -w '%{http_code}' -X POST $B/api/users/$OWNER/password)"
+
+TMPASS=$(tas_owner -d "{\"email\":\"$TMEMBER\",\"name\":\"A Member\"}" $B/api/users | jfield password)
+TMCOOKIES=$WORK/toggle-member-cookies.txt
+curl -s -c $TMCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$TMEMBER\",\"password\":\"$TMPASS\"}" $B/api/sign-in >/dev/null
+tas_member() { curl -s -b $TMCOOKIES -H 'Content-Type: application/json' "$@"; }
+
+expect "peopleScreen OFF: a member still gets 403 creating an access" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"email":"other@example.org","name":"Other"}' $B/api/users)"
+expect "peopleScreen OFF: a member still gets 403 on an approval" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc"}' $B/api/events)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PDATA"
 
 echo "local mode does NOT turn on outside development:"
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_AUDIENCE=/projects/0/x PORT=$PORT \

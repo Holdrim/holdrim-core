@@ -44,6 +44,10 @@ function App({ blocks, elsewhere, who }) {
   const [opened, setOpened] = useState(null);
   const me = who.email;
   const canApprove = Boolean(who.canApprove);
+  // Which of the panel's own controls this project has turned off (docs/ROLES.md, section 7),
+  // as `/api/me` sent them. A caller from before this toggle existed sends no `features` at all,
+  // and `Panel.jsx` reads a missing key as on — so `{}` here changes nothing for it.
+  const features = who.features ?? {};
   const [events, setEvents] = useState([]);
 
   async function reload() {
@@ -90,6 +94,7 @@ function App({ blocks, elsewhere, who }) {
       block={opened}
       me={me}
       canApprove={canApprove}
+      features={features}
       events={events}
       onRecord={async (e) => {
         await record(e);

@@ -327,6 +327,16 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
   }
+  // Checked before the feature gate below: `gatingFeatureOf` matches `data.category` by EXACT
+  // string — `"Bug"` or `"page "` would silently side-step whichever toggle the real spelling would
+  // have gated, because nothing else validates it is one of `cycle.json`'s own categories. `String`,
+  // not a bare compare: `data.category` is `unknown` (the core's own typedef, `engine/core/cycle.js`),
+  // and a category is never required — a request naming none still goes on to the checks below.
+  const category = incoming.data?.category;
+  if (incoming.type === 'request' && category !== undefined
+      && !Object.hasOwn(cycle.table.request_categories ?? {}, String(category))) {
+    return { status: 400, body: { error: say('api.request.unknownCategory', { category: String(category) }) } };
+  }
   // Checked before anything role-shaped: a feature that is off refuses everyone, owner included —
   // it is not a permission, and answering 403 either way keeps the two indistinguishable to whoever
   // is refused, exactly as intended.
@@ -481,6 +491,13 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       // their own choice, then the browser, then the project — so the panel does not decide it a
       // second way and speak Spanish on a page whose sign-in spoke Portuguese.
       language: languageOf(req),
+      // The toggles the PANEL draws a control for, and only those — never peopleScreen or graph,
+      // which gate a server screen and a CLI command the panel never renders. Without this the
+      // panel would keep offering "Comment", or the bug/page categories, after a project turned
+      // them off, and the person would type into a form the server then 403s on: the front end has
+      // to obey the same answer the server would give (docs/ROLES.md, "The front end obeys the
+      // server"). `engine/web/src/Panel.jsx` is the one place that reads this.
+      features: { comments: project.features.comments, pageRequests: project.features.pageRequests, bugCategory: project.features.bugCategory },
       // Only exists with password login. Without it, reloading the page would forget the password
       // is still the first-access one — and the change screen would only appear at login.
       ...(byPassword ? { mustChangePassword: (await byPassword.fromRequest(req.headers))?.mustChangePassword ?? false } : {}),

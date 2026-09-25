@@ -189,9 +189,9 @@ person's request to be removed; and every person is sent their own name on their
 ### 7. Feature toggles
 
 `holdrim.json` gains `features`: a closed list the engine knows — one list, next to the capability
-list — each with a default that is today's behaviour. An unknown key refuses to start, as an invalid
-theme colour does: a toggle misspelled is a toggle that silently did nothing. First candidates:
-`comments`, `pageRequests`, `bugCategory`, `peopleScreen`, `voice`, `sketch`, `graph`.
+list — each with a default that is today's behaviour. An unknown key refuses to start the service:
+a toggle misspelled is a toggle that silently did nothing. First candidates: `comments`,
+`pageRequests`, `bugCategory`, `peopleScreen`, `voice`, `sketch`, `graph`.
 
 - **A toggle never turns off a guard.** Locks, the owner's powers, "nothing is erased", the theme
   validation: none of these is a feature, and none gets a toggle.
@@ -258,4 +258,4 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | An agent's own credential, refused for any ✓ | not built |
 | `people.show`, applied by the server | not built |
-| `features`, with both states tested | built — `engine/core/features.js`, `engine/api/server.ts`, `engine/cli/graph.ts`, `scripts/toggle-matrix.sh` |
+| `features`, with both states tested | built — `engine/core/features.js`, `engine/api/server.ts`, `engine/cli/graph.ts`, `engine/web/src/Panel.jsx`, `engine/test-contract.sh` |

@@ -4,9 +4,10 @@
  *
  * The list is closed, the same way `CAPABILITIES` is closed in `engine/core/roles.js`: a project
  * combines these into `holdrim.json`'s `features` block, and can never invent one. An unknown key
- * refuses to start, exactly as an invalid theme colour does (`engine/api/theme.ts`) — a toggle
- * misspelled is a toggle that silently did nothing, and the only honest answer to that is to refuse
- * to boot rather than run with a default nobody chose on purpose.
+ * refuses to start the service — a toggle misspelled is a toggle that silently did nothing, and the
+ * only honest answer to that is to refuse to boot rather than run with a default nobody chose on
+ * purpose. Louder than an invalid theme colour (`engine/api/theme.ts`), which only warns and falls
+ * back: a bad brand colour is decoration, and a bad toggle decides whether a whole code path runs.
  *
  * ⚠️ A toggle never reaches a guard. `engine/core/roles.js` decides every capability and the lock,
  * and reads nothing from here — `engine/tests/features.test.js` proves it by grepping the source,
@@ -89,8 +90,8 @@ export function readFeatures(configured, root) {
     if (typeof value !== 'boolean') {
       throw new Error(
         `${root}/holdrim.json's "features.${key}" must be true or false; got ` +
-        `${JSON.stringify(value)}. Values other than booleans are refused the same way an invalid ` +
-        'theme colour is: silently accepting one would mean guessing what it meant.');
+        `${JSON.stringify(value)}. A value that is not a plain boolean is refused rather than ` +
+        'guessed at: silently accepting one would mean guessing what it meant.');
     }
   }
 

@@ -28,6 +28,7 @@
   "api.reason.required": "indica el motivo o la pregunta",
   "api.request.needsRequestId": "indica data.request",
   "api.request.notFound": "solicitud no encontrada en esta página",
+  "api.request.unknownCategory": "categoría de solicitud desconocida: {category}",
   "api.route.notFound": "ese método o esa ruta no existe",
   "api.state.cannotGo": "no se puede ir de {from} a {to}",
   "api.state.required": "indica data.state",

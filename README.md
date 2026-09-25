@@ -339,9 +339,9 @@ nothing:
 
 | Toggle | Default | What it gates |
 |---|---|---|
-| `comments` | on | the panel's "leave a remark" action, and the server's acceptance of it |
-| `pageRequests` | on | the home's "ask for a page" form, and a request categorised `page` |
-| `bugCategory` | on | the "Report a bug" category, and a request categorised `bug` |
+| `comments` | on | the panel's "Comment" button, and the server's acceptance of a `comment` event |
+| `pageRequests` | on | the home's "ask for a page" form, the panel's `page` category, and a request categorised `page` |
+| `bugCategory` | on | the panel's "Report a bug" category, and a request categorised `bug` |
 | `peopleScreen` | on | the people-management screen and its link in the nav |
 | `graph` | on | `holdrim graph` |
 | `voice` | off | not built yet — the key exists so a project can name it today |
@@ -349,8 +349,11 @@ nothing:
 
 A toggle only ever hides or refuses a FEATURE, never a guard: turning `peopleScreen` off hides the
 screen, and the `/api/users*` routes behind it keep every rule they always had — who may create,
-reset or disable an access is unaffected. `docs/ROLES.md`, section 7, is the design; `bash
-scripts/toggle-matrix.sh` runs every server-gated toggle on and off against a real server.
+reset or disable an access is unaffected. The panel obeys the same toggles: `/api/me` sends it
+`comments`, `pageRequests` and `bugCategory`, and it draws no control a project has turned off, so
+nobody types into a form the server would then refuse (docs/ROLES.md, "The front end obeys the
+server"). `docs/ROLES.md`, section 7, is the design; `bash engine/test-contract.sh` runs every
+server-gated toggle on and off against a real server.
 
 ## Design documents
 

@@ -159,7 +159,8 @@ export function readConfig(root, io, env = {}) {
      * FEATURE TOGGLES (docs/ROLES.md, section 7; the closed list and its defaults live in
      * `engine/core/features.js`, next to `roles.js`'s own closed list). Checked here, at the one
      * place every reader of `holdrim.json` already goes through, so a misspelled toggle refuses to
-     * start the same way an unknown top-level key or an invalid theme colour does.
+     * start the service — louder than an unrecognised top-level key, which this function simply
+     * never reads, and louder than an invalid theme colour, which only warns and falls back.
      */
     features: readFeatures(file.features, root),
   };
