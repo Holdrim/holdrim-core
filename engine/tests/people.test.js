@@ -31,6 +31,19 @@ test('everyone else can get a new password, and lose or regain access, never bot
   assert.deepEqual(actionsFor(person('r@x.org', { enabled: false }), false), ['reset', 'enable']);
 });
 
+test('the owner\'s rendered row carries no action; a member\'s still offers reset and disable', () => {
+  const html = renderPeoplePage(i18n, 'en', {
+    projectName: 'P',
+    people: [person('owner@x.org'), person('mem@x.org')],
+    roleOf: (e) => (e === 'owner@x.org' ? 'owner' : 'member'),
+    isOwner: (e) => e === 'owner@x.org',
+  }, ENGINE_THEME, 'n1');
+  const rowFor = (email) => html.split('\n').find((line) => line.includes(`<td>${email}</td>`));
+  assert.doesNotMatch(rowFor('owner@x.org'), /data-action=/, 'the owner\'s row must offer no action at all');
+  assert.match(rowFor('mem@x.org'), /data-action="reset"/);
+  assert.match(rowFor('mem@x.org'), /data-action="disable"/, 'enabled by default, so disable is on offer');
+});
+
 test('the People link appears only for whoever may manage people', () => {
   assert.match(engineNav(i18n, 'en', 'home', true), /href="\/engine\/people"/);
   assert.doesNotMatch(engineNav(i18n, 'en', 'home', false), /\/engine\/people/);

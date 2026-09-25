@@ -145,9 +145,11 @@ test('the CLI and the server name the same owner: HOLDRIM_OWNER', async (t) => {
   assert.deepEqual(cliView(p, { owner: OWNER }), expected, 'the CLI');
 });
 
-test('an admin named in HOLDRIM_ADMINS alone: their request starts approved, on both sides', async (t) => {
+test('an admin named in HOLDRIM_ADMINS alone: their request starts approved and their ✓ never locks, on both sides', async (t) => {
   // Not the owner, so only HOLDRIM_ADMINS can have made it skip triage — and a CLI that ignored the
   // variable would leave it open for the owner to triage while the server shows it approved.
+  // `cliView` also runs `sync` and asserts exactly one person's ✓ locks: this is the one test that
+  // catches an admin's ✓ locking too, so its name says both things it proves, not only the first.
   const p = await project(t);
   const variables = { owner: OWNER, admins: ADMIN };
   const expected = { owner: OWNER, states: { [OWNER]: ADMIN_START, [OTHER]: STRANGER_START, [ADMIN]: ADMIN_START } };

@@ -27,7 +27,7 @@ deployment itself names as holding `lock`.**
 
 ### 1. Capabilities are the engine's, roles are the project's
 
-The engine already speaks in capabilities (`canApprove`, `canTriage`) and never in a role's name.
+The engine already speaks in capabilities (`can(capability, email)`) and never in a role's name.
 This makes the list explicit and closed — one list, in `engine/core/roles.js`, and a project cannot
 invent a capability, only combine them:
 
@@ -39,8 +39,16 @@ invent a capability, only combine them:
 | `triage` | decide a request: approve it, reject it, ask its author |
 | `approve` | give a ✓ to a block — recorded and shown as theirs, never a lock |
 | `people` | create accesses, hand out passwords, disable and re-enable — never the owner's account, never the account of anyone who holds `lock` |
+| `lock` | turn a ✓ into the one the repository trusts — never granted like the six above (below) |
 
-`lock` is not in this list, on purpose: it is not granted like the others (section 3).
+`lock` is in the list — `engine/core/roles.js` validates `can('lock', …)` against it exactly as it
+validates the other six, so a typo there fails the same way — but it is never part of a GRANTABLE
+set: no role a project defines holds it, the owner's `capabilitiesOf` entry does not carry it either,
+and asking `can('lock', someone)` never consults a role's capabilities at all. It answers straight
+from identity — today, "is this the owner?"; once `LOCKS` exists (section 3), "is this the owner, or
+is this address in `LOCKS` for this block?" — because a capability granted through a role is exactly
+the kind of thing an admin, or a future project-defined role, could end up holding by a table edit,
+and this is the one answer that must never move that way.
 
 A role is a name and a subset of that list. Two roles ship, and with the owner they are today's
 behaviour exactly, so a project that configures nothing sees nothing change: **`admin`** holds every
@@ -241,7 +249,7 @@ loses the file fallback for the owner and the admins, and the templates, which s
 
 | Piece | State |
 |---|---|
-| Capabilities instead of role names (`canApprove`, `canTriage`) | built |
+| Capabilities instead of role names (`can(capability, email)`) | built |
 | Owner and admins, from configuration | built |
 | The closed capability list, and roles as sets of it | built — `engine/core/roles.js`, `CAPABILITIES` and `capabilitiesOf` |
 | `LOCKS`, and lock-holders' accounts guarded like the owner's | not built |

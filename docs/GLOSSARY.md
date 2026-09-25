@@ -111,7 +111,7 @@ forgot one.
 | **admin** | every capability but `lock`. A role of the **project**, not of the method. Named by `HOLDRIM_ADMINS`, and only there |
 | **member** | `read`, `comment`, `request` — any other allowed identity |
 | **founder** | a tag that grants the power to see the whole documentation. It sits **on the role, not on the person**, so the second holder of that role sees it too, without an exception. ⚠️ A concept of the method only: no code reads it yet |
-| **capability** | what the engine actually asks about — one of a closed list, `engine/core/roles.js`'s `CAPABILITIES`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`. A role is a name and a subset of it (`capabilitiesOf`); every caller asks `roles.can(capability, email)`, never a role's name — role names change with every company, capabilities do not |
+| **capability** | what the engine actually asks about — one of a closed list, `engine/core/roles.js`'s `CAPABILITIES`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`. A role is a name and a subset of it (`capabilitiesOf`); every caller asks `roles.can(capability, email)`, never a role's name — role names change with every company, capabilities do not. `lock` is validated the same as the other six but never part of a role's GRANTABLE set (`docs/ROLES.md`, "Capabilities are the engine's") |
 
 The method defines only `owner` and the `founder` tag. `admin`, clinical lead, operator, auditor —
 those belong to the project adopting the method. If the engine named a product role, it would stop

@@ -71,20 +71,54 @@ test('can throws on a capability outside the closed list, rather than silently a
  * The three shipped roles hold EXACTLY the capabilities docs/ROLES.md gives them, no more and no
  * less. This is the test the issue's mutations are aimed at: widen or narrow one shipped role's set
  * in `engine/core/roles.js` and this is the named test that fails.
+ *
+ * `lock` is checked separately, through `can`, not through `capabilitiesOf`: it is never part of a
+ * role's GRANTABLE set, owner included — see `docs/ROLES.md`, "Capabilities are the engine's", and
+ * the test right after this one.
  */
 test('the three shipped roles hold exactly the capabilities docs/ROLES.md gives them', () => {
-  assert.deepEqual([...capabilitiesOf('owner')].sort(), [...CAPABILITIES].sort(),
-    'the owner holds every capability, lock included');
-  assert.deepEqual([...capabilitiesOf('admin')].sort(), CAPABILITIES.filter((c) => c !== 'lock').sort(),
-    'admin is every capability but lock');
+  const grantable = CAPABILITIES.filter((c) => c !== 'lock');
+  assert.deepEqual([...capabilitiesOf('owner')].sort(), grantable.sort(),
+    'the owner\'s table entry is everything but lock — lock comes from identity, never from here');
+  assert.deepEqual([...capabilitiesOf('admin')].sort(), grantable.sort(), 'admin is every capability but lock');
   assert.deepEqual([...capabilitiesOf('member')].sort(), ['comment', 'read', 'request'],
     'member is read, comment and request — and nothing that decides anything');
-  // Asked the other way too: naming exactly what admin must NOT hold, so a mutation that adds a
-  // capability to admin's set fails here even if the sorted-array comparison above did not catch
-  // a reordering bug in some other change.
+  // Asked the other way too: naming exactly what admin (and the table itself) must NOT hold, so a
+  // mutation that adds a capability to admin's set, or puts lock back in the table for anyone, fails
+  // here even if the sorted-array comparison above did not catch a reordering bug in some other
+  // change.
   assert.equal(capabilitiesOf('admin').has('lock'), false);
+  assert.equal(capabilitiesOf('owner').has('lock'), false);
 });
 
 test('capabilitiesOf refuses a role this version does not ship', () => {
   assert.throws(() => capabilitiesOf('superadmin'), /"superadmin" is not one of the roles this version ships/);
+});
+
+// ------------------------------------------------------------------ the lock cannot come from a table edit
+/**
+ * `Object.freeze` on a `Set` freezes the BINDING, not the Set's contents — `.add()` still works,
+ * frozen or not. `capabilitiesOf` must therefore hand out a Set nobody else can reach again, and
+ * `can('lock', …)` must never consult the table at all: this is the test that proves both, and the
+ * one the issue's `capabilitiesOf('admin').add('lock')` mutation is aimed at.
+ */
+test('mutating what capabilitiesOf returns changes nothing the next caller reads', () => {
+  const roles = createRoles('owner@example.org', 'ana@example.org');
+  const mutated = capabilitiesOf('admin');
+  mutated.add('lock');
+  mutated.add('anything-else-nobody-granted');
+  // The mutated Set is a copy: a fresh call reads the frozen source again, not what somebody did to
+  // an earlier call's answer.
+  assert.equal(capabilitiesOf('admin').has('lock'), false);
+  assert.equal(roles.can('lock', 'ana@example.org'), false, 'an admin\'s ✓ must not have just become a lock');
+});
+
+test('can(\'lock\', …) is isOwner, full stop — even a table entry that DID carry lock would not matter', () => {
+  const roles = createRoles('owner@example.org', 'ana@example.org');
+  // Reaching into the table directly, the way a bug elsewhere in the process might, and putting
+  // `lock` on every role there is — `can` must still answer `lock` from identity alone.
+  for (const role of ['owner', 'admin', 'member']) capabilitiesOf(role).add('lock');
+  assert.equal(roles.can('lock', 'owner@example.org'), true);
+  assert.equal(roles.can('lock', 'ana@example.org'), false, 'admin must not lock, whatever the table says');
+  assert.equal(roles.can('lock', 'carl@example.org'), false, 'member must not lock, whatever the table says');
 });

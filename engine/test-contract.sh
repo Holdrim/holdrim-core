@@ -124,6 +124,8 @@ expect "no identity → 401"             401 "$(curl -s -o /dev/null -w '%{http_
 expect "owner is owner"                owner "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield role)"
 expect "reviewer is a member"          member "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/api/me | jfield role)"
 expect "capability instead of role"    true "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield canApprove)"
+expect "the owner can triage"          true "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield canTriage)"
+expect "a member cannot"               false "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/api/me | jfield canTriage)"
 
 echo "approval:"
 expect "reviewer does NOT approve → 403" 403 "$(post $REVIEWER '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc123"}')"
@@ -516,6 +518,13 @@ expect "and not the owner's" 0 "$([ "$MEMBER_ID" != "$OWNER_ID" ]; echo $?)"
 # The people screen draws only what the routes above allow, and is drawn only for who may use them.
 expect "the people screen opens for the owner → 200" 200 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' $B/engine/people)"
 expect "and lists the new person"       0 "$(curl -s -b $COOKIES $B/engine/people | has -F "$MEMBER"; echo $?)"
+# The one row the routes refuse to touch (the owner cannot be reset or disabled) must be the one row
+# the screen offers nothing on either — a button drawn there invites a click the server would 409 on.
+PEOPLE_HTML=$(curl -s -b $COOKIES $B/engine/people)
+expect "and the owner's own row offers no action at all" 1 \
+  "$(echo "$PEOPLE_HTML" | grep -F "$OWNER" | has 'data-action='; echo $?)"
+expect "while the new member's row still offers reset"  0 \
+  "$(echo "$PEOPLE_HTML" | grep -F "$MEMBER" | has 'data-action="reset"'; echo $?)"
 PEOPLE_HDR=$(curl -s -b $COOKIES -D- -o /dev/null $B/engine/people | grep -i '^content-security-policy:')
 expect "and runs only its own script"   0 "$(echo "$PEOPLE_HDR" | has "script-src 'nonce-" && ! echo "$PEOPLE_HDR" | has 'unsafe-inline'; echo $?)"
 expect "somebody who may not manage people is sent home" 0 "$(curl -s -b $MCOOKIES -D- -o /dev/null $B/engine/people | has -i 'location: /engine/home'; echo $?)"
