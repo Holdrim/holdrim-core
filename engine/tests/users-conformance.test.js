@@ -28,6 +28,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { UsersSqlite } from '../api/users-sqlite.ts';
+import { freshFirestoreProject } from './helpers/firestore.js';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
   ?? 'postgres://postgres:test@127.0.0.1:55432/postgres';
@@ -83,20 +84,16 @@ try {
 // --------------------------------------------------------------------- Firestore: needs emulator
 if (process.env.FIRESTORE_EMULATOR_HOST) {
   const { UsersFirestore } = await import('../api/users-firestore.ts');
-  const project = process.env.HOLDRIM_PROJECT ?? 'holdrim-conformance';
   stores.push({
     name: 'firestore',
-    open: async () => {
-      const store = new UsersFirestore(project);
-      const { Firestore } = await import('@google-cloud/firestore');
-      const db = new Firestore({ projectId: project });
-      for (const collection of ['users', 'sessions']) {
-        const docs = await db.collection(collection).get();
-        await Promise.all(docs.docs.map((d) => d.ref.delete()));
-      }
-      await db.terminate();
-      return store;
-    },
+    // A project of its own on every open, the same way events-conformance.test.js does it — not a
+    // fixed name wiped before use. The emulator keeps everything every earlier test AND every other
+    // run against the same emulator has ever written: two of this suite's own runs sharing one
+    // emulator at the same time — this file's job and another agent's, in this same container, are
+    // both real — would otherwise TRUNCATE-style wipe or overwrite each other's rows mid-test, and
+    // a count or a "this session is gone" assertion would pass or fail for the wrong reason. A fresh
+    // random project has nothing to wipe, because nothing has ever written to it before.
+    open: async () => new UsersFirestore(freshFirestoreProject('holdrim-conformance')),
   });
 } else {
   skipped.push({
@@ -152,7 +149,19 @@ async function millisecondsOf(fn) {
  */
 function forEachStore(title, body) {
   for (const store of stores) {
-    test(`[${store.name}] ${title}`, async () => {
+    // ⚠️ Firestore only: a loop over pages that never terminates — an off-by-one in what counts as
+    // "the page was full", say — would otherwise hang until CI's own ten-minute ceiling, on every
+    // run that touches it, and "the job never finished" is a far worse signal than a named test
+    // failing in fifteen seconds. SQLite and Postgres have no such loop to run away.
+    //
+    // Best-effort, not a guarantee: `timeout` cancels a test whose promise is genuinely stuck, but
+    // a loop that keeps making REAL round trips to the emulator — resolving, then looping again,
+    // forever — keeps the event loop busy with real work the whole time, and Node has no way to
+    // preempt a running `while` loop from the outside. What this buys is the common case (a bug
+    // that hangs on one call that never resolves) failing fast and by name; a true runaway loop
+    // still falls back to whatever kills the process from outside it — CI's own job timeout.
+    const options = store.name === 'firestore' ? { timeout: 15_000 } : {};
+    test(`[${store.name}] ${title}`, options, async () => {
       const s = await store.open();
       try {
         await body(s);
@@ -374,6 +383,127 @@ forEachStore('a password reset alone drops every open session for the account', 
     'a reset must drop existing sessions, not just replace the credential they were opened with');
 });
 
+forEachStore("disabling and resetting one account leaves another account's session alive", async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  await s.create('y@example.org', 'Y', 'a-long-enough-password');
+  const y = await s.openSession('y@example.org');
+
+  // Both operations target x only. A delete that is not actually scoped to the e-mail it was given
+  // — a stray `OR` in the WHERE clause, a `.where('email', ...)` call that got dropped on the way
+  // to the query — would still pass every test above, because those only ever create ONE account.
+  // Nothing catches a delete that is too wide unless something else exists to be too wide onto.
+  await s.setEnabled('x@example.org', false);
+  await s.resetPassword('x@example.org');
+
+  assert.equal((await s.fromSession(y))?.email, 'y@example.org',
+    "a delete scoped to x's e-mail must not reach a session that belongs to y");
+});
+
+forEachStore('an account with several open sessions has every one of them dropped', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const ids = [await s.openSession('x@example.org'), await s.openSession('x@example.org'),
+    await s.openSession('x@example.org')];
+  for (const id of ids) assert.equal((await s.fromSession(id))?.email, 'x@example.org');
+
+  // A delete that only reaches the FIRST session it finds — `LIMIT 1`, a loop that returns after
+  // one document — would pass every single-session test above and still leave two of these three
+  // cookies live. Real accounts keep more than one open session at once: a phone and a laptop, or
+  // two tabs, are the ordinary case, not an edge case.
+  //
+  // ⚠️ Re-enabled before the check, the same way the resurrection test above does: while the flag
+  // is still `false`, `fromSession`'s per-request check refuses every one of these regardless of
+  // whether its ROW is gone, and a delete that missed two of the three would pass this test by
+  // accident. Only after giving the access back does surviving a delete become the one thing left
+  // that could make a check here pass.
+  await s.setEnabled('x@example.org', false);
+  await s.setEnabled('x@example.org', true);
+  for (const id of ids) assert.equal(await s.fromSession(id), null);
+});
+
+forEachStore('a session landing right after the disable flag is written does not survive re-enable', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  // Stages the write-then-race the delete inside `setEnabled` has to survive: a session opened in
+  // the instant right after the flag flips to `false`, before the delete that follows it runs. This
+  // is `setEnabled`'s OWN internal ordering, not the sign-in race in `identity-password.ts` — the
+  // point here is that whatever lands between the write and the delete is still caught, because the
+  // delete has not run yet either.
+  const originalWriteEnabled = s.writeEnabled.bind(s);
+  let raced = null;
+  s.writeEnabled = async (email, enabled) => {
+    await originalWriteEnabled(email, enabled);
+    if (!enabled) raced = await s.openSession(email);
+  };
+  await s.setEnabled('x@example.org', false);
+  await s.setEnabled('x@example.org', true);
+  assert.equal(await s.fromSession(raced), null,
+    'the delete that follows the flag write has to catch a session opened before it runs');
+});
+
+forEachStore('a session landing right after the reset credential is written does not survive', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const originalWriteCredential = s.writeCredential.bind(s);
+  let raced = null;
+  s.writeCredential = async (...args) => {
+    await originalWriteCredential(...args);
+    raced = await s.openSession(args[0]);
+  };
+  await s.resetPassword('x@example.org');
+  assert.equal(await s.fromSession(raced), null,
+    'the delete that follows the credential write has to catch a session opened before it runs');
+});
+
+forEachStore('re-enabling an already enabled account keeps its session', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = await s.openSession('x@example.org');
+
+  // The route never checks whether an account was already enabled before calling `setEnabled(true)`
+  // on it — asking to give an access back that was never taken away is a 200, not a 400. Dropping
+  // the `if (!enabled)` guard and deleting on every call regardless would pass every test above
+  // that disables first, and would still be wrong here: this account was never disabled at all.
+  await s.setEnabled('x@example.org', true);
+  assert.equal((await s.fromSession(id))?.email, 'x@example.org',
+    'enabling an account that was already enabled must not drop a session that never needed dropping');
+});
+
+forEachStore('a reset still changes the password when dropping sessions fails, and says so loudly', async (s) => {
+  const first = await s.create('x@example.org', 'X', 'a-long-enough-password');
+  s.deleteSessionsForEmail = async () => { throw new Error('boom'); };
+
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    const reset = await s.resetPassword('x@example.org');
+    // The write happens BEFORE the delete that just failed. A caller that let the failure through
+    // would answer 500 with no `user_password_reset` line ever written — the credential change
+    // happened regardless, and the one record of it would not exist.
+    assert.ok(reset, 'the credential change must go through even though the cleanup after it failed');
+    assert.equal(await s.check('x@example.org', first), null, 'the old password really did stop working');
+    assert.ok(logged.some((line) => line.includes('x@example.org')),
+      'a delete that fails silently leaves sessions alive with nothing in any log to show it');
+  } finally {
+    console.error = originalError;
+  }
+});
+
+forEachStore('disabling still takes effect when dropping sessions fails, and says so loudly', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  s.deleteSessionsForEmail = async () => { throw new Error('boom'); };
+
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    await s.setEnabled('x@example.org', false);
+    assert.equal(await s.check('x@example.org', 'a-long-enough-password'), null,
+      'the account really is disabled even though the cleanup after it failed');
+    assert.ok(logged.some((line) => line.includes('x@example.org')),
+      'a delete that fails silently leaves the disable with nothing in any log to show it');
+  } finally {
+    console.error = originalError;
+  }
+});
+
 forEachStore('an access given back works again, with the same password', async (s) => {
   await s.create('back@example.org', 'Back', 'a-long-enough-password');
   await s.setEnabled('back@example.org', false);
@@ -423,3 +553,43 @@ forEachStore('an empty name is refused, and the old one survives the refusal', a
   assert.equal((await s.find('x@example.org')).name, 'Real Name',
     'a refused rename must not have half-written the blank');
 });
+
+// ===================================================================== Firestore only: pages
+//
+// Firestore is the one store whose delete cannot be a single query: it reads a page of matching
+// documents and deletes them, and a session count past that page's limit needs a second round trip
+// to reach at all. Nothing above exercises more than a handful of sessions, so a `.limit(1)` typo or
+// a delete that runs once and calls it done would pass the whole suite above and still leave most of
+// an account's sessions alive. SQLite and Postgres have no such limit to get wrong, hence no store
+// for this test but Firestore's own.
+if (process.env.FIRESTORE_EMULATOR_HOST) {
+  test('[firestore] deleting sessions reaches past a single page (401 of them, one page over the limit)',
+    { timeout: 30_000 }, async () => {
+      const { UsersFirestore } = await import('../api/users-firestore.ts');
+      const s = new UsersFirestore(freshFirestoreProject('holdrim-conformance'));
+      try {
+        await s.create('x@example.org', 'X', 'a-long-enough-password');
+        const ids = [];
+        for (let i = 0; i < 401; i++) ids.push(await s.openSession('x@example.org'));
+
+        // Re-enabled before the check: while the account is still disabled, `fromSession`'s
+        // per-request check refuses every one of these regardless of whether its ROW survived the
+        // delete — the flag alone would make a loop that stops after the first page pass this test
+        // by accident. Only once access is given back does outliving the delete become the one
+        // thing left that could make a check here succeed.
+        await s.setEnabled('x@example.org', false);
+        await s.setEnabled('x@example.org', true);
+
+        const alive = (await Promise.all(ids.map((id) => s.fromSession(id)))).filter(Boolean).length;
+        assert.equal(alive, 0,
+          'a one-shot delete, or a loop that stops after the first page, would leave the sessions '
+          + 'past the 400th one alive');
+      } finally {
+        await s.close();
+      }
+    });
+} else {
+  test('[firestore] deleting sessions reaches past a single page (401 of them, one page over the limit)',
+    { skip: 'FIRESTORE_EMULATOR_HOST is not set, so nothing ran against Firestore. Start one with: '
+      + 'eval "$(bash scripts/firestore-emulator.sh)", then re-run.' }, () => {});
+}
