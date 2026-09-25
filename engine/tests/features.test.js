@@ -22,9 +22,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createScanner, SyntaxKind } from 'typescript/unstable/ast';
+import { transformSync } from 'esbuild';
 import { readConfig } from '../core/config.js';
 import { readFeatures, FEATURE_DEFAULTS, FEATURE_KEYS } from '../core/features.js';
 import { CAPABILITIES } from '../core/roles.js';
@@ -402,6 +403,124 @@ function staleEntries() {
   return ALLOWED.filter((entry) => !withoutComments(read(entry.file)).includes(entry.text));
 }
 
+// ---------------------------------------------------------------- the regex-vs-division guess can be beaten
+//
+// ROUND 4 (MAJOR N2): `NO_REGEX_AFTER`, above, is a GUESS — the same "goal symbol" ambiguity every
+// JS engine resolves by knowing the whole grammar, reduced here to "what kind of token came right
+// before". It is wrong in exactly the cases the comment on `NO_REGEX_AFTER` already owns up to: a
+// `/` that starts a fresh STATEMENT right after `if (…)`'s closing `)`, or after a block's closing
+// `}`, is a regex — but both `)` and `}` are ALSO how a plain expression ends (`f(x)`, an object
+// literal), where the very next `/` really is division. The guess picks division for both, because
+// guessing regex there risks a real regex literal reading half the file looking for a `/` that
+// never comes — but picking division wrongly has its own failure, just as bad: the misjudged `/`
+// leaves the token stream at the WRONG position, and the regex's own embedded `/*` — completely
+// ordinary inside a real regex literal — gets read from there as an opening block comment, blanking
+// everything up to the file's next `*/`, guard and all.
+//
+// No amount of tuning `NO_REGEX_AFTER` closes this for good: the ambiguity is real, not a bug in the
+// heuristic's edges. So this stops trusting the guess and cross-checks it against a REAL parser
+// instead. `esbuild` (already a devDependency, `engine/tests/features.test.js`'s own `package.json`
+// entry) parses the ORIGINAL text and the text `withoutComments` blanked, with the loader that
+// matches the file's own extension, and the two must come out identical — modulo formatting, which
+// is why both are run through `minify: true` rather than compared as `withoutComments`-shaped text:
+// esbuild's UN-minified output keeps every comment exactly where it was, so two texts that
+// legitimately differ only by comments would still disagree without minifying, telling this check
+// nothing. If the blanking took real code with it, the blanked text either fails to parse at all —
+// the ordinary outcome, since code deleted mid-statement rarely still balances its braces — or
+// parses into something a real one wasn't, and either way this names the file rather than the
+// silent pass a text scan alone would give it.
+//
+// The same trap, for a different token: `//` inside literal JSX TEXT (an URL, most often) is not a
+// comment either, and nothing in a plain token scan run with no JSX context knows that — see the
+// self-test below. The fix is the same one: a real parser, told the file is JSX, does know.
+function loaderFor(file) {
+  if (file.endsWith('.tsx')) return 'tsx';
+  if (file.endsWith('.ts')) return 'ts';
+  if (file.endsWith('.jsx')) return 'jsx';
+  return 'js';
+}
+
+/**
+ * Why `withoutComments`'s guess disagrees with a real parser about `text` (named as `file`, for the
+ * loader and for the message — a synthetic snippet may pass any extension it likes), or `null` when
+ * the two agree.
+ * @param {string} file
+ * @param {string} text
+ */
+function stripperMismatch(file, text) {
+  const opts = { loader: loaderFor(file), minify: true };
+  let real;
+  try {
+    real = transformSync(text, opts).code;
+  } catch {
+    return null; // the ORIGINAL doesn't parse either — not this check's claim to make
+  }
+  let blanked;
+  try {
+    blanked = transformSync(withoutComments(text), opts).code;
+  } catch (error) {
+    return `${file}: withoutComments blanked real code — the result no longer parses ` +
+      `(${String(error.message).split('\n')[0]})`;
+  }
+  return blanked === real ? null
+    : `${file}: withoutComments blanked real code — the result parses to something different`;
+}
+
+test('every scanned file survives the esbuild cross-check: the regex/division guess never blanks real code', () => {
+  const mismatches = sourceFiles().map((file) => stripperMismatch(file, read(file))).filter(Boolean);
+  assert.deepEqual(mismatches, [],
+    'withoutComments blanked real code in a file this scan cannot trust its own text-matching over — see MAJOR (N2)');
+});
+
+test('N2: a regex misguessed as division after a block\'s closing `}` swallows the guard right after it', () => {
+  const real = read('engine/api/server.ts');
+  const marker = "const manages = () => roles.can('people', email);";
+  assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
+  // The demonstrated mutant, verbatim: `/` right after the `}` that closes `if (email) { … }` starts
+  // a fresh statement — the regex `/\/*/ ` (matching a literal "/*") — but `CloseBraceToken` is in
+  // `NO_REGEX_AFTER`, so the guess reads it as division instead, lands mid-token, and the regex's own
+  // `/*` gets read from there as an opening block comment: everything up to the file's next `*/` is
+  // blanked, the toggled guard right after it included.
+  const planted = real.replace(marker,
+    `${marker}\n  if (email) { log('INFO', 'x', {}); }\n  /\\/*/.test(email);\n` +
+    '  if (!manages() && project.features.peopleScreen) return forbidden();');
+  assert.ok(!offendersIn(planted, 'engine/api/server.ts').some((f) => f.includes('project.features.peopleScreen')),
+    'N2 setup — the text scan alone already caught this; the cross-check below would prove nothing');
+  const mismatch = stripperMismatch('engine/api/server.ts', planted);
+  assert.ok(mismatch && mismatch.startsWith('engine/api/server.ts:'),
+    'N2 — a guard hidden behind a misguessed regex after a block\'s closing `}` was not caught, by name');
+});
+
+test('N1: a regex misguessed as division right after `if (…)`\'s closing `)` swallows the guard too', () => {
+  const real = read('engine/api/server.ts');
+  // A route far from N2's and every S/D self-test's own marker, so this is not caught by luck: none
+  // of the others plants anything anywhere near the user-list route.
+  const marker = "if (route === '/users' && req.method === 'GET') {";
+  assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
+  // `if (email) /\/*/.test(email);` is real, valid JS: a single-statement `if` with no braces, whose
+  // statement IS the regex literal. `CloseParenToken` is in `NO_REGEX_AFTER` too, so the guess reads
+  // this `/` as division as well, with the same runaway "comment" swallowing the toggled guard.
+  const planted = real.replace(marker,
+    `${marker}\n    if (email) /\\/*/.test(email);\n    if (project.features.peopleScreen) return forbidden();`);
+  assert.ok(!offendersIn(planted, 'engine/api/server.ts').some((f) => f.includes('project.features.peopleScreen')),
+    'N1 setup — the text scan alone already caught this; the cross-check below would prove nothing');
+  const mismatch = stripperMismatch('engine/api/server.ts', planted);
+  assert.ok(mismatch && mismatch.startsWith('engine/api/server.ts:'),
+    'N1 — a guard hidden behind a misguessed regex right after `if (…)`\'s closing `)` was not caught, by name');
+});
+
+test('a JSX-text URL\'s "//" is not a comment either, and the cross-check catches the read it would otherwise hide', () => {
+  // `see https://example.org ` is literal JSX TEXT, a child of `<small>`, never code — but nothing
+  // in a plain token scan run with no JSX context knows that, and reads the URL's `//` as an
+  // ordinary line comment, exactly the "guess with no context" trap `NO_REGEX_AFTER` names for `/`.
+  const jsx = "<small>see https://example.org {features.voice ? '' : ''}</small>";
+  const found = offendersIn(jsx, 'x.jsx');
+  assert.deepEqual(found, [],
+    'setup — if the text scan alone already found features.voice here, the cross-check below would prove nothing');
+  const mismatch = stripperMismatch('x.jsx', jsx);
+  assert.ok(mismatch, 'a read hidden behind a JSX-text URL\'s "//" was not caught by the cross-check either');
+});
+
 test('the boundary itself: the scanned paths hold real reads, and nothing is stale', () => {
   const files = sourceFiles();
   assert.ok(files.includes('engine/api/server.ts'), 'the file scan read the wrong files');
@@ -417,23 +536,23 @@ test('the boundary itself: the scanned paths hold real reads, and nothing is sta
     'named moved or was reworded, and the exception it granted may now be hiding something else');
 });
 
+// ROUND 4: this used to write a real `engine/lib-self-test/gate.js` onto disk to prove `sourceFiles`
+// discovers it, then `rmSync` it in a `finally` — but `engine/tests/*.test.js` all run in the same
+// `node --test`, in parallel, and every one of them that calls `sourceFiles()` (this file's own
+// "every real read of features" among them) walks the SAME tree while this test's file sits there.
+// A file briefly present on disk is briefly present to everyone, and the shared state is exactly
+// what a mutation test on a toggle should never depend on. `isSourceFile` and `offendersIn` are
+// plain functions of a path and a string — the claim (a new directory is scanned by default; a read
+// inside it is recognised) needs neither `git` nor a file on disk to prove, so this proves it that
+// way instead.
 test('D4: a read planted in a brand-new directory, not only the four the old scan trusted, is caught', () => {
-  // The demonstrated mutant, replayed for real: a NEW engine/lib-self-test/gate.js, on disk, found by
-  // the same `git ls-files` this scan runs for the real files below — not a stand-in for it.
-  const dir = join(ROOT, 'engine/lib-self-test');
-  const target = join(dir, 'gate.js');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(target, 'export default (project) => project.features.peopleScreen;\n');
-  try {
-    const files = sourceFiles();
-    assert.ok(files.includes('engine/lib-self-test/gate.js'),
-      'D4 — a file in a brand-new directory under engine/ was not found by the file scan at all');
-    const offenders = offendersIn(read('engine/lib-self-test/gate.js'), 'engine/lib-self-test/gate.js');
-    assert.ok(offenders.some((f) => f.includes('project.features.peopleScreen')),
-      'D4 — the planted read in the new directory was found but not recognised as an offense');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const path = 'engine/lib-self-test/gate.js';
+  assert.ok(isSourceFile(path),
+    'D4 — a file in a brand-new directory under engine/ is not scanned by default');
+  const text = 'export default (project) => project.features.peopleScreen;\n';
+  const offenders = offendersIn(text, path);
+  assert.ok(offenders.some((f) => f.includes('project.features.peopleScreen')),
+    'D4 — the planted read in the new directory was found but not recognised as an offense');
 });
 
 test('every real read of features, across the engine, is on the allow-list', () => {

@@ -400,25 +400,45 @@ expect "and bugCategory, left on, still works"       201 \
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 echo "feature toggles — the screen goes dark, the guard behind it does not:"
-# Every built toggle off, this time under password identity: the /api/users* routes are what the
-# finding calls "still enforces its guard" — proved here as more than "the owner gets 201", which is
-# all the old matrix checked. A member and an admin get the SAME refusals they would with every
-# toggle on.
+# Every built toggle at the OPPOSITE of its default, this time under password identity: the
+# /api/users* routes are what the finding calls "still enforces its guard" — proved here as more
+# than "the owner gets 201", which is all the old matrix checked. A member and an admin get the SAME
+# refusals they would with every toggle at its default.
 #
 # MINOR 5 (D5): `JSON.stringify(project).includes('"peopleScreen":true')` never writes the word
 # `features`, so no scan of the SOURCE (engine/tests/features.test.js) can refuse it by name — that
 # file says so, in its own header comment, and points here instead. peopleScreen alone used to be the
-# only toggle turned off on this server; every OTHER built toggle is off here too now, so a guard that
-# secretly asked "is anything on" rather than "does roles.can say yes" has nowhere left to hide.
+# only toggle turned off on this server; every OTHER built toggle is at its non-default state here
+# too now, so a guard that secretly asked "is anything on" rather than "does roles.can say yes" has
+# nowhere left to hide.
+#
+# ROUND 4: read from `FEATURE_KEYS`/`FEATURE_DEFAULTS` (engine/core/features.js) instead of a
+# hand-written subset — the old literal turned four toggles off and left `graph` ON (its default)
+# and `voice`/`sketch` untouched (also their default, `false`), so nothing here ever exercised
+# `graph`, `voice` or `sketch` in their NON-default state. `!FEATURE_DEFAULTS[key]` for every key in
+# `FEATURE_KEYS` is the only way to keep this honest as the list grows: a toggle added to the closed
+# list lands here automatically, at the opposite of what it ships with, never at whatever this
+# script happened to hard-code the day it was written.
 POFF_SITE="$WORK/every-toggle-off-site"
 cp -r "$SITE" "$POFF_SITE"
-node -e '
-  const fs = require("fs");
+node --input-type=module -e '
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  const { FEATURE_KEYS, FEATURE_DEFAULTS } = await import("./engine/core/features.js");
   const path = process.argv[1];
-  const config = JSON.parse(fs.readFileSync(path, "utf8"));
-  config.features = { comments: false, pageRequests: false, bugCategory: false, peopleScreen: false };
-  fs.writeFileSync(path, JSON.stringify(config, null, 2));
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  config.features = Object.fromEntries(FEATURE_KEYS.map((k) => [k, !FEATURE_DEFAULTS[k]]));
+  writeFileSync(path, JSON.stringify(config, null, 2));
 ' "$POFF_SITE/holdrim.json"
+# The derivation itself, checked directly against the file it wrote — not only against a route that
+# happens to read one of these keys. `graph` and `voice`/`sketch` are read by nothing this server's
+# routes touch, so without this a hand-written subset that silently dropped back to leaving them at
+# their default would still pass every check below.
+expect "the derived config turns graph off (on by default)" 0 \
+  "$(grep -q '\"graph\": false' "$POFF_SITE/holdrim.json"; echo $?)"
+expect "and turns voice on (off by default, not built)" 0 \
+  "$(grep -q '\"voice\": true' "$POFF_SITE/holdrim.json"; echo $?)"
+expect "and turns sketch on too" 0 \
+  "$(grep -q '\"sketch\": true' "$POFF_SITE/holdrim.json"; echo $?)"
 PDATA=$(mktemp -d)
 TADMIN=toggle-admin@example.org
 TMEMBER=toggle-member@example.org
@@ -464,7 +484,39 @@ expect "peopleScreen OFF: a member still gets 403 creating an access" 403 \
   "$(tas_member -o /dev/null -w '%{http_code}' -d '{"email":"other@example.org","name":"Other"}' $B/api/users)"
 expect "peopleScreen OFF: a member still gets 403 on an approval" 403 \
   "$(tas_member -o /dev/null -w '%{http_code}' -d '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc"}' $B/api/events)"
-# MINOR 5 (D5), the three guards not already checked anywhere with every toggle off:
+#
+# MINOR (R-D5b): a reflective read — `JSON.stringify(project).includes('"peopleScreen":true')` — is
+# invisible to any scan of the SOURCE (engine/tests/features.test.js's own header comment says so,
+# and points here), so THIS server is the only backstop a guard like that has. It is only a backstop
+# for what it actually asks, though, so every guard on this server has to be asked here, enumerated
+# on purpose rather than left to whichever ones a past round happened to add. The two lists below are
+# complete as of this round; a route or a `refusalOf` 403 added later and not added here is a gap
+# this comment can no longer claim doesn't exist.
+#
+# Every `/api/users*` route (`userRoutes`, engine/api/server.ts), and where its `manages()` guard is
+# checked on THIS server:
+#   GET  /users                 — the list itself                     — below (member)
+#   POST /users                 — creating an access                  — owner 201 above; admin→owner
+#                                                                        409 above; member 403 below
+#   POST /users/me/name         — no role guard: the caller's OWN row, never a refusal path
+#   POST /users/:email/password — a new password for somebody         — admin→owner 409 above;
+#                                                                        member→another member 403
+#                                                                        below
+#   POST /users/:email/enabled  — taking the access away               — member 403, admin→owner 409
+#                                                                        below
+#
+# Every `refusalOf` 403 (engine/api/server.ts, the one gate `/api/events` and both home forms share):
+#   the feature gate itself     — proved live against comments/pageRequests/bugCategory above
+#                                  (OFF_SITE); not re-asked here, where `request` events on purpose
+#                                  name no category, to isolate the checks below from it
+#   approval, owner/admin only  — member 403 above
+#   supplement, owner or author — member (neither) 403 below
+#   triage (request_state),
+#     owner/admin only          — member 403 below
+expect "every toggle OFF: a member listing /api/users → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' $B/api/users)"
+expect "every toggle OFF: a member resetting ANOTHER member's password → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -X POST $B/api/users/$TADMIN/password)"
 expect "every toggle OFF: a member enabling or disabling an access → 403" 403 \
   "$(tas_member -o /dev/null -w '%{http_code}' -d '{"enabled":false}' $B/api/users/$TADMIN/enabled)"
 expect "every toggle OFF: an admin disabling the owner → 409" 409 \
@@ -472,6 +524,11 @@ expect "every toggle OFF: an admin disabling the owner → 409" 409 \
 TTRIAGE=$(tas_member -d '{"type":"request","page":"UC-01","text":"toggle triage check"}' $B/api/events | jfield id)
 expect "every toggle OFF: a non-owner triaging → refused" 403 \
   "$(tas_member -o /dev/null -w '%{http_code}' -d "{\"type\":\"request_state\",\"page\":\"UC-01\",\"text\":\"x\",\"data\":{\"request\":\"$TTRIAGE\",\"state\":\"approved\"}}" $B/api/events)"
+# The supplement guard: filed by the ADMIN, so neither the owner nor its own author is who attempts
+# it below — `email !== request.author && !canApprove` has to refuse a member who is truly neither.
+TSUPP=$(tas_admin -d '{"type":"request","page":"UC-01","text":"toggle supplement check"}' $B/api/events | jfield id)
+expect "every toggle OFF: a non-owner, non-author supplement → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d "{\"type\":\"supplement\",\"page\":\"UC-01\",\"text\":\"me too\",\"data\":{\"request\":\"$TSUPP\"}}" $B/api/events)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PDATA"
 
 echo "local mode does NOT turn on outside development:"
