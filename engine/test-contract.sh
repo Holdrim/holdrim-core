@@ -697,7 +697,16 @@ expect "a person sees their own address on their own comment, whatever the setti
 # to pass through `asRead` untouched, leaking the remover's raw address to a viewer `people.show`
 # was configured to hide it from. `by` is found by the event's OWN id, never its marker text: the
 # text is exactly what a removal takes away.
-REMOVE_ID=$(new_request $LEAD '{"type":"comment","page":"UC-01","text":"people-show removal marker"}')
+#
+# The request is $REVIEWER's, removed by $LEAD, and read by a third address, $PSHOW_VIEWER, that
+# holds neither part: an author removing their own text makes `removalSubjectsOf` returning `[]` an
+# equivalent mutant, since the removed comment's own `author` field already lands the remover in the
+# same distinct-author list `authorDisplaysFor` walks, so `resolveRemovedBy` still finds a display
+# for it — coincidentally, with nothing left for `removalSubjectsOf` to have proved. A viewer who is
+# also the author or the remover would let the "sees their own address" override (`personDisplay`,
+# server.ts) hide the same leak the same way.
+PSHOW_VIEWER=viewer@example.org
+REMOVE_ID=$(new_request $REVIEWER '{"type":"comment","page":"UC-01","text":"people-show removal marker"}')
 node --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
 const store = new SqliteEventStore(process.argv[1]);
@@ -712,11 +721,11 @@ removed_by_one() {
     node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s);console.log(e.textRemoved?e.textRemoved.by:'')})"
 }
 expect "people.show: role — a removal's \`by\` reads as the remover's role too" Admin \
-  "$(removed_by $REVIEWER $REMOVE_ID)"
+  "$(removed_by $PSHOW_VIEWER $REMOVE_ID)"
 expect "and never the remover's address, on the list route"    1 \
-  "$(removed_by $REVIEWER $REMOVE_ID | has -F '@'; echo $?)"
+  "$(removed_by $PSHOW_VIEWER $REMOVE_ID | has -F '@'; echo $?)"
 expect "nor on GET /api/events/{id} alone"                     1 \
-  "$(removed_by_one $REVIEWER $REMOVE_ID | has -F '@'; echo $?)"
+  "$(removed_by_one $PSHOW_VIEWER $REMOVE_ID | has -F '@'; echo $?)"
 expect "the owner still sees the remover's real address"      "$LEAD" \
   "$(removed_by $OWNER $REMOVE_ID)"
 
@@ -748,19 +757,21 @@ HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/people-show-id.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 
-ID_REMOVE_ID=$(new_request $LEAD '{"type":"comment","page":"UC-01","text":"people-show id removal marker"}')
+# Same split as the role case above — $REVIEWER authors, $LEAD removes, $PSHOW_VIEWER reads — for
+# the same reason: remover and author matching would leave this proving nothing.
+ID_REMOVE_ID=$(new_request $REVIEWER '{"type":"comment","page":"UC-01","text":"people-show id removal marker"}')
 node --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
 const store = new SqliteEventStore(process.argv[1]);
 await store.removeText(process.argv[2], 'text', process.argv[3]);
 " "$PSHOW_ID_DATA/events.db" "$ID_REMOVE_ID" "$LEAD"
-ID_BY=$(removed_by $REVIEWER $ID_REMOVE_ID)
+ID_BY=$(removed_by $PSHOW_VIEWER $ID_REMOVE_ID)
 expect "people.show: id — a removal's \`by\` is the opaque id too" 1 \
   "$(echo "$ID_BY" | grep -cE '^p_[0-9a-f]{24}$')"
 expect "and never the remover's address"                      1 \
   "$(echo "$ID_BY" | has -F '@'; echo $?)"
 expect "and the single-event route agrees"                    "$ID_BY" \
-  "$(removed_by_one $REVIEWER $ID_REMOVE_ID)"
+  "$(removed_by_one $PSHOW_VIEWER $ID_REMOVE_ID)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PSHOW_ID_DATA"
 
 echo "local mode does NOT turn on outside development:"
