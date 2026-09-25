@@ -179,6 +179,7 @@ export const HOME_KEYS = [
   'home.ask.lede', 'home.ask.near', 'home.ask.what', 'home.ask.submit', 'home.ask.done',
   'home.graph.heading', 'home.graph.lede', 'home.graph.loading', 'home.graph.failed',
   'home.graph.missing', 'home.graph.label', 'home.graph.zoomIn', 'home.graph.zoomOut', 'home.graph.reset',
+  'home.graph.filterPrefix', 'home.graph.filterStates', 'home.graph.noMatch',
 ] as const;
 
 /**
@@ -333,12 +334,19 @@ export function renderHomePage(
   // turn that count into "how many things happen to have this class", answering a question about
   // this section instead of the one the test asks about that one. Same look, borrowed through a
   // shared rule in the stylesheet below, never the shared class itself.
-  const legend = STATES.map((s) =>
-    `<li class="home-graph__legend-item"><span aria-hidden="true">${COLOURS[s]}</span> ${t(`home.light.${s}`)}</li>`).join('')
+  //
+  // The legend IS the state filter (#42): one box per row, ticked, whose value is the state key
+  // `/api/graph` sends. `home-graph.js` reads which boxes are ticked and never which exist, so the
+  // states a reader can hide are exactly the ones this legend names — a second list of them in the
+  // script would be one more copy of `STATES` to fall out of step with this one.
+  const stateBox = (state: string, glyph: string, label: string) =>
+    `<li class="home-graph__legend-item"><label><input type="checkbox" name="state" value="${state}" checked>`
+    + ` <span aria-hidden="true">${glyph}</span> ${label}</label></li>`;
+  const legend = STATES.map((s) => stateBox(s, COLOURS[s], t(`home.light.${s}`))).join('')
     // `missing` is not a traffic-light state (engine/core/validity.js never names it) — it is what
     // `graphOf` calls a `data-depends` that points at nothing, drawn as its own row so the legend
     // does not silently claim every dangling reference is "not validated" instead.
-    + `<li class="home-graph__legend-item"><span aria-hidden="true">❓</span> ${t('home.graph.missing')}</li>`;
+    + stateBox('missing', '❓', t('home.graph.missing'));
   // One attribute, not one per string: `states` is itself a dictionary, one entry per
   // traffic-light state plus `missing` — an attribute per STRING could not carry it without a
   // further attribute per state, and a second copy of `STATES` to know which. One blob, composed
@@ -351,10 +359,20 @@ export function renderHomePage(
       none: raw('home.light.none'), valid: raw('home.light.valid'), missing: raw('home.graph.missing'),
     },
   }));
+  // The filters (#42) are written here, translated like every other label on this screen, so the
+  // script carries no strings of its own for them. `home-graph.js` cancels the form's submit: a
+  // filter narrows the graph already loaded and never asks the server again. The "nothing matches"
+  // line sits OUTSIDE `#holdrim-graph`, because a successful draw replaces that container's children.
   const graphSection = !data.pages.length || !data.graphEnabled ? '' : `<section aria-labelledby="home-graph-heading">
     <h2 id="home-graph-heading">${t('home.graph.heading')}</h2>
     <p class="holdrim-muted">${t('home.graph.lede')}</p>
-    <ul class="home-lights home-graph__legend">${legend}</ul>
+    <form class="home-graph__filters" role="search">
+      <label class="holdrim-field"><span class="holdrim-label">${t('home.graph.filterPrefix')}</span>
+        <input class="holdrim-input" type="search" name="prefix" autocomplete="off" spellcheck="false"></label>
+      <fieldset class="home-graph__states"><legend class="holdrim-label">${t('home.graph.filterStates')}</legend>
+        <ul class="home-lights home-graph__legend">${legend}</ul></fieldset>
+    </form>
+    <p class="holdrim-muted home-graph__empty" role="status" hidden>${t('home.graph.noMatch')}</p>
     <div id="holdrim-graph" class="home-graph" data-graph-i18n="${graphI18n}">
       <p class="holdrim-muted" data-graph-status="loading">${t('home.graph.loading')}</p>
       <p class="holdrim-alert holdrim-alert--danger" role="alert" data-graph-status="failed" hidden>${t('home.graph.failed')}</p>
@@ -389,6 +407,10 @@ ${themeCss(theme)}
    property. */
 @media (max-width: 40rem) { .home-lights { display: grid; grid-template-columns: 1fr 1fr; gap: var(--holdrim-space-3); } }
 .home-graph { margin-top: var(--holdrim-space-4); }
+.home-graph__filters { display: flex; flex-wrap: wrap; gap: var(--holdrim-space-4); align-items: flex-end; margin-top: var(--holdrim-space-4); }
+.home-graph__states { border: 0; margin: 0; padding: 0; min-width: 0; }
+.home-graph__states .home-lights { margin-top: var(--holdrim-space-2); }
+.home-graph__legend-item label { display: flex; align-items: center; gap: var(--holdrim-space-2); cursor: pointer; }
 /* touch-action: none keeps a touch drag from also scrolling the PAGE behind the graph — without it
    a pan on a phone fights the browser's own scroll for the same gesture. */
 .home-graph__svg { width: 100%; height: 24rem; display: block; border: 1px solid var(--holdrim-line);

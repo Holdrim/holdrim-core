@@ -232,6 +232,11 @@ who ran the engine from `main` before it.
   React: a small hand-rolled SVG renderer and layout, `engine/web/home-graph.js`, its own bundle,
   loaded by the home screen only, and only when the toggle is on — with the toggle off, the home
   stays exactly as script-free as it always was, and its Content-Security-Policy says so.
+- **Filters on the home's graph**: a "pages starting with" box, and the legend's rows as ticked
+  boxes — one per traffic-light state, plus "not defined" — so a graph of 500+ blocks narrows to
+  the pages and states a viewer cares about. The filtered graph is laid out afresh, and an edge is
+  drawn only while both of its ends are. It filters in the browser, on what `GET /api/graph`
+  already sends: no new route, no new field, and nothing is remembered between visits.
 
 ### Security
 

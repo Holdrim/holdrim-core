@@ -16,6 +16,7 @@
  */
 import { fetchGraph } from './api.js';
 import { layoutOf, iconOf, NODE } from './graph-layout.js';
+import { filterGraph } from './graph-filter.js';
 import { COLOURS } from '../../core/validity.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -53,17 +54,28 @@ if (container) {
   const MAX_SCALE = 8;
   const clampScale = (s) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
 
+  /** The filters `home-page.ts` writes in the same section as `container` (#42), but outside it —
+   *  a draw empties the container, and the filters have to keep whatever a reader typed or ticked
+   *  before the graph finished loading. */
+  const filters = document.querySelector('.home-graph__filters');
+  const noMatch = document.querySelector('.home-graph__empty');
+  // Enter in the prefix box would submit the form, reloading the whole home for a filter that never
+  // needed the server — and losing every tick in the process. Cancelled HERE, not once the graph is
+  // drawn: the form is live from the moment the page is, and a reader who types and presses Enter
+  // while `/api/graph` is still on its way would otherwise send it for real.
+  filters.addEventListener('submit', (event) => event.preventDefault());
+  /** What the filters say right now. Every state is the VALUE of a ticked box — this script keeps
+   *  no list of states of its own, so a state the legend names is one a reader can hide. */
+  const filterOf = () => ({
+    prefix: filters.elements.prefix.value,
+    states: new Set([...filters.querySelectorAll('input[name="state"]:checked')].map((box) => box.value)),
+  });
+
   function draw(graph) {
-    const { positions, width, height } = layoutOf(graph.nodes);
     const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-    const centre = (id) => {
-      const p = positions.get(id);
-      return p && { x: p.x + NODE / 2, y: p.y + NODE / 2 };
-    };
 
     const view = svgEl('svg', {
-      viewBox: `0 0 ${width} ${height}`, class: 'home-graph__svg',
-      role: 'img', 'aria-label': i18n.label ?? 'Documentation graph',
+      class: 'home-graph__svg', role: 'img', 'aria-label': i18n.label ?? 'Documentation graph',
     });
     const world = svgEl('g', { class: 'home-graph__world' });
     const edges = svgEl('g');
@@ -71,36 +83,53 @@ if (container) {
     world.append(edges, nodes);
     view.append(world);
 
-    for (const e of graph.edges) {
-      const from = centre(e.from);
-      const to = centre(e.to);
-      // A dependency naming a block on neither side draws nothing rather than a line to the origin
-      // — graphOf already turned a truly dangling one into its own `missing` NODE (engine/cli/
-      // graph.ts); this guard is only ever real for a graph an older server sent a newer script,
-      // where the two disagree about what exists.
-      if (!from || !to) continue;
-      edges.append(svgEl('line', { x1: from.x, y1: from.y, x2: to.x, y2: to.y, class: 'home-graph__edge' }));
-    }
+    /** Draws what the filters let through, laid out AFRESH — never the full layout with holes in it:
+     *  narrowed to one page out of eight, the full layout would leave that page a sliver of a
+     *  viewBox still sized for all eight, which is no easier to read than before it was filtered. */
+    function render() {
+      const shown = filterGraph(graph, filterOf());
+      const { positions, width, height } = layoutOf(shown.nodes);
+      const centre = (id) => {
+        const p = positions.get(id);
+        return p && { x: p.x + NODE / 2, y: p.y + NODE / 2 };
+      };
+      view.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      noMatch.hidden = shown.nodes.length > 0;
 
-    for (const n of graph.nodes) {
-      const p = positions.get(n.id);
-      const group = svgEl('g', {
-        class: 'home-graph__node', transform: `translate(${p.x},${p.y})`,
-        'data-id': n.id, tabindex: '0', role: 'button',
-        'aria-label': `${n.id} — ${i18n.states?.[n.state] ?? n.state}`,
-      });
-      group.append(
-        svgEl('rect', { width: NODE, height: NODE, rx: 4 }),
-        svgEl('text', { x: NODE / 2, y: NODE / 2, 'text-anchor': 'middle', 'dominant-baseline': 'central' }),
-      );
-      group.lastChild.textContent = iconOf(COLOURS, n.state);
-      const open = () => { if (n.href) location.assign(n.href); };
-      // Enter and Space: a `role="button"` on an SVG `<g>` carries none of a real `<button>`'s
-      // built-in key handling, so without this the graph has nodes a keyboard cannot open at all.
-      group.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
-      });
-      nodes.append(group);
+      edges.replaceChildren();
+      for (const e of shown.edges) {
+        const from = centre(e.from);
+        const to = centre(e.to);
+        // A dependency naming a block on neither side draws nothing rather than a line to the
+        // origin — graphOf already turned a truly dangling one into its own `missing` NODE
+        // (engine/cli/graph.ts), and `filterGraph` already dropped every edge the filters cut; this
+        // guard is only ever real for a graph an older server sent a newer script, where the two
+        // disagree about what exists.
+        if (!from || !to) continue;
+        edges.append(svgEl('line', { x1: from.x, y1: from.y, x2: to.x, y2: to.y, class: 'home-graph__edge' }));
+      }
+
+      nodes.replaceChildren();
+      for (const n of shown.nodes) {
+        const p = positions.get(n.id);
+        const group = svgEl('g', {
+          class: 'home-graph__node', transform: `translate(${p.x},${p.y})`,
+          'data-id': n.id, tabindex: '0', role: 'button',
+          'aria-label': `${n.id} — ${i18n.states?.[n.state] ?? n.state}`,
+        });
+        group.append(
+          svgEl('rect', { width: NODE, height: NODE, rx: 4 }),
+          svgEl('text', { x: NODE / 2, y: NODE / 2, 'text-anchor': 'middle', 'dominant-baseline': 'central' }),
+        );
+        group.lastChild.textContent = iconOf(COLOURS, n.state);
+        const open = () => { if (n.href) location.assign(n.href); };
+        // Enter and Space: a `role="button"` on an SVG `<g>` carries none of a real `<button>`'s
+        // built-in key handling, so without this the graph has nodes a keyboard cannot open at all.
+        group.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+        });
+        nodes.append(group);
+      }
     }
 
     // Pan and zoom, both driven by one `transform` on `world` — the DOM underneath never moves, so
@@ -113,8 +142,14 @@ if (container) {
     let start = { x: 0, y: 0 };
     let originStart = { x: 0, y: 0 };
     const apply = () => world.setAttribute('transform', `translate(${originX},${originY}) scale(${scale})`);
-    apply(); // written once up front — an attribute a reader (or a test) can read before any
-             // interaction, rather than the absence of one meaning the same thing by accident.
+    const resetView = () => { originX = 0; originY = 0; scale = 1; apply(); };
+    render();
+    resetView(); // written once up front — an attribute a reader (or a test) can read before any
+                 // interaction, rather than the absence of one meaning the same thing by accident.
+
+    // A new filter is a new layout, so the view goes back to where it starts: a pan or zoom set for
+    // the old layout would point at wherever some other node now happens to sit.
+    filters.addEventListener('input', () => { render(); resetView(); });
 
     view.addEventListener('pointerdown', (event) => {
       dragging = true; dragged = false;
@@ -174,7 +209,7 @@ if (container) {
     controls.append(
       button(i18n.zoomIn ?? 'Zoom in', '+', () => zoomBy(1.25)),
       button(i18n.zoomOut ?? 'Zoom out', '−', () => zoomBy(0.8)),
-      button(i18n.reset ?? 'Reset view', '⟲', () => { originX = 0; originY = 0; scale = 1; apply(); }),
+      button(i18n.reset ?? 'Reset view', '⟲', resetView),
     );
 
     container.replaceChildren(view, controls);
