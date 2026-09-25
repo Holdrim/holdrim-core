@@ -15,6 +15,7 @@
   "api.crossSite": "Este formulario solo acepta envíos desde su propia página.",
   "api.event.notFound": "evento no encontrado",
   "api.event.unknownType": "tipo de evento desconocido",
+  "api.feature.disabled": "este proyecto tiene {feature} desactivado",
   "api.internal": "Algo salió mal en el servidor. Indique el código {id} a quien lo administra.",
   "api.jsonOnly": "Esta dirección solo acepta JSON: envíe el cuerpo con Content-Type: application/json.",
   "api.name.empty": "escribe el nombre",

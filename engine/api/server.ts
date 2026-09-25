@@ -298,6 +298,23 @@ async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 /**
+ * Which toggle an event needs turned on, or null when nothing about it is gated at all.
+ *
+ * A plain lookup, never a question asked of `roles`: FEATURES decide what exists, capabilities
+ * decide who may use it, and the two must never blend into one function — the moment a toggle could
+ * also be read as "may", it could be read as a way to take a capability from someone, which is
+ * exactly what docs/ROLES.md's "a toggle never turns off a guard" forbids. `approval`,
+ * `request_state` and `supplement` are absent on purpose: they are how a request already filed
+ * moves and how a text is locked, never a way to file a new kind of thing a toggle could gate.
+ */
+function gatingFeatureOf(incoming: NewEvent): keyof typeof project.features | null {
+  if (incoming.type === 'comment') return 'comments';
+  if (incoming.type === 'request' && incoming.data?.category === 'page') return 'pageRequests';
+  if (incoming.type === 'request' && incoming.data?.category === 'bug') return 'bugCategory';
+  return null;
+}
+
+/**
  * Why an event is refused before anything else about it is looked up, or null when it may go on.
  *
  * Called by `recordEvent` only, the one way into the event store for the API and both of the home's
@@ -309,6 +326,13 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
   { status: number; body: Record<string, unknown> } | null {
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
+  }
+  // Checked before anything role-shaped: a feature that is off refuses everyone, owner included —
+  // it is not a permission, and answering 403 either way keeps the two indistinguishable to whoever
+  // is refused, exactly as intended.
+  const gate = gatingFeatureOf(incoming);
+  if (gate && !project.features[gate]) {
+    return { status: 403, body: { error: say('api.feature.disabled', { feature: gate }) } };
   }
   if (incoming.type === 'approval' && (!incoming.block || !incoming.fingerprint)) {
     return { status: 400, body: { error: say('api.approval.needsBlockAndFingerprint') } };
@@ -737,6 +761,18 @@ async function viewerOf(req: IncomingMessage): Promise<string | null> {
  */
 const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.can('people', viewer));
 
+/**
+ * Whether the people SCREEN (and its link in the nav) is reachable at all — `features.peopleScreen`.
+ *
+ * ⚠️ This is the ONLY place that toggle is read. The `/api/users*` routes (`userRoutes`, above) ask
+ * `manages()` — `roles.can('people', email)` — and never this: hiding the screen must never mean
+ * disabling what it fronts (docs/ROLES.md, "no toggle may disable a guard"). An owner who knows the
+ * routes, or a script that calls them directly, keeps every ability the screen merely gives a button
+ * to; turning this off hides the button, nothing else. `engine/tests/features.test.js` proves the
+ * guards themselves read as if this toggle did not exist.
+ */
+const peopleScreenOn = () => project.features.peopleScreen;
+
 /** Headers for a screen the engine renders itself: never cached, framed by nobody, and its policy. */
 function screenHeaders(nonce: string, script: boolean) {
   return {
@@ -748,8 +784,10 @@ function screenHeaders(nonce: string, script: boolean) {
 async function servePeople(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
   // Somebody who may not manage people is sent home rather than shown a refusal: the navigation
-  // never offered them this screen, so they got here by typing the address.
-  if (!byPassword || !managesPeople(viewer)) {
+  // never offered them this screen, so they got here by typing the address. A project that turned
+  // the screen off sends EVERYONE home the same way, owner included — the routes behind it (above)
+  // never asked this question and are not asked it here either.
+  if (!peopleScreenOn() || !byPassword || !managesPeople(viewer)) {
     return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
   }
   const nonce = randomBytes(16).toString('base64');
@@ -848,7 +886,8 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   res.writeHead(status, screenHeaders(nonce, false));
   res.end(renderHomePage(i18n, lang, {
     projectName: project.name, pages, requests,
-    canManagePeople: managesPeople(viewer), ask,
+    canManagePeople: peopleScreenOn() && managesPeople(viewer),
+    pageRequestsEnabled: project.features.pageRequests, ask,
   }, projectTheme, nonce));
 }
 

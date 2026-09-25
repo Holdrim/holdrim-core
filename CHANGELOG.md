@@ -125,3 +125,10 @@ who ran the engine from `main` before it.
   their fields, the request states and categories, the CLI's commands and flags, what
   `holdrim list --json` prints, and the HTTP routes. CI derives each list from the code and fails
   when one moves, naming it, and the failure asks for the change to be recorded here.
+- **Feature toggles**, `holdrim.json`'s new `features` block: a closed list — `comments`,
+  `pageRequests`, `bugCategory`, `peopleScreen`, `graph`, `voice`, `sketch` — each with a default
+  equal to today's behaviour, so a project that sets none sees no change. An unknown key, or a
+  value that is not `true`/`false`, refuses to start, the same way an invalid theme colour does. A
+  toggle never reaches a guard: `peopleScreen` off hides the people screen and its nav link, never
+  the `/api/users*` routes' own rules. `bash scripts/toggle-matrix.sh` runs every server-gated
+  toggle on and off against a real server.

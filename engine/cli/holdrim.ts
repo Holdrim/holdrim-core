@@ -131,7 +131,8 @@ async function main() {
     case 'lights':     return (await validation.showLights(root, { only: values.only })) ? 0 : 2;
     case 'restamp':    await validation.restamp(root); return 0;
     case 'if-i-touch': return validation.ifITouch(root, requireArg(arg, 'if-i-touch <id>'));
-    case 'graph':      return graph.showGraph(root, { json: values.json, mermaid: values.mermaid, dot: values.dot });
+    case 'graph':      return graph.showGraph(root, { json: values.json, mermaid: values.mermaid, dot: values.dot,
+                         enabled: projectConfig.features.graph });
     case 'export': {
       const out = requireArg(arg, 'export <folder>');
       const { pages, files } = exportSite(root, out);

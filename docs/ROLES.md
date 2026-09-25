@@ -258,4 +258,4 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | An agent's own credential, refused for any ✓ | not built |
 | `people.show`, applied by the server | not built |
-| `features`, with both states tested | not built |
+| `features`, with both states tested | built — `engine/core/features.js`, `engine/api/server.ts`, `engine/cli/graph.ts`, `scripts/toggle-matrix.sh` |
