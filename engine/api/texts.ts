@@ -209,9 +209,10 @@ export function findingOf(event: string, field: TextField, kind: TamperKind, obs
  * Never a text, and never an unsalted hash of one (docs/PRIVACY.md, section 4: "an unsalted hash of a
  * CPF would be the CPF"): this reaches the panel and is written into an event that is never erased.
  * Both hashes are salted, with the salt kept in the row and gone with it; the ids name events. So
- * what stays the SAME finding is only what none of the three can see: a `downgraded` field's inline
- * value edited again (it has no salt of its own to hash it under), and a field put right and then
- * tampered back into exactly the state that was acknowledged.
+ * what stays the SAME finding is what none of the three can see: a `downgraded` field's inline
+ * value edited again (it has no salt of its own to hash it under), a field put right and then
+ * tampered back into exactly the state that was acknowledged, and a removal event rewritten in
+ * place — its author, say, since only its id is hashed here.
  */
 export function observedOf(recorded: string | null, row: TextRow | undefined, removals: readonly string[]): string {
   return [recorded ?? '', row ? hashText(row.value, row.salt) : '', [...removals].sort().join(',')].join('\u0000');

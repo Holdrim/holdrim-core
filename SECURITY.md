@@ -38,35 +38,36 @@ Worth knowing before you run it:
   means for personal data, and how a person is removed without breaking the trail:
   [`docs/PRIVACY.md`](docs/PRIVACY.md).
 - **A text that fails its own hash raises a CRITICAL alert — but only once something reads it.**
-  A row edited in place, a hash with no row and no valid removal, two removals of the same field, or
-  (SQLite only — see below) a hash stripped off a row that postdates when extraction began
+  A row edited in place, a hash with no row and no valid removal, two removals of the same field,
+  or (SQLite only — see below) a hash stripped off a row that postdates when extraction began
   ([holdrim#91](https://github.com/Holdrim/holdrim-core/issues/91)) each log a CRITICAL
   `text_tampered` line (`reportTampered`, `engine/api/texts.ts`) the moment the server, or the CLI
-  reading the file or the cloud directly, resolves that field — every time, not once, acknowledged or
-  not — and `holdrim list`/`sync` warn and exit non-zero on the same finding. Nor does it watch on a
-  schedule: it fires when a page, the panel or the CLI actually reads the record, so one nobody ever
-  re-reads raises nothing until somebody does. Every page the panel runs on shows a banner, with no
-  control that closes it, while any finding is open
+  reading the file or the cloud directly, resolves that field — every time, not once, acknowledged
+  or not — and `holdrim list`/`sync` warn and exit non-zero on the same finding. Nor does it watch
+  on a schedule: it fires when a page, the panel or the CLI actually reads the record, so one
+  nobody ever re-reads raises nothing until somebody does. Every page the panel runs on shows a
+  banner, with no control that closes it, while any finding is open
   ([holdrim#107](https://github.com/Holdrim/holdrim-core/issues/107)); the owner alone can
-  acknowledge one finding, which records a `tamper_acknowledged` event and takes that one line of the
-  banner down — never the log line, never the CLI's exit code, and never the text's own tampered
-  reading, which nothing repairs. A finding is its event, field and case plus three things found
-  there (`observedOf`, `engine/api/texts.ts`): the hash the event itself carries, the row's own hash
-  under the row's own salt, and the ids of every valid removal of the field (dated and placed after
-  its target). Changing any of the three, or the case, is a new finding, and shows again while the
-  field still reads as tampered. Two re-tamperings of the field stay the same finding, because none
-  of the three sees them: a `downgraded` field's inline value edited again (it has no salt of its
-  own, and an unsalted hash of it is what docs/PRIVACY.md section 4 forbids), and a field put right
-  and then tampered back into exactly the state that was acknowledged. Nor is anything the three do
-  not hash a new finding: a removal event rewritten in place — its author, say — keeps its id, and
-  so the finding, which is the limit the first item above already names for every event rewritten
-  in place, closed only by signed events. Only a
-  `tamper_acknowledged` event counts, and only one marked `asAgent: "false"`, the one form the route
-  writes: the same id in any other event's `data`, which a client writes, quiets nothing. The banner has a
-  weaker footing than the log line, said plainly: the log line comes from code a direct writer to the
-  store does not reach, while an acknowledgement is an event, and that same direct writer can insert
-  one naming the finding — the banner then goes quiet while the CRITICAL line keeps firing. Closing
-  that needs the events signed, like every other forgery this file names.
+  acknowledge one finding, which records a `tamper_acknowledged` event and takes that one line of
+  the banner down — never the log line, never the CLI's exit code, and never the text's own
+  tampered reading, which nothing repairs. A finding is its event, field and case plus three
+  things found there (`observedOf`, `engine/api/texts.ts`): the hash the event itself carries, the
+  row's own hash under the row's own salt, and the ids of every valid removal of the field (placed
+  after its target and not dated before it). Changing any of the three, or the case, is a new
+  finding, and shows again while the field still reads as tampered. Two re-tamperings of the field
+  stay the same finding, because none of the three sees them: a `downgraded` field's inline value
+  edited again (it has no salt of its own, and an unsalted hash of it is what docs/PRIVACY.md
+  section 4 forbids), and a field put right and then tampered back into exactly the state that was
+  acknowledged. Nor is anything the three do not hash a new finding: a removal event rewritten in
+  place — its author, say — keeps its id, and so the finding, which is the limit the first item
+  above already names for every event rewritten in place, closed only by signed events. Only a
+  `tamper_acknowledged` event counts, and only one marked `asAgent: "false"`, the one form the
+  route writes: the same id in any other event's `data`, which a client writes, quiets nothing.
+  The banner has a weaker footing than the log line, said plainly: the log line comes from code a
+  direct writer to the store does not reach, while an acknowledgement is an event, and that same
+  direct writer can insert one naming the finding — the banner then goes quiet while the CRITICAL
+  line keeps firing. Closing that needs the events signed, like every other forgery this file
+  names.
 
   What a direct writer can still make this alert miss differs by store, and neither is a new gap —
   both are the same one write access to the file or the project always had, made visible for the

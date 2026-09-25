@@ -205,7 +205,7 @@ test('only an acknowledgement quiets a finding: not another event naming it, not
     if (value === undefined) delete data.asAgent; else data.asAgent = value;
     return { ...ack, data };
   };
-  for (const [value, why] of [['true', 'recorded as an agent\'s'], [true, 'marked with a boolean'], [undefined, 'with no mark at all']]) {
+  for (const [value, why] of [['true', 'recorded as an agent\'s'], [true, 'marked with a boolean'], [false, 'marked with the boolean false'], [undefined, 'with no mark at all']]) {
     assert.equal(openFindings(reports, [...events, markedAs(value)]).length, 1, `an acknowledgement ${why} counts for nothing`);
   }
   assert.equal(openFindings(reports, [...events, markedAs('false')]).length, 0, 'the owner\'s, as the route writes it, does');

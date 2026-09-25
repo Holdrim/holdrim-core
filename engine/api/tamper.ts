@@ -117,9 +117,10 @@ export function acknowledgementRefusal(
   if (typeof finding !== 'string' || !/^[0-9a-f]{64}$/.test(finding)) return { refused: { status: 400, key: 'api.tamper.findingRequired' } };
   // Only an OPEN finding: one already acknowledged, one no longer found, and one that does not exist
   // yet are all refused alike — the last is what stops an acknowledgement from being given in
-  // advance. A finding is predictable by whoever can see what it hashes: an event's recorded hash
-  // and its removals' ids are on every read, and the row's salted hash is known to whoever is about
-  // to write that row — so without this check, that writer could acknowledge the tampering first.
+  // advance. A finding is predictable by whoever can see what it hashes: the event's recorded hash
+  // is known to whoever can read the store, and the removals' ids are on every read; the row's
+  // salted hash is known to whoever is about to write that row — so without this check, that writer
+  // could acknowledge the tampering first.
   const found = open.find((f) => f.finding === finding);
   if (!found) return { refused: { status: 409, key: 'api.tamper.notOpen' } };
   return { found };
