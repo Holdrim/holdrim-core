@@ -275,5 +275,5 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Scopes actually consulted by `can`, with a page or block in hand | not built — the grammar is validated (`isValidScope`), nothing reads it yet |
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | An agent's own credential, refused for any ✓ | not built |
-| `people.show`, applied by the server | built (#31) — `engine/core/people-show.js`, `engine/api/server.ts`'s `personDisplay`/`authorDisplaysFor`, `engine/cli/requests.ts`'s `personLabel`. The CLI applies it too, though it can show no name it has no accounts store to find (docs/PRIVACY.md, section 1) |
+| `people.show`, applied by the server | built (#31) — `engine/core/people-show.js`, `engine/api/server.ts`'s `personDisplay`/`authorDisplaysFor`, `engine/cli/requests.ts`'s `personLabel`. The CLI applies it too, though it can show no name and no id it has no accounts store to look either up in (docs/PRIVACY.md, section 1) — `personLabel` passes `id: null` as well as `name: null`, so both fall back to the address, the same as an event from before ids existed |
 | `features`, with both states tested | built — `engine/core/features.js`, `engine/api/server.ts`, `engine/cli/graph.ts`, `engine/web/src/Panel.jsx`, `engine/test-contract.sh` |
