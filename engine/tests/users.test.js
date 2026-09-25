@@ -64,15 +64,23 @@ test('a sign-in racing a reset does not open a session the reset cannot reach', 
   const id = new PasswordIdentity(store, { secure: false });
 
   const realOpenSession = store.openSession.bind(store);
+  let raced = null;
   store.openSession = async (...args) => {
     // The reset's own delete finds nothing here — this account has no session yet — which is
     // exactly why the old fix alone was not enough.
     await store.resetPassword('x@example.org');
-    return realOpenSession(...args);
+    raced = await realOpenSession(...args);
+    return raced;
   };
 
   const result = await id.signIn('x@example.org', password);
   assert.equal(result, null, 'the password stopped matching before this session existed');
+  // `signIn` refusing is not, by itself, proof the row is gone — it is also what a session that was
+  // simply never inserted would look like. What closes THAT gap is `signIn`'s own re-check calling
+  // `closeSession(session)` on exactly this id: without it, or with it closing a different one, the
+  // row this test staged would still be sitting there, live, for whoever still holds it.
+  assert.equal(await store.fromSession(raced), null,
+    'the session opened in the race has to be the one signIn closes, not merely refused up front');
 });
 
 test('a sign-in racing a disable does not open a session the disable cannot reach', async () => {
@@ -81,13 +89,23 @@ test('a sign-in racing a disable does not open a session the disable cannot reac
   const id = new PasswordIdentity(store, { secure: false });
 
   const realOpenSession = store.openSession.bind(store);
+  let raced = null;
   store.openSession = async (...args) => {
     await store.setEnabled('x@example.org', false);
-    return realOpenSession(...args);
+    raced = await realOpenSession(...args);
+    return raced;
   };
 
   const result = await id.signIn('x@example.org', password);
   assert.equal(result, null, 'the account stopped being enabled before this session existed');
+  // Re-enabled before the check, the same reason the conformance suite re-enables before checking a
+  // race staged inside `setEnabled` itself: while the account is still disabled, `fromSession`
+  // refuses on `enabled` alone and would read as null whether or not the ROW survived. Only once
+  // the account can sign in again does a live row come back to life — so a null here, and only
+  // here, means `signIn`'s own `closeSession(session)` really deleted it.
+  await store.setEnabled('x@example.org', true);
+  assert.equal(await store.fromSession(raced), null,
+    'the session opened in the race has to be the one signIn closes, not merely refused up front');
 });
 
 test('the session cookie is not readable by JavaScript and does not travel to another site', () => {
