@@ -100,9 +100,12 @@ who ran the engine from `main` before it.
   Content-Security-Policy whose nonce only the panel's tag carries, so a script written into the
   content — by a person, or by an agent following an instruction hidden in a document — cannot act
   with the reader's session. A page cannot bring scripts of its own.
-- **The CLI, `holdrim`**: `lights`, `if-i-touch`, `index`, `check`, `kinds`, `export`, and the request
-  cycle, `list`, `show`, `impact`, `apply` and `state`. `apply` hands a request to the agent CLI the
-  person already has. The engine calls no model and holds no key.
+- **The CLI, `holdrim`**: `lights`, `if-i-touch`, `graph`, `index`, `check`, `kinds`, `export`, and
+  the request cycle, `list`, `show`, `impact`, `apply` and `state`. `apply` hands a request to the
+  agent CLI the person already has. The engine calls no model and holds no key.
+- **`holdrim graph`**: the dependency graph the traffic light already reads, as JSON, Mermaid or
+  DOT — for a script, another tool, or a diagram to look at outside the browser. It reads the same
+  blocks and the same traffic light every other command does, never a second copy of either.
 - **Sign-in** with passwords, or behind an identity proxy. There is exactly one owner, named by
   `HOLDRIM_OWNER`, and the first-access password is printed once.
 - **Storage.** Events go to SQLite or Firestore and are only ever appended; SQLite refuses

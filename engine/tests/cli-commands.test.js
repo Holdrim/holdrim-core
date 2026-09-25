@@ -129,6 +129,50 @@ test('if-i-touch answers for a block, and refuses one that is not there', (t) =>
   assert.match(missing.out, /no such block: Z99\.9\.9/);
 });
 
+test('graph refuses to guess a format, and refuses two at once', (t) => {
+  const dir = project(t);
+  const none = run(['graph'], dir);
+  assert.equal(none.code, 2);
+  assert.match(none.out, /graph needs exactly one of --json, --mermaid, --dot; got none/);
+
+  const both = run(['graph', '--json', '--dot'], dir);
+  assert.equal(both.code, 2);
+  assert.match(both.out, /got json, dot/);
+});
+
+test('graph prints the SAME dependencies and states `lights` and `if-i-touch` read', () => {
+  // cash-register has real data-depends edges and a mix of validated and broken blocks — hello
+  // world alone would only prove the command runs, not that it reads the graph correctly.
+  const cashRegister = join(ROOT, 'examples', 'cash-register');
+
+  const json = JSON.parse(run(['graph', '--root', cashRegister, '--json'], ROOT).out);
+  const edge = json.edges.find((e) => e.from === 'R02.2.2' && e.to === 'R02.2.1');
+  assert.ok(edge, 'the edge data-depends="R02.2.1" on R02.2.2 is in the graph');
+  const node = json.nodes.find((n) => n.id === 'R02.2.2');
+  assert.ok(node && ['valid', 'stale', 'broken', 'none', 'missing'].includes(node.state));
+  assert.ok(json.edges.length > 0);
+
+  // Mermaid never uses the real id as ITS id (engine/cli/graph.ts), so the edge is found by tracing
+  // the synthetic ids the two labels were given, not by grepping for the block ids themselves.
+  const mermaid = run(['graph', '--root', cashRegister, '--mermaid'], ROOT).out;
+  assert.match(mermaid, /^flowchart TD/);
+  const from = mermaid.match(/(n\d+)\["[^"]*R02\.2\.2"\]/)?.[1];
+  const to = mermaid.match(/(n\d+)\["[^"]*R02\.2\.1"\]/)?.[1];
+  assert.ok(from && to, 'both ends of the edge got a labelled node');
+  assert.match(mermaid, new RegExp(`${from} --> ${to}`));
+
+  const dot = run(['graph', '--root', cashRegister, '--dot'], ROOT).out;
+  assert.match(dot, /^digraph holdrim \{/);
+  assert.match(dot, /"R02\.2\.2" -> "R02\.2\.1";/);
+});
+
+test('graph is byte-identical across two runs of the same project', () => {
+  const cashRegister = join(ROOT, 'examples', 'cash-register');
+  const a = run(['graph', '--root', cashRegister, '--mermaid'], ROOT).out;
+  const b = run(['graph', '--root', cashRegister, '--mermaid'], ROOT).out;
+  assert.equal(a, b);
+});
+
 test('list, show, impact, summary and apply --dry-run read the events file with no cloud', async (t) => {
   const dir = project(t);
   const blocks = await readBlocks(dir);
