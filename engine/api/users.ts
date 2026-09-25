@@ -132,7 +132,27 @@ export interface UserStore {
    * and without saying whether they are disabled.
    */
   check(email: string, password: string): Promise<User | null>;
-  changePassword(email: string, next: string): Promise<void>;
+  /**
+   * A password the person chose themselves, unlike `resetPassword` — nobody else has seen it, so
+   * unlike a reset it does not force a further change.
+   *
+   * `keepSessionId`, when given, is the caller's OWN session: issue #115. Without it, changing your
+   * own password left every OTHER session open too — a stolen cookie survives the very act meant to
+   * shut it out, for as long as the cookie's twelve hours have left to run. The fix is the same shape
+   * as `resetPassword`'s and `setEnabled`'s (see `deleteSessionsForEmail`): drop every session for
+   * the account, except this ONE. `sessionsDropped` is `false` only when that drop failed — the
+   * credential itself has already changed either way, for the same reason a failed drop never undoes
+   * a reset or a disable: the caller decides what to do with the flag (log it, tell whoever asked),
+   * because this class knows neither a request nor a language.
+   *
+   * Optional, and not the account's only other option, because the one caller that exists —
+   * `/api/change-password` — always has a live session by the time it reaches here (every other
+   * `/api/*` route requires one first); nothing here NEEDS the drop to be all-or-nothing the way a
+   * reset or a disable does. Omitting it drops nothing at all, which is `resetPassword`'s job, not
+   * this one's, and passing `false`-shaped nonsense instead of a real id would be worse than saying
+   * nothing.
+   */
+  changePassword(email: string, next: string, keepSessionId?: string): Promise<{ sessionsDropped: boolean }>;
   /**
    * Generates a new password, stores it and returns it to be shown ONCE. Demands a change, because
    * somebody other than its owner has seen it.
@@ -224,6 +244,23 @@ export abstract class UserStoreBase implements UserStore {
    * databases with three ways to "delete where email = X" is still one rule, decided once, here.
    */
   protected abstract deleteSessionsForEmail(email: string): Promise<void>;
+  /**
+   * Every session open under this e-mail EXCEPT `keepSessionId`, gone — issue #115's own primitive,
+   * next to `deleteSessionsForEmail` for the same reason that one exists: one rule, decided once,
+   * here, rather than three databases each inventing their own "delete where email = X and id is not
+   * mine".
+   *
+   * ⚠️ It has to be ONE operation, not delete-all-then-reopen. Re-opening a fresh session for the
+   * caller after deleting everything would leave a real window — between the delete committing and
+   * the new session's insert landing — where a request arriving with the OLD, still-valid cookie
+   * finds no session at all and is refused, even though nothing about the caller's own session was
+   * ever meant to change. That window is exactly the shape of race #113's fix in `identity-password.
+   * ts`'s `signIn` closes for a NEW session; reopening one here to reopen the same hole on a session
+   * that already exists would be solving #115 by half-reintroducing #113. `WHERE email = ? AND id !=
+   * ?` (or its store's equivalent) has no such window: the caller's row is simply never touched, so
+   * there is nothing for a concurrent request to race.
+   */
+  protected abstract deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void>;
 
   abstract close(): Promise<void>;
 
@@ -278,7 +315,7 @@ export abstract class UserStoreBase implements UserStore {
     return profileOf(row);
   }
 
-  async changePassword(email: string, next: string): Promise<void> {
+  async changePassword(email: string, next: string, keepSessionId?: string): Promise<{ sessionsDropped: boolean }> {
     if (next.length < MIN_PASSWORD_LENGTH) {
       throw new UserInputError(
         `a password needs at least ${MIN_PASSWORD_LENGTH} characters`,
@@ -286,8 +323,17 @@ export abstract class UserStoreBase implements UserStore {
     }
     const salt = randomBytes(SALT_LENGTH);
     const hash = await this.#hash(next, salt);
+    const normalized = normalizeEmail(email);
     // `false`: the person just chose this one themselves, so there is nothing left to demand.
-    await this.writeCredential(normalizeEmail(email), salt, hash, false);
+    await this.writeCredential(normalized, salt, hash, false);
+    // Issue #115: a session opened under the password that just stopped being valid is exactly as
+    // exposed as a stolen credential is — the same reasoning `resetPassword` acts on below — except
+    // here the caller is IN one of those sessions right now, having just proved who they are with the
+    // old password, and dropping it out from under them would be its own kind of lockout. `undefined`
+    // (no caller session known) drops nothing, same as never calling this at all — see the interface
+    // doc on why the one real caller never actually takes that branch.
+    if (keepSessionId === undefined) return { sessionsDropped: true };
+    return { sessionsDropped: await this.#dropSessions(normalized, keepSessionId) };
   }
 
   /**
@@ -351,16 +397,17 @@ export abstract class UserStoreBase implements UserStore {
   }
 
   /**
-   * Deletes every session for an e-mail, and says whether it worked — never by throwing.
+   * Deletes every session for an e-mail — or every session but one, when `keepSessionId` names it —
+   * and says whether it worked, never by throwing.
    *
    * ⚠️ By the time this runs, `writeCredential` or `writeEnabled` has ALREADY committed — the
    * access change is real, whatever happens next. Letting a failed delete here reject the whole
-   * `resetPassword` or `setEnabled` call would turn a real, already-applied change into a 500 with
-   * NO `user_password_reset` or `user_enabled_changed` line in the audit log: the one record of who
-   * did this and to whom simply would not exist, for a change that certainly happened. The
-   * write-then-delete order stays — the alternative was rejected once already, in the sign-in race
-   * `identity-password.ts` guards against — so what changes here is only that the delete's own
-   * failure does not also swallow the record of the write that preceded it.
+   * `resetPassword`, `setEnabled` or `changePassword` call would turn a real, already-applied change
+   * into a 500 with NO `user_password_reset`, `user_enabled_changed` or `password_changed` line in
+   * the audit log: the one record of who did this and to whom simply would not exist, for a change
+   * that certainly happened. The write-then-delete order stays — the alternative was rejected once
+   * already, in the sign-in race `identity-password.ts` guards against — so what changes here is only
+   * that the delete's own failure does not also swallow the record of the write that preceded it.
    *
    * The failure is not allowed to vanish either: it means some number of that account's sessions
    * may still be alive, silently, which is a real gap in exactly the guarantee issue #113 exists
@@ -371,9 +418,10 @@ export abstract class UserStoreBase implements UserStore {
    * failure is handed back as a plain boolean, so the route above — which HAS the request, the
    * person's id and the JSON answer the caller reads — can log it and report it instead.
    */
-  async #dropSessions(email: string): Promise<boolean> {
+  async #dropSessions(email: string, keepSessionId?: string): Promise<boolean> {
     try {
-      await this.deleteSessionsForEmail(email);
+      if (keepSessionId === undefined) await this.deleteSessionsForEmail(email);
+      else await this.deleteSessionsForEmailExcept(email, keepSessionId);
       return true;
     } catch {
       return false;

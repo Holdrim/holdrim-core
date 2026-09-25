@@ -149,6 +149,13 @@ export class UsersPostgres extends UserStoreBase {
     await this.#query('DELETE FROM sessions WHERE email = $1', [email]);
   }
 
+  protected async deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void> {
+    // One statement: the caller's own row is excluded by the WHERE clause itself, so there is no
+    // moment where it is gone and not yet back (users.ts's comment on the abstract method says why
+    // that matters).
+    await this.#query('DELETE FROM sessions WHERE email = $1 AND id != $2', [email, keepSessionId]);
+  }
+
   async close(): Promise<void> {
     // Awaiting the connection first: closing a store whose pool is still being built would leave
     // the pool open behind us and hold the process alive.

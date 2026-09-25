@@ -383,6 +383,105 @@ forEachStore('a password reset alone drops every open session for the account', 
     'a reset must drop existing sessions, not just replace the credential they were opened with');
 });
 
+// ===================================================================== changing your own password
+//
+// Issue #115: unlike `resetPassword` above, this credential change was chosen by the very session
+// that is asking for it — dropping that session too would sign the person out of the tab they just
+// proved is theirs. Every other session for the account is exactly as exposed as `resetPassword`'s
+// stale sessions are, so it drops those and only those.
+
+forEachStore('changing your own password drops every OTHER session, and keeps the caller\'s', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const mine = await s.openSession('x@example.org');
+  const stolen = await s.openSession('x@example.org');
+  assert.equal((await s.fromSession(mine)).email, 'x@example.org');
+  assert.equal((await s.fromSession(stolen)).email, 'x@example.org');
+
+  await s.changePassword('x@example.org', 'a-new-long-password', mine);
+
+  assert.equal(await s.fromSession(stolen), null,
+    'a session that is not the one asking for the change is exactly as exposed as a stolen password');
+  assert.equal((await s.fromSession(mine)).email, 'x@example.org',
+    'the session that just proved it is the account owner must not be the one that pays for it');
+});
+
+forEachStore('changing your own password with no session named to keep drops nothing', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = await s.openSession('x@example.org');
+
+  // `keepSessionId` omitted entirely — the shape `resetPassword` itself uses, and the one nothing in
+  // this codebase actually calls `changePassword` with (the real caller, `/api/change-password`,
+  // always knows its own session). Dropping every session here regardless would silently turn a
+  // no-op into `resetPassword`'s job.
+  const result = await s.changePassword('x@example.org', 'a-new-long-password');
+
+  assert.equal((await s.fromSession(id)).email, 'x@example.org',
+    'omitting the session to keep must not be read as "keep none of them"');
+  assert.equal(result.sessionsDropped, true, 'nothing was asked to be dropped, so nothing failed');
+});
+
+forEachStore("changing one account's password does not touch another account's session", async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  await s.create('y@example.org', 'Y', 'a-long-enough-password');
+  const mine = await s.openSession('x@example.org');
+  const y = await s.openSession('y@example.org');
+
+  // A delete not scoped to x's e-mail — `id != ?` alone, with the `email = ?` half dropped or
+  // OR'd instead of AND'd — would still pass the single-account test above, because that one has
+  // nothing else to reach. Only a second account's session can catch a WHERE clause that is too wide.
+  await s.changePassword('x@example.org', 'a-new-long-password', mine);
+
+  assert.equal((await s.fromSession(y))?.email, 'y@example.org',
+    "a delete scoped to x's e-mail and x's kept session must not reach y's session at all");
+});
+
+forEachStore('every other open session is dropped, not just the first one found', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const mine = await s.openSession('x@example.org');
+  const others = [await s.openSession('x@example.org'), await s.openSession('x@example.org'),
+    await s.openSession('x@example.org')];
+
+  await s.changePassword('x@example.org', 'a-new-long-password', mine);
+
+  for (const id of others) assert.equal(await s.fromSession(id), null,
+    'a delete that only reaches the first other session it finds would pass with fewer sessions open');
+  assert.equal((await s.fromSession(mine)).email, 'x@example.org');
+});
+
+forEachStore('a session landing right after the change\'s credential write does not survive', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const mine = await s.openSession('x@example.org');
+  // Same shape as the reset race above: whatever lands between the credential write and the delete
+  // that follows it is still caught, because the delete has not run yet either.
+  const originalWriteCredential = s.writeCredential.bind(s);
+  let raced = null;
+  s.writeCredential = async (...args) => {
+    await originalWriteCredential(...args);
+    raced = await s.openSession(args[0]);
+  };
+  await s.changePassword('x@example.org', 'a-new-long-password', mine);
+  assert.equal(await s.fromSession(raced), null,
+    'the delete that follows the credential write has to catch a session opened before it runs');
+  assert.equal((await s.fromSession(mine)).email, 'x@example.org',
+    'and still must not catch the one session this whole call exists to keep alive');
+});
+
+forEachStore('changing your own password still changes the credential when dropping the others fails', async (s) => {
+  const first = await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const mine = await s.openSession('x@example.org');
+  s.deleteSessionsForEmailExcept = async () => { throw new Error('boom'); };
+
+  const result = await s.changePassword('x@example.org', 'a-new-long-password', mine);
+
+  // The write happens BEFORE the delete that just failed — same ordering as the reset test above,
+  // and for the same reason: a caller that let this throw would answer 500 with no
+  // `password_changed` line ever written, for a credential that changed regardless.
+  assert.equal(await s.check('x@example.org', first), null, 'the old password really did stop working');
+  assert.ok(await s.check('x@example.org', 'a-new-long-password'), 'and the new one really does get in');
+  assert.equal(result.sessionsDropped, false,
+    'a delete that fails has to say so, not report a success it did not have');
+});
+
 forEachStore("disabling and resetting one account leaves another account's session alive", async (s) => {
   await s.create('x@example.org', 'X', 'a-long-enough-password');
   await s.create('y@example.org', 'Y', 'a-long-enough-password');
@@ -597,3 +696,42 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
     { skip: 'FIRESTORE_EMULATOR_HOST is not set, so nothing ran against Firestore. Start one with: '
       + 'eval "$(bash scripts/firestore-emulator.sh)", then re-run.' }, () => {});
 }
+
+// Round 1 review of #115 (MAJOR, proof): the "except" pagination has the same page boundary as
+// `deleteSessionsForEmail` above, but nothing exercised it — the "except" tests earlier in this file
+// open only a handful of sessions, and the pagination test just above drives `deleteSessionsForEmail`,
+// where nothing is ever excluded and `queued` always equals `page.size`. A mutant that reads
+// `queued === 400` instead of `page.size === 400` (`#deleteSessionPage`, users-firestore.ts) survived
+// every test that existed before this one — this is the test that catches it.
+forEachStore('the kept session survives even past a single delete page, and every other one is gone', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+
+  // Crafted, not random: `!` (0x21) sorts before every character `openSession`'s base64url ids use
+  // (`-0-9A-Za-z_`, all 0x2D or higher), and a plain `.where(...).limit(...)` query with no
+  // `orderBy` reads Firestore documents back in ascending id order — checked against the real
+  // emulator, not merely assumed. That lands this ONE session inside the FIRST page a paginated
+  // delete reads, which is the only place `#deleteSessionPage`'s "how many documents did the QUERY
+  // return" and "how many did this call actually delete" can ever come apart: with fewer sessions,
+  // or the kept one happening to fall on the always-short LAST page, the two numbers are always
+  // equal and a bug that confused them would pass unnoticed regardless of how many sessions exist.
+  // `insertSession` bypasses `openSession`'s random id on purpose, to CHOOSE where this one lands
+  // rather than hope for it; every store implements it, so this same test is portable to all three,
+  // even though only Firestore's delete has a page boundary to get wrong.
+  const mine = '!!!!!!!!the-kept-session';
+  const now = new Date();
+  await s.insertSession(mine, 'x@example.org', now.toISOString(),
+    new Date(now.getTime() + 12 * 3600_000).toISOString());
+  const others = [];
+  for (let i = 0; i < 401; i++) others.push(await s.openSession('x@example.org'));
+
+  await s.changePassword('x@example.org', 'a-new-long-password', mine);
+
+  assert.equal((await s.fromSession(mine)).email, 'x@example.org',
+    'the one session named to survive has to still be there once the account has more sessions '
+    + 'than a single delete page can hold');
+  const alive = (await Promise.all(others.map((id) => s.fromSession(id)))).filter(Boolean).length;
+  assert.equal(alive, 0,
+    'a loop that stops the moment it sees the kept session sitting in a FULL page would leave every '
+    + 'session past that page alive — this is the boundary a plain "a handful of sessions" test, or '
+    + 'one that never excludes anybody, cannot reach');
+});

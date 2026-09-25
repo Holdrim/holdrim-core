@@ -231,3 +231,15 @@ who ran the engine from `main` before it.
   `POST /api/users/:email/password` and `.../enabled` carries `sessionsDropped: false`, the log
   gets an `ERROR user_sessions_not_dropped` line naming the person by id, and the people screen
   warns next to their row.
+- **`POST /api/change-password` now drops every OTHER session open under the account, keeping only
+  the one that just made the change.** Before, a password chosen by its own owner — unlike a reset,
+  which already dropped everything — left a session opened under the old, just-abandoned password
+  free to keep going for whatever was left of its twelve hours: exactly as exposed as a stolen
+  credential, and untouched by the very act meant to shut it out. It is not treated like a reset's
+  all-or-nothing drop, because here the caller is sitting in one of those sessions right now, having
+  just proved who they are — dropping it too would sign them out of the tab they used to change it.
+  Every user store gained a `deleteSessionsForEmailExcept` primitive for this, one atomic delete
+  rather than a delete-all followed by re-opening the caller's own session, which would reopen the
+  exact race issue #113's fix closed for a window nobody asked to reopen. Same failure reporting as
+  above: a failed drop carries `sessionsDropped: false` and an `ERROR user_sessions_not_dropped` line,
+  never a 500 for a credential that changed regardless.
