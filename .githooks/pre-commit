@@ -93,9 +93,9 @@ fi
 # esbuild is fast. The inputs are named broadly on purpose — all of engine/core/, though today the
 # panel imports one file of it: a rebuild for nothing costs 0.3 s, an input left off the list is a
 # stale bundle reaching CI.
-INPUTS='^engine/(web/src/|core/|locales/en\.json$|cycle\.json$)|^package(-lock)?\.json$'
+INPUTS='^engine/(web/src/|core/|locales/en\.json$|cycle\.json$)|^scripts/build-web\.js$|^package(-lock)?\.json$'
 # The bundle itself too: one staged alone, edited by hand or left by an old build, is checked the same.
-bundled=$(echo "$FILES" | grep -E "$INPUTS|^engine/web/panel-react\.js$" || true)
+bundled=$(echo "$FILES" | grep -E "$INPUTS|^engine/web/(panel-react\.js|generated/)" || true)
 # esbuild reads the working tree, not what is staged. With an input half staged, the rebuilt bundle
 # would carry the unstaged half into the commit while the source it came from stayed out, and pass.
 # So a commit that touches the bundle's inputs has to be the whole of them.
@@ -105,8 +105,9 @@ if [ -n "$bundled" ] && [ -n "$unstaged" ]; then
 elif [ -n "$bundled" ]; then
   if ! npm run --silent build:web >/tmp/pre-commit-bundle.log 2>&1; then
     tail -5 /tmp/pre-commit-bundle.log | sed 's/^/      /'; fail "the panel's bundle does not build"
-  elif ! git diff --quiet -- engine/web/panel-react.js; then
-    fail "engine/web/panel-react.js was stale; it is rebuilt now — git add engine/web/panel-react.js"
+  elif ! git diff --quiet -- engine/web/panel-react.js engine/web/generated \
+    || [ -n "$(git ls-files --others --exclude-standard -- engine/web/generated)" ]; then
+    fail "the panel bundle or Mermaid chunks were stale; rebuild and stage them by path"
   fi
 fi
 

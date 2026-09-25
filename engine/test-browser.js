@@ -21,6 +21,9 @@ import { chromium } from 'playwright-core';
 const ROOT = new URL('..', import.meta.url).pathname;
 const PORT = Number(process.env.PORT ?? 18096);
 const BASE = `http://127.0.0.1:${PORT}`;
+const MERMAID_ENTRY = readFileSync(join(ROOT, 'engine', 'web', 'panel-react.js'), 'utf8')
+  .match(/import\("(\.\/[^" ]+\.js)"\)/)?.[1];
+if (!MERMAID_ENTRY) throw new Error('the panel bundle has no lazy Mermaid entry');
 const OWNER = 'owner@example.org';
 const READER = 'reader@example.org';
 const LEAD = 'lead@example.org';   // an admin: may approve, and their ✓ is not the lock
@@ -74,6 +77,23 @@ if (await fetch(`${BASE}/api/health`).then(() => true, () => false)) {
 const site = mkdtempSync(join(tmpdir(), 'holdrim-browser-'));
 cpSync(join(ROOT, 'examples', 'hello-world'), site, { recursive: true });
 cpSync(join(ROOT, 'examples', 'template'), join(site, 'template'), { recursive: true });
+// The first Mermaid source is deliberately malformed. Its failure must leave the original text
+// readable and must not prevent the valid diagram after it from rendering in the same block.
+const diagramPath = join(site, 'template', '00-kinds', 'Y01.html');
+writeFileSync(diagramPath, readFileSync(diagramPath, 'utf8').replace(
+  '<pre><code class="mermaid">flowchart LR',
+  '<pre><code class="mermaid">flowchart LR\n  A[unfinished</code></pre>\n    <pre><code class="mermaid">flowchart LR')
+  .replace('  </div>\n\n  <div class="block" data-id="Y01.2.4"', `    <pre><code class="language-js">console.log('ordinary source, never a diagram');</code></pre>
+    <pre><code class="mermaid">%%{init: {"securityLevel":"loose"}}%%
+flowchart LR
+  A[Source] --> B[Destination]
+  click A "https://example.invalid/safe"
+  click B "javascript:globalThis.__mermaidAttack = true"</code></pre>
+    <pre><code class="mermaid">flowchart LR
+  A["&lt;img src=x onerror=globalThis.__mermaidAttack=true&gt;"] --> B[Safe]</code></pre>
+  </div>
+
+  <div class="block" data-id="Y01.2.4"`));
 
 // A page whose blocks depend on a block of ANOTHER page (A02.1.1): one approved while that
 // block read as it does now, one approved against a text it no longer has. The panel only renders
@@ -259,12 +279,76 @@ try {
     console.log(`${kind} (${code}):`);
     const url = BASE + path;
     const owner = await person(OWNER);
+    const mermaidRequests = [];
+    owner.page.on('request', (request) => {
+      if (new URL(request.url()).pathname === `/engine/web/${MERMAID_ENTRY.slice(2)}`) {
+        mermaidRequests.push(request.url());
+      }
+    });
+    const outsideRequests = [];
+    if (code === 'Y01') owner.page.on('request', (request) => {
+      if (new URL(request.url()).origin !== BASE) outsideRequests.push(request.url());
+    });
     await owner.page.goto(url);
     await must('the panel builds its buttons', () => owner.page.locator('.rv-num').first().waitFor());
     await settled(owner.page);
     expect('every numbered block has a button', numbered, await owner.page.locator('main .rv-num').count());
     expect('the panel switched on', true, await owner.page.locator('body.rv-on').count() === 1);
     expect('nothing failed to load, nothing threw', '', owner.problems.join(' | '));
+    if (code === 'A01') expect('a page without Mermaid never requests its chunk', 0,
+      mermaidRequests.length);
+
+    if (code === 'Y01') {
+      const diagram = owner.page.locator('[data-id="Y01.2.2"]');
+      expect('malformed Mermaid leaves the source readable and panel active', true,
+        (await diagram.locator('pre code.mermaid').first().textContent()).includes('A[unfinished')
+        && await owner.page.locator('body.rv-on').count() === 1);
+      expect('malformed Mermaid adds no drawing to its source', false,
+        await diagram.locator('pre').first().evaluate((el) => el.nextElementSibling?.matches('.rv-diagram')));
+      await must('the valid Mermaid drawing after malformed source appears under the page CSP',
+        () => diagram.locator('.rv-diagram svg').waitFor({ timeout: 15000 }));
+      await settled(owner.page);
+      expect('a diagram page requests its local Mermaid chunk', true,
+        mermaidRequests.length > 0 && mermaidRequests.every((request) => request.startsWith(BASE)));
+      const hostile = owner.page.locator('[data-id="Y01.2.3"]');
+      await must('the security fixtures render in the second block',
+        () => hostile.locator('.rv-diagram svg').last().waitFor());
+      const drawings = owner.page.locator('.rv-diagram svg');
+      const diagramIds = await drawings.evaluateAll((elements) => elements.map((element) => element.id));
+      expect('diagram ids are unique across blocks', diagramIds.length,
+        new Set(diagramIds).size);
+      expect('ordinary code is never submitted to the renderer',
+        ['holdrim-diagram-1', 'holdrim-diagram-2', 'holdrim-diagram-3'].join(','),
+        diagramIds.join(','));
+      expect('ordinary code has no drawing', 0,
+        await hostile.locator('pre').first().evaluate((el) => Number(el.nextElementSibling?.matches('.rv-diagram'))));
+      const unsafe = await hostile.locator('.rv-diagram').evaluateAll((elements) =>
+        elements.flatMap((element) => [...element.querySelectorAll('*')]).filter((node) =>
+          node.tagName.toLowerCase() === 'foreignobject'
+          || [...node.attributes].some(({ name, value }) => name.toLowerCase().startsWith('on')
+            || (/^(href|xlink:href)$/i.test(name) && /^\s*javascript:/i.test(value)))).length);
+      expect('strict Mermaid leaves no foreignObject, event handler or javascript link', 0, unsafe);
+      expect('malicious Mermaid never runs script', false,
+        await owner.page.evaluate(() => Boolean(globalThis.__mermaidAttack)));
+      expect('the original Mermaid source remains in the block', true,
+        (await diagram.locator('pre code.mermaid').last().textContent()).includes('flowchart LR'));
+      expect('the renderer makes no external requests', '', outsideRequests.join(' | '));
+      expect('the rendered SVG raises no CSP or load errors', '', owner.problems.join(' | '));
+      expect('the drawing is excluded from the fingerprint', 1,
+        await diagram.locator('.rv-diagram[data-review-ui]').count());
+      const liveFingerprint = await diagram.evaluate(async (element) =>
+        (await import('/engine/core/fingerprint.js')).fingerprintOfElement(element));
+      expect('the live diagram fingerprint remains on the text after rendering',
+        (await readBlocks(root)).get('Y01.2.2').fingerprint, liveFingerprint);
+      await block(owner.page, 'Y01.2.2').click();
+      await owner.page.getByRole('button', { name: '✓ Approve this block' }).click();
+      const diagramEvents = await fetch(`${BASE}/api/events?page=Y01`, { headers: { 'X-Dev-Email': OWNER } })
+        .then((r) => r.json());
+      expect('the diagram approval fingerprints the source text, not the SVG',
+        (await readBlocks(root)).get('Y01.2.2').fingerprint,
+        diagramEvents.find((e) => e.type === 'approval' && e.block === 'Y01.2.2')?.fingerprint);
+      await owner.page.getByRole('button', { name: 'Close' }).click();
+    }
 
     // Approve 1.2, as the owner.
     await block(owner.page, `${code}.1.2`).click();
@@ -286,6 +370,8 @@ try {
     await settled(owner.page);
     expect('and after a reload it still holds', true,
       await owner.page.locator(`[data-id="${code}.1.2"] .rv-num.rv-num--ok`).count() === 1);
+    if (code === 'Y01') expect('the diagram approval still holds after rendering again', 1,
+      await owner.page.locator('[data-id="Y01.2.2"] .rv-num.rv-num--ok').count());
 
     // An admin's ✓ is recorded and stays an opinion: the block does not turn green, the panel says
     // whose ✓ it is, and the button is not offered again to the one who just pressed it. Green for

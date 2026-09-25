@@ -256,6 +256,11 @@ async function start() {
   where.setAttribute('data-review-ui', '');
   document.body.appendChild(where);
   createRoot(where).render(<App blocks={blocks} elsewhere={elsewhere} who={who} />);
+  // A plain documentation page should not download the 3 MB renderer.
+  if (blocks.some(({ el }) => el.querySelector('pre code.mermaid'))) {
+    const { renderDiagrams } = await import('./diagrams.js');
+    await renderDiagrams(blocks);
+  }
 }
 
 start().catch((e) => switchOff(e));
