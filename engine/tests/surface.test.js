@@ -24,7 +24,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CLI_COMMANDS, CLI_FLAGS } from './helpers/cli-source.js';
-import { EVENT_TYPES, stored } from '../api/types.ts';
+import { EVENT_TYPES, stored, LOCK_BASELINE_TYPE, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD } from '../api/types.ts';
 import { queue } from '../cli/requests.ts';
 import * as screens from '../core/screens.js';
 import * as language from '../api/language.ts';
@@ -129,7 +129,17 @@ test('the data- attributes the engine reads and writes are the ones engine/surfa
 
 // ---------------------------------------------------------------- events
 test('the event types are the ones engine/surface.json lists', () => {
-  sameAs('event types', EVENT_TYPES, SURFACE['event-types']);
+  // `LOCK_BASELINE_TYPE` is unioned in here, by hand, rather than added to `EVENT_TYPES` itself:
+  // `EVENT_TYPES` is also the client-accepted list `refusalOf` (server.ts) checks a POST's `type`
+  // against, and `lock_baseline` is written only by the server (types.ts, `ensureLockBaseline`).
+  //
+  // ⚠️ This test does NOT guard `lock_baseline` staying out of `EVENT_TYPES` (round 2's review,
+  // M-3): `sameAs` dedupes through `new Set(derived)`, so if a future edit merged `LOCK_BASELINE_TYPE`
+  // INTO `EVENT_TYPES` — which WOULD let a client post one and forge who the baseline owner was — the
+  // union here would list the exact same names either way, and this assertion would keep passing in
+  // silence. The actual guard is `refusalOf` refusing an unknown `type`, and `engine/test-contract.sh`
+  // (`lock_baseline via POST /events → 400, even from a member`) proves it stays refused.
+  sameAs('event types', [...EVENT_TYPES, LOCK_BASELINE_TYPE], SURFACE['event-types']);
 });
 
 test('the fields of an event are the ones engine/surface.json lists', () => {
@@ -154,6 +164,13 @@ test('the keys inside an event\'s data are the ones engine/surface.json lists', 
       for (const [, key] of body.matchAll(/(?:^|,)\s*(\w+)\s*(?=:|,|$)/g)) keys.add(key);
     }
   }
+  // `locks` and `authorCouldTriage` are written through a COMPUTED key — `data[LOCKS_FIELD]`
+  // (server.ts) — which every pattern above is blind to: no literal `.locks`/`.authorCouldTriage`
+  // or one-line `{ locks: … }` exists anywhere in the product for the scan to find. Added from the
+  // constants themselves, the one place a future rename could not silently stop being checked here
+  // the way it silently stopped being caught by the scan (round 1's review, finding 4).
+  keys.add(LOCKS_FIELD);
+  keys.add(AUTHOR_COULD_TRIAGE_FIELD);
   assert.ok(keys.has('request') && keys.has('commit'), 'the data-key scan read the wrong files');
   sameAs('event data keys', keys, SURFACE['event-data-keys']);
 });

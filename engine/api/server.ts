@@ -26,7 +26,10 @@ import { loadTheme } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { IapIdentity } from './identity-iap.ts';
-import { EVENT_TYPES, type Event, type NewEvent, type EventStore } from './types.ts';
+import {
+  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, ensureLockBaseline, isLocked, authorCouldTriage,
+  type Event, type NewEvent, type EventStore,
+} from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
 import { personAs } from '../core/people-show.js';
 import { resolveRemovedBy, type Removed } from './texts.ts';
@@ -172,6 +175,21 @@ const events: EventStore = await (async () => {
       process.exit(1);
   }
 })();
+
+/**
+ * The fact an unwritten ✓ is measured against (decision B, round 1's review): who HOLDRIM_OWNER was
+ * the moment THIS server first read this store. Resolved once, at boot, before anything is served —
+ * "on the first start of this version" means whatever the store already holds, checked here, never a
+ * flag this process could lose track of. See `ensureLockBaseline`'s own comment (types.ts) for the
+ * write it makes, and why it is never reachable from a client POST.
+ *
+ * It also decides which events' WRITTEN fields are trusted at all (round 2's review): `isLocked` and
+ * `authorCouldTriage` (types.ts) read `data.locks`/`data.authorCouldTriage` only for an event dated
+ * after this one — anything this server itself recorded, this boot or an earlier one of this
+ * version — never for one that predates it, which is a store from before this mechanism existed and
+ * could hold whatever a client's own POST body once put in `data`.
+ */
+const LOCK_BASELINE = await ensureLockBaseline(events, roles.owner);
 
 /** Wraps `idForLog`/`actedOn` (engine/api/people.ts) around this server's own store. */
 const idForLog = (email: string) => peopleIdForLog(events, email);
@@ -379,21 +397,30 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
 /**
  * A request plus the state the server computed. The front end does not reimplement the cycle.
  * `thread` is the request's own events (`cycle.threadsOf`), not the whole list: see there why.
+ * `authorCouldTriage` (types.ts) is what reads what `recordEvent` wrote onto the request when it was
+ * FILED — the one implementation this file and requests.ts (the agent's CLI) both call, so there is
+ * no second copy of the fallback to drift from it (round 1's review, finding 2). It trusts that
+ * written field only when the request itself is dated after `LOCK_BASELINE` (round 2's review): a
+ * request from before this whole mechanism existed could hold a client-forged `authorCouldTriage`
+ * `recordEvent` never wrote, back when it stored whatever `data` a client sent.
  */
 const withStatus = (e: Event, thread: Event[]) => ({
   ...e,
-  status: cycle.status(cycle.currentState(e.id, thread, roles.can('triage', e.author))),
+  status: cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e, LOCK_BASELINE))),
 });
 
 /**
  * An event as a reader gets it: a request with its state, and an approval saying whether it is the
  * lock. Only the owner's ✓ is — `holdrim sync` and the home count theirs alone — and a panel that
- * painted any ✓ green, an admin's included, would show an opinion as if it were the lock.
- * Said here, where the roles are, so the panel reads the answer instead of learning who the owner is.
+ * painted any ✓ green, an admin's included, would show an opinion as if it were the lock. `isLocked`
+ * (types.ts) reads what `recordEvent` wrote onto the ✓ when it was GIVEN — but only when the ✓ is
+ * dated after `LOCK_BASELINE`, for the same reason `withStatus`, above, gates `authorCouldTriage` the
+ * same way — falling back to `legacyLock` against `LOCK_BASELINE` for one that predates it, or holds
+ * nothing at all. The one implementation this file and validation.ts (`holdrim sync`) both call.
  */
 const asRead = (e: Event, threads: Map<string, Event[]>) => {
   if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? []);
-  if (e.type === 'approval') return { ...e, locks: roles.can('lock', e.author) };
+  if (e.type === 'approval') return { ...e, locks: isLocked(e, LOCK_BASELINE) };
   return e;
 };
 
@@ -485,7 +512,7 @@ async function recordEvent(
     const ofPage = await events.list(incoming.page);
     const request = ofPage.find((e) => e.id === requestId && e.type === 'request');
     if (!request) return { status: 404, body: { error: say('api.request.notFound') } };
-    const current = cycle.currentState(requestId, ofPage, roles.can('triage', request.author));
+    const current = cycle.currentState(requestId, ofPage, authorCouldTriage(request, LOCK_BASELINE));
 
     if (incoming.type === 'supplement') {
       if (email !== request.author && !canApprove) {
@@ -517,6 +544,18 @@ async function recordEvent(
       // guard — see `currentState` in engine/core/cycle.js.
       incoming.data = { ...incoming.data, from: current };
     }
+  }
+
+  // Written NOW, from the grants `roles` holds at this exact instant — never left for a later read
+  // to work out, which is the bug this closes (docs/ROLES.md §3, "written at the moment, read
+  // forever after"): a ✓ recomputed on every read stops being a lock the moment its author no longer
+  // holds `lock`, and a request recomputed the same way is silently decided the moment its author
+  // gains `triage`, with no triage event ever written. Written as a STRING — see `writtenBoolean`'s
+  // own comment for why a bare boolean here would silently break the CLI's cloud reader.
+  if (incoming.type === 'approval') {
+    incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(roles.can('lock', email)) };
+  } else if (incoming.type === 'request') {
+    incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(roles.can('triage', email)) };
   }
 
   // Resolved BEFORE the write, not after: an event's author is never null — the row has to exist
@@ -677,7 +716,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     const all = await events.list(null);
     const threads = cycle.threadsOf(all);
     const toTriage = all.filter((e) => e.type === 'request')
-      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.can('triage', r.author)) === 'open').length;
+      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)) === 'open').length;
     return json(res, 200, { toTriage });
   }
 
@@ -1056,7 +1095,7 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   const all = await events.list(null);
   // Only a ✓ from someone who holds `lock` can become one, so only those are worth counting as
   // waiting for one.
-  const ownerApprovals = all.filter((e) => e.type === 'approval' && roles.can('lock', e.author));
+  const ownerApprovals = all.filter((e) => e.type === 'approval' && isLocked(e, LOCK_BASELINE));
   const pages = summarisePages(await readBlocks(projectRoot), loadRegistry(projectRoot), cfg.site, ownerApprovals,
     (path) => readFileSync(path, 'utf8'));
   const threads = cycle.threadsOf(all);
@@ -1065,7 +1104,7 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   // this for `type: "request"` events, so those are all `authorDisplaysFor` ever needs to look at.
   const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, lang);
   const requests = requestsInProgress(all,
-    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], roles.can('triage', r.author)),
+    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)),
     new Map(pages.map((p) => [p.page, p.href])),
     (email) => displays.get(email) ?? email);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the

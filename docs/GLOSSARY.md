@@ -172,7 +172,20 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `snapshot` | the text of the block at that instant. The same table, the same hash, the same three readings as `text` — `snapshotRemoved`, `snapshotTampered` |
 | `author` | who made it. Stored as the person's opaque id (`p_` and 24 hex characters) from the people table, never as an e-mail; resolved back to the address, as verified by whichever identity is in charge — or to the id, once the person is forgotten. What a READER is actually sent is then `people.show`'s decision (docs/ROLES.md, "How a person appears"): the name, the address, their current role (not yet the one they acted under — nothing writes that on the event), or the id — never the raw address to a viewer the setting was configured to hide it from. The owner, whoever holds `people`, and a person about their own event are always sent the address (or the name, under `people.show: "name"`). `textRemoved.by`/`snapshotRemoved.by` name the remover the same way, resolved the same way. An event written before ids holds the e-mail itself, and reads as it |
 | `when` | ISO, the server's clock. Stored in the column `happened_at`, since `WHEN` is an SQL keyword |
-| `data` | a small map of scalars: `request`, `state` and `from` on `request_state`, `commit` and `blocks` on an applied one, `category` on a request, `related` on a request that follows an approved one |
+| `data` | a small map of scalars: `request`, `state` and `from` on `request_state`, `commit` and `blocks` on an applied one, `category` on a request, `related` on a request that follows an approved one, `locks` on an approval and `authorCouldTriage` on a request (below) |
+
+`locks` and `authorCouldTriage` are written by `recordEvent` itself, from the grants in force at that
+exact instant, never left for a later read to work out (docs/ROLES.md §3, "written at the moment, read
+forever after") — an owner who hands over must not silently un-lock every ✓ they gave before, and
+granting `triage` afterwards must not silently pre-approve a request already filed. Both are stored as
+the strings `'true'`/`'false'`, and trusted only on an event dated after the store's own `lock_baseline`
+(below); before it, or with none at all, they are ignored outright, since a store from before this
+existed could hold anything a client's own POST body once put there. One exception: a ✓ written
+`locks:"false"` is trusted even before the baseline, since a forged field can only ever help an
+attacker by claiming `"true"`, never `"false"` — guarding a former owner's own ✓ from misreading as a
+lock should the server's clock ever run behind the baseline's. `authorCouldTriage` has no matching
+exception — there, ignoring what was written already equals the fail-closed answer. `writtenBoolean`,
+`isLocked` and `authorCouldTriage` (`engine/api/types.ts`) are the one reading of them.
 
 ## Event types
 
@@ -185,6 +198,7 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `request_state` | a request moving from one state of the cycle to another |
 | `supplement` | detail added to a request by whoever asked |
 | `text_removed` | a `text` or `snapshot` let go on purpose, naming the event and the field in `data`. Written only by `EventStore.removeText`, never through `POST /events` — deliberately not in `EVENT_TYPES`, since the removal has to delete the row in the same step, which that door does not do |
+| `lock_baseline` | who `HOLDRIM_OWNER` was the moment a server of this version first read the store — written once, by `ensureLockBaseline` (`engine/api/types.ts`), at boot. Never through `POST /events`, and deliberately not in `EVENT_TYPES` either, for the same reason as `text_removed`: a client that could write one could forge who the baseline owner was |
 
 ## Request categories
 

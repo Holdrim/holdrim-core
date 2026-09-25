@@ -57,6 +57,32 @@ who ran the engine from `main` before it.
   texts as ordinary, unbounded reads, not inside one Firestore transaction — a read-only transaction
   aborts after 270 seconds, and both collections only grow — and correct a field that looks tampered
   by asking once more, later, for the removal it could not have seen yet.
+- **Whether a ✓ is a lock, and whether a request's author could already triage it, are now written
+  onto the event when it is given or filed, and read from what was written forever after — never
+  recomputed from who holds `lock`/`triage` today.** Before this, an owner who handed over silently
+  un-locked every ✓ they had given, and revoking `triage` from an admin silently sent their past
+  requests back to triage with no event recording either change. The server writes `locks` (an
+  approval) and `authorCouldTriage` (a request) at the moment it records the event; every reader —
+  the panel, the home, `holdrim sync` and `holdrim list`/`show`/`summary`/`state` — reads what was
+  written. A request with nothing written reads as "at triage" (the safe direction: the owner
+  triages it again, once). A ✓ with nothing written needs a **baseline**: on its first boot against a
+  store, a server of this version writes one `lock_baseline` event, recording who `HOLDRIM_OWNER` was
+  at that exact moment; an unwritten ✓ then locks only if its author matches the baseline's and it
+  predates the baseline, and a store with no baseline at all trusts no unwritten ✓ from anyone. A
+  field written before this version existed is trusted the same way — only when it is dated after
+  the store's own baseline — since a client's own POST body could shape `data` freely before this
+  change; one that predates the baseline is decided by the baseline rule instead, whatever it claims.
+  One exception: a ✓ written `locks:"false"` is trusted even before the baseline, since a forged field
+  can only ever help an attacker by claiming `"true"`, never `"false"` — guarding a former owner's own
+  ✓ from misreading as a lock should this server's clock ever run behind the baseline's.
+  **What to change, before anyone uses this version against a real store:** move ALL traffic to the
+  new revision first — an old revision left serving alongside it can still record events with
+  client-forged `locks`/`authorCouldTriage`, dated after the new baseline, which the new version would
+  then trust as if it had written them itself. **And boot this version once under the `HOLDRIM_OWNER`
+  who gave the existing ✓s** (Cloud Run: a revision serving 100% of traffic; anywhere else, once at
+  startup): the baseline freezes whoever `HOLDRIM_OWNER` is at that first boot, **permanently** — a
+  later handover does not move it, and there is no second chance to set it once a store already holds
+  one. `SECURITY.md` has the same two steps, in the place an operator reads before upgrading.
 - **`holdrim apply`'s commit no longer carries `Requested-by:`.** Only `Request: <full id>` is
   written; who asked is found from the request, through the people table, the one place it can be
   removed. What to change: anything reading a commit for who asked now reads the request instead.

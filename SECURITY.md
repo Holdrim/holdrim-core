@@ -123,12 +123,30 @@ Worth knowing before you run it:
   ownership, and the process runs as an unprivileged user.
 - **Never put a key in `holdrim.json`.** That file is versioned. Secrets go in the environment or
   in `.env`, which is git-ignored. The engine itself needs no model key: it calls no model.
+- **Upgrading to a version that writes the lock baseline (CHANGELOG.md), move ALL traffic to the new
+  revision before anyone uses it, and boot it once under the `HOLDRIM_OWNER` who gave the existing
+  ✓s.** The first server of that version to read a store writes one `lock_baseline` event, freezing
+  who `HOLDRIM_OWNER` was at that exact instant — **permanently**: a later handover does not move it,
+  and there is no second chance to set it once a store already holds one. An old revision left
+  serving in parallel can still record events during the switch; see "Known limits" below for what
+  that costs if it does.
 
 ## Known limits
 
 - The agent's CLI can read the event store directly, bypassing the API — and therefore the cycle,
   the roles and the limits. It only reads, and it is marked in the code. The right fix is the agent
   having an identity of its own.
+- **An old revision still taking traffic after the new one has written its lock baseline can record
+  events the new version will trust as if it had written them itself.** `locks` and
+  `authorCouldTriage` are trusted on any event dated after the baseline, whichever revision recorded
+  it — there is no signature tying the field to the process that wrote it, only the timestamp. A
+  multi-instance rollout (Cloud Run gradually shifting traffic, a rolling Kubernetes deploy) can leave
+  an old-revision replica answering requests for a window after the new revision's first boot; if it
+  does, it still writes whatever `data` a client's own POST sends, unguarded by this version's checks,
+  and dated after the baseline that same window created. This is not closed in code: closing it needs
+  every writer to agree, cross-process, on when the baseline exists, which no store here can promise
+  without a lock this method does not have. It is closed by deployment discipline instead — move all
+  traffic to the new revision first, the same step named above — not by a check this file's tests run.
 - Identity is password or an identity proxy. OIDC, Google and LDAP are not implemented.
 - **Wrong passwords are counted per process, in memory.** Five free attempts per e-mail, then a
   wait that doubles up to fifteen minutes. With several instances each counts on its own, and a

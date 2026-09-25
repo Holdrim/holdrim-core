@@ -84,6 +84,7 @@
     "approval",
     "comment",
     "decision_reply",
+    "lock_baseline",
     "request",
     "request_state",
     "supplement"
@@ -105,12 +106,14 @@
     "when"
   ],
   "event-data-keys": [
+    "authorCouldTriage",
     "blocks",
     "category",
     "commit",
     "event",
     "field",
     "from",
+    "locks",
     "request",
     "state"
   ],
