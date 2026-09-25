@@ -627,8 +627,9 @@ test('[sqlite] the CLI\'s direct file reader wraps its four reads in one transac
 // is not a valid database, so the first real statement inside the transaction fails with SQLite's
 // own "file is not a database" — the smallest page SQLite reads before it can tell is 4096 bytes, so
 // anything shorter reads as a plain I/O error instead. `rollbackQuietly` has no test of its own:
-// this is that test, for all three sites that share it (`list` and `installGuards`, store-sqlite.ts,
-// call the identical helper).
+// this test and the one below it, for `installGuards`, are what prove it. `SqliteEventStore.list()`
+// is the third call site and shares the identical helper, but has no test of its own — nothing about
+// `list`'s own catch block differs from what these two already exercise on the same function.
 //
 // A child process, not a prototype patch in this process like the test just above: that test only
 // needs `exec` to keep working while it records calls, but this one needs `node:sqlite` itself
@@ -648,7 +649,10 @@ test('[sqlite] a ROLLBACK that itself throws does not mask the read error that c
       await new Source({ db: ${JSON.stringify(junkPath)} }).events();
       console.log(JSON.stringify({ threw: false }));
     } catch (err) {
-      console.log(JSON.stringify({ threw: true, message: err.message }));
+      console.log(JSON.stringify({
+        threw: true, message: err.message,
+        rollbackAttempts: globalThis.__HOLDRIM_FAKE_ROLLBACK_THROWN__ ?? 0,
+      }));
     }
   `;
   const r = spawnSync(process.execPath, ['--import', hook.pathname, '--input-type=module', '-e', code],
@@ -656,8 +660,60 @@ test('[sqlite] a ROLLBACK that itself throws does not mask the read error that c
   assert.equal(r.status, 0, `the child process itself must not crash: ${r.stderr}`);
   const result = JSON.parse(r.stdout.trim());
   assert.equal(result.threw, true, 'a file that is not a database must still fail the read');
+  // Checked BEFORE the message: a real ROLLBACK on this empty, read-only transaction never fails
+  // either, so if the hook's own redirect ever stopped catching `node:sqlite`, the exact same
+  // message would still come out below — proving nothing about the masking this test exists to
+  // catch. This is what tells the two cases apart.
+  assert.ok(result.rollbackAttempts >= 1, 'the fake ROLLBACK must actually have run for this test to prove anything');
   assert.match(result.message, /file is not a database/,
     'the ORIGINAL error must surface, not whatever the failing ROLLBACK throws instead');
+});
+
+// Round 3 of the #91 review, MINOR: `installGuards` (engine/api/store-sqlite.ts) shares the exact
+// same shape — `rollbackQuietly` in its catch, then `throw err` — for the repair transaction it runs
+// under `BEGIN IMMEDIATE`. `zz_broken`'s body is invalid SQL (`SELEC`, not `SELECT`), so the
+// `CREATE TRIGGER` statement that installs it fails with SQLite's own "near \"SELEC\": syntax error",
+// and the fake ROLLBACK then fails on top of that while `installGuards` is unwinding — exactly the
+// two-failures-at-once shape the test above proves for `Source#fromFile`, now proved for this second
+// call site.
+test('[sqlite] installGuards surfaces the ORIGINAL repair error too, not a masked ROLLBACK', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-rollback-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'store.db');
+
+  const hook = new URL('./hooks/fake-sqlite-rollback-throws.js', import.meta.url);
+  const storeSqlite = new URL('../api/store-sqlite.ts', import.meta.url);
+  const code = `
+    const { SqliteEventStore, installGuards, GUARDS } = await import(${JSON.stringify(storeSqlite.pathname)});
+    const { DatabaseSync } = await import('node:sqlite');
+    // Opened and closed first, so the events/people/texts tables and the real guards already exist
+    // — the broken one below is installed on top of a normal store, the same repair path a boot with
+    // a foreign trigger takes, not a first install.
+    (new SqliteEventStore(${JSON.stringify(path)})).close();
+    const db = new DatabaseSync(${JSON.stringify(path)});
+    try {
+      installGuards(db, { ...GUARDS, zz_broken: 'BEFORE INSERT ON events BEGIN SELEC 1; END' }, () => {});
+      console.log(JSON.stringify({ threw: false }));
+    } catch (err) {
+      console.log(JSON.stringify({
+        threw: true, message: err.message,
+        rollbackAttempts: globalThis.__HOLDRIM_FAKE_ROLLBACK_THROWN__ ?? 0,
+      }));
+    }
+    db.close();
+  `;
+  const r = spawnSync(process.execPath, ['--import', hook.pathname, '--input-type=module', '-e', code],
+    { encoding: 'utf8' });
+  assert.equal(r.status, 0, `the child process itself must not crash: ${r.stderr}`);
+  // Two lines, not one: `installGuards` itself logs `sqlite_guard_missing` as a JSON line on stdout
+  // (engine/api/log.ts) before it ever reaches the broken guard's `CREATE TRIGGER` — the last line
+  // is always this test's own.
+  const lines = r.stdout.trim().split('\n');
+  const result = JSON.parse(lines[lines.length - 1]);
+  assert.equal(result.threw, true, 'an invalid guard body must still fail the repair');
+  assert.ok(result.rollbackAttempts >= 1, 'the fake ROLLBACK must actually have run for this test to prove anything');
+  assert.match(result.message, /SELEC/,
+    'the ORIGINAL syntax error must surface, not whatever the failing ROLLBACK throws instead');
 });
 
 // ===================================================================== one snapshot, not three reads
