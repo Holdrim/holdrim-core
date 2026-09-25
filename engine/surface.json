@@ -172,6 +172,7 @@
     "-h"
   ],
   "list-json": [
+    "guardsTampered",
     "requests",
     "requests[].author",
     "requests[].block",

@@ -167,57 +167,109 @@ export const GUARDS: Record<string, string> = {
  */
 export function installGuards(db: DatabaseSync, guards: Record<string, string> = GUARDS,
                               warn: (line: string) => void = console.warn): void {
-  // SQLite keeps the text as written, spacing included.
-  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
-  const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
-  // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
-  const held = () => db.prepare(
-    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people', 'texts')"
-  ).all() as { name: string; sql: string }[];
-  const inPlace = (rows: { name: string; sql: string }[]) =>
-    rows.length === want.size &&
-    rows.every((r) => want.has(r.name) && flat(r.sql) === flat(want.get(r.name)!));
-  if (inPlace(held())) return;
+  if (guardMismatches(db, guards).length === 0) return;
   // The name comes from the file, so it is quoted: unquoted, a trigger named
   // `x; DROP TRIGGER events_no_delete` would drop a guard and keep itself.
   const drop = (name: string) => db.exec(`DROP TRIGGER IF EXISTS "${name.replace(/"/g, '""')}"`);
   db.exec('BEGIN IMMEDIATE');
   try {
     // Read again under the lock: another process may have repaired it while this one waited.
-    const rows = held();
-    const byName = new Map(rows.map((r) => [r.name, r]));
+    const found = guardMismatches(db, guards);
     // Neither half alone is enough: a fresh file can hold a foreign trigger (still reported below,
     // just not as one of OUR guards missing) before it ever holds a row, and an old, real database
     // can hold rows with none of our guards on it at all — see the long comment above the function.
-    const noGuardOfOursHeld = !rows.some((r) => want.has(r.name));
+    const noGuardOfOursHeld = found.filter((m) => m.kind === 'missing').length === Object.keys(guards).length;
     const holdsNoRow = () =>
       !db.prepare('SELECT 1 FROM events LIMIT 1').get() &&
       !db.prepare('SELECT 1 FROM people LIMIT 1').get() &&
       !db.prepare('SELECT 1 FROM texts LIMIT 1').get();
     const firstInstall = noGuardOfOursHeld && holdsNoRow();
-    for (const r of rows) {
-      if (want.has(r.name)) continue;
-      warn(`holdrim: the database holds a trigger this version does not install, ${r.name}; dropping it`);
-      drop(r.name);
-    }
-    for (const [name, sql] of want) {
-      const r = byName.get(name);
-      if (r && flat(r.sql) === flat(sql)) continue;
-      if (r) {
-        warn(`holdrim: the database's guard ${r.name} was not the one this version installs; replacing it`);
-        drop(r.name);
+    // `guardMismatches` names the foreign triggers first, so they are gone before any guard goes in.
+    for (const m of found) {
+      if (m.kind === 'foreign') {
+        warn(`holdrim: ${guardMismatchSaid(m)}; dropping it`);
+        drop(m.name);
+        continue;
+      }
+      if (m.kind === 'changed') {
+        warn(`holdrim: ${guardMismatchSaid(m)}; replacing it`);
+        drop(m.name);
       } else if (!firstInstall) {
         // Only the name goes out — never a row's contents — so this line is safe wherever the log
         // ends up, unlike an event's own text or a person's e-mail (docs/PRIVACY.md).
-        warn(`holdrim: the database's guard ${name} is missing; installing it`);
-        log('WARNING', 'sqlite_guard_missing', { guard: name });
+        warn(`holdrim: ${guardMismatchSaid(m)}; installing it`);
+        log('WARNING', 'sqlite_guard_missing', { guard: m.name });
       }
-      db.exec(sql);
+      db.exec(`CREATE TRIGGER ${m.name} ${guards[m.name]}`);
     }
     db.exec('COMMIT');
   } catch (err) {
     rollbackQuietly(db);
     throw err;
+  }
+}
+
+/**
+ * One way the triggers a file holds on `events`, `people` and `texts` differ from `guards`: a guard
+ * not held at all, one held under its name with a different text, or a trigger that is not a guard.
+ */
+export type GuardMismatch = { name: string; kind: 'missing' | 'changed' | 'foreign' };
+
+/**
+ * The comparison `installGuards` repairs from, and the only one: the CLI's `--db` reader
+ * (`Source#fromFile`, engine/cli/remote.ts) asks it too, on a file it opens read-only (holdrim#108).
+ * Before, only the server compared, and only on its next boot, so for anyone reading the file with
+ * the CLI a guard dropped was a guard gone — nobody had to put it back to go unseen. Two copies of
+ * this comparison would drift the day a guard's text or the set of tables changes, and the reader
+ * whose copy fell behind would call a sound file tampered, or a tampered one sound.
+ *
+ * Reads `sqlite_master` and nothing else, and writes nothing: the CLI's connection is read-only,
+ * and a comparison that repaired as it went could not run there. Foreign triggers come first, then
+ * the guards in `guards`' own order — the order `installGuards` repairs in.
+ *
+ * A foreign trigger counts: one that answers `RAISE(IGNORE)` to every ✓, or inserts a forged one
+ * after each real event, leaves every guard intact and the lock off all the same.
+ */
+export function guardMismatches(db: DatabaseSync, guards: Record<string, string> = GUARDS): GuardMismatch[] {
+  // SQLite keeps the text as written, spacing included, so a run of spacing is read as one space —
+  // but only the five characters SQLite's own tokenizer skips between tokens. JavaScript's `\s`
+  // (and `.trim()`) also take U+00A0 and the other Unicode spaces, which SQLite reads as part of an
+  // identifier: `rowid\u00A0= NEW.rowid`, beside an added column named `"rowid\u00A0"` that is
+  // always NULL, is a guard that compares nothing, and `\s` would have called it the same text as
+  // the real one. No trim either: both sides start at `CREATE` and end at `END`, as SQLite stores them.
+  const flat = (sql: string) => sql.replace(/[ \t\n\f\r]+/g, ' ');
+  // A Map, not `name in guards`: a trigger named `constructor` would be "in" any plain object.
+  const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
+  // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
+  const rows = db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people', 'texts')"
+  ).all() as { name: string; sql: string }[];
+  const held = new Map(rows.map((r) => [r.name, r.sql]));
+  const out: GuardMismatch[] = rows.filter((r) => !want.has(r.name)).map((r) => ({ name: r.name, kind: 'foreign' }));
+  for (const [name, sql] of want) {
+    const found = held.get(name);
+    if (found === undefined) out.push({ name, kind: 'missing' });
+    else if (flat(found) !== flat(sql)) out.push({ name, kind: 'changed' });
+  }
+  return out;
+}
+
+/**
+ * What a mismatch is, in the words both readers say it in — the server before "installing it",
+ * "replacing it" or "dropping it", the CLI before saying it repairs nothing. One sentence per kind,
+ * so whoever greps a server log for a guard's name finds the CLI's line with the same words.
+ *
+ * The name is quoted as JSON because a foreign trigger's name is whatever whoever wrote the file
+ * chose: raw, an escape sequence in it reaches the terminal and can clear the very warning it sits
+ * in — and `show`, `impact` and `summary` exit 0, so that warning is all a person gets. Quoted, a
+ * control character comes out as `\u001b`, the same for the server's log as for the CLI's stderr.
+ */
+export function guardMismatchSaid(m: GuardMismatch): string {
+  const name = JSON.stringify(m.name);
+  switch (m.kind) {
+    case 'missing': return `the database's guard ${name} is missing`;
+    case 'changed': return `the database's guard ${name} was not the one this version installs`;
+    case 'foreign': return `the database holds a trigger this version does not install, ${name}`;
   }
 }
 

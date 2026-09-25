@@ -7,8 +7,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { SqliteEventStore, installGuards, GUARDS } from '../api/store-sqlite.ts';
+import { SqliteEventStore, installGuards, guardMismatches, GUARDS } from '../api/store-sqlite.ts';
 import { ONLY_LOSES } from '../api/people.ts';
+import { outside } from './helpers/sqlite.js';
+import { Source } from '../cli/remote.ts';
 
 const approval = { type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null };
 
@@ -42,22 +44,21 @@ function withFile(fn) {
 
 const tryParse = (line) => { try { return JSON.parse(line); } catch { return undefined; } };
 
-const outside = (path, sql) => { const db = new DatabaseSync(path); db.exec(sql); db.close(); };
 const reopen = async (path) => { const s = new SqliteEventStore(path); await s.close(); };
 
 // Which guard a warn() line names, and which of the three things installGuards says it for — a
 // guard present but different ('replaced'), one not held at all ('missing'), or a trigger on these
-// tables that is not one of ours ('foreign'). Kept apart from the plain `line.match(/guard (\w+)/)`
+// tables that is not one of ours ('foreign'). Kept apart from the plain `line.match(/guard "(\w+)"/)`
 // used elsewhere in this file because a test asserting "these guards were said" must also be able to
 // tell a genuine repair from the exact wrong wording — reporting a missing guard with the "replacing
 // it" text would pass a name-only check and still be the wrong claim about what happened.
 function classify(line) {
-  let m = line.match(/guard (\S+) is missing/);
-  if (m) return { name: m[1], kind: 'missing' };
-  m = line.match(/guard (\S+) was not the one/);
-  if (m) return { name: m[1], kind: 'replaced' };
-  m = line.match(/trigger this version does not install, (\S+);/);
-  if (m) return { name: m[1], kind: 'foreign' };
+  let m = line.match(/guard ("\S+") is missing/);
+  if (m) return { name: JSON.parse(m[1]), kind: 'missing' };
+  m = line.match(/guard ("\S+") was not the one/);
+  if (m) return { name: JSON.parse(m[1]), kind: 'replaced' };
+  m = line.match(/trigger this version does not install, ("\S+");/);
+  if (m) return { name: JSON.parse(m[1]), kind: 'foreign' };
   return undefined;
 }
 const byName = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
@@ -293,7 +294,7 @@ test('a database the previous version made: the changed guards are replaced, the
         BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END;
   `);
   await reopen(path);
-  const named = (line) => line.match(/guard (\w+)/)?.[1];
+  const named = (line) => line.match(/guard "(\w+)"/)?.[1];
   assert.deepEqual(said.map(named).sort(),
     ['events_no_low_rowid', 'events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
     'the guards whose text changed are replaced, the ones this fixture never had are installed, and each is said once');
@@ -338,7 +339,7 @@ test('a database from before texts were extracted gains the columns it needs, ke
     const after = await store.append({ type: 'comment', page: 'A01', text: 'a new one', snapshot: null, data: null }, 'owner@example.org');
     assert.equal(after.text, 'a new one', 'a fresh append works on a database ALTER just widened');
   } finally { await store.close(); }
-  const named = (line) => line.match(/guard (\w+)/)?.[1];
+  const named = (line) => line.match(/guard "(\w+)"/)?.[1];
   assert.deepEqual(said.map(named).sort(), Object.keys(GUARDS).sort(),
     'widening the schema says nothing on its own, but a real row with no guard on it is not a first install: every guard is named as missing');
 }));
@@ -564,7 +565,8 @@ test('a foreign trigger is found under any spelling of the table, and its name c
   assert.throws(() => db.exec('DELETE FROM events'), /not deleted/, 'no name may drop a guard on its way out');
   db.close();
   for (const name of ['x_forge', 'x; DROP TRIGGER events_no_delete', 'a"b']) {
-    assert.ok(said.some((line) => line.includes(name)), `${name} has to be said`);
+    // Quoted as JSON (`guardMismatchSaid`), so `a"b` is said as `"a\"b"`.
+    assert.ok(said.some((line) => line.includes(JSON.stringify(name))), `${name} has to be said`);
   }
 }));
 
@@ -607,4 +609,102 @@ test('two boots repairing one file at once: the second waits for the first and t
     db.close();
     await new Promise((resolve) => first.once('exit', resolve));
   }
+}));
+
+test('guardMismatches names what installGuards would repair, foreign first, on a read-only connection', withFile(async (path) => {
+  // The CLI's `--db` reader (holdrim#108) asks the same question on a connection that cannot write,
+  // so the comparison must not: a version that repaired as it compared would throw here.
+  await reopen(path);
+  outside(path, `DROP TRIGGER events_no_delete;
+    DROP TRIGGER texts_no_update; CREATE TRIGGER texts_no_update BEFORE UPDATE ON texts BEGIN SELECT 1; END;
+    CREATE TRIGGER x_ignore BEFORE INSERT ON events BEGIN SELECT RAISE(IGNORE); END;`);
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(db), [
+      { name: 'x_ignore', kind: 'foreign' },
+      { name: 'events_no_delete', kind: 'missing' },
+      { name: 'texts_no_update', kind: 'changed' },
+    ]);
+  } finally {
+    db.close();
+  }
+  await reopen(path);
+  const repaired = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(repaired), [], 'and once the server repaired it, nothing is left to name');
+  } finally {
+    repaired.close();
+  }
+}));
+
+test('a guard rewritten with U+00A0 for one space is changed, not the same text: named by guardMismatches, replaced by installGuards, flagged by the --db reader',
+  withFile(async (path, said) => {
+    const store = new SqliteEventStore(path);
+    await store.append(approval, 'owner@example.org');
+    const last = await store.append({ ...approval, block: 'A01.1.2' }, 'owner@example.org');
+    await store.close();
+    // SQLite reads U+00A0 as part of an identifier, so `rowid\u00A0` is a column — added, and
+    // always NULL — and the rowid half of the guard compares NULL with everything: it holds nothing.
+    const nbsp = '\u00A0';
+    const inert = GUARDS.events_no_replace.replace('OR rowid = NEW.rowid', `OR rowid${nbsp}= NEW.rowid`);
+    assert.notEqual(inert, GUARDS.events_no_replace, 'the substitute has to differ for this to prove anything');
+    outside(path, `ALTER TABLE events ADD COLUMN "rowid${nbsp}";
+      DROP TRIGGER events_no_replace; CREATE TRIGGER events_no_replace ${inert};`);
+    // It is a real bypass, not only a different byte: REPLACE onto the last approval's rowid, under
+    // a new id, now erases that approval — the real guard refuses exactly this.
+    const raw = new DatabaseSync(path);
+    try {
+      const { rowid } = raw.prepare('SELECT rowid FROM events WHERE id = ?').get(last.id);
+      raw.prepare(`INSERT OR REPLACE INTO events (rowid, id, type, page, author, happened_at)
+        VALUES (?, 'overwritten', 'comment', 'A01', 'x', '2026-01-01T00:00:00.000Z')`).run(rowid);
+      assert.equal(raw.prepare('SELECT 1 FROM events WHERE id = ?').get(last.id), undefined, 'the approval is gone');
+    } finally {
+      raw.close();
+    }
+
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.deepEqual(guardMismatches(db), [{ name: 'events_no_replace', kind: 'changed' }]);
+    } finally {
+      db.close();
+    }
+    const source = new Source({ db: path });
+    await source.events();
+    assert.equal(source.guardsTampered, true, 'the CLI reader flags it');
+    await reopen(path);
+    assert.deepEqual(said.map(classify).filter(Boolean), [{ name: 'events_no_replace', kind: 'replaced' }],
+      'and the server replaces it, saying so');
+  }));
+
+test('[sqlite] the --db reader compares the guards in the snapshot it reads the rows from', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+  await store.close();
+  // A second connection drops a guard the moment the reader asks for the event rows. Inside one
+  // read transaction, the rows and the comparison both predate the drop: the guard was there for
+  // every row this read returns, and saying otherwise would be a false alarm about rows it never
+  // read without one. A comparison made after the transaction, on a fresh snapshot, sees the drop.
+  const original = DatabaseSync.prototype.prepare;
+  let dropped = 0;
+  DatabaseSync.prototype.prepare = function (sql, ...rest) {
+    if (!dropped && sql.startsWith('SELECT *, rowid FROM events')) {
+      dropped++;
+      outside(path, 'DROP TRIGGER events_no_delete');
+    }
+    return original.call(this, sql, ...rest);
+  };
+  const source = new Source({ db: path });
+  try {
+    await source.events();
+  } finally {
+    DatabaseSync.prototype.prepare = original;
+  }
+  assert.equal(dropped, 1, 'the drop has to have landed during the read for this to prove anything');
+  const after = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(after), [{ name: 'events_no_delete', kind: 'missing' }], 'and it really is gone now');
+  } finally {
+    after.close();
+  }
+  assert.equal(source.guardsTampered, false, 'compared in the same snapshot as the rows it read');
 }));

@@ -165,7 +165,8 @@ export function personLabel(show: ReturnType<typeof ofProject>['peopleShow'], ro
  * The agent's queue: what the owner approved and nobody applied yet, with everything an agent
  * needs to act — as data. `--json` is the contract other tools read; the table is for a person.
  */
-export async function queue(root: string, source: Pick<Source, 'events'>, all: boolean) {
+export async function queue(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'guardsTampered'>>,
+                            all: boolean) {
   checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
@@ -179,6 +180,10 @@ export async function queue(root: string, source: Pick<Source, 'events'>, all: b
     // was actually resolved (the server, or one of `Source`'s two direct readers) — this is only
     // the flag `list` warns from and exits non-zero on (issue #91's "same warning").
     tampered: suspectsOf(events).length > 0,
+    // Read after `events()`, which is what sets it. A key of its own rather than folded into
+    // `tampered`: a guard dropped says the file COULD hold a forgery, a text that fails its hash
+    // says it DOES, and an agent reading this queue acts differently on the two (holdrim#108).
+    guardsTampered: source.guardsTampered ?? false,
     requests: showing.map((r) => {
       const block = r.block ? blocks.get(r.block) : undefined;
       return {
@@ -209,16 +214,35 @@ export function warnOfTampering() {
     + 'server log (or run this again where the log is written) for which event and field.');
 }
 
-export async function list(root: string, source: Pick<Source, 'events'>, options: { all?: boolean; json?: boolean } = {}) {
+/**
+ * What `apply` and `state` do on a file whose guards are not as this version installs them: refuse,
+ * before a brief is written, an agent is started or an event appended. Reading warns and goes on
+ * (holdrim#108): the owner has to be able to look at the file they are judging. Acting is another
+ * matter. With `events_no_update` dropped, a rejection can be rewritten into an approval in `data`,
+ * where no text hash sees it, and an agent that went ahead would apply work the owner refused.
+ * The reader has already named each guard; this only stops the act, and says how to get going again.
+ */
+export function refuseToActOnBrokenGuards(source: Partial<Pick<Source, 'guardsTampered'>>): void {
+  if (!source.guardsTampered) return;
+  throw new Error('refusing to act on this events file: its guards are not the ones this version installs '
+    + '(each is named above), so an approval in it may be forged.\n'
+    + '  Start the server against the file once — it puts the guards back and names them in its log — '
+    + 'check what was written while they were gone, then run this again.');
+}
+
+export async function list(root: string, source: Parameters<typeof queue>[1], options: { all?: boolean; json?: boolean } = {}) {
   const cycle = loadCycle();
   const q = await queue(root, source, options.all ?? false);
-  if (options.json) { console.log(JSON.stringify(q, null, 2)); if (q.tampered) warnOfTampering(); return q.tampered; }
+  // Either one exits non-zero. The guards' own warning was already said, one line per guard, by the
+  // reader that compared them (`Source#fromFile`), so only a text's needs saying here.
+  const alarmed = q.tampered || q.guardsTampered;
+  if (options.json) { console.log(JSON.stringify(q, null, 2)); if (q.tampered) warnOfTampering(); return alarmed; }
   if (q.tampered) warnOfTampering();
 
   if (!q.requests.length) {
     console.log(`no requests ${options.all ? 'recorded' : 'approved and waiting to be applied'}.` +
       (q.toTriage && !options.all ? ` (${q.toTriage} waiting for the owner's triage)` : ''));
-    return q.tampered;
+    return alarmed;
   }
   const { peopleShow } = ofProject(root);
   const roles = projectRoles(root);
@@ -229,7 +253,7 @@ export async function list(root: string, source: Pick<Source, 'events'>, options
       `${formatWhen(r.when)}  ${personLabel(peopleShow, roles, r.author)}${changed}`);
     console.log(`          “${r.text.replace(/\n/g, ' ').slice(0, 140)}”`);
   }
-  return q.tampered;
+  return alarmed;
 }
 
 export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
@@ -327,11 +351,13 @@ export async function summary(root: string, source: Pick<Source, 'events'>) {
  * The agent only uses ITS OWN states: approving, rejecting and asking is the owner's triage, on
  * the site.
  */
-export async function setState(root: string, source: Pick<Source, 'events' | 'add'>, prefix: string, target: string,
+export async function setState(root: string, source: Pick<Source, 'events' | 'add'> & Partial<Pick<Source, 'guardsTampered'>>,
+                               prefix: string, target: string,
                                message: string, extra: { commit?: string; blocks?: string } = {}) {
   checkAuthority(root);
   const cycle = loadCycle();
   const events = await source.events();
+  refuseToActOnBrokenGuards(source);
   const r = find(requests(events), prefix);
 
   if (!cycle.agentStates.includes(target)) {
