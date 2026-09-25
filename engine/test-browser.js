@@ -54,6 +54,15 @@ if (await fetch(`${SIGN_IN}/api/health`).then(() => true, () => false)) {
   process.exit(1);
 }
 
+// A third server, with the panel's own toggles off, so a browser can prove what only a browser can:
+// that the bundle the page actually loads draws no control the server has turned off. The same
+// guard, the same reason.
+const TOGGLES_OFF = `http://127.0.0.1:${PORT + 2}`;
+if (await fetch(`${TOGGLES_OFF}/api/health`).then(() => true, () => false)) {
+  console.log(`port ${PORT + 2} is already in use — the test would run against ANOTHER server.`);
+  process.exit(1);
+}
+
 // The same guard as the contract test, for the same reason: a port already taken means the old
 // server keeps answering, and the whole run tests the previous build without saying so.
 if (await fetch(`${BASE}/api/health`).then(() => true, () => false)) {
@@ -185,12 +194,31 @@ signInServer.stdout.on('data', (chunk) => {
   firstAccess ||= String(chunk).match(/password:\s+(\S+)/)?.[1] ?? '';
 });
 
+// A third server, on its own copy of the site, with the three toggles the panel itself draws a
+// control for turned off (docs/ROLES.md, section 7). Its own project, not a flag on the one above:
+// a toggle is read once, at boot, from holdrim.json — there is no live way to flip it under a
+// running server, and there should not be one.
+const offSite = mkdtempSync(join(tmpdir(), 'holdrim-browser-off-'));
+cpSync(site, offSite, { recursive: true });
+const offConfig = JSON.parse(readFileSync(join(offSite, 'holdrim.json'), 'utf8'));
+offConfig.features = { comments: false, pageRequests: false, bugCategory: false };
+writeFileSync(join(offSite, 'holdrim.json'), JSON.stringify(offConfig, null, 2));
+const toggleServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
+  env: {
+    ...process.env, PORT: String(PORT + 2), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
+    HOLDRIM_OWNER: OWNER, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'memory', HOLDRIM_SITE: offSite,
+  },
+  stdio: ['ignore', 'ignore', 'inherit'],
+});
+
 let browser;
 const cleanUp = async () => {
   await browser?.close();
   server.kill();
   signInServer.kill();
+  toggleServer.kill();
   rmSync(site, { recursive: true, force: true });
+  rmSync(offSite, { recursive: true, force: true });
 };
 
 try {
@@ -593,6 +621,41 @@ try {
     await must('and the request shows its new state',
       () => owner.page.locator('tr', { hasText: 'Decide this one from the home' }).getByText('Approved').first().waitFor());
     expect('and nothing was refused on the way', '', owner.problems.join(' | '));
+  }
+
+  console.log('the panel obeys the project\'s feature toggles:');
+  for (let i = 0; i < 40 && !(await fetch(`${TOGGLES_OFF}/api/health`).then((r) => r.ok, () => false)); i++) {
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  {
+    // comments, pageRequests and bugCategory are OFF on this server (docs/ROLES.md, section 7):
+    // `/api/me` sends the panel exactly these three, and `Panel.jsx` must draw no control for one
+    // that is off — a control the server would then 403 on is worse than none at all. Only a real
+    // browser, running the real bundle, can see this: a unit test on `Panel.jsx`'s exports would
+    // prove the same source that might still ship the wrong `panel-react.js`.
+    const reader = await person(READER);
+    await reader.page.goto(`${TOGGLES_OFF}/pages/A01.html`);
+    await block(reader.page, 'A01.1.3').click();
+    await must('the panel still opens', () => reader.page.locator('.rv-panel[open]').waitFor());
+    expect('with comments off, there is no Comment button', 0,
+      await reader.page.locator('.rv-actions').getByRole('button', { name: 'Comment' }).count());
+    await reader.page.getByRole('button', { name: 'Request a change' }).click();
+    const offCategories = await reader.page.locator('.rv-form select option').allTextContents();
+    expect('and neither the bug nor the page category is offered',
+      'Adjust the text,Replace a term,Remove,Doubt', offCategories.join(','));
+    expect('and nothing failed', '', reader.problems.join(' | '));
+
+    // The default server, above, leaves every toggle at its default — on — and offers every one.
+    const onReader = await person(READER);
+    await onReader.page.goto(`${BASE}/pages/A01.html`);
+    await block(onReader.page, 'A01.1.3').click();
+    expect('with every toggle on, Comment is offered', 1,
+      await onReader.page.locator('.rv-actions').getByRole('button', { name: 'Comment' }).count());
+    await onReader.page.getByRole('button', { name: 'Request a change' }).click();
+    const onCategories = await onReader.page.locator('.rv-form select option').allTextContents();
+    expect('and every category is offered, bug and page included',
+      'Adjust the text,Replace a term,Remove,Doubt,Report a bug,Ask for a new page', onCategories.join(','));
+    expect('and nothing failed', '', onReader.problems.join(' | '));
   }
 
   console.log('the sign-in screen, under its own policy:');

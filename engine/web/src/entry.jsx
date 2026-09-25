@@ -44,6 +44,10 @@ function App({ blocks, elsewhere, who }) {
   const [opened, setOpened] = useState(null);
   const me = who.email;
   const canApprove = Boolean(who.canApprove);
+  // Which of the panel's own controls this project has turned off (docs/ROLES.md, section 7),
+  // as `/api/me` sent them. A caller from before this toggle existed sends no `features` at all,
+  // and `Panel.jsx` reads a missing key as on — so `{}` here changes nothing for it.
+  const features = who.features ?? {};
   const [events, setEvents] = useState([]);
   // How many of the selected block's dependents live on OTHER pages, where there is no element to
   // light. The count still says something happened; a silent zero would read as "nothing depends on
@@ -126,6 +130,7 @@ function App({ blocks, elsewhere, who }) {
       block={opened}
       me={me}
       canApprove={canApprove}
+      features={features}
       events={events}
       radiusElsewhere={radiusElsewhere}
       onRecord={async (e) => {

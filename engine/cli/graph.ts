@@ -193,7 +193,15 @@ export function toDot(graph: Graph): string {
  * posture `lights --only` already takes toward an unknown filter.
  */
 export async function showGraph(root: string,
-  options: { json?: boolean; mermaid?: boolean; dot?: boolean }): Promise<number> {
+  options: { json?: boolean; mermaid?: boolean; dot?: boolean; enabled: boolean }): Promise<number> {
+  // `enabled` is `features.graph` (docs/ROLES.md §7), resolved by the caller (`holdrim.ts`) from the
+  // SAME `ofProject` every other command reads its configuration through — a second read here could
+  // answer a different question if the two ever drifted. Checked before the format check below: a
+  // project that turned the command off should not learn that also by way of "choose one format".
+  if (!options.enabled) {
+    console.error('graph is turned off: this project\'s holdrim.json sets "features": { "graph": false }');
+    return 2;
+  }
   const chosen = ['json', 'mermaid', 'dot'].filter((f) => options[f as 'json' | 'mermaid' | 'dot']);
   if (chosen.length !== 1) {
     console.error(`graph needs exactly one of --json, --mermaid, --dot; got ${chosen.length ? chosen.join(', ') : 'none'}`);

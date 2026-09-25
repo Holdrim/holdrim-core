@@ -163,6 +163,27 @@ expect "applied with a commit → 201"   201 "$(state agent@test $P applied 'don
 # The check is here and not only in the unit tests because the category crosses the whole edge: the
 # JSON body, the limits on `data`, and the record.
 expect "a request categorised as bug → 201" 201 "$(post $REVIEWER '{"type":"request","page":"D02","block":"D02.1.3","fingerprint":"x","text":"the screen does not do what this block says","snapshot":"the earlier text","data":{"category":"bug"}}')"
+# A category outside cycle.json's own list is refused before it can silently side-step a toggle:
+# `data.category` is compared by exact string in `gatingFeatureOf`, so "Bug" or "page " would
+# otherwise reach the store as an ungated category, never having asked the bugCategory/pageRequests
+# gate the right spelling would have.
+expect "an unknown category → 400"    400 "$(post $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":"Bug"}}')"
+expect "and the message names it"       0 "$(body $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":"Bug"}}' | has 'Bug'; echo $?)"
+# MINOR 6: a single-element JSON array stringifies to exactly its element (`String(['bug']) ===
+# 'bug'`), so a body naming `"category":["bug"]` used to pass the OLD check — which asked
+# `String(category)`, never `typeof category`. The STATUS alone does not prove the fix: overLimit's
+# unrelated "a data value has to be text or a number" check refuses an array too, further down, so a
+# check that only asked for 400 would still pass with the typeof check deleted — refused for the
+# wrong reason, by a check that has nothing to do with categories. The MESSAGE says which one fired:
+# only the category check, run BEFORE overLimit, says "unknown request category".
+expect "a category smuggled as an array is refused AS AN UNKNOWN CATEGORY, not merely as non-scalar" 0 \
+  "$(body $REVIEWER '{"type":"request","page":"D02","text":"x","data":{"category":["bug"]}}' | has 'unknown request category'; echo $?)"
+# And the 400 body itself stays small: an unbounded category echoed whole is how a 200 KB category
+# once became a 200 KB error body.
+BIGCAT=$(node -e "console.log('x'.repeat(5000))")
+expect "an oversized category is truncated in the error, not echoed whole" 0 \
+  "$(body $REVIEWER "{\"type\":\"request\",\"page\":\"D02\",\"text\":\"x\",\"data\":{\"category\":\"$BIGCAT\"}}" \
+    | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).error.length < 100 ? 0 : 1))")"
 # The race guard is written INTO the record: `from` names the state the change departed from.
 expect "the record says where it came from" approved "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=D02" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type==='request_state').pop();console.log(e.data.from)})")"
 
@@ -329,6 +350,290 @@ expect "a language nobody has falls back" 0 "$(say_it 'ja-JP' $B/api/events/does
 expect "but the log stays English"        0 "$(grep -q '"event":"event_recorded"' $WORK/tests.log; echo $?)"
 expect "with the contract values as they are" 0 "$(grep -q '"type":"request_state".*"to":"applied"' $WORK/tests.log; echo $?)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+# ----------------------------------------------------------------------------- feature toggles
+# `npm test` never boots the server (AGENTS.md): `engine/tests/features.test.js` proves
+# `readFeatures` validates `holdrim.json` and that no toggle wraps a guard, but not that the SERVER
+# actually 403s a `comment` event when `comments: false`. That needs a live process, started twice,
+# against projects whose `holdrim.json` disagree about what is on — which is why this lives here and
+# not only as a unit test, and why it uses THIS file's own $PORT and the port-in-use guard above,
+# rather than a port of its own nobody checks (the stale-server trap AGENTS.md warns about). This
+# used to be `scripts/toggle-matrix.sh`, outside every gate; folded in here, `npm test`'s companion
+# contract run is the only place it runs, same as every other HTTP check in this file.
+echo "feature toggles — every server-gated toggle, off, against something real:"
+OFF_SITE="$WORK/off-site"
+cp -r "$SITE" "$OFF_SITE"
+# ROUND 5: every toggle at the opposite of its default (`everyToggleFlipped`, engine/core/
+# features.js), instead of the hand-written four-key literal this used to be — that literal left
+# `graph` ON (its default) and `voice`/`sketch` untouched (also their default, `false`), so nothing
+# on THIS server ever exercised any of the three in its NON-default state, the exact gap ROUND 4
+# closed only on the password server.
+node --input-type=module -e '
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  const { everyToggleFlipped } = await import("./engine/core/features.js");
+  const path = process.argv[1];
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  config.features = everyToggleFlipped();
+  writeFileSync(path, JSON.stringify(config, null, 2));
+' "$OFF_SITE/holdrim.json"
+expect "the derived config turns graph off (on by default)" 0 \
+  "$(grep -q '\"graph\": false' "$OFF_SITE/holdrim.json"; echo $?)"
+expect "and turns voice on (off by default, not built)" 0 \
+  "$(grep -q '\"voice\": true' "$OFF_SITE/holdrim.json"; echo $?)"
+expect "and turns sketch on too" 0 \
+  "$(grep -q '\"sketch\": true' "$OFF_SITE/holdrim.json"; echo $?)"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$OFF_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/toggles-off.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "comments OFF: a comment is refused"          403 "$(post $OWNER '{"type":"comment","page":"UC-01","text":"hi"}')"
+expect "pageRequests OFF: asking for a page is refused" 403 "$(post $OWNER '{"type":"request","page":"UC-01","text":"a new page","data":{"category":"page"}}')"
+expect "bugCategory OFF: a bug report is refused"    403 "$(post $OWNER '{"type":"request","page":"UC-01","text":"broken","data":{"category":"bug"}}')"
+# Everything else off must not mean everything off: an ungated category still goes through — S5.
+expect "an ungated category still works with the other three off" 201 \
+  "$(post $OWNER '{"type":"request","page":"UC-01","text":"still fine","data":{"category":"text"}}')"
+# S10: decoration follows the toggle too, on a page nobody's role gates — the OWNER could ask for a
+# page either way, so only the toggle explains the form disappearing.
+expect "pageRequests OFF: the home has no ask-for-a-page form" 1 \
+  "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | has -F 'Ask for a page'; echo $?)"
+# MINOR (locks): the triage guard's `iap?.localMode && agentState` carve-out is a code path the
+# PASSWORD server's own "every toggle OFF" section (further down) never runs, since it never sets
+# `HOLDRIM_MODE=local` — so this repeats that check here instead, in local mode, with every toggle
+# off, to prove the carve-out for an AGENT state never widens into one for a plain reviewer moving a
+# request to `approved`, which is not an agent state at all.
+# Filed by the REVIEWER, not the owner: `cycle.json`'s `initial_for_admin` starts an owner's or
+# admin's OWN request already at `approved` (they do not triage themselves), which would answer 409
+# — "cannot go from approved to approved" — regardless of whether the guard under test refused it.
+OFF_P=$(new_request $REVIEWER '{"type":"request","page":"UC-01","text":"local-mode triage check"}')
+expect "every toggle off, in local mode: a reviewer moving it to approved → 403" 403 \
+  "$(post $REVIEWER "{\"type\":\"request_state\",\"page\":\"UC-01\",\"text\":\"x\",\"data\":{\"request\":\"$OFF_P\",\"state\":\"approved\"}}")"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+echo "feature toggles — one off does not put the others off too:"
+# S4: pageRequests and bugCategory each read their OWN key (gatingFeatureOf); a mutant that swaps
+# which toggle gates which category survives when a test only ever moves both at once. Here
+# pageRequests is off ALONE and bugCategory stays on, so the wrong mapping shows up as one of these
+# two failing on the wrong side.
+ASYM_SITE="$WORK/asymmetric-site"
+cp -r "$SITE" "$ASYM_SITE"
+node -e '
+  const fs = require("fs");
+  const path = process.argv[1];
+  const config = JSON.parse(fs.readFileSync(path, "utf8"));
+  config.features = { pageRequests: false };
+  fs.writeFileSync(path, JSON.stringify(config, null, 2));
+' "$ASYM_SITE/holdrim.json"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$ASYM_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/toggles-asym.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "pageRequests OFF alone: a page request is still refused" 403 \
+  "$(post $OWNER '{"type":"request","page":"UC-01","text":"a new page","data":{"category":"page"}}')"
+expect "and bugCategory, left on, still works"       201 \
+  "$(post $OWNER '{"type":"request","page":"UC-01","text":"broken","data":{"category":"bug"}}')"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+echo "feature toggles — the screen goes dark, the guard behind it does not:"
+# Every built toggle at the OPPOSITE of its default, this time under password identity: the
+# /api/users* routes are what the finding calls "still enforces its guard" — proved here as more
+# than "the owner gets 201", which is all the old matrix checked. A member and an admin get the SAME
+# refusals they would with every toggle at its default.
+#
+# MINOR 5 (D5): `JSON.stringify(project).includes('"peopleScreen":true')` never writes the word
+# `features`, so no scan of the SOURCE (engine/tests/features.test.js) can refuse it by name — that
+# file says so, in its own header comment, and points here instead. peopleScreen alone used to be the
+# only toggle turned off on this server; every OTHER built toggle is at its non-default state here
+# too now, so a guard that secretly asked "is anything on" rather than "does roles.can say yes" has
+# nowhere left to hide.
+#
+# ROUND 4: every toggle at the opposite of its default (`everyToggleFlipped`, engine/core/
+# features.js) instead of a hand-written subset — the old literal turned four toggles off and left
+# `graph` ON (its default) and `voice`/`sketch` untouched (also their default, `false`), so nothing
+# here ever exercised `graph`, `voice` or `sketch` in their NON-default state. The helper keeps this
+# honest as the list grows: a toggle added to the closed list lands here automatically, at the
+# opposite of what it ships with, never at whatever this script happened to hard-code the day it
+# was written.
+POFF_SITE="$WORK/every-toggle-off-site"
+cp -r "$SITE" "$POFF_SITE"
+node --input-type=module -e '
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  const { everyToggleFlipped } = await import("./engine/core/features.js");
+  const path = process.argv[1];
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  config.features = everyToggleFlipped();
+  writeFileSync(path, JSON.stringify(config, null, 2));
+' "$POFF_SITE/holdrim.json"
+# The derivation itself, checked directly against the file it wrote — not only against a route that
+# happens to read one of these keys. `graph` and `voice`/`sketch` are read by nothing this server's
+# routes touch, so without this a hand-written subset that silently dropped back to leaving them at
+# their default would still pass every check below.
+expect "the derived config turns graph off (on by default)" 0 \
+  "$(grep -q '\"graph\": false' "$POFF_SITE/holdrim.json"; echo $?)"
+expect "and turns voice on (off by default, not built)" 0 \
+  "$(grep -q '\"voice\": true' "$POFF_SITE/holdrim.json"; echo $?)"
+expect "and turns sketch on too" 0 \
+  "$(grep -q '\"sketch\": true' "$POFF_SITE/holdrim.json"; echo $?)"
+PDATA=$(mktemp -d)
+TADMIN=toggle-admin@example.org
+TMEMBER=toggle-member@example.org
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$TADMIN HOLDRIM_IDENTITY=password \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_USERS_PATH=$PDATA/users.db HOLDRIM_EVENTS_PATH=$PDATA/events.db PORT=$PORT \
+  HOLDRIM_SITE="$POFF_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/toggles-people.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+TFIRST=$(grep -A2 'FIRST ACCESS' $WORK/toggles-people.log | sed -n -E 's/.*password: *//p' | head -1)
+TCOOKIES=$WORK/toggle-owner-cookies.txt
+curl -s -c $TCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OWNER\",\"password\":\"$TFIRST\"}" $B/api/sign-in >/dev/null
+tas_owner() { curl -s -b $TCOOKIES -H 'Content-Type: application/json' "$@"; }
+
+expect "peopleScreen OFF: the screen redirects home, even for the owner" 0 \
+  "$(curl -s -b $TCOOKIES -D- -o /dev/null $B/engine/people | has -i 'location: /engine/home'; echo $?)"
+# S9: canManagePeople has to stay `peopleScreenOn() && managesPeople(viewer)`, not just the second
+# half — the owner truly manages people here (a real password session, unlike the dev-mode server
+# above, where managesPeople is always false and this same check would prove nothing).
+expect "peopleScreen OFF: the owner's own home has no People link either" 1 \
+  "$(tas_owner $B/engine/home | has -F 'href="/engine/people"'; echo $?)"
+expect "peopleScreen OFF: /api/users still enforces its guard — the owner still creates an access" 201 \
+  "$(tas_owner -o /dev/null -w '%{http_code}' -d '{"email":"toggle-new@example.org","name":"New"}' $B/api/users)"
+
+TAPASS=$(tas_owner -d "{\"email\":\"$TADMIN\",\"name\":\"An Admin\"}" $B/api/users | jfield password)
+TACOOKIES=$WORK/toggle-admin-cookies.txt
+curl -s -c $TACOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$TADMIN\",\"password\":\"$TAPASS\"}" $B/api/sign-in >/dev/null
+tas_admin() { curl -s -b $TACOOKIES -H 'Content-Type: application/json' "$@"; }
+
+expect "peopleScreen OFF: an admin still cannot create the owner" 409 \
+  "$(tas_admin -o /dev/null -w '%{http_code}' -d "{\"email\":\"$OWNER\",\"name\":\"Not Me\"}" $B/api/users)"
+expect "peopleScreen OFF: an admin still cannot reset the owner's password" 409 \
+  "$(tas_admin -o /dev/null -w '%{http_code}' -X POST $B/api/users/$OWNER/password)"
+
+TMPASS=$(tas_owner -d "{\"email\":\"$TMEMBER\",\"name\":\"A Member\"}" $B/api/users | jfield password)
+TMCOOKIES=$WORK/toggle-member-cookies.txt
+curl -s -c $TMCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$TMEMBER\",\"password\":\"$TMPASS\"}" $B/api/sign-in >/dev/null
+tas_member() { curl -s -b $TMCOOKIES -H 'Content-Type: application/json' "$@"; }
+
+expect "peopleScreen OFF: a member still gets 403 creating an access" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"email":"other@example.org","name":"Other"}' $B/api/users)"
+expect "peopleScreen OFF: a member still gets 403 on an approval" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc"}' $B/api/events)"
+#
+# MINOR (R-D5b): a reflective read — `JSON.stringify(project).includes('"peopleScreen":true')` — is
+# invisible to any scan of the SOURCE (engine/tests/features.test.js's own header comment says so,
+# and points here), so THIS server is the only backstop a guard like that has. It is only a backstop
+# for what it actually asks, though, so every guard on this server has to be asked here, enumerated
+# on purpose rather than left to whichever ones a past round happened to add. The lists below are
+# complete as of this round; a route, a `refusalOf` 403 or another guard added later and not added
+# here is a gap this comment can no longer claim doesn't exist.
+#
+# Every `/api/users*` route (`userRoutes`, engine/api/server.ts), and where its `manages()` guard is
+# checked on THIS server:
+#   GET  /users                 — the list itself                     — below (member)
+#   POST /users                 — creating an access                  — owner 201 above; admin→owner
+#                                                                        409 above; member 403 below
+#   POST /users/me/name         — no role guard: the caller's OWN row, never a refusal path
+#   POST /users/:email/password — a new password for somebody         — admin→owner 409 above;
+#                                                                        member→another member 403
+#                                                                        below
+#   POST /users/:email/enabled  — taking the access away               — member 403, admin→owner 409
+#                                                                        below; disabling a real
+#                                                                        member also below, for the
+#                                                                        session check further down
+#
+# Every `refusalOf` 403 (engine/api/server.ts, the one gate `/api/events` and both home forms share):
+#   the feature gate itself     — proved live against comments/pageRequests/bugCategory above
+#                                  (OFF_SITE); not re-asked here, where `request` events on purpose
+#                                  name no category, to isolate the checks below from it
+#   approval, owner/admin only  — member 403 above
+#   supplement, owner or author — member (neither) 403 below
+#   triage (request_state),
+#     owner/admin only          — member 403 below
+#   cross-site (`sameOrigin`),
+#     both home forms           — below (MINOR X1/P1)
+#
+# The one guard shaped as neither of the above — `/api/change-password` (engine/api/server.ts),
+# whose `checked` refusal is its own `if`, not `userRoutes`' `manages()` nor `refusalOf` — was
+# missing from every list above and so from every check below it: changing your own password with
+# the wrong current one — below (MINOR PW).
+#
+# MAJOR (L1): none of the above is shaped as a `refusalOf` 403, but each is exactly the kind of
+# question `JSON.stringify(project).includes(...)` could answer instead of asking `roles.can` —
+# `asRead`'s `locks:` field, `serveHome`'s `ownerApprovals` count and `serveStatic`'s path guard,
+# checked below:
+#   only the owner's ✓ becomes the lock — `asRead`'s `locks:` field on an admin's ✓ (false) and the
+#     owner's own (true), and the home's "not yet in the repository" count, which must move only
+#     when the owner's ✓ lands, never the admin's — below
+#   a path outside the site (`site.pathOutside`) — below (MINOR X1/P1)
+expect "every toggle OFF: a member listing /api/users → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' $B/api/users)"
+expect "every toggle OFF: a member resetting ANOTHER member's password → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -X POST $B/api/users/$TADMIN/password)"
+expect "every toggle OFF: a member enabling or disabling an access → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"enabled":false}' $B/api/users/$TADMIN/enabled)"
+expect "every toggle OFF: an admin disabling the owner → 409" 409 \
+  "$(tas_admin -o /dev/null -w '%{http_code}' -d '{"enabled":false}' $B/api/users/$OWNER/enabled)"
+TTRIAGE=$(tas_member -d '{"type":"request","page":"UC-01","text":"toggle triage check"}' $B/api/events | jfield id)
+expect "every toggle OFF: a non-owner triaging → refused" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d "{\"type\":\"request_state\",\"page\":\"UC-01\",\"text\":\"x\",\"data\":{\"request\":\"$TTRIAGE\",\"state\":\"approved\"}}" $B/api/events)"
+# The supplement guard: filed by the ADMIN, so neither the owner nor its own author is who attempts
+# it below — `email !== request.author && !canApprove` has to refuse a member who is truly neither.
+TSUPP=$(tas_admin -d '{"type":"request","page":"UC-01","text":"toggle supplement check"}' $B/api/events | jfield id)
+expect "every toggle OFF: a non-owner, non-author supplement → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d "{\"type\":\"supplement\",\"page\":\"UC-01\",\"text\":\"me too\",\"data\":{\"request\":\"$TSUPP\"}}" $B/api/events)"
+# MINOR (PW): `/api/change-password` is neither a `userRoutes` route nor a `refusalOf` 403, so it
+# was never on the lists above and never asked here — the one server where a reflective read could
+# have swallowed its `checked` guard without a single check noticing.
+expect "every toggle OFF: changing your own password with the wrong current one → 403" 403 \
+  "$(tas_member -o /dev/null -w '%{http_code}' -d '{"current":"the-wrong-password","next":"a-long-enough-password"}' $B/api/change-password)"
+
+# MAJOR (L1): `asRead`'s `locks:` field and `serveHome`'s `ownerApprovals` count both decide from
+# `roles.can('lock', ...)` — never from anything reflective — so this is the one place either could
+# be replaced by `JSON.stringify(project).includes('"peopleScreen":true')` without a single test
+# above noticing: every check so far asks whether an action is REFUSED, never what a ✓ that went
+# through reads back as.
+toff_waiting() { tas_owner $B/engine/home | has -F 'not yet in the repository'; echo $?; }
+expect "every toggle OFF: nothing waits before anyone approves" 1 "$(toff_waiting)"
+# "waiting" only moves for a ✓ whose fingerprint matches the block's ACTUAL current one
+# (`home-page.ts`'s `summarisePages`), so this needs a REAL block — `A01.1.3`, real content nothing
+# else in this file's checks against POFF_SITE already touches — and its real fingerprint, not an
+# arbitrary string like the ones used above only to exercise a 403/409 refusal.
+TLOCK_FP=$(cli_fingerprint A01.1.3)
+TLOCK_ADMIN=$(tas_admin -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.3\",\"fingerprint\":\"$TLOCK_FP\"}" $B/api/events | jfield id)
+expect "every toggle OFF: an admin's ✓, read back, is not the lock" false \
+  "$(tas_owner $B/api/events/$TLOCK_ADMIN | jfield locks)"
+expect "every toggle OFF: and the home does not count it as waiting" 1 "$(toff_waiting)"
+TLOCK_OWNER=$(tas_owner -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.3\",\"fingerprint\":\"$TLOCK_FP\"}" $B/api/events | jfield id)
+expect "every toggle OFF: the owner's ✓, read back, is the lock" true \
+  "$(tas_owner $B/api/events/$TLOCK_OWNER | jfield locks)"
+expect "every toggle OFF: and now the home counts it as waiting" 0 "$(toff_waiting)"
+
+# MINOR (X1/P1): the cross-site guard (`sameOrigin`) and the path-outside guard (`site.pathOutside`)
+# are both reflective reads' other favourite hiding place — reached by nothing `refusalOf` runs, so
+# nothing above asked either. Triage, not "ask for a page": a `request` needing `pageRequests` would
+# be refused by the feature gate first here, proving nothing about `sameOrigin` specifically.
+# Filed by the MEMBER, not the owner: `cycle.json`'s `initial_for_admin` starts an owner's or admin's
+# OWN request already at `approved` (they do not triage themselves), so approving it again would be
+# refused with 409 regardless of `sameOrigin` — proving nothing about the guard under test.
+TCROSS=$(tas_member -d '{"type":"request","page":"UC-01","text":"toggle cross-site setup"}' $B/api/events | jfield id)
+expect "every toggle OFF: a cross-site POST to the home is refused" "403 " \
+  "$(curl -s -o /dev/null -w '%{http_code} ' -b $TCOOKIES -H 'Origin: https://elsewhere.example' \
+    --data-urlencode action=triage --data-urlencode "request=$TCROSS" --data-urlencode page=UC-01 \
+    --data-urlencode state=approved $B/engine/home)"
+# With a real session, unlike the default server's check this repeats: with NO session, password
+# identity redirects everything but /sign-in and /api/ to sign-in (302) before serveStatic is ever
+# reached, so an unauthenticated request here would prove the login guard, not `site.pathOutside`.
+expect "every toggle OFF: a path outside the site is refused" 403 \
+  "$(curl -s -b $TCOOKIES -o /dev/null -w '%{http_code}' --path-as-is "$B/%2e%2e%2f%2e%2e%2fetc/passwd")"
+
+# MINOR (locks): disabling drops the open session at once (AGENTS.md, "nothing is erased") — this is
+# the LAST use of tas_member on this server, because disabling the account it authenticates as makes
+# every later call through it answer 401 instead of whatever it meant to prove.
+expect "every toggle OFF: the owner disabling a member → 200" 200 \
+  "$(tas_owner -o /dev/null -w '%{http_code}' -d '{"enabled":false}' $B/api/users/$TMEMBER/enabled)"
+expect "every toggle OFF: their open session dies at once → 401" 401 \
+  "$(tas_member -o /dev/null -w '%{http_code}' $B/api/me)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$PDATA"
 
 echo "local mode does NOT turn on outside development:"
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_AUDIENCE=/projects/0/x PORT=$PORT \

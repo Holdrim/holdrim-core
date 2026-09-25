@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
 import { createRoles, rolesOf } from '../core/roles.js';
-import { overLimit, validCommit } from '../core/limits.js';
+import { overLimit, validCommit, short } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
 import { SqliteEventStore } from './store-sqlite.ts';
@@ -299,6 +299,23 @@ async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 /**
+ * Which toggle an event needs turned on, or null when nothing about it is gated at all.
+ *
+ * A plain lookup, never a question asked of `roles`: FEATURES decide what exists, capabilities
+ * decide who may use it, and the two must never blend into one function — the moment a toggle could
+ * also be read as "may", it could be read as a way to take a capability from someone, which is
+ * exactly what docs/ROLES.md's "a toggle never turns off a guard" forbids. `approval`,
+ * `request_state` and `supplement` are absent on purpose: they are how a request already filed
+ * moves and how a text is locked, never a way to file a new kind of thing a toggle could gate.
+ */
+function gatingFeatureOf(incoming: NewEvent): keyof typeof project.features | null {
+  if (incoming.type === 'comment') return 'comments';
+  if (incoming.type === 'request' && incoming.data?.category === 'page') return 'pageRequests';
+  if (incoming.type === 'request' && incoming.data?.category === 'bug') return 'bugCategory';
+  return null;
+}
+
+/**
  * Why an event is refused before anything else about it is looked up, or null when it may go on.
  *
  * Called by `recordEvent` only, the one way into the event store for the API and both of the home's
@@ -310,6 +327,36 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
   { status: number; body: Record<string, unknown> } | null {
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
+  }
+  // Checked before the feature gate below: `gatingFeatureOf` matches `data.category` by EXACT
+  // string — `"Bug"` or `"page "` would silently side-step whichever toggle the real spelling would
+  // have gated, because nothing else validates it is one of `cycle.json`'s own categories.
+  //
+  // ⚠️ `typeof category !== 'string'` is checked FIRST, never folded into `String(category)` the way
+  // this used to read. `gatingFeatureOf` compares the RAW value (`data.category === 'page'`), never a
+  // stringified one — and `String([...])` joins a single-element array with nothing in between, so a
+  // JSON body naming `"category":["page"]` used to pass THIS check (`String(['page']) === 'page'`)
+  // while `gatingFeatureOf` read the very same value and saw neither `'page'` nor `'bug'`: the gate
+  // stayed null, and a request shaped exactly like a page request reached the store with pageRequests
+  // off, never having asked it. Requiring a real string closes the gap by construction: the two
+  // checks now agree on the same value instead of two different ones that merely print the same.
+  // `data.category` is `unknown` (the core's own typedef, `engine/core/cycle.js`), and a category is
+  // never required — a request naming none still goes on to the checks below.
+  //
+  // `short`, not the raw value, in the message: `category` is caller-controlled and unbounded until
+  // `overLimit` runs, further down — echoing it whole here is how a 200 KB category once became a
+  // 200 KB error body.
+  const category = incoming.data?.category;
+  if (incoming.type === 'request' && category !== undefined
+      && (typeof category !== 'string' || !Object.hasOwn(cycle.table.request_categories ?? {}, category))) {
+    return { status: 400, body: { error: say('api.request.unknownCategory', { category: short(category) }) } };
+  }
+  // Checked before anything role-shaped: a feature that is off refuses everyone, owner included —
+  // it is not a permission, and answering 403 either way keeps the two indistinguishable to whoever
+  // is refused, exactly as intended.
+  const gate = gatingFeatureOf(incoming);
+  if (gate && !project.features[gate]) {
+    return { status: 403, body: { error: say('api.feature.disabled', { feature: gate }) } };
   }
   if (incoming.type === 'approval' && (!incoming.block || !incoming.fingerprint)) {
     return { status: 400, body: { error: say('api.approval.needsBlockAndFingerprint') } };
@@ -458,6 +505,13 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
       // their own choice, then the browser, then the project — so the panel does not decide it a
       // second way and speak Spanish on a page whose sign-in spoke Portuguese.
       language: languageOf(req),
+      // The toggles the PANEL draws a control for, and only those — never peopleScreen or graph,
+      // which gate a server screen and a CLI command the panel never renders. Without this the
+      // panel would keep offering "Comment", or the bug/page categories, after a project turned
+      // them off, and the person would type into a form the server then 403s on: the front end has
+      // to obey the same answer the server would give (docs/ROLES.md, "The front end obeys the
+      // server"). `engine/web/src/Panel.jsx` is the one place that reads this.
+      features: { comments: project.features.comments, pageRequests: project.features.pageRequests, bugCategory: project.features.bugCategory },
       // Only exists with password login. Without it, reloading the page would forget the password
       // is still the first-access one — and the change screen would only appear at login.
       ...(byPassword ? { mustChangePassword: (await byPassword.fromRequest(req.headers))?.mustChangePassword ?? false } : {}),
@@ -809,6 +863,18 @@ async function viewerOf(req: IncomingMessage): Promise<string | null> {
  */
 const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.can('people', viewer));
 
+/**
+ * Whether the people SCREEN (and its link in the nav) is reachable at all — `features.peopleScreen`.
+ *
+ * ⚠️ This is the ONLY place that toggle is read. The `/api/users*` routes (`userRoutes`, above) ask
+ * `manages()` — `roles.can('people', email)` — and never this: hiding the screen must never mean
+ * disabling what it fronts (docs/ROLES.md, "no toggle may disable a guard"). An owner who knows the
+ * routes, or a script that calls them directly, keeps every ability the screen merely gives a button
+ * to; turning this off hides the button, nothing else. `engine/tests/features.test.js` proves the
+ * guards themselves read as if this toggle did not exist.
+ */
+const peopleScreenOn = () => project.features.peopleScreen;
+
 /** Headers for a screen the engine renders itself: never cached, framed by nobody, and its policy. */
 function screenHeaders(nonce: string, script: boolean) {
   return {
@@ -820,8 +886,10 @@ function screenHeaders(nonce: string, script: boolean) {
 async function servePeople(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
   // Somebody who may not manage people is sent home rather than shown a refusal: the navigation
-  // never offered them this screen, so they got here by typing the address.
-  if (!byPassword || !managesPeople(viewer)) {
+  // never offered them this screen, so they got here by typing the address. A project that turned
+  // the screen off sends EVERYONE home the same way, owner included — the routes behind it (above)
+  // never asked this question and are not asked it here either.
+  if (!peopleScreenOn() || !byPassword || !managesPeople(viewer)) {
     return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
   }
   const nonce = randomBytes(16).toString('base64');
@@ -920,7 +988,8 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   res.writeHead(status, screenHeaders(nonce, false));
   res.end(renderHomePage(i18n, lang, {
     projectName: project.name, pages, requests,
-    canManagePeople: managesPeople(viewer), ask,
+    canManagePeople: peopleScreenOn() && managesPeople(viewer),
+    pageRequestsEnabled: project.features.pageRequests, ask,
   }, projectTheme, nonce));
 }
 

@@ -16,6 +16,7 @@ import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mar
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests, queue, list } from '../cli/requests.ts';
 import { createRoles } from '../core/roles.js';
+import { everyToggleFlipped } from '../core/features.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const EXAMPLE = join(ROOT, 'examples', 'hello-world');
@@ -296,6 +297,52 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
   assert.equal(registry['A01.1.2'], undefined, 'a ✓ for an earlier text does not hold');
   assert.equal(registry['A02.1.1'], undefined, 'a reviewer\'s ✓ never locks');
   assert.match(readFileSync(join(tmp, 'pages', 'A01.html'), 'utf8'), /data-id="A01\.1\.1" data-validated="2026-09-22"/);
+});
+
+/**
+ * The filter above (`roles.can('lock', e.author)`) is exercised only against `holdrim.json`'s
+ * DEFAULT toggles by the test before this one — every toggle this project ships at the value it
+ * ships with. A filter that secretly asked something toggle-shaped instead of `roles.can` — the
+ * same worry `engine/test-contract.sh`'s "every toggle off" section answers for the SERVER — would
+ * have nowhere to show itself there, so this repeats the claim with every toggle at the OPPOSITE of
+ * its default, on the CLI's own path (`projectRoles`, real `HOLDRIM_OWNER`/`HOLDRIM_ADMINS`, no
+ * `options.owner` standing in for either).
+ */
+test('sync\'s owner filter holds with every toggle at its non-default value', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-toggles-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const config = JSON.parse(readFileSync(join(tmp, 'holdrim.json'), 'utf8'));
+  // holdrim.json itself may never name `owner` or `admins` (AGENTS.md — "whoever commits to the
+  // file is not whoever deploys"): only `features` is added here, and who is the owner or an admin
+  // still comes from the environment, below.
+  config.features = everyToggleFlipped();
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify(config));
+
+  const blocks = await readBlocks(tmp);
+  const approval = (author, when) => ({
+    id: `approval-${author}`, type: 'approval', page: 'A01', block: 'A01.1.1',
+    fingerprint: blocks.get('A01.1.1').fingerprint, author, when, data: null,
+  });
+
+  const before = { owner: process.env.HOLDRIM_OWNER, admins: process.env.HOLDRIM_ADMINS };
+  process.env.HOLDRIM_OWNER = 'owner@example.org';
+  process.env.HOLDRIM_ADMINS = 'admin@example.org';
+  t.after(() => {
+    if (before.owner === undefined) delete process.env.HOLDRIM_OWNER; else process.env.HOLDRIM_OWNER = before.owner;
+    if (before.admins === undefined) delete process.env.HOLDRIM_ADMINS; else process.env.HOLDRIM_ADMINS = before.admins;
+  });
+
+  // No `options.owner`: each call resolves through `projectRoles`, the real HOLDRIM_OWNER/
+  // HOLDRIM_ADMINS path `options.owner` exists only to bypass.
+  const reviewerRun = await sync(tmp, { events: async () => [approval('reviewer@example.org', '2026-09-22T10:00:00Z')] });
+  assert.equal(reviewerRun.added, 0, 'a reviewer\'s ✓ never locks, every toggle at its non-default value or not');
+
+  const adminRun = await sync(tmp, { events: async () => [approval('admin@example.org', '2026-09-22T10:01:00Z')] });
+  assert.equal(adminRun.added, 0, 'an admin\'s ✓ never locks either, same toggles');
+
+  const ownerRun = await sync(tmp, { events: async () => [approval('owner@example.org', '2026-09-22T10:02:00Z')] });
+  assert.equal(ownerRun.added, 1, 'the owner\'s ✓ still locks with every toggle at its non-default value');
 });
 
 // ===================================================================== issue #91: the CLI's own alert
