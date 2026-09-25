@@ -52,13 +52,17 @@ Worth knowing before you run it:
   banner down — never the log line, never the CLI's exit code, and never the text's own tampered
   reading, which nothing repairs. A finding is its event, field and case plus three things found
   there (`observedOf`, `engine/api/texts.ts`): the hash the event itself carries, the row's own hash
-  under the row's own salt, and the ids of every removal that claims the field. Rewriting any of the
-  three, or changing the case, is a new finding and shows again. Two things stay the same finding,
-  because none of the three sees them: a `downgraded` field's inline value edited again (it has no
-  salt of its own, and an unsalted hash of it is what docs/PRIVACY.md section 4 forbids), and a field
-  put right and then tampered back into exactly the state that was acknowledged. Only a
-  `tamper_acknowledged` event counts, and never one marked as an agent's: the same id in any other
-  event's `data`, which a client writes, quiets nothing. The banner has a
+  under the row's own salt, and the ids of every valid removal of the field (dated and placed after
+  its target). Changing any of the three, or the case, is a new finding, and shows again while the
+  field still reads as tampered. Two re-tamperings of the field stay the same finding, because none
+  of the three sees them: a `downgraded` field's inline value edited again (it has no salt of its
+  own, and an unsalted hash of it is what docs/PRIVACY.md section 4 forbids), and a field put right
+  and then tampered back into exactly the state that was acknowledged. Nor is anything the three do
+  not hash a new finding: a removal event rewritten in place — its author, say — keeps its id, and
+  so the finding, which is the limit the first item above already names for every event rewritten
+  in place, closed only by signed events. Only a
+  `tamper_acknowledged` event counts, and only one marked `asAgent: "false"`, the one form the route
+  writes: the same id in any other event's `data`, which a client writes, quiets nothing. The banner has a
   weaker footing than the log line, said plainly: the log line comes from code a direct writer to the
   store does not reach, while an acknowledgement is an event, and that same direct writer can insert
   one naming the finding — the banner then goes quiet while the CRITICAL line keeps firing. Closing

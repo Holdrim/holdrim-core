@@ -253,7 +253,9 @@ forEachStore('a read hands its tampered fields to a caller that asks, and an ack
   assert.equal(finding.page, 'A01');
 
   await tick();
-  await s.append(acknowledgementOf(finding), 'owner@example.org');
+  // As the route appends it, with the `asAgent` it stamps from the identity it saw.
+  const incoming = acknowledgementOf(finding);
+  await s.append({ ...incoming, data: { ...incoming.data, asAgent: 'false' } }, 'owner@example.org');
   const again = [];
   const after = await s.list('A01', again);
   assert.equal(after.find((e) => e.id === written.id).textTampered, true, 'still tampered: acknowledging repairs nothing');

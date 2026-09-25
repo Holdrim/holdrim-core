@@ -314,7 +314,8 @@ interface Removals {
   valid: Map<string, Removed>;
   /** A key with a second valid removal — `removeText` can never produce one, so this is forgery. */
   duplicated: Set<string>;
-  /** Every valid removal's id, per key — what a `double_removal` finding is identified by (`findingOf`). */
+  /** Every valid removal's id, per key — one of the three things `observedOf` hashes into every
+   *  finding of that key, whatever its case, so a removal forged after an acknowledgement is new. */
   ids: Map<string, string[]>;
 }
 

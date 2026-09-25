@@ -952,7 +952,7 @@ try {
     await must('the block\'s history names the acknowledgement',
       () => owner.page.locator('.rv-history', { hasText: en['panel.did.tamperAcknowledged'] }).waitFor());
     await owner.page.keyboard.press('Escape');
-        expect('the acknowledgement is an event, by the owner, and the text still reads as tampered',
+    expect('the acknowledgement is an event, by the owner, and the text still reads as tampered',
       `${OWNER} true`, `${events.find((e) => e.type === 'tamper_acknowledged')?.author} ${events.find((e) => e.id === 'forged1')?.textTampered}`);
 
     // The same field again: a row put back that does not hold the recorded text.

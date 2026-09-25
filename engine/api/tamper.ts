@@ -72,11 +72,13 @@ export function openFindings(reports: readonly TamperReport[], events: readonly 
  * Whether an event quiets the finding its `data.finding` names. Its TYPE first: `data` on any other
  * event is whatever a client posted through `POST /events` — a member's comment carrying
  * `finding: <id>` would otherwise quiet the banner, walking round the owner-only route entirely.
- * And never one recorded as an agent's: the route refuses an agent before it writes anything, so
- * `asAgent: "true"` on an acknowledgement means it did not come through that route at all.
+ * And only one recorded as NOT an agent's, in the one form the route writes: the route refuses an
+ * agent before it writes anything and always stamps `asAgent: "false"`, and no acknowledgement older
+ * than that stamp exists. Anything else — `"true"`, a boolean, the field missing — did not come
+ * through that route, and asking only `!== "true"` would let the last two quiet the banner.
  */
 function isAcknowledgement(e: Event): boolean {
-  return e.type === TAMPER_ACKNOWLEDGED && typeof e.data?.finding === 'string' && e.data?.[AS_AGENT_FIELD] !== 'true';
+  return e.type === TAMPER_ACKNOWLEDGED && typeof e.data?.finding === 'string' && e.data?.[AS_AGENT_FIELD] === 'false';
 }
 
 /** The two identity questions this needs of `createRoles` (engine/core/roles.js), and no more. */
@@ -115,7 +117,9 @@ export function acknowledgementRefusal(
   if (typeof finding !== 'string' || !/^[0-9a-f]{64}$/.test(finding)) return { refused: { status: 400, key: 'api.tamper.findingRequired' } };
   // Only an OPEN finding: one already acknowledged, one no longer found, and one that does not exist
   // yet are all refused alike — the last is what stops an acknowledgement from being given in
-  // advance, for a finding somebody can predict (`unaccounted` has nothing but the case to it).
+  // advance. A finding is predictable by whoever can see what it hashes: an event's recorded hash
+  // and its removals' ids are on every read, and the row's salted hash is known to whoever is about
+  // to write that row — so without this check, that writer could acknowledge the tampering first.
   const found = open.find((f) => f.finding === finding);
   if (!found) return { refused: { status: 409, key: 'api.tamper.notOpen' } };
   return { found };
