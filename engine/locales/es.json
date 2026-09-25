@@ -164,7 +164,7 @@
   "panel.unavailable": "No se pudo cargar el estado de la revisión. Recargue la página.",
   "panel.you": "Usted",
   "people.confirm.disable": "¿Retirar el acceso de {email}? Sus aprobaciones se quedan, firmadas con su nombre.",
-  "people.confirm.reset": "¿Generar una nueva contraseña para {email}? La actual deja de funcionar ahora.",
+  "people.confirm.reset": "¿Generar una nueva contraseña para {email}? La actual deja de funcionar ahora, y también toda sesión abierta en la cuenta — incluida la suya, si es usted.",
   "people.create.heading": "Dar acceso a alguien",
   "people.create.submit": "Crear acceso",
   "people.disable": "Retirar acceso",

@@ -171,7 +171,7 @@
   "panel.unavailable": "Could not load the review state. Reload the page.",
   "panel.you": "You",
   "people.confirm.disable": "Take away the access of {email}? Their approvals stay, signed with their name.",
-  "people.confirm.reset": "Generate a new password for {email}? The current one stops working now.",
+  "people.confirm.reset": "Generate a new password for {email}? The current one stops working now, and so does every open session on the account — yours too, if this is you.",
   "people.create.heading": "Give someone access",
   "people.create.submit": "Create access",
   "people.disable": "Take access away",
