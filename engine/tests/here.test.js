@@ -128,6 +128,18 @@ test('mayActOn is true on a block the viewer may either triage or approve, and o
   assert.equal(mayActOn(stub, 'member@example.org', 'P03.1.1'), false, 'not TRIAGER at all');
 });
 
+test('mayActOn asks with the block itself, not its page: a block-scoped grant reaches that block alone', () => {
+  // The stub above holds page scopes, which answer a block and its page alike, and the shipped roles
+  // are unscoped: neither could tell `{ block }` from `{ page }` or EVERYWHERE. A grant scoped to one
+  // block can: asked of the page, or of everywhere, it answers false.
+  const oneBlock = {
+    can: (capability, who, where) => who === TRIAGER && capability === 'approve' && scopeCovers('P05.2.1', where),
+    isAgent: () => false,
+  };
+  assert.equal(mayActOn(oneBlock, TRIAGER, 'P05.2.1'), true, 'the block its grant names');
+  assert.equal(mayActOn(oneBlock, TRIAGER, 'P05.2.2'), false, 'a sibling on the same page');
+});
+
 test('mayActOn, for the shipped roles: owner and admin may act everywhere, a member and an agent nowhere', () => {
   const roles = createRoles('owner@example.org', 'ana@example.org', undefined, 'agent@example.org');
   for (const who of ['owner@example.org', 'ana@example.org']) {
