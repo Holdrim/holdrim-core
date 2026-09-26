@@ -92,6 +92,14 @@ who ran the engine from `main` before it.
   sign-in (`sign_in_refused`) still logs the address exactly as typed: it never became a person.
   `docs/PRIVACY.md`, section 5, documents the manual procedure for removing a person, until there is
   a screen for it.
+- **`holdrim sync` and `holdrim restamp` exit non-zero when a ✓ could not be stamped safely.** A ✓
+  whose block cannot be written without risking another one (see the entry under **Fixed** about
+  stamping only the block a ✓ was given to) is refused, and it used to be refused with exit 0 — the
+  registry never got the entry, so a later rewrite of that text passed `holdrim check` in silence.
+  What an adopter's CI sees now: a `✗ <id>: <reason>; nothing written` line per refused block, `sync`'s
+  summary line counting them (`… · 1 refused · …`), a `⚠ … could not be stamped safely` line, and exit
+  code 1. What to change: fix what the reason names on the page — most often two blocks sharing one
+  id — and run the command again; nothing to change in the pipeline itself.
 
 ### Added
 
@@ -272,9 +280,12 @@ who ran the engine from `main` before it.
   the first file that had it — either could land the seal on the wrong block, or throw, depending on
   characters the id itself carried (a documentation author's choice, not the engine's). A block is
   now resolved the same way the traffic light already reads it, and a write is verified, by
-  re-parsing, against every other block on the page before it lands. Three cases now REFUSE, and say
-  why, instead of writing anywhere: an id carried by more than one block; an id containing `"`, `&`,
-  `<` or `>`, which cannot be located safely; and a page where the tag cannot be found without
-  risking another block. Along the way, writing `data-depended-on` (which carries other block ids
-  inside a JSON blob) stopped going through `String.replace` with a string replacement, whose
-  `$&`/`$1`/`$$` syntax could corrupt an id containing `$&`.
+  re-parsing, against the whole page before it lands: the only difference allowed is the attributes
+  added to that one block's tag. An attribute the block already carries is never written a second
+  time. Three cases now REFUSE, and say why, instead of writing anywhere: an id carried by more than
+  one block; an id containing `"` or `&`, which a page normally holds as an entity (`&quot;`,
+  `&amp;`) that a literal search cannot find; and a page where the tag cannot be found without
+  risking another block — among them a tag with a `>` inside a quoted value before its `data-id`.
+  Along the way, writing `data-depended-on` (which carries other block ids inside a JSON blob)
+  stopped going through `String.replace` with a string replacement, whose `$&`/`$1`/`$$` syntax could
+  corrupt an id containing `$&`.

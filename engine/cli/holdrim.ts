@@ -128,13 +128,15 @@ async function main() {
                          { agent: values.agent, dryRun: values['dry-run'] });
     case 'sync': {
       const r = await validation.sync(root, source);
-      return r.tampered || r.guardsTampered ? 1 : 0;
+      // A refused ✓ is an owner's approval the registry did not get: exiting 0 would let CI pass a
+      // run that silently left a lock unrecorded (holdrim#135).
+      return r.tampered || r.guardsTampered || r.refused > 0 ? 1 : 0;
     }
     case 'check':      return (await validation.check(root)) ? 1 : 0;
     case 'index':      await validation.rebuildIndex(root, values.db); return 0;
     case 'kinds':      await validation.listKinds(); return 0;
     case 'lights':     return (await validation.showLights(root, { only: values.only })) ? 0 : 2;
-    case 'restamp':    await validation.restamp(root); return 0;
+    case 'restamp':    return (await validation.restamp(root)).refused > 0 ? 1 : 0;
     case 'if-i-touch': return validation.ifITouch(root, requireArg(arg, 'if-i-touch <id>'));
     case 'graph':      return graph.showGraph(root, { json: values.json, mermaid: values.mermaid, dot: values.dot,
                          enabled: projectConfig.features.graph });

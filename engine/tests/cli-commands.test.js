@@ -335,6 +335,66 @@ test('sync exits non-zero and prints the warning when a field reads as tampered'
   assert.match(r.out, /CRITICAL/);
 });
 
+// ===================================================================== holdrim#135: a refused ✓ fails the run
+// A ✓ the CLI could not stamp safely leaves the registry without it, and a later rewrite of that text
+// passes `check`. Only the exit code makes the refusal reach a CI run that does not read the log, and
+// only spawning the CLI proves the `? 1 : 0` in holdrim.ts's switch.
+
+/** The hello world's A01.1.1, carried a second time by a hidden copy placed before it. */
+function duplicateA0111(dir) {
+  const page = join(dir, 'pages', 'A01.html');
+  const html = readFileSync(page, 'utf8');
+  const tag = '<p class="lead" data-id="A01.1.1" data-code="1.1">';
+  assert.ok(html.includes(tag), 'the hello world still opens A01.1.1 this way');
+  writeFileSync(page, html.replace(tag, '<p data-id="A01.1.1" hidden>copy</p>' + tag));
+}
+
+/** An events file holding the owner's ✓ on A01.1.1's current text, after the store's baseline. */
+async function approvedA0111(dir) {
+  const db = join(dir, 'events.db');
+  const store = new SqliteEventStore(db);
+  await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, 'you@example.org');
+  // `append` stamps its own time: without a gap, the ✓ could share the baseline's millisecond and
+  // read as predating it, which is a different rule (`legacyLock`) than the one this is about.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const fingerprint = (await readBlocks(dir)).get('A01.1.1').fingerprint;
+  await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint, data: { locks: 'true' } },
+    'you@example.org');
+  await store.close();
+  return db;
+}
+
+test('sync exits 0 when the ✓ it brings in is stamped, and non-zero when it has to refuse one', async (t) => {
+  const clean = project(t);
+  const ok = run(['sync', '--db', await approvedA0111(clean)], clean);
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /1 new · 0 already there · 0 ✓ expired · 0 refused/);
+
+  const dir = project(t);
+  duplicateA0111(dir);
+  const r = runApart(['sync', '--db', await approvedA0111(dir)], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /✗ A01\.1\.1: 2 blocks carry this id; nothing written/);
+  assert.match(r.stdout, /0 new · 0 already there · 0 ✓ expired · 1 refused/);
+});
+
+test('restamp exits 0 when every entry is stamped, and non-zero when it has to refuse one', async (t) => {
+  const registry = JSON.stringify({ 'A01.1.1': { file: 'A01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } });
+  const clean = project(t);
+  writeFileSync(join(clean, 'approvals.json'), registry);
+  const ok = run(['restamp'], clean);
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /1 block\(s\) got the mark they were missing/);
+
+  const dir = project(t);
+  writeFileSync(join(dir, 'approvals.json'), registry);
+  duplicateA0111(dir);
+  const r = runApart(['restamp'], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /✗ A01\.1\.1: 2 blocks carry this id; nothing written/);
+  assert.match(r.stdout, /⚠ 1 entries could not be stamped safely/);
+});
+
 // ===================================================================== issue #108: the guards, through --db
 // `Source#fromFile` opens the file read-only and never compared its triggers with GUARDS: only the
 // server's next boot did. So for the CLI, dropping a guard was enough — nobody had to put it back

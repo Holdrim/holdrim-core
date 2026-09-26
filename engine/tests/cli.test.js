@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, cpSync, re
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
-import { readBlocks, sheetFiles } from '../cli/pages.ts';
+import { readBlocks, sheetFiles, spliceAttributes } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, restamp, check, ifITouch } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests, queue, list, show } from '../cli/requests.ts';
@@ -108,6 +108,8 @@ test('a validated block whose text changed is caught by check, and intact otherw
  * character of the id literally, so this suite plants each hostile id NEXT TO an innocent neighbour
  * and checks the neighbour never moves.
  */
+// `a$&b` is not here: an id with `&` is refused outright (`resolveBlock`), so its `$&` is proved
+// where it can still reach a write — as a DEPENDENCY id inside `data-depended-on`, further down.
 const HOSTILE_IDS = ['a+b', 'a(b', 'a|b', 'a[b', 'a\\b'];
 const OTHER_ID = 'safe-neighbour';
 
@@ -208,26 +210,66 @@ test('a dependency id containing $& lands intact in data-depended-on', async (t)
     'the dependency id must appear exactly as JSON.stringify produced it, not mangled by $-substitution');
 });
 
+/** What `fn` printed through console.log, as one string, and what it returned. */
+async function printed(t, fn) {
+  const lines = [];
+  const log = t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
+  try {
+    return { value: await fn(), out: lines.join('\n') };
+  } finally {
+    log.mock.restore();
+  }
+}
+
 /**
- * `"`, `&`, `<` and `>` have no literal `data-id="${id}"` to find at all — an id carrying one names
- * something this raw-text format cannot represent unescaped. `mark` refuses up front, before
- * scanning a single file, rather than let the id's own character decide which tag the entity or the
- * tag boundary it introduces actually belongs to.
+ * `"` and `&` reach a page as entities (`&quot;`, `&amp;`), so the literal `data-id="${id}"` a splice
+ * starts from is normally not in the file at all. `mark` says so, by that reason, before reading a
+ * page — stated policy, not the safety: the whole-page check in `spliceAttributes` is. The page
+ * here DOES hold a block with the id, entity-encoded, so the reason is the only thing a mutant that
+ * dropped the refusal would change: it would print "could not locate its tag" instead.
  */
-const INVALID_IDS = ['a"b', 'a&b', 'a<b', 'a>b'];
-for (const id of INVALID_IDS) {
-  test(`mark refuses id ${JSON.stringify(id)}: it cannot be matched by a literal needle`, async (t) => {
+const INVALID_IDS = [['a"b', 'a&quot;b'], ['a&b', 'a&amp;b']];
+for (const [id, written] of INVALID_IDS) {
+  test(`mark refuses id ${JSON.stringify(id)} by that reason, and writes nothing`, async (t) => {
     const tmp = project(t);
     const sheet = join(tmp, 'p', 'X01.html');
-    const html = '<main><p data-id="safe" data-code="1.1">safe text</p></main>';
+    const html = `<main><p data-id="${written}" data-code="1.1">the text</p></main>`;
     writeFileSync(sheet, html);
     const registry = {};
 
-    const result = await mark(tmp, registry, id, '2026-09-22', 'test');
+    const { value, out } = await printed(t, () => mark(tmp, registry, id, '2026-09-22', 'test'));
 
-    assert.equal(result, null, `mark must refuse an id containing ${JSON.stringify(id)}`);
+    assert.equal(value, null, `mark must refuse an id containing ${JSON.stringify(id)}`);
+    assert.match(out, /an id containing " or & cannot be located safely; nothing written/);
     assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
     assert.equal(registry[id], undefined);
+  });
+}
+
+/**
+ * `<` and `>` are not refused: inside a quoted value they are literal text, the needle finds them as
+ * written, and the whole-page check proves the write landed on that block alone.
+ */
+for (const id of ['a<b', 'a>b']) {
+  test(`mark and restamp stamp an id containing ${JSON.stringify(id.slice(1, 2))} on its own block only`, async (t) => {
+    const tmp = project(t);
+    const sheet = join(tmp, 'p', 'X01.html');
+    writeFileSync(sheet, hostilePage(id));
+
+    const fingerprint = await mark(tmp, {}, id, '2026-09-22', 'test');
+    assert.ok(fingerprint);
+    assert.equal(readFileSync(sheet, 'utf8'),
+      `<main><div data-id="${id}" data-validated="2026-09-22" data-code="1.1" data-validated-fingerprint="${fingerprint}">`
+      + `hostile text</div><div data-id="${OTHER_ID}" data-code="1.2">neighbour text</div></main>`);
+
+    writeFileSync(sheet, hostilePage(id));
+    writeFileSync(join(tmp, 'r.json'),
+      JSON.stringify({ [id]: { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } }));
+    const { written, refused } = await restamp(tmp);
+    assert.deepEqual({ written, refused }, { written: 1, refused: 0 });
+    assert.equal(readFileSync(sheet, 'utf8'),
+      `<main><div data-id="${id}" data-code="1.1" data-validated-fingerprint="ffffffffffffffff">`
+      + `hostile text</div><div data-id="${OTHER_ID}" data-code="1.2">neighbour text</div></main>`);
   });
 }
 
@@ -248,6 +290,44 @@ test('mark refuses the double-quote decoy id from round 1, and leaves both block
 
   assert.equal(result, null, 'an id with a `"` cannot be matched by a literal needle');
   assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
+});
+
+/**
+ * The same decoy on a REPEAT stamp: the real block already carries its seal, so nothing needs
+ * inserting — and a restamp that decided "already there" by looking at the raw text past the first
+ * needle would find the decoy's tag bare and stamp it. The refusal names its reason, and the page is
+ * byte-identical.
+ */
+test('restamp refuses id a"b by its reason, and never stamps the decoy whose raw text matches it', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<main><p data-id="a"b"="">decoy a</p>'
+    + '<p data-id="a&quot;b" data-validated-fingerprint="ffffffffffffffff">real</p></main>';
+  writeFileSync(sheet, html);
+  writeFileSync(join(tmp, 'r.json'),
+    JSON.stringify({ 'a"b': { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } }));
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.deepEqual(value, { written: 0, alreadyHad: 0, noSuchBlock: 0, refused: 1 });
+  assert.match(out, /✗ a"b: an id containing " or & cannot be located safely; nothing written/);
+  assert.equal(readFileSync(sheet, 'utf8'), html);
+});
+
+test('restamp refuses id a&amp;b by its reason, and never stamps the block whose id decodes to it', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<main><p data-id="a&amp;b">decoy</p>'
+    + '<p data-id="a&amp;amp;b" data-validated-fingerprint="ffffffffffffffff">real</p></main>';
+  writeFileSync(sheet, html);
+  writeFileSync(join(tmp, 'r.json'),
+    JSON.stringify({ 'a&amp;b': { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } }));
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.equal(value.refused, 1);
+  assert.match(out, /✗ a&amp;b: an id containing " or & cannot be located safely; nothing written/);
+  assert.equal(readFileSync(sheet, 'utf8'), html);
 });
 
 /**
@@ -440,10 +520,10 @@ test('mark on a block whose tag hides a `>` inside a quoted attribute stamps bef
 });
 
 /**
- * Proof P1 (round 1's review): no fixture had `data-id` as the LAST attribute before `>` — an
- * off-by-one in the needle's own end would slip past unnoticed.
+ * Round 1's review: no fixture had `data-id` as the LAST attribute before `>` — an off-by-one in the
+ * needle's own end would slip past unnoticed.
  */
-test('mark on a tag where data-id is the last attribute before `>`', async (t) => {
+test('mark stamps inside the tag when data-id is its last attribute, never after the `>`', async (t) => {
   const tmp = project(t);
   const sheet = join(tmp, 'p', 'X01.html');
   writeFileSync(sheet, '<main><div data-id="X">text</div></main>');
@@ -458,31 +538,35 @@ test('mark on a tag where data-id is the last attribute before `>`', async (t) =
 });
 
 /**
- * Proof P2 (round 1's review): calling `mark` twice on the same id must leave exactly one
- * `data-validated` — the FIRST date, never silently overwritten by a second call.
+ * Round 1's review: calling `mark` twice on the same id must leave exactly one `data-validated` —
+ * the FIRST date, never silently overwritten by a second call — and the second call still succeeds:
+ * a block already carrying its seal is recorded, not refused.
  */
-test('mark called twice on the same id leaves exactly one data-validated attribute', async (t) => {
+test('a second mark on the same block succeeds, writes nothing, and the first date stands', async (t) => {
   const tmp = project(t);
   const sheet = join(tmp, 'p', 'X01.html');
   writeFileSync(sheet, '<main><p data-id="y" data-code="1.1">the text</p></main>');
   const registry = {};
 
   await mark(tmp, registry, 'y', '2026-09-22', 'test');
-  await mark(tmp, registry, 'y', '2026-09-23', 'test');
+  const once = readFileSync(sheet, 'utf8');
+  assert.ok(await mark(tmp, registry, 'y', '2026-09-23', 'test'), 'the second mark must be recorded, not refused');
+  assert.equal(registry.y.date, '2026-09-23');
 
   const after = readFileSync(sheet, 'utf8');
+  assert.equal(after, once, 'nothing on the page changes');
   assert.equal((after.match(/data-validated="/g) ?? []).length, 1, 'data-validated must not be duplicated');
   assert.equal((after.match(/data-validated-fingerprint="/g) ?? []).length, 1);
   assert.match(after, /data-validated="2026-09-22"/, 'the first date wins: mark never overwrites an existing mark');
 });
 
 /**
- * Proof P3 (round 1's review): a tag with no closing `>` anywhere in the file is not a block a
- * parser can resolve at all — the same parser `readBlocks` uses never turns it into an element, so
+ * Round 1's review: a tag with no closing `>` anywhere in the file is not a block a parser can
+ * resolve at all — the same parser `readBlocks` uses never turns it into an element, so
  * `resolveBlock` reports it as not found rather than guessing where an attribute would even go.
  * `mark` has to refuse, and `restamp` must not count it as written.
  */
-test('mark on a tag that never closes refuses instead of guessing where it ends', async (t) => {
+test('mark refuses a tag that never closes, and writes nothing', async (t) => {
   const tmp = project(t);
   const sheet = join(tmp, 'p', 'X01.html');
   const html = '<main><p data-id="y" data-code="1.1"never closed here';
@@ -495,7 +579,7 @@ test('mark on a tag that never closes refuses instead of guessing where it ends'
   assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
 });
 
-test('restamp on a tag that never closes does not count it as written', async (t) => {
+test('restamp counts a tag that never closes as gone, never as written', async (t) => {
   const tmp = project(t);
   const sheet = join(tmp, 'p', 'X01.html');
   const html = '<main><p data-id="y" data-code="1.1"never closed here';
@@ -503,10 +587,357 @@ test('restamp on a tag that never closes does not count it as written', async (t
   writeFileSync(join(tmp, 'r.json'),
     JSON.stringify({ y: { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } }));
 
-  const written = await restamp(tmp);
+  const { written, noSuchBlock } = await restamp(tmp);
 
   assert.equal(written, 0, 'a tag that cannot be closed safely must not count as written');
+  assert.equal(noSuchBlock, 1, 'the parser never made it a block: "no longer exists", the ordinary case');
   assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
+});
+
+// ===================================================================== holdrim#135, round 3
+// What a stamp inserts is decided from the resolved element's own attributes, and a candidate is
+// accepted only if that element carries exactly what was planned and, with it taken off again, the
+// whole page serialises as it did. Each test below is a page on which some weaker rule — "already
+// there" read from the raw text, a check of the blocks alone, a tag end that loses track of a quote —
+// wrote somewhere else, or refused in silence.
+
+/** A project whose one page is `html`, with `registry` as its approvals record. */
+function onePage(t, html, registry = {}) {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  writeFileSync(sheet, html);
+  writeFileSync(join(tmp, 'r.json'), JSON.stringify(registry));
+  return { tmp, sheet, page: () => readFileSync(sheet, 'utf8') };
+}
+
+/** One recorded ✓ for `y`, as `restamp` reads it. */
+const Y_RECORDED = { y: { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } };
+
+/** The owner's ✓ on each of `ids`, on the text `readBlocks` sees now, after a baseline. */
+async function ownersApprovals(root, ids) {
+  const blocks = await readBlocks(root);
+  return [
+    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: 'owner@example.org',
+      when: '2026-09-22T09:00:00Z', data: null },
+    ...ids.map((id, i) => ({ id: `e${i}`, type: 'approval', page: 'X01', block: id,
+      fingerprint: blocks.get(id).fingerprint, author: 'owner@example.org',
+      when: `2026-09-22T1${i}:00:00Z`, data: { locks: 'true' } })),
+  ];
+}
+
+test('sync counts a ✓ it could not stamp as refused, says so in its summary, and records nothing for it',
+  async (t) => {
+    const { tmp, page } = onePage(t, '<main><p data-id="a" data-code="1.1">approved a</p>'
+      + '<p data-id="y" data-code="1.2">twice</p><p data-id="y" data-code="1.3">twice</p></main>');
+    const before = page();
+    const events = await ownersApprovals(tmp, ['a', 'y']);
+
+    const { value: r, out } = await printed(t, () =>
+      sync(tmp, { events: async () => events }, { owner: 'owner@example.org' }));
+
+    assert.equal(r.added, 1);
+    assert.equal(r.refused, 1, 'the duplicate y is a refusal the CLI exits non-zero on, not a silent skip');
+    assert.match(out, /✗ y: 2 blocks carry this id; nothing written/);
+    assert.match(out, /^1 new · 0 already there · 0 ✓ expired · 1 refused · 1 validated in all$/m);
+    assert.match(out, /⚠ 1 ✓ could not be stamped safely/);
+    assert.deepEqual(Object.keys(loadRegistry(tmp)), ['a']);
+    assert.notEqual(page(), before, 'a is stamped');
+    assert.doesNotMatch(page(), /data-id="y" data-validated/);
+  });
+
+/**
+ * `sync` checks each ✓ against the text `readBlocks` read at the start, and `mark` resolves the block
+ * again, later. A page edited in between must not have its NEW text recorded under a ✓ given to the
+ * old one: `mark` is handed the fingerprint `sync` checked, and refuses when the text it resolves
+ * differs. The edit is made from inside `sync`'s own run, the moment it reports the first block.
+ */
+test('sync refuses a ✓ whose text changed between reading the blocks and writing the seal', async (t) => {
+  const tmp = project(t);
+  const a = join(tmp, 'p', 'X01.html');
+  const b = join(tmp, 'p', 'X02.html');
+  writeFileSync(a, '<main><p data-id="a">approved a</p></main>');
+  writeFileSync(b, '<main><p data-id="b">approved b</p></main>');
+  const events = await ownersApprovals(tmp, ['a', 'b']);
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => {
+    lines.push(args.join(' '));
+    if (String(args[0]).includes('✓ a validated')) writeFileSync(b, '<main><p data-id="b">never approved</p></main>');
+  });
+
+  const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
+  t.mock.restoreAll();
+
+  assert.equal(r.added, 1);
+  assert.equal(r.refused, 1);
+  assert.ok(lines.some((l) => /✗ b: the text resolved here does not match the ✓ that was checked; nothing written/.test(l)));
+  const registry = loadRegistry(tmp);
+  assert.ok(registry.a);
+  assert.equal(registry.b, undefined, 'b must not be recorded with a text the owner never approved');
+  assert.equal(readFileSync(b, 'utf8'), '<main><p data-id="b">never approved</p></main>', 'and b is not stamped');
+});
+
+const HIDDEN_Y = '<header><span data-id="y" hidden>other</span></header>';
+
+test('restamp over a stamped block never stamps a same-id element outside main', async (t) => {
+  const html = `${HIDDEN_Y}<main><p data-id="y" data-validated-fingerprint="ffffffffffffffff">real</p></main>`;
+  const { tmp, page } = onePage(t, html, Y_RECORDED);
+
+  assert.deepEqual(await restamp(tmp), { written: 0, alreadyHad: 1, noSuchBlock: 0, refused: 0 });
+  assert.equal(page(), html);
+});
+
+test('a second mark never stamps a same-id element outside main, and still succeeds', async (t) => {
+  const { tmp, page } = onePage(t, `${HIDDEN_Y}<main><p data-id="y">real</p></main>`);
+  const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+  const once = page();
+  assert.equal(once, `${HIDDEN_Y}<main><p data-id="y" data-validated="2026-09-22" `
+    + `data-validated-fingerprint="${fingerprint}">real</p></main>`);
+
+  assert.ok(await mark(tmp, {}, 'y', '2026-09-23', 'test'));
+  assert.equal(page(), once);
+});
+
+test('a re-approval after a text change is recorded with the new text\'s fingerprint', async (t) => {
+  const { tmp, sheet, page } = onePage(t, '<main><p data-id="y">old</p></main>');
+  const registry = {};
+  const first = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  writeFileSync(sheet, page().replace('>old<', '>new<'));
+  const edited = page();
+
+  const second = await mark(tmp, registry, 'y', '2026-09-23', 'test');
+
+  assert.ok(second, 'the re-approval must be recorded, not refused because the page already carries a seal');
+  assert.notEqual(second, first);
+  assert.equal(registry.y.fingerprint, second);
+  assert.equal(page(), edited, 'the attributes already on the block are never inserted a second time');
+});
+
+test('a re-approval after a text change never stamps a same-id element outside main', async (t) => {
+  const { tmp, sheet, page } = onePage(t, `${HIDDEN_Y}<main><p data-id="y">old</p></main>`);
+  const registry = {};
+  await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  writeFileSync(sheet, page().replace('>old<', '>new<'));
+
+  assert.ok(await mark(tmp, registry, 'y', '2026-09-23', 'test'));
+  assert.ok(page().startsWith(HIDDEN_Y), 'the hidden span is untouched');
+});
+
+test('restamp never stamps a neighbour whose x-data-id attribute holds the needle, fresh or repeated',
+  async (t) => {
+    const { tmp, page } = onePage(t, '<main><p data-id="z" x-data-id="y">zzz</p><p data-id="y">real</p></main>', Y_RECORDED);
+
+    assert.equal((await restamp(tmp)).written, 1);
+    const once = page();
+    assert.equal(once, '<main><p data-id="z" x-data-id="y">zzz</p>'
+      + '<p data-id="y" data-validated-fingerprint="ffffffffffffffff">real</p></main>');
+    assert.equal((await restamp(tmp)).alreadyHad, 1);
+    assert.equal(page(), once);
+  });
+
+/**
+ * The needle in prose, followed by an apostrophe: a tag-end scan starting there reads the `'` as an
+ * opening quote and ends up at a `>` inside a comment further down. The real tag is stamped; the
+ * prose, both comments and the block after them are byte-identical.
+ */
+test('restamp stamps the real tag, and leaves prose, comments and later blocks byte-identical', async (t) => {
+  const tail = '<!-- it\'s a note --><p data-id="w">w</p><!-- end --></main>';
+  const { tmp, page } = onePage(t,
+    `<main><p data-id="z">see data-id="y" isn't it</p><p data-id="y">real</p>${tail}`, Y_RECORDED);
+
+  assert.equal((await restamp(tmp)).written, 1);
+  assert.equal(page(), '<main><p data-id="z">see data-id="y" isn\'t it</p>'
+    + `<p data-id="y" data-validated-fingerprint="ffffffffffffffff">real</p>${tail}`);
+});
+
+test('restamp leaves a stamped page untouched when prose, a comment and an apostrophe follow the needle',
+  async (t) => {
+    const html = '<main><p data-id="z">see data-id="y" isn\'t it</p>'
+      + '<p data-id="y" data-validated-fingerprint="ffffffffffffffff">real</p>'
+      + '<!-- it\'s a note --><p data-id="w">w</p><!-- end --></main>';
+    const { tmp, page } = onePage(t, html, Y_RECORDED);
+
+    assert.deepEqual(await restamp(tmp), { written: 0, alreadyHad: 1, noSuchBlock: 0, refused: 0 });
+    assert.equal(page(), html);
+  });
+
+/**
+ * An apostrophe in the target's own tag (`it's`, an attribute name) sends the tag-end scan past the
+ * real `>` into the next comment. Written there, the seal would change the comment and never reach
+ * the block: the only safe answer is a refusal, said, with the page untouched.
+ */
+test('restamp refuses, and writes nothing, when an apostrophe in the tag hides where it ends', async (t) => {
+  const html = '<main><p data-id="y" it\'s>real</p><p data-id="w">w</p><!-- it\'s --><p data-id="v">v</p><!-- end --></main>';
+  const { tmp, page } = onePage(t, html, Y_RECORDED);
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.deepEqual(value, { written: 0, alreadyHad: 0, noSuchBlock: 0, refused: 1 });
+  assert.match(out, /✗ y: could not locate its tag without risking another block; nothing written/);
+  assert.equal(page(), html);
+});
+
+test('restamp never rewrites another block\'s single-quoted id on the way to the real tag', async (t) => {
+  const head = '<main><p data-id="z">see data-id="y" isn\'t it</p><p data-id=\'a>b\'>ab</p>';
+  const { tmp, page } = onePage(t, `${head}<p data-id="y">real</p></main>`, Y_RECORDED);
+
+  assert.equal((await restamp(tmp)).written, 1);
+  assert.equal(page(), `${head}<p data-id="y" data-validated-fingerprint="ffffffffffffffff">real</p></main>`);
+});
+
+test('restamp never writes into an end tag when prose before the block mentions its id', async (t) => {
+  const head = '<main><p data-id="z">see data-id="y" isn\'t it\'s</p>';
+  const { tmp, page } = onePage(t, `${head}<p data-id="y">real</p></main>`, Y_RECORDED);
+
+  assert.equal((await restamp(tmp)).written, 1);
+  assert.equal(page(), `${head}<p data-id="y" data-validated-fingerprint="ffffffffffffffff">real</p></main>`);
+});
+
+/**
+ * The locks lens's case: a block already sealed, a comment carrying the needle and an unbalanced
+ * quote, and a neighbour with an apostrophe in an unquoted value. A second ✓ on the same text must
+ * write nothing at all — not the comment, not the neighbour — and still be recorded.
+ */
+test('sync over a pre-stamped block never moves its seal into a comment or onto a neighbour', async (t) => {
+  const text = 'Never deploy on Friday';
+  const probe = onePage(t, `<main><p data-id="y">${text}</p></main>`);
+  const fingerprint = (await readBlocks(probe.tmp)).get('y').fingerprint;
+  for (const decoy of ['<!-- data-id="y" data-validated= \' -->',
+    '<!-- data-id="y" data-validated= " -->',
+    '<p data-id="a" data-code="1.0">Write data-id="y" data-validated= on it, don\'t forget</p>']) {
+    const html = `<main>${decoy}<p data-id="z" data-code="1.2" data-validated="2026-09-01" title=it's>Z text</p>`
+      + `<p data-id="y" data-code="1.1" data-validated="2026-01-01" data-validated-fingerprint="${fingerprint}">${text}</p></main>`;
+    const { tmp, page } = onePage(t, html);
+    const events = await ownersApprovals(tmp, ['y']);
+
+    const { value: r } = await printed(t, () => sync(tmp, { events: async () => events }, { owner: 'owner@example.org' }));
+
+    assert.equal(r.added, 1, decoy);
+    assert.equal(r.refused, 0, decoy);
+    assert.equal(page(), html, `nothing written with ${decoy}`);
+  }
+});
+
+test('mark skips a needle in prose with an apostrophe after it, and stamps the real block', async (t) => {
+  const head = '<main><p data-id="z">see data-id="y" if it\'s here</p>';
+  const { tmp, page } = onePage(t, `${head}<p data-id="y">real</p></main>`);
+
+  const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+
+  assert.ok(fingerprint);
+  assert.equal(page(), `${head}<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="${fingerprint}">real</p></main>`);
+});
+
+test('mark stamps past a > inside a single-quoted value in the tag', async (t) => {
+  const { tmp, page } = onePage(t, '<main><p data-id="y" title=\'a>b\'>real</p></main>');
+
+  const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+
+  assert.ok(fingerprint, 'the > inside the single quotes does not end the tag');
+  assert.equal(page(), `<main><p data-id="y" data-validated="2026-09-22" title='a>b' data-validated-fingerprint="${fingerprint}">real</p></main>`);
+});
+
+test('mark stamps past a > inside a double-quoted value that holds an apostrophe', async (t) => {
+  const tail = '<p data-id="w">it\'s w</p></main>';
+  const { tmp, page } = onePage(t, `<main><p data-id="y" title="it's > that">real</p>${tail}`);
+
+  const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+
+  assert.ok(fingerprint, 'an apostrophe inside double quotes neither opens nor closes a quote');
+  assert.equal(page(), `<main><p data-id="y" data-validated="2026-09-22" title="it's > that" `
+    + `data-validated-fingerprint="${fingerprint}">real</p>${tail}`);
+});
+
+test('mark skips a needle in a comment whose apostrophe never closes, and stamps the real block', async (t) => {
+  const head = '<main><!-- data-id="y" isn\'t it -->';
+  const { tmp, page } = onePage(t, `${head}<p data-id="y">real</p></main>`);
+
+  const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+
+  assert.ok(fingerprint, 'a candidate whose tag never closes is skipped, not the end of the search');
+  assert.equal(page(), `${head}<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="${fingerprint}">real</p></main>`);
+});
+
+/**
+ * "Already there" read from the raw text asked whether `data-validated` came RIGHT AFTER the needle;
+ * one sitting later in the tag was missed, and a second, earlier copy inserted — which the parser
+ * reads first, overwriting the date it was never meant to touch. Read from the element, it is there.
+ */
+test('mark never inserts a second data-validated when the block already carries one later in its tag',
+  async (t) => {
+    const { tmp, page } = onePage(t, '<main><p data-id="y" data-code="1" data-validated="2020-01-01">real</p></main>');
+
+    const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+
+    assert.ok(fingerprint);
+    assert.equal(page(), '<main><p data-id="y" data-code="1" data-validated="2020-01-01" '
+      + `data-validated-fingerprint="${fingerprint}">real</p></main>`);
+  });
+
+/**
+ * The other way raw text lies about "already there": a value that merely NAMES the attribute. The
+ * element does not carry `data-validated-fingerprint`, so it is written.
+ */
+test('mark stamps a block whose title merely names data-validated-fingerprint', async (t) => {
+  const { tmp, page } = onePage(t, '<main><p data-id="y" title="data-validated-fingerprint">real</p></main>');
+
+  const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+
+  assert.ok(fingerprint);
+  assert.equal(page(), '<main><p data-id="y" data-validated="2026-09-22" title="data-validated-fingerprint" '
+    + `data-validated-fingerprint="${fingerprint}">real</p></main>`);
+});
+
+/**
+ * The parser reads `data-id='y'` as the block `y`, but the literal `data-id="y"` a splice starts from
+ * is nowhere in the file. Nothing can be written safely, so nothing is — the page, and the record.
+ */
+test('mark refuses, records nothing and writes nothing when the page holds the id only single-quoted',
+  async (t) => {
+    const html = '<main><p data-id=\'y\'>real</p></main>';
+    const { tmp, page } = onePage(t, html);
+    const registry = {};
+
+    const { value, out } = await printed(t, () => mark(tmp, registry, 'y', '2026-09-22', 'test'));
+
+    assert.equal(value, null);
+    assert.match(out, /✗ y: could not locate its tag without risking another block; nothing written/);
+    assert.deepEqual(registry, {});
+    assert.equal(page(), html);
+  });
+
+test('restamp refuses a duplicate id, counts it as refused and not as gone', async (t) => {
+  const html = '<main><p data-id="y">1</p><p data-id="y">2</p></main>';
+  const { tmp, page } = onePage(t, html, Y_RECORDED);
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.deepEqual(value, { written: 0, alreadyHad: 0, noSuchBlock: 0, refused: 1 });
+  assert.match(out, /✗ y: 2 blocks carry this id; nothing written/);
+  assert.match(out, /⚠ 1 entries could not be stamped safely/);
+  assert.doesNotMatch(out, /no longer exist/);
+  assert.equal(page(), html);
+});
+
+test('restamp counts a block that is gone as gone, and not as refused', async (t) => {
+  const { tmp } = onePage(t, '<main><p data-id="x">1</p></main>', Y_RECORDED);
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.deepEqual(value, { written: 0, alreadyHad: 0, noSuchBlock: 1, refused: 0 });
+  assert.match(out, /⚠ 1 entries in the registry no longer exist/);
+  assert.doesNotMatch(out, /could not be stamped|nothing written/);
+});
+
+test('restamp refuses a tag it cannot splice safely, counts it as refused and not as written', async (t) => {
+  const html = '<main><p data-id=\'y\'>1</p></main>';
+  const { tmp, page } = onePage(t, html, Y_RECORDED);
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.deepEqual(value, { written: 0, alreadyHad: 0, noSuchBlock: 0, refused: 1 });
+  assert.match(out, /✗ y: could not locate its tag without risking another block; nothing written/);
+  assert.match(out, /⚠ 1 entries could not be stamped safely/);
+  assert.equal(page(), html);
 });
 
 /**
@@ -731,7 +1162,7 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
       author: 'reviewer@example.org', when: '2026-09-22T10:02:00Z', data: { locks: 'false' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false, tampered: false, guardsTampered: false });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, refused: 0, offline: false, tampered: false, guardsTampered: false });
   const registry = loadRegistry(tmp);
   assert.ok(registry['A01.1.1'], 'the owner\'s ✓ for the current text locks');
   assert.equal(registry['A01.1.1'].date, '2026-09-22');
@@ -913,7 +1344,7 @@ test('sync locks a ✓ from what was written on it, even once somebody else is H
   // This process's own HOLDRIM_OWNER has since moved on — a handover, or a stale shell variable.
   // Recomputing "is this the CURRENT owner?" would read the ✓ above as no lock at all.
   const r = await sync(tmp, { events: async () => events }, { owner: 'newowner@example.org' });
-  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 0, offline: false, tampered: false, guardsTampered: false });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 0, refused: 0, offline: false, tampered: false, guardsTampered: false });
   assert.ok(loadRegistry(tmp)['A01.1.1'], 'the ✓ locks from what was written, not from today\'s owner');
 });
 
@@ -1568,4 +1999,76 @@ test('the request list is linear in its history: 30 000 requests read in well un
   assert.equal(found.length, 30000);
   assert.ok(found.every((r) => r.state === 'approved' && r.history.length === 1));
   assert.ok(took < 1500, `took ${Math.round(took)} ms`);
+});
+
+/**
+ * The only candidate that gives this block its seal splices it in past the `"` that really ends `x`'s
+ * value, so the tag re-tokenises: its attribute `y"<` becomes two, `y"` and `<`. The block's id and
+ * text are unchanged, and it carries exactly the attributes planned — only comparing the WHOLE page,
+ * with those attributes taken off again, sees that something else in the tag moved.
+ */
+test('mark refuses a write that would re-tokenise the rest of the block\'s own tag', async (t) => {
+  const html = '<main><p data-id="y" x="> <p data-id="y"</p>text</main>';
+  const { tmp, page } = onePage(t, html);
+  const registry = {};
+
+  const { value, out } = await printed(t, () => mark(tmp, registry, 'y', '2026-09-22', 'test'));
+
+  assert.equal(value, null);
+  assert.match(out, /✗ y: could not locate its tag without risking another block; nothing written/);
+  assert.equal(page(), html);
+  assert.deepEqual(registry, {});
+});
+
+/**
+ * An apostrophe in the block's own tag sends the tag-end scan past its real `>` to the `>` of its END
+ * tag. Written there, the seal is dropped by the parser — the page serialises exactly as before, so
+ * the whole-page comparison alone would accept it; only asking the block itself whether it now
+ * carries the seal refuses it.
+ */
+test('restamp refuses a write that would land in an end tag, where the parser drops it', async (t) => {
+  const html = '<main><p data-id="y" it\'s>real y\'s</p></main>';
+  const { tmp, page } = onePage(t, html, Y_RECORDED);
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.deepEqual(value, { written: 0, alreadyHad: 0, noSuchBlock: 0, refused: 1 });
+  assert.match(out, /✗ y: could not locate its tag without risking another block; nothing written/);
+  assert.equal(page(), html);
+});
+
+/**
+ * `data-depended-on` escapes only `"`, so a dependency id holding `&lt;` is written as text a reader
+ * decodes to `<` — a map naming a block that does not exist. The value read back is compared with
+ * the value meant, not merely found present, so that write is refused instead of recorded.
+ */
+test('mark refuses a data-depended-on that would read back naming a different block', async (t) => {
+  const depId = 'a&lt;b';
+  const html = '<main><p data-id="y" data-depends="a&amp;lt;b">text</p><p data-id="a&amp;lt;b">dep</p></main>';
+  const { tmp, page } = onePage(t, html);
+
+  const result = await mark(tmp, {}, 'y', '2026-09-22', 'test', undefined, new Map([[depId, 'dddddddddddddddd']]));
+
+  assert.equal(result, null);
+  assert.equal(page(), html);
+});
+
+/**
+ * Nothing to insert is answered from the element before any splice is tried: a block the parser
+ * reads, sealed already, whose tag no literal needle can find (`data-id='y'`), is "already had", not
+ * a refusal — there is nothing to write, so there is nothing that could be written wrong.
+ */
+test('restamp counts a sealed block written with single quotes as already had, not refused', async (t) => {
+  const html = '<main><p data-id=\'y\' data-validated-fingerprint="ffffffffffffffff">real</p></main>';
+  const { tmp, page } = onePage(t, html, Y_RECORDED);
+
+  assert.deepEqual(await restamp(tmp), { written: 0, alreadyHad: 1, noSuchBlock: 0, refused: 0 });
+  assert.equal(page(), html);
+});
+
+test('spliceAttributes refuses a page where two blocks carry the id, whoever calls it', () => {
+  const html = '<main><p data-id="y">1</p><p data-id="y">2</p></main>';
+  const plan = { attributes: [{ attr: 'data-validated-fingerprint', value: 'ffffffffffffffff' }] };
+
+  assert.deepEqual(spliceAttributes(html, 'y', plan), { error: '2 blocks carry this id in this file' });
 });

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, resolveBlock, spliceAttributes, shortName, ofProject, projectRoles,
+import { readBlocks, sheetFiles, resolveBlock, spliceAttributes, textOf, shortName, ofProject, projectRoles,
   type Block, type Stamp, type MarkPlan } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
@@ -216,9 +216,7 @@ export async function mark(root: string, registry: Registry, id: string, when: s
   if (!resolved.ok) return refuse(id, resolved.message);
   const { path, html, element } = resolved;
 
-  const copy = element.cloneNode(true) as Element;
-  copy.querySelectorAll('[data-review-ui]').forEach((x: Element) => x.remove());
-  const text = copy.textContent ?? '';
+  const text = textOf(element);
   const fingerprint = await fingerprintOfText(text);
 
   if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
@@ -245,10 +243,8 @@ export async function mark(root: string, registry: Registry, id: string, when: s
     attributes.push({ attr: 'data-depended-on', value: JSON.stringify(dependsOn).replace(/"/g, '&quot;') });
   }
 
-  // Always the FULL plan, never pre-filtered by what the element already has: `spliceAttributes`
-  // itself is what decides "already there, leave it" per attribute, against the tag it actually
-  // splices into — the one check, used here and by `restamp`, rather than a second one guessing the
-  // same thing from the resolved element before any splice is even attempted.
+  // The FULL plan: `spliceAttributes` leaves out whatever the resolved element already carries, the
+  // one rule for "already there", shared with `restamp`.
   const plan: MarkPlan = { validatedAt: when, attributes };
   const result = spliceAttributes(html, id, plan);
   if ('error' in result) return refuse(id, result.error);
@@ -296,7 +292,7 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     const registry = loadRegistry(root);
     console.log(`⚠ could not reach the cloud, so no new ✓ from the site came in:\n  ${(e as Error).message}`);
     console.log(`  Going on with the registry in the repository: ${Object.keys(registry).length} validated (a frozen snapshot).`);
-    return { added: 0, unchanged: 0, expired: 0, offline: true, tampered: false, guardsTampered: false };
+    return { added: 0, unchanged: 0, expired: 0, refused: 0, offline: true, tampered: false, guardsTampered: false };
   }
   // Which of the three cases it was already went out through `reportTampered`, wherever `events` was
   // resolved — this is only the flag `sync` warns from and exits non-zero on (issue #91).
@@ -330,7 +326,7 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
   const registry = loadRegistry(root);
   const blocks = await readBlocks(root);
   const fingerprintsNow = new Map([...blocks].map(([id, b]) => [id, b.fingerprint]));
-  let added = 0, unchanged = 0, expired = 0;
+  let added = 0, unchanged = 0, expired = 0, refused = 0;
 
   for (const e of theOwners.sort((a, b) => a.when.localeCompare(b.when))) {
     const id = e.block;
@@ -349,11 +345,18 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     if (await mark(root, registry, id, when, 'site', e.id, fingerprintsNow, block.fingerprint)) {
       console.log(`  ✓ ${id} validated by you on the site on ${when}`);
       added++;
+    } else {
+      // The block exists and the ✓ is current, yet `mark` refused to write it (its own line above
+      // says why). Counted and returned so the CLI exits non-zero: without that, the registry never
+      // gets the entry, the text can be rewritten afterwards, and `check` passes over it in silence.
+      refused++;
     }
   }
   saveRegistry(root, registry);
-  console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${Object.keys(registry).length} validated in all`);
-  return { added, unchanged, expired, offline: false, tampered, guardsTampered };
+  console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${refused} refused · `
+    + `${Object.keys(registry).length} validated in all`);
+  if (refused) console.log(`⚠ ${refused} ✓ could not be stamped safely — see the messages above; this run exits non-zero`);
+  return { added, unchanged, expired, refused, offline: false, tampered, guardsTampered };
 }
 
 /**
@@ -468,13 +471,13 @@ export async function restamp(root: string) {
 
   console.log(`\n${written} block(s) got the mark they were missing · ${alreadyHad} already had it`);
   if (noSuchBlock) console.log(`⚠ ${noSuchBlock} entries in the registry no longer exist in the pages`);
-  if (refused) console.log(`⚠ ${refused} entries could not be stamped safely — see the messages above`);
+  if (refused) console.log(`⚠ ${refused} entries could not be stamped safely — see the messages above; this run exits non-zero`);
   if (willTurnYellow.length) {
     console.log(`\n🟡 ${willTurnYellow.length} will show up YELLOW on the site, and that is right —`);
     console.log(`   the text changed after the ✓:\n   ${willTurnYellow.join('  ')}`);
   }
   console.log('');
-  return written;
+  return { written, alreadyHad, noSuchBlock, refused };
 }
 
 /** What else do I have to look at if I touch this? The question to ask BEFORE editing. */

@@ -38,7 +38,7 @@ test('does not touch a block that already carries the mark', async (t) => {
   // "written" would pass the byte-comparison below by accident, since re-writing identical content
   // changes nothing on disk either way.
   const second = await restamp(dir);
-  assert.equal(second, 0, 'the second, idempotent run must report nothing written');
+  assert.equal(second.written, 0, 'the second, idempotent run must report nothing written');
   assert.equal(pageOf(dir), once);
   assert.equal((once.match(/data-validated-fingerprint/g) ?? []).length, 1);
 });
@@ -53,6 +53,6 @@ test('carries over what the block depended on, when the registry recorded it', a
 
 test('an entry with no recorded fingerprint is skipped, not invented', async (t) => {
   const dir = project(t, { 'A01.1.1': { file: 'A01.html', date: '2026-01-01' } });
-  assert.equal(await restamp(dir), 0);
+  assert.equal((await restamp(dir)).written, 0);
   assert.doesNotMatch(pageOf(dir), /data-validated-fingerprint/);
 });
