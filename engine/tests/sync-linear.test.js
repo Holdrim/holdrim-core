@@ -8,7 +8,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, unlinkSync } from 'node:fs';
+import fs, { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, unlinkSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
@@ -363,6 +364,135 @@ test('sync that aborts half-way records exactly the seals already written, and c
     assert.ok(!said.some((l) => l.includes('NO registry entry')), said.join('\n'));
     assert.equal(problems, 0, said.join('\n'));
   });
+
+/**
+ * Every `writeFileSync` in this process — the engine's named import included, through
+ * `syncBuiltinESMExports` — throws the error code `failing(path)` returns for a path, and writes as
+ * usual where it returns nothing. Returns the real one, for a test's own writes; restored when the test ends.
+ */
+function failingWrites(t, failing) {
+  const real = fs.writeFileSync;
+  fs.writeFileSync = (path, ...rest) => {
+    const code = failing(String(path));
+    if (code) throw Object.assign(new Error(`${code}: write refused by the test, '${path}'`), { code });
+    return real(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  t.after(() => { fs.writeFileSync = real; syncBuiltinESMExports(); });
+  return real;
+}
+
+/** What `check` finds in `root`, and what it said. */
+async function checked(t, root) {
+  const said = [];
+  const quiet = t.mock.method(console, 'log', (...args) => { said.push(args.join(' ')); });
+  try {
+    return { problems: await check(root), said: said.join('\n') };
+  } finally {
+    quiet.mock.restore();
+  }
+}
+
+/**
+ * The registry saved on the way out of an aborted run holds only what reached a page, because each
+ * entry is added after its page's write returns. Here the write of `X02.html` itself fails (EIO) on
+ * `markAll`'s path, with two ✓ on that page: recorded before the write, `b` and `b2` would be saved
+ * with no seal on any page — a lock on text the ✓ never reached.
+ */
+test('sync whose page write fails records neither of that page\'s ✓, and saves the pages written before it',
+  async (t) => {
+    const x02 = '<main><p data-id="b">approved b</p><p data-id="b2">approved b2</p></main>';
+    const tmp = pages(t, {
+      'X01.html': '<main><p data-id="a">approved a</p></main>',
+      'X02.html': x02,
+      'X03.html': '<main><p data-id="c">approved c</p></main>',
+    });
+    const events = await approvedInOrder(tmp, ['a', 'b', 'b2', 'c']);
+    failingWrites(t, (path) => (path.endsWith('X02.html') ? 'EIO' : null));
+    const lines = [];
+    const log = t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
+    try {
+      await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+        { code: 'EIO' }, 'the run still fails loudly');
+    } finally {
+      log.mock.restore();
+    }
+
+    assert.deepEqual(Object.keys(loadRegistry(tmp)), ['a'], lines.join('\n'));
+    assert.equal(readFileSync(join(tmp, 'p', 'X02.html'), 'utf8'), x02, 'X02 carries no seal');
+    const { problems, said } = await checked(t, tmp);
+    assert.ok(!said.includes('NO registry entry'), said);
+    assert.equal(problems, 0, said);
+  });
+
+/**
+ * The same, on `mark`'s per-block path: `X02.html` changes after it was located, so its ✓ is written
+ * one by one, and that write fails. The id whose write failed must not be recorded.
+ */
+test('sync whose page write fails on the per-block path does not record that ✓', async (t) => {
+  const tmp = pages(t, {
+    'X01.html': '<main><p data-id="a">approved a</p></main>',
+    'X02.html': '<main><p data-id="b">approved b</p></main>',
+  });
+  const events = await approvedInOrder(tmp, ['a', 'b']);
+  const moved = '<main><p>a paragraph added since</p><p data-id="b">approved b</p></main>';
+  const real = failingWrites(t, (path) => (path.endsWith('X02.html') ? 'EIO' : null));
+  const lines = [];
+  const log = t.mock.method(console, 'log', (...args) => {
+    lines.push(args.join(' '));
+    if (String(args[0]).includes('✓ a validated')) real(join(tmp, 'p', 'X02.html'), moved);
+  });
+  try {
+    await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+      { code: 'EIO' }, 'the run still fails loudly');
+  } finally {
+    log.mock.restore();
+  }
+
+  assert.deepEqual(Object.keys(loadRegistry(tmp)), ['a'], lines.join('\n'));
+  assert.equal(readFileSync(join(tmp, 'p', 'X02.html'), 'utf8'), moved, 'X02 carries no seal');
+  const { problems, said } = await checked(t, tmp);
+  assert.ok(!said.includes('NO registry entry'), said);
+  assert.equal(problems, 0, said);
+});
+
+/**
+ * A registry that cannot be saved while a run is already aborting must not hide why it aborted: the
+ * page's EIO is what the run ends with, and the registry's own failure is said on the way out.
+ */
+test('sync whose registry save fails while it is aborting ends with the abort\'s error and says the save\'s',
+  async (t) => {
+    const tmp = pages(t, {
+      'X01.html': '<main><p data-id="a">approved a</p></main>',
+      'X02.html': '<main><p data-id="b">approved b</p></main>',
+    });
+    const events = await approvedInOrder(tmp, ['a', 'b']);
+    failingWrites(t, (path) => (path.endsWith('X02.html') ? 'EIO' : path.endsWith('r.json') ? 'ENOSPC' : null));
+    const errors = [];
+    const log = t.mock.method(console, 'log', () => {});
+    const error = t.mock.method(console, 'error', (...args) => { errors.push(args.join(' ')); });
+    try {
+      await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+        { code: 'EIO' }, 'the error that aborted the run, not the save\'s');
+    } finally {
+      log.mock.restore();
+      error.mock.restore();
+    }
+    assert.ok(errors.some((l) => l.includes('the registry could not be saved') && l.includes('ENOSPC')), errors.join('\n'));
+  });
+
+/** With nothing else going wrong, a registry that cannot be saved is the run's error, not a line. */
+test('sync whose registry save fails on a run that otherwise finished throws the save\'s error', async (t) => {
+  const tmp = pages(t, { 'X01.html': '<main><p data-id="a">approved a</p></main>' });
+  const events = await approvedInOrder(tmp, ['a']);
+  failingWrites(t, (path) => (path.endsWith('r.json') ? 'ENOSPC' : null));
+  const log = t.mock.method(console, 'log', () => {});
+  try {
+    await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }), { code: 'ENOSPC' });
+  } finally {
+    log.mock.restore();
+  }
+});
 
 /**
  * The halving verifies each stamp inside its own half only. Here a verifier accepts every stamp alone

@@ -407,6 +407,7 @@ async function markWith(say: (line: string) => void, root: string, registry: Reg
 
   const result = spliceAttributes(html, id, planned.plan);
   if ('error' in result) return refused(result.error);
+  // The write stays above `record`: `sync` saves the registry even when this write throws.
   if (result.html !== html) writeFileSync(path, result.html, 'utf8');
 
   record(root, registry, id, path, when, source, event, planned);
@@ -494,6 +495,7 @@ async function markAll(root: string, registry: Registry, stamps: readonly SiteSt
       planned.push({ index, planned: plan });
     }
     const written = spliceAll(html, document, planned.map(({ index, planned: p }) => ({ id: stamps[index].id, plan: p.plan })));
+    // The write stays above `record`: `sync` saves the registry even when this write throws.
     if (written.html !== html) writeFileSync(path, written.html, 'utf8');
     for (const [k, { index, planned: p }] of planned.entries()) {
       const { id, when, event, say } = stamps[index];
@@ -595,6 +597,7 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     while (printed < sorted.length && settled[printed]) for (const line of lines[printed++]) console.log(line);
   };
   let pending = [...sorted.keys()];
+  let unwinding = false;
   try {
     while (pending.length) {
       const later: number[] = [];
@@ -642,6 +645,9 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
       });
       pending = later;
     }
+  } catch (e) {
+    unwinding = true;
+    throw e;
   } finally {
     // A run that throws half-way still shows what it had to say about every ✓ it got to.
     for (const slot of sorted.keys()) if (slot >= printed) for (const line of lines[slot]) console.log(line);
@@ -657,7 +663,19 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     // killed there, leaves the seal without the entry, which `check` flags and the next `sync`
     // records again from the owner's ✓. Nor once per page: every page would rewrite the whole
     // registry, and a sync would grow with pages times entries again (holdrim#144).
-    saveRegistry(root, registry);
+    //
+    // A save that fails while another error is on its way out is said and let go, so the error that
+    // aborted the run is the one the run ends with: thrown from here, it would replace it, and the
+    // cause of the abort would be lost behind the registry's. With nothing on its way out, the save's
+    // own error is the run's error. ⚠️ The registry file itself is still written in place, not written
+    // aside and renamed, so a process killed during the save can still leave it truncated.
+    try {
+      saveRegistry(root, registry);
+    } catch (saveError) {
+      if (!unwinding) throw saveError;
+      console.error(`⚠ the registry could not be saved either, so the ✓ stamped above are on their pages `
+        + `without an entry until the next sync records them: ${(saveError as Error).message}`);
+    }
   }
   console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${refused} refused · `
     + `${Object.keys(registry).length} validated in all`);

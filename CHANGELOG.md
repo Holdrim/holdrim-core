@@ -443,6 +443,7 @@ who ran the engine from `main` before it.
   of the same name, say — left those seals on disk with no registry entry, and `holdrim check` called
   each of those genuine ✓ "marked as validated … and there is NO registry entry" until a later sync
   got all the way through. The registry is now saved on the way out whether the run finished or not,
-  with exactly the ✓ whose pages were written and nothing else; the run still fails, and the CLI still
-  exits non-zero. A process killed outright between a page write and the save can still leave a seal
+  with exactly the ✓ whose pages were written and nothing else — a page whose own write fails records
+  none of its ✓; the run still fails, and the CLI still exits non-zero, with the error that aborted it
+  even when the registry cannot be saved either (that failure is printed on the way out). A process killed outright between a page write and the save can still leave a seal
   without its entry — never an entry without its seal — and the next `holdrim sync` records it again.
