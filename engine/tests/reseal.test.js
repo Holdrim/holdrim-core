@@ -169,6 +169,12 @@ const OLD_SEALS = [
   ['that lacks only its fingerprint',
     '<p data-id="y" data-validated="2026-01-01" data-code="1.1">',
     '<p data-id="y" data-validated="2026-09-22" data-code="1.1" data-validated-fingerprint="FP">'],
+  // Two copies spelt exactly alike: a browser, and the parser behind `target.attributes`, both keep
+  // only the first — so `tokenNames` has to be de-duplicated the same way before it is compared
+  // against `parsedNames`, or a page with no case difference at all reads as one this engine cannot see.
+  ['written twice, spelt exactly alike',
+    '<p data-id="y" data-validated="2026-01-01" data-validated="2025-01-01">',
+    '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP">'],
 ];
 
 for (const [where, tag, rewritten] of OLD_SEALS) {
@@ -198,6 +204,12 @@ for (const [what, html] of [
   ['in upper case', '<main><p DATA-VALIDATED-FINGERPRINT="0000" title="a<b" data-id="y" data-validated="2026-01-01">real</p></main>'],
   ['spelt exactly like the copy the ✓ writes', '<main><p data-validated-fingerprint="FP" title="a<b" data-id="y" '
     + 'data-validated="2026-01-01">real</p></main>'],
+  // The `<` inside the title hides a fake tag whose names are the SAME SET the real tag carries, only
+  // in a different order — the names check has to compare that order, not just the set, or a sorted
+  // comparison sees no mismatch and lets the write proceed onto the fake tag, corrupting the title.
+  ['naming the same set the real tag does, only in another order',
+    '<main><p data-validated-fingerprint="0000" title=\'<b title data-validated-fingerprint=x\' data-id="y" '
+      + 'data-validated="2026-01-01">real</p></main>'],
 ]) {
   test(`a re-approval refuses, and writes nothing, when a seal copy ${what} sits behind a < it cannot see past`,
     async (t) => {
@@ -212,6 +224,27 @@ for (const [what, html] of [
       assert.equal(loadRegistry(tmp).y, undefined);
     });
 }
+
+/**
+ * A decoy `data-id="y"` sitting in an earlier element's `title`, spelt exactly like the needle, fails
+ * the names check the same way a hidden seal does — its raw tag reads only `data-id`, `y`'s own
+ * carries `data-validated` too — and that failure has to be a `continue` to the next occurrence, not
+ * a `break`: the real tag sits right after it, and giving up at the first mismatch would refuse a
+ * page whose real tag was never even tried.
+ */
+test('a re-approval walks past a decoy data-id sitting in an earlier title value to reach the real one',
+  async (t) => {
+    const html = '<main><p title=\'<b data-id="y">\' data-id="z">z</p><p data-id="y" '
+      + 'data-validated="2026-01-01">real</p></main>';
+    const { tmp, page } = onePage(t, html);
+
+    const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
+
+    assert.equal(r.refused, 0, out);
+    const fingerprint = loadRegistry(tmp).y.fingerprint;
+    assert.equal(page(), '<main><p title=\'<b data-id="y">\' data-id="z">z</p><p data-id="y" '
+      + `data-validated="2026-09-22" data-validated-fingerprint="${fingerprint}">real</p></main>`);
+  });
 
 /**
  * A `<` that starts no tag at all (`x < y`) before data-id: the start tag cannot be found from it,
@@ -249,20 +282,20 @@ test('a first ✓ through sync stamps a block whose earlier value holds a < and 
  * lets `sync` reach the block at all.
  */
 const ALREADY = [
-  ['keeps no stale data-depended-on beside a date and fingerprint that already match',
+  ['it drops a stale data-depended-on beside a date and fingerprint that already match',
     '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP" '
       + 'data-depended-on="{&quot;gone&quot;:&quot;1&quot;}">',
     '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP">'],
-  ['keeps no upper-case name whose value already matches',
+  ['it drops an upper-case name whose value already matches',
     '<p data-id="y" DATA-VALIDATED="2026-09-22" data-validated-fingerprint="FP">',
     '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP">'],
-  ['leaves a single-quoted seal that is already exact untouched, quotes and all',
+  ['it leaves a single-quoted seal that is already exact untouched, quotes and all',
     '<p data-id="y" data-validated=\'2026-09-22\' data-validated-fingerprint=\'FP\'>',
     '<p data-id="y" data-validated=\'2026-09-22\' data-validated-fingerprint=\'FP\'>'],
 ];
 
 for (const [what, tag, after] of ALREADY) {
-  test(`a ✓ the page already shows ${what}`, async (t) => {
+  test(`a ✓ the page already shows needs no write, and ${what}`, async (t) => {
     const fp = await fingerprintOf();
     const { tmp, page } = onePage(t, `<main>${tag.replace('FP', fp)}real</p></main>`);
 
@@ -271,6 +304,26 @@ for (const [what, tag, after] of ALREADY) {
     assert.equal(r.added, 1, out);
     assert.equal(page(), `<main>${after.replace('FP', fp)}real</p></main>`);
   });
+}
+
+/**
+ * `resolveBlock`'s identity refusal is tested above only for `data-id` — the other two names that
+ * decide which block an id names, `data-code` and `data-depends`, are refused the same way, and
+ * only a test naming each catches an identity list that quietly dropped one of them.
+ */
+for (const name of ['DATA-CODE', 'DATA-DEPENDS']) {
+  test(`sync refuses a ✓, and writes nothing, when the block's own page carries ${name} in upper case`,
+    async (t) => {
+      const html = `<main><p data-id="y" ${name}="1.1">real</p></main>`;
+      const { tmp, page } = onePage(t, html);
+
+      const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
+
+      assert.equal(r.refused, 1);
+      assert.match(out, new RegExp(`✗ y: p/X01\\.html carries ${name}, which a browser reads as ${name.toLowerCase()}`));
+      assert.equal(page(), html);
+      assert.equal(loadRegistry(tmp).y, undefined);
+    });
 }
 
 test('a first ✓ on a block with no seal writes it exactly where it always has', async (t) => {
@@ -419,10 +472,10 @@ test('check names the fingerprint a browser reads — the first copy, in upper c
 test('check counts a block whose every name is in upper case, seal included, though it is on no other list',
   async (t) => {
     const { tmp } = onePage(t, '<main><p DATA-ID="z" DATA-CODE="1.2" DATA-VALIDATED="2026-01-01" '
-      + `DATA-VALIDATED-FINGERPRINT="${await fingerprintOf()}">real</p></main>`);
+      + `DATA-VALIDATED-FINGERPRINT="${await fingerprintOf()}" DATA-DEPENDED-ON="{}">real</p></main>`);
     const { value, out } = await printed(t, () => check(tmp));
-    assert.equal(value, 4, out);
-    for (const name of ['DATA-ID', 'DATA-CODE', 'DATA-VALIDATED', 'DATA-VALIDATED-FINGERPRINT']) {
+    assert.equal(value, 5, out);
+    for (const name of ['DATA-ID', 'DATA-CODE', 'DATA-VALIDATED', 'DATA-VALIDATED-FINGERPRINT', 'DATA-DEPENDED-ON']) {
       assert.match(out, new RegExp(`✗ z: carries ${name}, which a browser reads as ${name.toLowerCase()} `));
     }
   });
@@ -460,6 +513,20 @@ test('check counts an id carried by blocks on two pages, one of them in upper ca
   assert.match(out, /✗ y: carried by 2 blocks \(p\/X01\.html, p\/X02\.html\)/);
   assert.match(out, /✗ y: carries DATA-ID/);
   assert.match(out, /a validated mark on a block with NO data-id/);
+});
+
+/**
+ * A browser paints a seal only on `main [data-id]` — an element sharing the same id OUTSIDE main is
+ * not a block at all, so it is no twin. `duplicateIds` has to walk `main *`, not the whole page, or
+ * such an element reads as a second block under the same id.
+ */
+test('check finds no problem in a same id sitting outside main, beside the block it belongs to', async (t) => {
+  const fp = await fingerprintOf();
+  const { tmp } = onePage(t, '<nav data-id="y"></nav><main><p data-id="y" data-code="1.1" '
+    + `data-validated="2026-09-22" data-validated-fingerprint="${fp}">real</p></main>`,
+  { y: { file: 'X01.html', date: '2026-09-22', fingerprint: fp } });
+  const { value, out } = await printed(t, () => check(tmp));
+  assert.equal(value, 0, out);
 });
 
 // ---------------------------------------------------------------- no seal on a page a browser reads otherwise

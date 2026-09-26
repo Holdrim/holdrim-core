@@ -80,7 +80,7 @@ export async function check(root: string): Promise<number> {
   }
   problems += duplicateIds(root);
   problems += sealMismatches(registry, blocks);
-  problems += namesNotInLowerCase(root);
+  problems += caseProblems(root);
   problems += await orphanMarks(root, registry);
   problems += missingProofs(root, blocks);
   problems += upwardDependencies(blocks);
@@ -155,7 +155,7 @@ function sameDependencies(page: Record<string, unknown>, recorded: Record<string
  * every sweep built on them never see. Every element, not only `readBlocks`' blocks: those are exactly
  * the ones selected by the lower-case name. Named by the id a browser reads there, or by its page.
  */
-export function namesNotInLowerCase(root: string): number {
+export function caseProblems(root: string): number {
   let found = 0;
   for (const path of sheetFiles(root)) {
     const { document } = parseHTML(readFileSync(path, 'utf8'));
