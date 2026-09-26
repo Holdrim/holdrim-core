@@ -11,6 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, cpSync, re
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
+import { parseHTML } from 'linkedom';
 import { readBlocks, sheetFiles, spliceAttributes } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, restamp, check, ifITouch } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
@@ -205,7 +206,8 @@ test('a dependency id containing $& lands intact in data-depended-on', async (t)
   assert.ok(fingerprint);
 
   const after = readFileSync(sheet, 'utf8');
-  const expectedValue = JSON.stringify({ [depId]: 'dddddddddddddddd' }).replace(/"/g, '&quot;');
+  // `&` escaped first, then `"` — the dependency's own `&` is text, not the start of an entity.
+  const expectedValue = JSON.stringify({ [depId]: 'dddddddddddddddd' }).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   assert.ok(after.includes(`data-depended-on="${expectedValue}"`),
     'the dependency id must appear exactly as JSON.stringify produced it, not mangled by $-substitution');
 });
@@ -2038,20 +2040,51 @@ test('restamp refuses a write that would land in an end tag, where the parser dr
 });
 
 /**
- * `data-depended-on` escapes only `"`, so a dependency id holding `&lt;` is written as text a reader
- * decodes to `<` — a map naming a block that does not exist. The value read back is compared with
- * the value meant, not merely found present, so that write is refused instead of recorded.
+ * `data-depended-on` is JSON written between double quotes, read back by `getAttribute` and parsed
+ * (engine/web/src/entry.jsx). A dependency id holding a literal entity — `&quot;`, `&lt;` — must
+ * come back as those characters, not as the `"` or `<` a parser would decode them to: a map naming a
+ * block that does not exist is a 🔴 nobody can clear. `&` is escaped before `"` for exactly this.
  */
-test('mark refuses a data-depended-on that would read back naming a different block', async (t) => {
-  const depId = 'a&lt;b';
-  const html = '<main><p data-id="y" data-depends="a&amp;lt;b">text</p><p data-id="a&amp;lt;b">dep</p></main>';
-  const { tmp, page } = onePage(t, html);
+for (const depId of ['a&quot;b', 'a&lt;b']) {
+  test(`a dependency id holding a literal ${depId.slice(1, -1)} round-trips intact in data-depended-on`, async (t) => {
+    const onPage = depId.replace(/&/g, '&amp;');
+    const { tmp, page } = onePage(t, `<main><p data-id="y" data-depends="${onPage}">text</p>`
+      + `<p data-id="${onPage}">dep</p></main>`);
+    const registry = {};
 
-  const result = await mark(tmp, {}, 'y', '2026-09-22', 'test', undefined, new Map([[depId, 'dddddddddddddddd']]));
+    const fingerprint = await mark(tmp, registry, 'y', '2026-09-22', 'test', undefined,
+      new Map([[depId, 'dddddddddddddddd']]));
 
-  assert.equal(result, null);
-  assert.equal(page(), html);
-});
+    assert.ok(fingerprint, 'the write is verified against what a reader will get back, and it matches');
+    assert.deepEqual(registry.y.dependsOn, { [depId]: 'dddddddddddddddd' });
+    const el = parseHTML(page()).document.querySelector('[data-id="y"]');
+    assert.deepEqual(JSON.parse(el.getAttribute('data-depended-on')), { [depId]: 'dddddddddddddddd' },
+      'what the browser parses names the same block the registry does');
+  });
+}
+
+/**
+ * The pre-filter only orders the search: a `>` inside a quoted value before `data-id`, or no space
+ * before it, makes it misjudge the real tag, and the tag is still found — tried after the likely
+ * occurrences, verified like any other — rather than refused.
+ */
+for (const [what, tag] of [['a `>` inside a quoted value before data-id', '<p title="a -> b" data-id="y">'],
+  ['no space before data-id', '<p title="x"data-id="y">']]) {
+  test(`mark and restamp stamp the right block when ${what}`, async (t) => {
+    const prose = '<p data-id="z">see data-id="y" here</p>';
+    const html = `<main>${prose}${tag}real</p></main>`;
+    const { tmp, sheet, page } = onePage(t, html, Y_RECORDED);
+
+    const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+    assert.ok(fingerprint, 'not refused');
+    assert.equal(page(), `<main>${prose}${tag.replace('data-id="y"', 'data-id="y" data-validated="2026-09-22"')
+      .replace(/>$/, ` data-validated-fingerprint="${fingerprint}">`)}real</p></main>`);
+
+    writeFileSync(sheet, html);
+    assert.deepEqual(await restamp(tmp), { written: 1, alreadyHad: 0, noSuchBlock: 0, refused: 0 });
+    assert.equal(page(), `<main>${prose}${tag.replace(/>$/, ' data-validated-fingerprint="ffffffffffffffff">')}real</p></main>`);
+  });
+}
 
 /**
  * Nothing to insert is answered from the element before any splice is tried: a block the parser

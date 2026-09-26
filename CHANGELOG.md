@@ -285,7 +285,8 @@ who ran the engine from `main` before it.
   time. Three cases now REFUSE, and say why, instead of writing anywhere: an id carried by more than
   one block; an id containing `"` or `&`, which a page normally holds as an entity (`&quot;`,
   `&amp;`) that a literal search cannot find; and a page where the tag cannot be found without
-  risking another block — among them a tag with a `>` inside a quoted value before its `data-id`.
-  Along the way, writing `data-depended-on` (which carries other block ids inside a JSON blob)
-  stopped going through `String.replace` with a string replacement, whose `$&`/`$1`/`$$` syntax could
-  corrupt an id containing `$&`.
+  risking another block. Along the way, writing `data-depended-on` (which carries other block ids
+  inside a JSON blob) stopped going through `String.replace` with a string replacement, whose
+  `$&`/`$1`/`$$` syntax could corrupt an id containing `$&`, and now escapes `&` as well as `"`: a
+  dependency id holding a literal `&quot;` or `&lt;` used to read back, in the browser, as `"` or
+  `<` — a dependency naming a block that does not exist.

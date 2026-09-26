@@ -201,8 +201,23 @@ function blocksNamed(document: { querySelectorAll(selector: string): Iterable<El
   return mainBlocks(document).filter((el) => el.getAttribute('data-id') === id);
 }
 
-/** One attribute to write, and the value it must carry once written. */
+/** One attribute to write, as the text spliced between its quotes (see `attributeText`). */
 export interface Stamp { attr: string; value: string }
+
+/**
+ * `value` as the text to write between an attribute's double quotes: `&` first, then `"`. Escaping
+ * only `"` left a `&` that happened to start an entity for the parser to decode — a dependency id
+ * holding a literal `&quot;` or `&lt;` read back as `"` or `<`, a map naming a block that does not
+ * exist. `&` has to go first, or the `&` of every `&quot;` just written would be escaped again.
+ */
+export function attributeText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
+
+/** What a reader's `getAttribute` returns for text `attributeText` wrote: the two steps undone in reverse. */
+function readBack(text: string): string {
+  return text.replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+}
 
 export interface MarkPlan {
   /** `data-validated="value"`, right after the needle — only `mark` sets this; `restamp` never touches it. */
@@ -231,12 +246,14 @@ function tagEndFrom(html: string, from: number): number | null {
 }
 
 /**
- * Whether the needle at `start` could be an attribute of a start tag, judged from the raw text alone:
- * whitespace right before it, and a `<` nearer than any `>`. A cost filter, not a safety check — it
- * spares a full re-parse for every mention of the needle in prose, which is what made a page with a
- * thousand of them take seconds. It errs one way only: a `>` inside a quoted value BEFORE `data-id`
- * (`title="a -> b" data-id="y"`) or no space before it (`title="x"data-id="y"`) reads as "not in a
- * tag", so that block is refused, loudly, never written wrong.
+ * Whether the needle at `start` looks like an attribute of a start tag, judged from the raw text
+ * alone: whitespace right before it, and a `<` nearer than any `>`. Only an ORDER, never a verdict:
+ * the occurrences that pass are tried first, so the real tag is usually reached before a single
+ * re-parse is spent on a mention of the needle in prose — without that, a page with a thousand such
+ * mentions took seconds. It can be wrong both ways — a `>` inside a quoted value before `data-id`
+ * (`title="a -> b" data-id="y"`), or no space before it (`title="x"data-id="y"`), fails it on the
+ * real tag — so the occurrences that fail are still tried afterwards, and no block is refused on
+ * its word.
  */
 function mayBeAttribute(html: string, start: number): boolean {
   if (!/\s/.test(html[start - 1] ?? '')) return false;
@@ -255,7 +272,8 @@ function mayBeAttribute(html: string, start: number): boolean {
  * without trying a splice at all.
  *
  * Where to insert is found by trying each raw occurrence of `data-id="${id}"` — it can also sit in
- * prose, a comment, a `<script>` or another element's value — and accepting the first candidate that
+ * prose, a comment, a `<script>` or another element's value — the likely ones first (`mayBeAttribute`),
+ * each group in document order, and accepting the first candidate that
  * (a) resolves `id` to exactly one element carrying every inserted attribute with exactly the value
  * planned, and (b) once those attributes are taken off that element again, serialises exactly like
  * the original page. Each catches what the other cannot. (a) refuses a write the parser silently
@@ -286,8 +304,13 @@ export function spliceAttributes(html: string, id: string, plan: MarkPlan): { ht
   const original = document.toString();
   const needle = `data-id="${id}"`;
 
+  const likely: number[] = [];
+  const unlikely: number[] = [];
   for (let start = html.indexOf(needle); start !== -1; start = html.indexOf(needle, start + 1)) {
-    if (!mayBeAttribute(html, start)) continue;
+    (mayBeAttribute(html, start) ? likely : unlikely).push(start);
+  }
+
+  for (const start of [...likely, ...unlikely]) {
     const needleEnd = start + needle.length;
     const tagEnd = tagEndFrom(html, needleEnd);
     if (tagEnd === null) continue;
@@ -301,9 +324,8 @@ export function spliceAttributes(html: string, id: string, plan: MarkPlan): { ht
 
 /**
  * The acceptance test of one candidate, (a) and (b) in `spliceAttributes`. `getAttribute` hands
- * back the DECODED value — `&quot;` read as `"` — because `data-depended-on` carries a `"` inside the
- * JSON it stamps, escaped so it does not close the attribute early; undoing that one entity is what
- * makes the comparison the same string the write intended.
+ * back the DECODED value, so each planned value is compared as `readBack` decodes it — the string a
+ * reader of the page will actually get, not the escaped text that was spliced in.
  */
 function writesOnlyThe(candidate: string, id: string, inserted: Stamp[], original: string): boolean {
   const { document } = parseHTML(candidate);
@@ -311,7 +333,7 @@ function writesOnlyThe(candidate: string, id: string, inserted: Stamp[], origina
   if (targets.length !== 1) return false;
   const el = targets[0];
   for (const { attr, value } of inserted) {
-    if (el.getAttribute(attr) !== value.replace(/&quot;/g, '"')) return false;
+    if (el.getAttribute(attr) !== readBack(value)) return false;
   }
   for (const { attr } of inserted) el.removeAttribute(attr);
   return document.toString() === original;

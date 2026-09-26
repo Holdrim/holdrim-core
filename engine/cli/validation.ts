@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, resolveBlock, spliceAttributes, textOf, shortName, ofProject, projectRoles,
+import { readBlocks, sheetFiles, resolveBlock, spliceAttributes, attributeText, textOf, shortName, ofProject, projectRoles,
   type Block, type Stamp, type MarkPlan } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
@@ -240,7 +240,7 @@ export async function mark(root: string, registry: Registry, id: string, when: s
   // The JSON is the truth; these attributes are the copy that travels with the page.
   const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: fingerprint }];
   if (Object.keys(dependsOn).length) {
-    attributes.push({ attr: 'data-depended-on', value: JSON.stringify(dependsOn).replace(/"/g, '&quot;') });
+    attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(dependsOn)) });
   }
 
   // The FULL plan: `spliceAttributes` leaves out whatever the resolved element already carries, the
@@ -456,7 +456,7 @@ export async function restamp(root: string) {
 
     const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: recorded }];
     if (entry.dependsOn && Object.keys(entry.dependsOn).length) {
-      attributes.push({ attr: 'data-depended-on', value: JSON.stringify(entry.dependsOn).replace(/"/g, '&quot;') });
+      attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(entry.dependsOn)) });
     }
 
     const result = spliceAttributes(html, id, { attributes });
