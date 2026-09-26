@@ -38,7 +38,7 @@ import { personAs } from '../core/people-show.js';
 import { resolveRemovedBy, type Removed, type TamperReport } from './texts.ts';
 import { issuedEvent, revokedEvent } from './agent-tokens.ts';
 import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
-import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED } from './here.ts';
+import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn } from './here.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -827,7 +827,15 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   // for `/api/users*`). The home renders no script to call this route when the toggle is off, but
   // the route itself asks the one question every other block-reading route already asks — is
   // anybody signed in at all — and, same as `/impact-radius` and `/fingerprints`, asks nothing more
-  // of WHO: any viewer sees the same graph the home's own tables already name every block in.
+  // of WHO for which NODES come back: every viewer sees the same graph the home's own tables already
+  // name every block in. (Filtering what a viewer may READ, #153, is a separate change, not this one.)
+  //
+  // `mayAct` (#42, box three) is the one thing this route DOES ask of who is asking: `mayActOn`
+  // (engine/api/here.ts) asks `can` with the node's own block as its place, the same way `hereOf`
+  // does for a single page — the server decides, and the home's filter only draws what it is sent, a
+  // boolean and never a scope. A member's graph comes back with `mayAct: false` everywhere, and an
+  // agent token's does too (`AGENT_NEVER`, engine/core/roles.js): the filter then empties instead of
+  // hiding nodes it has no way to tell apart from ones the viewer could act on.
   if (req.method === 'GET' && route === '/graph') {
     const blocks = await readBlocks(projectRoot);
     const registry = loadRegistry(projectRoot);
@@ -836,7 +844,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
       const block = blocks.get(n.id);
       const href = block
         ? `/${relative(cfg.site, block.path).split(sep).join('/')}#${encodeURIComponent(n.id)}` : null;
-      return { id: n.id, page: n.page, kind: n.kind, state: n.state, href };
+      return { id: n.id, page: n.page, kind: n.kind, state: n.state, href, mayAct: mayActOn(roles, who, n.id) };
     });
     return json(res, 200, { nodes, edges: graph.edges });
   }

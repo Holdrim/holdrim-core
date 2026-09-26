@@ -116,3 +116,20 @@ export function hereOf(roles: Asks, who: Who, page: string, blockIds: Iterable<s
     blocks,
   };
 }
+
+/**
+ * Whether `who` may act on `block` at all: triage it, or approve it — whichever the block's place
+ * grants (docs/ROLES.md, section 2). The one question the home's documentation graph asks per node
+ * for its "where I may act" filter (#42, box three): the graph draws no distinction between the two
+ * capabilities the way `hereOf` does, only whether there is anything to do here or not, so an `or`
+ * of both is the whole answer and not a third capability invented for the filter alone.
+ *
+ * Boolean only, like `hereOf`'s own answer — never a scope: today no grant `can` reads is scoped
+ * (owner and admin hold it everywhere, member holds neither anywhere), so a member's graph empties
+ * entirely and an agent's does too, `AGENT_NEVER` refusing both `triage` and `approve` before a
+ * grant is ever read (`can`, engine/core/roles.js). Scoped grants (#36) narrow this to real subsets
+ * without this function, or its one caller in `server.ts`, changing at all.
+ */
+export function mayActOn(roles: Asks, who: Who, block: string): boolean {
+  return roles.can('triage', who, { block }) || roles.can('approve', who, { block });
+}

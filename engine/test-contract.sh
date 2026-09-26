@@ -383,6 +383,15 @@ expect "a real block gets a link to open, page and anchor both" 0 \
   "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/graph" | has -F '"href":"/pages/A01.html#A01.1.1"'; echo $?)"
 expect "and nobody unknown asks → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/graph")"
 
+# The graph's third filter (#42, box three), "where I may act": one boolean per node, `mayActOn`'s
+# own (engine/api/here.ts) — the owner may act on every node this site has, and a member on none of
+# them, the shipped roles' unscoped grants proved the same way `hereOf`'s own contract check is,
+# below.
+graph_count() { curl -s -H "X-Dev-Email: $1" "$B/api/graph" | node -e \
+  "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const ns=JSON.parse(s).nodes;console.log(process.argv[1]==='all'?ns.length:ns.filter(n=>n.mayAct===true).length)})" "$2"; }
+expect "the owner may act on every node this site has" "$(graph_count "$OWNER" all)" "$(graph_count "$OWNER" mayAct)"
+expect "a member may act on none of them" 0 "$(graph_count "$REVIEWER" mayAct)"
+
 echo "the home counts only the owner's ✓ as waiting for the repository:"
 # An admin's ✓ is recorded and stays an opinion: `holdrim sync` brings in the owner's alone. Counted
 # on the home as "approved on the site", it would tell the owner a lock is one sync away when the
@@ -2169,6 +2178,12 @@ expect "as an agent's, whatever the body claimed" true "$(echo "$BOT_COMMENT" | 
 # dropped from the list would leave the agent blind with every write above still passing.
 expect "it reads the fingerprints, the impact radius, the graph and the open requests → 200" "200 200 200 200" \
   "$(bot_code "$B/api/fingerprints?ids=A01.1.1") $(bot_code "$B/api/impact-radius?id=A01.1.1") $(bot_code $B/api/graph) $(bot_code $B/api/requests/open)"
+# The graph's "where I may act" filter (#42, box three): `AGENT_NEVER` refuses an agent both
+# `triage` and `approve` before any grant is read, so `mayActOn` (engine/api/here.ts) answers false
+# for every node the token can see — the filter empties, rather than the route hiding a node the
+# agent could still fetch every field of otherwise.
+expect "and mayAct is false on every node — an agent triages and approves nowhere" 0 \
+  "$(as_bot $B/api/graph | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).nodes.filter(n=>n.mayAct===true).length))")"
 expect "and one event by its id"                 "$(echo "$BOT_COMMENT" | jfield id)" "$(as_bot $B/api/events/$(echo "$BOT_COMMENT" | jfield id) | jfield id)"
 expect "a ✓ through the token → 403"             403 "$(bot_code -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A011_FP\"}" $B/api/events)"
 # Its own sentence, not the capability's: this refusal is asked on how the request signed in, and

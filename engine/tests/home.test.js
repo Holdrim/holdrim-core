@@ -240,6 +240,11 @@ test('the graph\'s legend is its state filter: one ticked box per state, plus a 
   assert.match(html, /<form class="home-graph__filters"[^>]*>[\s\S]*<input [^>]*name="prefix"/);
   assert.match(html, /<p class="[^"]*home-graph__empty"[^>]*hidden>No block matches these filters\.<\/p>/,
     'the "nothing matches" line is there, and hidden until a filter empties the graph');
+  // Box three (#42): one checkbox, unticked — unlike the state legend, it starts OFF, since ticking
+  // it is what narrows to what this viewer may act on, and starting narrowed for a viewer the server
+  // never told this render about would hide the very thing the filter exists to let someone choose.
+  assert.match(html, /<form class="home-graph__filters"[^>]*>[\s\S]*<input type="checkbox" name="mayAct">/);
+  assert.doesNotMatch(html, /<input type="checkbox" name="mayAct" checked>/);
 });
 
 test('the graph\'s i18n blob is escaped for its attribute, not for the JSON inside it', () => {

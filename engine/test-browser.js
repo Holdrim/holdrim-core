@@ -835,6 +835,16 @@ try {
     expect('filtering never navigated, and nothing threw', `${BASE}/engine/home | `,
       `${owner.page.url()} | ${owner.problems.join(' | ')}`);
 
+    // "Where I may act" (#42, box three): a per-node boolean the SERVER already decided
+    // (`mayActOn`, engine/api/here.ts) — the browser only reads it, never recomputes a role.
+    const mayActBox = owner.page.locator('.home-graph__filters input[name="mayAct"]');
+    expect('the API already sent mayAct true for the owner on every node',
+      true, apiGraph.nodes.every((n) => n.mayAct === true));
+    await mayActBox.check();
+    expect('the owner may act everywhere, so ticking it hides nothing', apiGraph.nodes.length, (await drawnIds()).length);
+    await mayActBox.uncheck();
+    expect('and unticking it again brings back the same whole graph', apiGraph.nodes.length, (await drawnIds()).length);
+
     // The form is live from the moment the page is, before `/api/graph` answers. `/api/graph` is held
     // back here until the test lets it go, so Enter is pressed while there is still no graph at all —
     // the case a submit cancelled only once the graph is drawn gets wrong: the form goes to the
@@ -859,6 +869,26 @@ try {
     await prefixBox.press('Enter');
     await owner.page.waitForTimeout(300);
     expect('Enter once the graph is drawn submits nothing either', `${BASE}/engine/home`, owner.page.url());
+  }
+
+  console.log('"where I may act" hides what a member may not act on (#42, box three):');
+  {
+    const reader = await person(READER);
+    await reader.page.goto(`${BASE}/engine/home`);
+    await reader.page.locator('#holdrim-graph .home-graph__svg').waitFor();
+    const readerGraph = await fetch(`${BASE}/api/graph`, { headers: { 'X-Dev-Email': READER } }).then((r) => r.json());
+    expect('the server\'s own answer: a member may act on none of it', true,
+      readerGraph.nodes.every((n) => n.mayAct === false));
+    const drawnCount = () => reader.page.locator('#holdrim-graph [data-id]').count();
+    const noMatch = reader.page.locator('.home-graph__empty');
+    expect('unfiltered, the member still sees the whole graph — this filter narrows, #153 does not hide',
+      readerGraph.nodes.length, await drawnCount());
+    await reader.page.locator('.home-graph__filters input[name="mayAct"]').check();
+    expect('ticked, every node the member may not act on is hidden', 0, await drawnCount());
+    expect('and the home says nothing matches, rather than drawing a broken graph', true, await noMatch.isVisible());
+    await reader.page.locator('.home-graph__filters input[name="mayAct"]').uncheck();
+    expect('unticked again, the whole graph returns', readerGraph.nodes.length, await drawnCount());
+    expect('nothing failed for the member either', '', reader.problems.join(' | '));
   }
 
   console.log('the panel obeys the project\'s feature toggles:');

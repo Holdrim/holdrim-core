@@ -65,10 +65,13 @@ if (container) {
   // while `/api/graph` is still on its way would otherwise send it for real.
   filters.addEventListener('submit', (event) => event.preventDefault());
   /** What the filters say right now. Every state is the VALUE of a ticked box — this script keeps
-   *  no list of states of its own, so a state the legend names is one a reader can hide. */
+   *  no list of states of its own, so a state the legend names is one a reader can hide. `mayAct` is
+   *  the third box (#42): one checkbox, read straight off the form, never a role computed here — the
+   *  boolean it narrows by is the one `/api/graph` already sent per node (`mayActOn`, engine/api/here.ts). */
   const filterOf = () => ({
     prefix: filters.elements.prefix.value,
     states: new Set([...filters.querySelectorAll('input[name="state"]:checked')].map((box) => box.value)),
+    mayAct: filters.elements.mayAct.checked,
   });
 
   function draw(graph) {

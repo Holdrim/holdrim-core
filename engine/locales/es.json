@@ -90,6 +90,7 @@
   "home.ask.submit": "Enviar la solicitud",
   "home.ask.what": "Qué debería explicar",
   "home.graph.failed": "No se pudo cargar el grafo.",
+  "home.graph.filterMayAct": "Dónde puedo actuar",
   "home.graph.filterPrefix": "Páginas que empiezan por",
   "home.graph.filterStates": "Mostrar",
   "home.graph.heading": "Grafo de dependencias",
