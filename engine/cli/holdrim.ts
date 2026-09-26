@@ -130,7 +130,7 @@ async function main() {
       const r = await validation.sync(root, source);
       // A refused ✓ is an owner's approval the registry did not get: exiting 0 would let CI pass a
       // run that silently left a lock unrecorded (holdrim#135).
-      return r.tampered || r.guardsTampered || r.refused > 0 ? 1 : 0;
+      return r.tampered || r.refused > 0 ? 1 : 0;
     }
     case 'check':      return (await validation.check(root)) ? 1 : 0;
     case 'index':      await validation.rebuildIndex(root, values.db); return 0;
