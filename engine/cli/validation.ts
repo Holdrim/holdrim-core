@@ -727,39 +727,17 @@ export async function showLights(root: string, options: { only?: string } = {}) 
  */
 export async function restamp(root: string) {
   const registry = loadRegistry(root);
-  const blocks = await readBlocks(root);
   let written = 0, alreadyHad = 0, noSuchBlock = 0, refused = 0;
   const willTurnYellow: string[] = [];
 
-  for (const [id, entry] of Object.entries(registry)) {
-    const recorded = entry.fingerprint;
-    if (!recorded) continue;
-    const resolved = resolveBlock(root, id);
-    if (!resolved.ok) {
-      // Not found is the ordinary "the page moved on" case `noSuchBlock` always reported; a
-      // duplicate id or an id this format cannot represent is a REFUSAL — the block may well still
-      // be there, but nothing can be written to it safely — and gets its own count and its reason.
-      if (resolved.kind === 'not-found') { noSuchBlock++; continue; }
-      refuse(id, resolved.message); refused++; continue;
-    }
-    const { path, html } = resolved;
-
-    const current = blocks.get(id)?.fingerprint;
-    if (current && current !== recorded) willTurnYellow.push(id);
-
-    const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: attributeText(recorded) }];
-    if (entry.dependsOn && Object.keys(entry.dependsOn).length) {
-      attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(entry.dependsOn)) });
-    }
-
-    const result = spliceAttributes(html, id, { attributes });
-    if ('error' in result) { refuse(id, result.error); refused++; continue; }
-    // "Already had it" and "written" are the same question asked in opposite directions — whether
-    // this splice changed anything — so one comparison answers both, instead of a text-based check
-    // for the first and a write for the second.
-    if (result.html === html) { alreadyHad++; continue; }
-    writeFileSync(path, result.html, 'utf8');
-    written++;
+  const entries = Object.entries(registry).filter(([, entry]) => entry.fingerprint);
+  for (const [index, outcome] of (await restampEach(root, entries)).entries()) {
+    const [id] = entries[index];
+    if (outcome.yellow) willTurnYellow.push(id);
+    if (outcome.counted === 'refused') { refuse(id, outcome.message); refused++; }
+    else if (outcome.counted === 'written') written++;
+    else if (outcome.counted === 'alreadyHad') alreadyHad++;
+    else noSuchBlock++;
   }
 
   console.log(`\n${written} block(s) got the mark they were missing · ${alreadyHad} already had it`);
@@ -771,6 +749,116 @@ export async function restamp(root: string) {
   }
   console.log('');
   return { written, alreadyHad, noSuchBlock, refused };
+}
+
+/**
+ * What `restamp` did with one registry entry, and whether the block's text has moved on from the
+ * recorded fingerprint (`yellow`) — known only for a block that resolved, refused on the page or not.
+ */
+type Restamped = { yellow: boolean } & (
+  | { counted: 'written' | 'alreadyHad' | 'noSuchBlock' }
+  | { counted: 'refused'; message: string });
+
+/**
+ * The seal `restamp` writes for one entry: the registry's fingerprint and dependencies, through
+ * `attributeText`, and nothing else. No `validatedAt` and no `replace` — whatever the block already
+ * carries stays, and a page value that disagrees with the registry is `check`'s to report.
+ */
+function restampPlan(entry: Registry[string]): MarkPlan {
+  const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: attributeText(entry.fingerprint) }];
+  if (entry.dependsOn && Object.keys(entry.dependsOn).length) {
+    attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(entry.dependsOn)) });
+  }
+  return { attributes };
+}
+
+/**
+ * Every entry's outcome, in the registry's order, from one read, parse, verification and write per
+ * page — `markAll`'s shape, on `sync`'s batched path (`locateBlocks`, `spliceAll`). Resolved entry by
+ * entry, a page of N recorded blocks is parsed and verified N times over: 800 take about 30 s, and
+ * 3 000 about nine minutes. The outcomes are returned rather than printed as they come, so the
+ * refusals still read in the registry's order however the entries fall across pages.
+ *
+ * One page at a time, and only a page still exactly as it was located: one that changed or vanished
+ * since has its entries restamped one by one (`restampOne`), which resolves each afresh — the digest
+ * guards everything locating decided about the page, as it does for `markAll`.
+ */
+async function restampEach(root: string, entries: readonly [string, Registry[string]][]): Promise<Restamped[]> {
+  const outcomes: Restamped[] = new Array(entries.length);
+  const located = locateBlocks(root, entries.map(([id]) => id));
+  const pages = new Map<string, { digest: string; indexes: number[] }>();
+  for (const [index, [id]] of entries.entries()) {
+    const where = located.get(id)!;
+    if (!where.ok) { outcomes[index] = unresolved(where); continue; }
+    const page = pages.get(where.path) ?? { digest: where.digest, indexes: [] };
+    page.indexes.push(index);
+    pages.set(where.path, page);
+  }
+
+  for (const [path, { digest, indexes }] of pages) {
+    const html = pageIfThere(path);
+    if (html === null || digestOf(html) !== digest) {
+      for (const index of indexes) outcomes[index] = await restampOne(root, ...entries[index]);
+      continue;
+    }
+    const { document, byId } = parsePage(html);
+    const yellow: boolean[] = [];
+    for (const index of indexes) {
+      const [id, entry] = entries[index];
+      yellow.push(await fingerprintOfText(textOf(byId.get(id)![0])) !== entry.fingerprint);
+    }
+    const stamps = indexes.map((index) => ({ id: entries[index][0], plan: restampPlan(entries[index][1]) }));
+    const spliced = spliceAll(html, document, stamps);
+    if (spliced.html !== html) writeFileSync(path, spliced.html, 'utf8');
+    for (const [k, index] of indexes.entries()) {
+      const result = spliced.results[k];
+      outcomes[index] = 'error' in result ? { yellow: yellow[k], counted: 'refused', message: result.error }
+        : { yellow: yellow[k], counted: result.unchanged ? 'alreadyHad' : 'written' };
+    }
+  }
+  return outcomes;
+}
+
+/**
+ * An entry whose block did not resolve. Not found is the ordinary "the page moved on" case
+ * `noSuchBlock` always reported; a duplicate id or an id this format cannot represent is a REFUSAL —
+ * the block may well still be there, but nothing can be written to it safely — with its own count and
+ * its reason.
+ */
+function unresolved(where: { kind: string; message: string }): Restamped {
+  return where.kind === 'not-found' ? { yellow: false, counted: 'noSuchBlock' }
+    : { yellow: false, counted: 'refused', message: where.message };
+}
+
+/** One entry restamped alone, resolved and spliced against the pages as they are now — the per-block path. */
+async function restampOne(root: string, id: string, entry: Registry[string]): Promise<Restamped> {
+  const resolved = resolveBlock(root, id);
+  if (!resolved.ok) return unresolved(resolved);
+  const { path, html, element } = resolved;
+  const yellow = await fingerprintOfText(textOf(element)) !== entry.fingerprint;
+
+  const result = spliceAttributes(html, id, restampPlan(entry));
+  if ('error' in result) return { yellow, counted: 'refused', message: result.error };
+  // "Already had it" and "written" are the same question asked in opposite directions — whether
+  // this splice changed anything — so one comparison answers both, instead of a text-based check
+  // for the first and a write for the second.
+  if (result.html === html) return { yellow, counted: 'alreadyHad' };
+  writeFileSync(path, result.html, 'utf8');
+  return { yellow, counted: 'written' };
+}
+
+/**
+ * The page at `path` as it is now, or `null` when it was deleted since it was located — which the
+ * per-block path then reports as "not found". Any other read error propagates: the per-block path
+ * would meet it too, and a loud abort beats a silent retry.
+ */
+function pageIfThere(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    return null;
+  }
 }
 
 /** What else do I have to look at if I touch this? The question to ask BEFORE editing. */
