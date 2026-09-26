@@ -11,10 +11,13 @@ comments that say why; commits added by path, never `git add -A`; never a force 
 2. Open a **draft** pull request early, from a branch named `issue-<number>-<slug>` (in your fork if
    you have no write access). Fill `.github/PULL_REQUEST_TEMPLATE.md` completely — kind, tier, the
    agent and model that made it — and put your plan in it.
-3. Build it. Run the five proofs and, when the panel or the API changed, `npm run browser`. Report
-   their real exit codes. If your environment cannot run something, say so: a check reported as
-   passing that did not run is the one mistake this repository does not forgive.
-4. When it is ready, mark the pull request ready, remove `needs:<you>`, add the reviewer's label, and
+3. Read `LESSONS.md` before you build, its Security section above all: each entry is a mistake
+   this repository has already paid for once. Then build it. Run the five proofs and, when the
+   panel or the API changed, `npm run browser`. Report their real exit codes. If your environment
+   cannot run something, say so: a check reported as passing that did not run is the one mistake
+   this repository does not forgive.
+4. When it is ready, answer the three questions in the pull request (`LESSONS.md` says what each
+   asks), then mark the pull request ready, remove `needs:<you>`, add the reviewer's label, and
    @mention them.
 5. Answer every review finding: fix it in a new commit, or reply with your reason. A MINOR never
    blocks. A CRITICAL or MAJOR blocks until the reviewer who raised it closes it, or the owner does:
