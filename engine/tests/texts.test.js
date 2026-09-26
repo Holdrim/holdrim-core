@@ -228,6 +228,19 @@ test('a row that still matches its hash, with a valid removal of the same field,
   assert.deepEqual(reports, []);
 });
 
+test('a row whose value or salt is not a string reads as overwritten, and never throws before the alarm', () => {
+  // Firestore keeps whatever type a direct writer gives a field; hashing a number or a map throws,
+  // and a read that throws raises no CRITICAL line at all (texts.ts, `rowHash`).
+  const edited = { ...AN_EVENT, text: null, textHash: hashText('the real text', newSalt()) };
+  for (const row of [{ value: 5, salt: newSalt() }, { value: 'the real text', salt: { a: 1 } }, { value: undefined, salt: 's' }]) {
+    const reports = [];
+    const [out] = withTexts([edited], new Map([[textKey('e1', 'text'), row]]), reports);
+    assert.equal(out.text, null);
+    assert.equal(out.textTampered, true);
+    assert.deepEqual(cases(reports), [{ event: 'e1', field: 'text', kind: 'overwritten' }]);
+  }
+});
+
 test('a removal event whose target is not a string names no removal, even one that would print as the right id', () => {
   const salt = newSalt();
   // `['e1']` stringifies to exactly `'e1'` wherever a template literal reads it — `textKey` does —

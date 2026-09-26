@@ -68,6 +68,16 @@ export function hashText(value: string, salt: string): string {
   return createHash('sha256').update(salt, 'utf8').update('\u0000').update(value, 'utf8').digest('hex');
 }
 
+/**
+ * A stored row's own hash, or null when its value or salt is not a string. Firestore keeps whatever
+ * type a direct writer gives a field, and `hashText` throws on a number or a map: without this, such
+ * an edit makes every read fail before the CRITICAL line is logged, and the alarm becomes a crash.
+ * Null matches no recorded hash, so the row reads as `overwritten`, like any other edit.
+ */
+function rowHash(row: TextRow): string | null {
+  return typeof row.value === 'string' && typeof row.salt === 'string' ? hashText(row.value, row.salt) : null;
+}
+
 /** One freshly-salted row of the texts table, ready to write, for one field an event was given. */
 export interface SaltedRow {
   field: TextField;
@@ -217,7 +227,7 @@ export function findingOf(event: string, field: TextField, kind: TamperKind, obs
  * place — its author, say, since only its id is hashed here.
  */
 export function observedOf(recorded: string | null, row: TextRow | undefined, removals: readonly string[]): string {
-  return [recorded ?? '', row ? hashText(row.value, row.salt) : '', [...removals].sort().join(',')].join('\u0000');
+  return [recorded ?? '', row ? (rowHash(row) ?? 'not text') : '', [...removals].sort().join(',')].join('\u0000');
 }
 
 /**
@@ -408,7 +418,7 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
       continue;
     }
     const row = rows.get(textKey(e.id as string, field));
-    if (row && hashText(row.value, row.salt) === hash) {
+    if (row && rowHash(row) === hash) {
       out[field] = row.value;
       out[`${field}Removed`] = null;
       out[`${field}Tampered`] = false;
