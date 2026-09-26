@@ -92,7 +92,7 @@ export class FirestoreEventStore implements EventStore {
    * for exactly those fields, and only those, it asks a fresh, later query for the removal events
    * that first read could not have seen yet.
    */
-  async list(page?: string | null): Promise<Event[]> {
+  async list(page?: string | null, found?: TamperReport[]): Promise<Event[]> {
     let q: FirebaseFirestore.Query = this.#db.collection('events');
     if (page != null) q = q.where('page', '==', page);
     const r = await q.get();
@@ -120,6 +120,7 @@ export class FirestoreEventStore implements EventStore {
       return withAuthors(removed.docs.map((d) => this.#fromFirestore(d.id, d.data())), peopleMap);
     }, reports);
     for (const r of reports) reportTampered(r);
+    found?.push(...reports);
     return out;
   }
 

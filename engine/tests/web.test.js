@@ -113,7 +113,7 @@ test('the tokens panel.css declares are base.css\'s values, so a page without ba
 
 test('every class the panel creates has a rule in panel.css, and every rule a class', () => {
   const css = read('engine/web/panel.css');
-  const js = ['engine/web/src/entry.jsx', 'engine/web/src/Panel.jsx'].map(read).join('\n');
+  const js = ['engine/web/src/entry.jsx', 'engine/web/src/Panel.jsx', 'engine/web/src/Tamper.jsx'].map(read).join('\n');
   // Two classes are hooks with no look of their own: they tell a project's stylesheet which
   // history line is which. Listed here so that a NEW unstyled class still fails, and has to be
   // added on purpose.
@@ -175,7 +175,7 @@ test('every sentence the panel asks for exists in every dictionary', () => {
   // A key the panel asks for and a dictionary lacks shows on screen as `panel.something` — only in
   // that language, and only to the reader who happens to speak it. Read from the source, so a new
   // `t('…')` is held to this without anyone remembering to list it.
-  const source = ['engine/web/src/Panel.jsx', 'engine/web/src/entry.jsx'].map(read).join('\n');
+  const source = ['engine/web/src/Panel.jsx', 'engine/web/src/entry.jsx', 'engine/web/src/Tamper.jsx'].map(read).join('\n');
   // Every `t('…')`, and every quoted `'panel.…'` — a key kept in a table and translated later, as
   // the history's verbs are, is a key too.
   const keys = [...new Set([...source.matchAll(/\bt\('([\w.]+)'|'(panel\.[\w.]+)'/g)].map((m) => m[1] ?? m[2]))];

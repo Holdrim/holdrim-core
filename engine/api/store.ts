@@ -46,7 +46,7 @@ export class MemoryEventStore implements EventStore {
     return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: e.author };
   }
 
-  async list(page?: string | null): Promise<Event[]> {
+  async list(page?: string | null, found?: TamperReport[]): Promise<Event[]> {
     const people = new Map([...this.#people.values()].map((p) => [p.id, p.email]));
     const events = withAuthors(this.#events
       .filter((e) => page == null || e.page === page)
@@ -56,6 +56,7 @@ export class MemoryEventStore implements EventStore {
     const reports: TamperReport[] = [];
     const out = withTexts(events, this.#texts, reports);
     for (const r of reports) reportTampered(r);
+    found?.push(...reports);
     return out;
   }
 

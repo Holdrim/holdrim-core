@@ -15,7 +15,8 @@ CI checks the built file is not stale, and so does the pre-commit hook. Touch an
 |---|---|
 | `entry.jsx` | the bridge to the page: finds the blocks, creates the buttons, mounts React |
 | `Panel.jsx` | the dialog: badge, actions, request form, triage, history |
-| `api.js` | the three API routes, and the fingerprint (which comes from the core, not a copy) |
+| `Tamper.jsx` | the tampered-text banner: one line per finding the server says is open, and no close control |
+| `api.js` | the API routes the panel calls, and the fingerprint (which comes from the core, not a copy) |
 | `state.js` | a block's state and traffic light, derived from the events — pure, tested without a browser |
 
 The state labels and the request categories are read from `engine/cycle.json`, bundled in. There is

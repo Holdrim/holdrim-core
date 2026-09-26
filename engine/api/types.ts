@@ -1,4 +1,4 @@
-import type { Removed, TextField } from './texts.ts';
+import type { Removed, TextField, TamperReport } from './texts.ts';
 import { normalizeEmail } from './users.ts';
 
 /** A fact from the review. Only created — never altered, never deleted. */
@@ -146,7 +146,12 @@ export interface PeopleTable {
 /** Persistence. The in-memory store, SQLite and Firestore implement the same contract. */
 export interface EventStore extends PeopleTable {
   append(event: NewEvent, author: string): Promise<Event>;
-  list(page?: string | null): Promise<Event[]>;
+  /**
+   * `found`, given, is appended to with every field this read resolved to tampered — the very reports
+   * the store already raises through `reportTampered`, handed on so the server can say which findings
+   * are open (engine/api/tamper.ts, issue #107) without a second, different detection of its own.
+   */
+  list(page?: string | null, found?: TamperReport[]): Promise<Event[]>;
   /**
    * Removes one field's text — the row in the texts table, and only that — and records the removal
    * as a new event of type `text_removed` (engine/api/texts.ts, `TEXT_REMOVED`), `by` as its author.
