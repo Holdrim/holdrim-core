@@ -22,8 +22,12 @@ import { freshFirestoreProject } from './helpers/firestore.js';
 
 // The plain `console.error` line AND the structured `log()` line `reportTampered` prints, captured
 // the way store-sqlite-guards.test.js captures `sqlite_guard_missing`: `log()` writes one JSON line
-// per call through `console.log`, which nothing else in this file calls with a JSON string, so a line
-// that parses and carries a `severity` is one of ours; anything else passes through untouched.
+// per call, through `console.log` by default (a store's own read: the server's log, unmoved by
+// issue #129) or through `console.error` where `reportTampered` is given it (the CLI's two direct
+// readers, `Source#fromFile` and `events()`, engine/cli/remote.ts: `list --json`'s stdout must stay
+// parseable). `logged` is the JSON parsed off `console.log`; `said` keeps every `console.error` line
+// as the raw string, since a caller of THAT stream reads it as text, not JSON, and a test proving the
+// CLI's own alert lands there parses `said` itself (`tryParse`) rather than through `logged`.
 function capturingReports(fn) {
   return async (t) => {
     const said = [];
@@ -411,7 +415,11 @@ test('[sqlite] the CLI\'s own direct reader of the events file raises the alert 
     // means by "the events file" among the CLI's two direct readers.
     await new Source({ db: path }).events();
     assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(written.id)));
-    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.kind === 'overwritten'));
+    // The structured line too, but on `console.error` — `said`, never `logged` (issue #129): this
+    // reader feeds `list --json`, whose stdout a caller `JSON.parse`s as the queue.
+    const structured = said.map(tryParse).filter((p) => p && typeof p.severity === 'string');
+    assert.ok(structured.some((l) => l.severity === 'CRITICAL' && l.kind === 'overwritten'));
+    assert.deepEqual(logged, [], 'this reader\'s alert never reaches stdout');
   }));
 
 test('suspectsOf, exported for the CLI\'s own list/sync, reads the same pairs on a final resolved list', () => {
@@ -888,7 +896,11 @@ test('[firestore] the CLI\'s own reader of the cloud raises the alert too', clou
     await store.append({ type: TEXT_REMOVED, page: 'A01', data: { event: kept.id, field: 'text' } }, 'forger@example.org');
     await new Source({ project, account: 'ci@example.org' }).events();
     assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(kept.id)));
-    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.eventId === kept.id && l.kind === 'double_removal'));
+    // On `console.error` — `said`, never `logged` (issue #129): the same reason as the sqlite
+    // reader above, for the CLI's other direct reader, the cloud.
+    const structured = said.map(tryParse).filter((p) => p && typeof p.severity === 'string');
+    assert.ok(structured.some((l) => l.severity === 'CRITICAL' && l.eventId === kept.id && l.kind === 'double_removal'));
+    assert.deepEqual(logged, [], 'this reader\'s alert never reaches stdout');
   }));
 
 test('[firestore] the CLI pages through more documents than one page holds, and drops none', cloud, async (t) => {
