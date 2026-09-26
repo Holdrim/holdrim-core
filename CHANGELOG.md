@@ -456,3 +456,30 @@ who ran the engine from `main` before it.
   none of its ✓; the run still fails, and the CLI still exits non-zero, with the error that aborted it
   even when the registry cannot be saved either (that failure is printed on the way out). A process killed outright between a page write and the save can still leave a seal
   without its entry — never an entry without its seal — and the next `holdrim sync` records it again.
+- **`approvals.json` is now written atomically (holdrim#150).** `saveRegistry` used to overwrite it
+  in place with a single `writeFileSync`, which truncates the file before the new bytes land: a
+  process killed mid-write left every owner ✓ ever recorded in it gone, recoverable only from git.
+  It now writes to a temp file beside it, fsyncs it, copies the target's own mode AND owner (uid and
+  gid — a warning, not a failure, when this process cannot give the file away) onto it, and renames it
+  over the real name — a reader sees the previous file or the new one, whole, owned exactly as before,
+  never a partial one. **A registry that is a symlink is now refused on both read and write, whether
+  the link resolves or is dangling (its target already gone).** The refusal lives in `loadRegistry`
+  itself, so every reader of the registry changes with it, not only `holdrim sync`: `holdrim check`,
+  `restamp`, `lights`, `graph` and `if-i-touch`, and the server's home and `/graph` routes, all read
+  through `loadRegistry` and now refuse a symlinked registry, where every one of them used to read
+  through it — an adopter who relies on the panel, or on `check` in CI, and not only on `sync`, will
+  see this. This is a behaviour change for a project that shared one `approvals.json` between
+  checkouts through a symlink: that used to be read and written straight through, and now refuses
+  outright on every path that touches it. It has to, on both ends of `sync` at least — a `sync` that
+  read a working link, stamped seals onto every approved page, and only THEN hit the save's refusal in
+  its `finally` would leave those seals on disk with no registry entry to show for them, exactly the
+  state holdrim#148 and holdrim#151 already exist to prevent. Point such a project's `content.registry`
+  at a real file instead. `exportSite` already refused a symlinked `out` before this change, but only
+  when it resolved — a DANGLING `out` slipped past its own `existsSync`-gated check and died later
+  with a raw `ENOENT` out of `mkdirSync`, never having written anything through it either way; it now
+  gives a dangling `out` the same clear refusal as a resolving one, up front (all three call sites now
+  share one check, `refuseLink` in `engine/cli/fs.ts`). A registry this process cannot write to is
+  refused with `EACCES` before anything is touched, where the old in-place write refused it too.
+  Fsyncing the containing directory afterwards, where the platform allows it, is a durability step on
+  top of an already successful save: a failure there is a warning, never a reason to report the save
+  itself as failed.

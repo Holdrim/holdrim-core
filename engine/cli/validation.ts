@@ -1,5 +1,7 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync,
+  statSync, chmodSync, chownSync, accessSync, constants } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { readBlocks, sheetFiles, resolveBlock, locateBlocks, digestOf, fingerprintsByPage, parsePage, spliceAttributes, spliceAll, attributeText, textOf, shortName, ofProject, projectRoles,
@@ -11,6 +13,7 @@ import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
 import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
+import { refuseLink } from './fs.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -51,13 +54,124 @@ const registryPath = (root: string) =>
 
 export function loadRegistry(root: string): Registry {
   const p = registryPath(root);
+  // ANY link, not only a dangling one: a WORKING symlinked registry looks safe to read through, but
+  // `sync` stamps seals onto pages between this call and `saveRegistry`'s own refusal of the same
+  // link, in its `finally`. A run that got that far would leave those seals on disk with no registry
+  // entry to show for them — exactly what holdrim#148 and holdrim#151 already exist to prevent — so
+  // the refusal has to happen here, before a single page is written, not only at the save on the way
+  // out. `refuseLink` uses `lstatSync`, never `existsSync`, so a DANGLING link (its target gone — an
+  // unmounted shared volume, say, which `existsSync` reads as "nothing here", the same as a registry
+  // simply never written yet) is refused too, rather than silently read as an empty registry.
+  refuseLink(p, `load ${p}`);
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
 }
 
-export function saveRegistry(root: string, registry: Registry) {
+/**
+ * Fsyncs the file already written at `path`: `writeFileSync` hands the bytes to the kernel's page
+ * cache and returns, so without this a rename right after can make the approvals file's name point
+ * at data that has not reached disk yet — a crash between the two leaves the next reader with a
+ * shorter or garbled file under the name that is supposed to mean "safe".
+ */
+function fsyncFile(path: string) {
+  const fd = openSync(path, 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+/**
+ * Fsyncs the directory `dir`. Left to throw whatever `openSync` or `fsyncSync` raise: by the time a
+ * caller reaches this, the rename it follows has already succeeded, so there is no "ignorable" code
+ * to filter here any more — a platform that cannot do this (Windows refuses the open outright; some
+ * filesystems refuse the fsync) and a real failure look the same from here, and `saveRegistry` treats
+ * every one of them the same way, as a durability warning rather than a lost write.
+ */
+function fsyncDir(dir: string) {
+  const fd = openSync(dir, 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+/**
+ * Writes the registry to a temp file beside `approvals.json`, fsyncs it, then renames it over the
+ * real name — a reader (this process' own `loadRegistry`, or a person's editor) sees the old file or
+ * the new one, in full, never a partial write from a process killed in the middle of it (holdrim#150).
+ * A plain `writeFileSync` on the real name is truncated the moment the write starts; every owner ✓
+ * recorded in it is then gone until somebody recovers it from git.
+ *
+ * `interrupt` is the seam a test throws from, between the temp write and the rename, to prove the
+ * real file is untouched and the temp file cleaned up when that happens — a no-op by default, the
+ * same shape `Verifier` in pages.ts takes for the same reason: a real caller never supplies one.
+ */
+export function saveRegistry(root: string, registry: Registry, interrupt: () => void = () => {}) {
   const sorted: Registry = {};
   for (const k of Object.keys(registry).sort()) sorted[k] = registry[k];
-  writeFileSync(registryPath(root), JSON.stringify(sorted, null, 1) + '\n', 'utf8');
+  const path = registryPath(root);
+  const dir = dirname(path);
+
+  // A link is not followed: the rename below would replace the LINK ITSELF with a plain file, and
+  // whatever it used to point at — a registry shared between two checkouts, say — would keep
+  // whatever it last held forever. The same `refuseLink` (engine/cli/fs.ts) `loadRegistry` already
+  // ran on this path before `sync` wrote a single page — repeated here, at the very end of the run,
+  // because a page turning the registry file into a symlink mid-run is exactly the kind of surprise
+  // this refusal exists to catch, not assume away.
+  refuseLink(path, `save ${path}`);
+  // Safe now: `refuseLink` just ruled out a symlink, so whatever `existsSync` finds here (or
+  // doesn't) is an ordinary file, never a link whose target existing or not would say something else.
+  const existing = existsSync(path);
+
+  if (existing) {
+    // A registry made read-only on purpose (0444, to mark "do not touch by hand") used to refuse
+    // with EACCES the instant the old in-place write tried to open it. A rename only needs the
+    // DIRECTORY to be writable, never its target, so that refusal has to be made explicit here or
+    // the fresh temp file would silently land in place of a file nobody meant to be overwritten.
+    try {
+      accessSync(path, constants.W_OK);
+    } catch {
+      throw Object.assign(new Error(`EACCES: permission denied, open '${path}'`), { code: 'EACCES', path });
+    }
+  }
+
+  // Same folder as the target: a rename is only atomic within one filesystem, and a temp directory
+  // elsewhere could sit on a different one. pid and randomness only need to keep two runs writing at
+  // once from choosing the SAME name — the two are still two different files, so neither can ever
+  // see the other's half-written bytes. `sheetFiles` only ever reads `.html`, so this name is never
+  // mistaken for a page whatever it is called.
+  const tmp = join(dir, `.${basename(path)}.${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
+  try {
+    writeFileSync(tmp, JSON.stringify(sorted, null, 1) + '\n', 'utf8');
+    fsyncFile(tmp);
+    // A fresh file gets a fresh mode AND a fresh owner — whoever runs this `sync`, never necessarily
+    // who owns approvals.json today. Copying the target's own mode and, where this process is allowed
+    // to give a file away, its uid and gid onto the temp file before the rename is what keeps BOTH
+    // exactly as an operator set them, instead of quietly resetting either to a new file's default
+    // every time a sync writes it. A non-root process cannot `chown` at all (EPERM) — that limit is
+    // not this save's to fail over, so it is a warning naming the change, and the save still lands.
+    if (existing) {
+      const target = statSync(path);
+      chmodSync(tmp, target.mode);
+      try {
+        chownSync(tmp, target.uid, target.gid);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EPERM') throw e;
+        console.error(`⚠ ${path}'s owner could not be kept: it changed from ${target.uid}:${target.gid} `
+          + `to ${process.getuid?.()}:${process.getgid?.()}`);
+      }
+    }
+    interrupt();
+    renameSync(tmp, path);
+  } catch (e) {
+    // The temp file is this call's own mess to clean up — nothing else will ever look for it by
+    // this name. Ignored here because the write itself may be what threw, leaving nothing to remove.
+    try { unlinkSync(tmp); } catch { /* nothing to remove */ }
+    throw e;
+  }
+  try {
+    fsyncDir(dir);
+  } catch (e) {
+    // The rename above already succeeded — the new registry IS saved, safely, under its real name.
+    // Losing the directory's own metadata flush in a crash is a durability gap, not a lost write, so
+    // this is a warning and a normal return, never the error `sync`'s finally reads as "the registry
+    // could not be saved" (holdrim#151) — that message has to stay true to what actually happened.
+    console.error(`⚠ ${path} was saved, but its folder could not be flushed: ${(e as Error).message}`);
+  }
 }
 
 /**
@@ -708,8 +822,8 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     // A save that fails while another error is on its way out is said and let go, so the error that
     // aborted the run is the one the run ends with: thrown from here, it would replace it, and the
     // cause of the abort would be lost behind the registry's. With nothing on its way out, the save's
-    // own error is the run's error. ⚠️ The registry file itself is still written in place, not written
-    // aside and renamed, so a process killed during the save can still leave it truncated.
+    // own error is the run's error. `saveRegistry` itself writes aside and renames (holdrim#150), so a
+    // process killed during this save leaves the PREVIOUS registry intact, never a truncated one.
     try {
       saveRegistry(root, registry);
     } catch (saveError) {
