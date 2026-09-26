@@ -441,10 +441,15 @@ test('no caller outside engine/core/roles.js decides anything from a role\'s nam
 // carries, and `isOwner` then answers for the owner's address as though the owner had signed in
 // (holdrim#138, the tamper routes after #134 merged). Only the TOKEN_READS/TOKEN_WRITES allowlist
 // stops such a call today, so no request can reach it; this scan is what fails if one comes back.
+// `email` and `addressOf(who)` are the two spellings of the flattened address in server.ts; the last
+// alternative is the other shape of the same mistake, deciding "is this the owner?" by comparing
+// addresses instead of asking `isOwner(who)`, which a token's address would pass.
+const ADDRESS = String.raw`(?:email\b|addressOf\(\s*who\s*\))`;
 const ROLE_QUESTION_OF_ADDRESS = new RegExp([
-  String.raw`\broles\.(?:isOwner|isLockHolder|isAgent|roleOf)\(\s*email\b`,
-  String.raw`\broles\.can\([^)]*,\s*email\b`,
-  String.raw`\b(?:mayAcknowledge|acknowledgementRefusal)\(\s*roles\s*,\s*email\b`,
+  String.raw`\broles\.(?:isOwner|isLockHolder|isAgent|roleOf)\(\s*` + ADDRESS,
+  String.raw`\broles\.can\([^)]*,\s*` + ADDRESS,
+  String.raw`\b(?:mayAcknowledge|acknowledgementRefusal)\(\s*roles\s*,\s*` + ADDRESS,
+  String.raw`\bisOwner\(\s*(\w+)\s*\)\s*&&\s*\1\s*!==\s*email\b`,
 ].join('|'));
 
 test('server.ts asks every role question of who, never of the flattened address', () => {
@@ -453,9 +458,12 @@ test('server.ts asks every role question of who, never of the flattened address'
   assert.deepEqual(hits, [], 'a role question of `email` flattens an agent token');
 });
 
-test('the address scan catches mayAcknowledge(roles, email) and roles.isOwner(email), by name', () => {
+test('the address scan catches a role asked of email or addressOf(who), and an owner decided by comparing addresses', () => {
   assert.ok(ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, email)) return'));
   assert.ok(ROLE_QUESTION_OF_ADDRESS.test('String(roles.isAgent(email))'));
   assert.ok(ROLE_QUESTION_OF_ADDRESS.test("roles.can('triage', email)"));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, addressOf(who))) return'));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('if (roles.isOwner(target) && target !== email) {'));
+  assert.ok(!ROLE_QUESTION_OF_ADDRESS.test('if (roles.isOwner(target) && !roles.isOwner(who)) {'));
   assert.ok(!ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, who)) return'));
 });

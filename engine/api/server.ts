@@ -1009,7 +1009,7 @@ async function userRoutes(
     // the service removes the account and restarts, and the first-access password is generated
     // again. That is an operations act, on purpose — being the owner is configuration, not a
     // button someone else can press.
-    if (roles.isOwner(target) && target !== email) {
+    if (roles.isOwner(target) && !roles.isOwner(who)) {
       return json(res, 409, { error: say('api.users.ownerPasswordIsOwnTo') }), true;
     }
     // Same guard, extended to HOLDRIM_LOCKS (docs/ROLES.md, section 3): "the owner's alone", with no
