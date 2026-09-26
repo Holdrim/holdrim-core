@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CLI_COMMANDS, CLI_FLAGS } from './helpers/cli-source.js';
 import { EVENT_TYPES, stored, LOCK_BASELINE_TYPE, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD } from '../api/types.ts';
+import { AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED } from '../api/agent-tokens.ts';
 import { queue } from '../cli/requests.ts';
 import * as screens from '../core/screens.js';
 import * as language from '../api/language.ts';
@@ -141,7 +142,9 @@ test('the event types are the ones engine/surface.json lists', () => {
   // union here would list the exact same names either way, and this assertion would keep passing in
   // silence. The actual guard is `refusalOf` refusing an unknown `type`, and `engine/test-contract.sh`
   // (`lock_baseline via POST /events → 400, even from a member`) proves it stays refused.
-  sameAs('event types', [...EVENT_TYPES, LOCK_BASELINE_TYPE], SURFACE['event-types']);
+  // The two agent-token events the same way, for the same reason: only the owner's own routes write
+  // them (agent-tokens.ts), and the guard that keeps them out of `POST /events` is the contract test's.
+  sameAs('event types', [...EVENT_TYPES, LOCK_BASELINE_TYPE, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED], SURFACE['event-types']);
 });
 
 test('the fields of an event are the ones engine/surface.json lists', () => {

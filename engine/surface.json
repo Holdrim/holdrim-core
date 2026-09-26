@@ -14,6 +14,7 @@
       "HOLDRIM_ACCOUNT",
       "HOLDRIM_ADMINS",
       "HOLDRIM_AGENTS",
+      "HOLDRIM_AGENT_TOKEN",
       "HOLDRIM_AUDIENCE",
       "HOLDRIM_DEV_EMAIL",
       "HOLDRIM_ENVIRONMENT",
@@ -31,6 +32,7 @@
       "HOLDRIM_PROJECT",
       "HOLDRIM_SITE",
       "HOLDRIM_THEME_BRAND",
+      "HOLDRIM_URL",
       "HOLDRIM_USERS",
       "HOLDRIM_USERS_PATH"
     ],
@@ -84,6 +86,8 @@
     "data-validated-fingerprint"
   ],
   "event-types": [
+    "agent_token_issued",
+    "agent_token_revoked",
     "approval",
     "comment",
     "decision_reply",
@@ -109,6 +113,7 @@
     "when"
   ],
   "event-data-keys": [
+    "agent",
     "authorCouldTriage",
     "blocks",
     "category",
@@ -117,8 +122,10 @@
     "field",
     "from",
     "locks",
+    "replacedTokenId",
     "request",
-    "state"
+    "state",
+    "tokenId"
   ],
   "request-states": [
     "applied",
@@ -206,6 +213,7 @@
     "* /engine/web/*",
     "* /language",
     "* /sign-in",
+    "GET /api/agent-tokens",
     "GET /api/events",
     "GET /api/events/:param",
     "GET /api/fingerprints",
@@ -214,6 +222,8 @@
     "GET /api/me",
     "GET /api/requests/open",
     "GET /api/users",
+    "POST /api/agent-tokens",
+    "POST /api/agent-tokens/:param/revoke",
     "POST /api/change-password",
     "POST /api/events",
     "POST /api/sign-in",

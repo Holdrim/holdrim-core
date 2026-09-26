@@ -1,4 +1,4 @@
-import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
+import { UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
  * People and sessions in Postgres: tables `users` and `sessions`.
@@ -74,6 +74,16 @@ export class UsersPostgres extends UserStoreBase {
         expires_at TEXT NOT NULL
       )`);
     await pool.query('CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions (expires_at)');
+    // One row per agent address, as in SQLite: the primary key is what makes a second issue replace
+    // the first. users-sqlite.ts says why there is no reference to `users`.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        email     TEXT PRIMARY KEY,
+        kind      TEXT NOT NULL CHECK (kind = 'agent'),
+        token_id  TEXT NOT NULL UNIQUE,
+        hash      BYTEA NOT NULL,
+        issued_at TEXT NOT NULL
+      )`);
 
     this.#pool = pool;
     return pool;
@@ -156,6 +166,35 @@ export class UsersPostgres extends UserStoreBase {
     await this.#query('DELETE FROM sessions WHERE email = $1 AND id != $2', [email, keepSessionId]);
   }
 
+  protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
+    // One statement: the CTE reads the row as it stood before this statement, and the upsert
+    // replaces it, with no moment in between where the address holds two tokens or none. Two issues
+    // racing may both name the same predecessor in the trail; they still leave exactly one row.
+    const [r] = await this.#query(
+      'WITH before AS (SELECT token_id FROM agent_tokens WHERE email = $1) '
+      + 'INSERT INTO agent_tokens (email, kind, token_id, hash, issued_at) VALUES ($1, $2, $3, $4, $5) '
+      + 'ON CONFLICT (email) DO UPDATE SET kind = EXCLUDED.kind, token_id = EXCLUDED.token_id, '
+      + 'hash = EXCLUDED.hash, issued_at = EXCLUDED.issued_at '
+      + 'RETURNING (SELECT token_id FROM before) AS replaced',
+      [row.email, row.kind, row.tokenId, row.hash, row.issuedAt]);
+    return (r?.replaced as string | null | undefined) ?? null;
+  }
+
+  protected async readAgentTokenById(tokenId: string): Promise<StoredAgentToken | null> {
+    const [r] = await this.#query('SELECT * FROM agent_tokens WHERE token_id = $1', [tokenId]);
+    return r ? rowToToken(r) : null;
+  }
+
+  protected async readAllAgentTokens(): Promise<StoredAgentToken[]> {
+    // Ordered out loud, for the collation reason `readAllUsers` gives.
+    return (await this.#query('SELECT * FROM agent_tokens ORDER BY email')).map(rowToToken);
+  }
+
+  protected async deleteAgentToken(email: string): Promise<string | null> {
+    const [r] = await this.#query('DELETE FROM agent_tokens WHERE email = $1 RETURNING token_id', [email]);
+    return (r?.token_id as string | undefined) ?? null;
+  }
+
   async close(): Promise<void> {
     // Awaiting the connection first: closing a store whose pool is still being built would leave
     // the pool open behind us and hold the process alive.
@@ -175,5 +214,13 @@ function rowToUser(r: Record<string, unknown>): StoredUser {
     salt: Buffer.from(r.salt as Uint8Array), hash: Buffer.from(r.hash as Uint8Array),
     mustChangePassword: !!r.must_change, createdAt: r.created_at as string,
     enabled: !!r.enabled,
+  };
+}
+
+/** One row of `agent_tokens`, shaped as `users.ts` expects it, for the single read and the listing. */
+function rowToToken(r: Record<string, unknown>): StoredAgentToken {
+  return {
+    email: r.email as string, kind: r.kind as 'agent', tokenId: r.token_id as string,
+    hash: Buffer.from(r.hash as Uint8Array), issuedAt: r.issued_at as string,
   };
 }

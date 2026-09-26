@@ -1,5 +1,5 @@
 import { Firestore, type DocumentData, type WhereFilterOp } from '@google-cloud/firestore';
-import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
+import { UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
  * People and sessions in Firestore: collections `users` and `sessions`.
@@ -146,9 +146,50 @@ export class UsersFirestore extends UserStoreBase {
     return page.size === 400;
   }
 
+  /**
+   * The document id is the address, as in `users`: one document per agent, so a second issue
+   * OVERWRITES the first and the old token has no document left to be found by. Read and written in
+   * one transaction so the id it reports as replaced is the one it actually replaced.
+   */
+  protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
+    const ref = this.#db.collection('agent_tokens').doc(row.email);
+    return this.#db.runTransaction(async (tx) => {
+      const before = (await tx.get(ref)).data();
+      tx.set(ref, { email: row.email, kind: row.kind, token_id: row.tokenId, hash: row.hash, issued_at: row.issuedAt });
+      return (before?.token_id as string | undefined) ?? null;
+    });
+  }
+
+  protected async readAgentTokenById(tokenId: string): Promise<StoredAgentToken | null> {
+    // A query on one field, which Firestore indexes by itself, and strongly consistent: a token
+    // revoked or replaced a moment ago is not found by the next request, on any instance.
+    const found = await this.#db.collection('agent_tokens').where('token_id', '==', tokenId).limit(1).get();
+    return found.empty ? null : docToToken(found.docs[0]!.data());
+  }
+
+  protected async readAllAgentTokens(): Promise<StoredAgentToken[]> {
+    const all = await this.#db.collection('agent_tokens').orderBy('__name__').get();
+    return all.docs.map((doc) => docToToken(doc.data()));
+  }
+
+  protected async deleteAgentToken(email: string): Promise<string | null> {
+    const ref = this.#db.collection('agent_tokens').doc(email);
+    return this.#db.runTransaction(async (tx) => {
+      const before = (await tx.get(ref)).data();
+      if (!before) return null;
+      tx.delete(ref);
+      return (before.token_id as string | undefined) ?? null;
+    });
+  }
+
   async close(): Promise<void> {
     await this.#db.terminate();
   }
+}
+
+/** One document of `agent_tokens`, shaped as `users.ts` expects it. */
+function docToToken(d: DocumentData): StoredAgentToken {
+  return { email: d.email, kind: d.kind, tokenId: d.token_id, hash: Buffer.from(d.hash), issuedAt: d.issued_at };
 }
 
 /**

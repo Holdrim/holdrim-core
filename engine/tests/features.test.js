@@ -613,7 +613,7 @@ test('every scanned file survives the esbuild cross-check: the regex/division gu
 
 test('N2: a regex misguessed as division after a block\'s closing `}` swallows the guard right after it', () => {
   const real = read('engine/api/server.ts');
-  const marker = "const manages = () => roles.can('people', email);";
+  const marker = "const manages = () => roles.can('people', who);";
   assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
   // The demonstrated mutant, verbatim: `/` right after the `}` that closes `if (email) { … }` starts
   // a fresh statement — the regex `/\/*/ ` (matching a literal "/*") — but `CloseBraceToken` is in
@@ -767,7 +767,7 @@ test('every real read of features, across the engine, is on the allow-list', asy
 
 test('S11: wrapping the owner-creation guard in a feature check is caught, by name', () => {
   const real = read('engine/api/server.ts');
-  const marker = 'if (roles.isOwner(address) && !roles.isOwner(email)) {';
+  const marker = 'if (roles.isOwner(address) && !roles.isOwner(who)) {';
   assert.ok(real.includes(marker), 'the guard this test plants a mutant next to moved or was reworded');
   const planted = real.replace(marker, `if (project.features.peopleScreen) ${marker}`);
   const found = offendersIn(planted, 'engine/api/server.ts');
@@ -788,7 +788,7 @@ test('S12: rewriting forbidden() to read a toggle is caught, by name', () => {
 
 test('S13: a brand-new condition reading a toggle next to a guard is caught, by name', () => {
   const real = read('engine/api/server.ts');
-  const marker = "const manages = () => roles.can('people', email);";
+  const marker = "const manages = () => roles.can('people', who);";
   assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
   const planted = real.replace(marker,
     `${marker}\n  if (!manages() && project.features.peopleScreen) return forbidden();`);
@@ -799,7 +799,7 @@ test('S13: a brand-new condition reading a toggle next to a guard is caught, by 
 
 test('S14 (D2b): a regex literal containing /* does not blind the scan to the guard right after it', () => {
   const real = read('engine/api/server.ts');
-  const marker = "const manages = () => roles.can('people', email);";
+  const marker = "const manages = () => roles.can('people', who);";
   assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
   // The demonstrated mutant, verbatim: `/\/*/ ` is a real regex (it matches a literal "/*"), and the
   // old hand-rolled stripper read its embedded `/*` as an OPENING block comment instead, blanking

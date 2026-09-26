@@ -28,6 +28,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { UsersSqlite } from '../api/users-sqlite.ts';
+import { AGENT_TOKEN_FORMAT } from '../api/users.ts';
 import { freshFirestoreProject } from './helpers/firestore.js';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
@@ -65,7 +66,7 @@ try {
     open: async () => {
       const store = new UsersPostgres(PG_URL);
       await store.isEmpty();                       // forces the connection and creates the schema
-      await admin.query('TRUNCATE sessions, users');
+      await admin.query('TRUNCATE sessions, users, agent_tokens');
       return store;
     },
   });
@@ -734,4 +735,63 @@ forEachStore('the kept session survives even past a single delete page, and ever
     'a loop that stops the moment it sees the kept session sitting in a FULL page would leave every '
     + 'session past that page alive — this is the boundary a plain "a handful of sessions" test, or '
     + 'one that never excludes anybody, cannot reach');
+});
+
+// ===================================================================== agent tokens (issue #122)
+/** The public id and the secret a token carries, as `AGENT_TOKEN_FORMAT` reads them. */
+const partsOf = (token) => {
+  const m = AGENT_TOKEN_FORMAT.exec(token);
+  assert.ok(m, `not a token: ${token}`);
+  return { id: m[1], secret: m[2] };
+};
+
+forEachStore('an agent token is issued once, and names its agent back with kind agent', async (s) => {
+  const { token, agent, tokenId, replaced } = await s.issueAgentToken(' Bot@Example.org ');
+  assert.equal(partsOf(token).id, tokenId);
+  assert.equal(replaced, null, 'nothing was replaced on a first issue');
+  assert.deepEqual(agent, { email: 'bot@example.org', kind: 'agent', issuedAt: agent.issuedAt });
+  assert.match(agent.issuedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(await s.fromAgentToken(token), agent);
+});
+
+forEachStore('a token that is not the one issued opens nothing: another secret, an unknown id, a malformed one', async (s) => {
+  const { token } = await s.issueAgentToken('bot@example.org');
+  const { id, secret } = partsOf(token);
+  const other = secret.slice(0, -1) + (secret.endsWith('0') ? '1' : '0');
+  assert.equal(await s.fromAgentToken(`holdrim_agent_${id}_${other}`), null, 'the right id with another secret');
+  assert.equal(await s.fromAgentToken(`holdrim_agent_${'0'.repeat(24)}_${secret}`), null, 'the right secret under another id');
+  for (const bad of [undefined, '', token.toUpperCase(), ` ${token}`, `${token}x`, secret, id]) {
+    assert.equal(await s.fromAgentToken(bad), null, String(bad));
+  }
+});
+
+forEachStore('re-issuing revokes the previous token at once, and says which one it replaced', async (s) => {
+  // Owner decision 3 (issue #122): one token per agent address.
+  const first = await s.issueAgentToken('bot@example.org');
+  const second = await s.issueAgentToken('bot@example.org');
+  assert.equal(await s.fromAgentToken(first.token), null, 'the old token still opens the door after a re-issue');
+  assert.equal((await s.fromAgentToken(second.token))?.email, 'bot@example.org');
+  assert.equal(second.replaced, first.tokenId);
+  assert.equal((await s.listAgentTokens()).length, 1, 'one address, one token');
+});
+
+forEachStore('revoking makes the token fail at once, and a second revoke finds nothing to revoke', async (s) => {
+  const { token, tokenId } = await s.issueAgentToken('bot@example.org');
+  const kept = await s.issueAgentToken('other@example.org');
+  assert.equal(await s.revokeAgentToken('BOT@example.org'), tokenId, 'revoked by its address, normalized');
+  assert.equal(await s.fromAgentToken(token), null);
+  assert.equal(await s.revokeAgentToken('bot@example.org'), null);
+  assert.equal((await s.fromAgentToken(kept.token))?.email, 'other@example.org', 'another agent\'s token is untouched');
+  assert.deepEqual((await s.listAgentTokens()).map((a) => a.email), ['other@example.org']);
+});
+
+forEachStore('the list of agent tokens carries no secret, no hash and no id, ordered by address', async (s) => {
+  const issued = [await s.issueAgentToken('zed@example.org'), await s.issueAgentToken('abe@example.org')];
+  const list = await s.listAgentTokens();
+  assert.deepEqual(list.map((a) => a.email), ['abe@example.org', 'zed@example.org']);
+  for (const a of list) assert.deepEqual(Object.keys(a).sort(), ['email', 'issuedAt', 'kind']);
+  const said = JSON.stringify(list);
+  for (const { token, tokenId } of issued) {
+    assert.ok(!said.includes(partsOf(token).secret) && !said.includes(tokenId), 'a token\'s secret or id is in the list');
+  }
 });

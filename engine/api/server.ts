@@ -5,7 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
-import { createRoles, rolesOf } from '../core/roles.js';
+import { createRoles, rolesOf, agentByToken, byToken, addressOf } from '../core/roles.js';
 import { overLimit, validCommit, short } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
@@ -34,6 +34,7 @@ import {
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
 import { personAs } from '../core/people-show.js';
 import { resolveRemovedBy, type Removed } from './texts.ts';
+import { issuedEvent, revokedEvent } from './agent-tokens.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -265,6 +266,14 @@ if (identityKind === 'password') {
 }
 
 // ---------------------------------------------------------------- helpers
+/**
+ * Who is asking the API: an address, from a session or the identity proxy, or an agent that came in
+ * with a token (`agentByToken`, engine/core/roles.js). Carried whole to every question `roles`
+ * answers, never flattened to the address first — flattened, a token identity would read as the
+ * person its address names, and the agent flag the token gave it would be gone.
+ */
+type Who = string | ReturnType<typeof agentByToken>;
+
 const json = (res: ServerResponse, code: number, body: unknown) => {
   const text = JSON.stringify(body);
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', ...API_HEADERS });
@@ -344,7 +353,7 @@ function gatingFeatureOf(incoming: NewEvent): keyof typeof project.features | nu
  * these checks, written for a form, is how that form would one day accept the 500 KB text the API
  * refuses.
  */
-function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?: Record<string, string | number>) => string):
+function refusalOf(incoming: NewEvent, who: Who, say: (key: string, params?: Record<string, string | number>) => string):
   { status: number; body: Record<string, unknown> } | null {
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
@@ -382,9 +391,16 @@ function refusalOf(incoming: NewEvent, email: string, say: (key: string, params?
   if (incoming.type === 'approval' && (!incoming.block || !incoming.fingerprint)) {
     return { status: 400, body: { error: say('api.approval.needsBlockAndFingerprint') } };
   }
+  // ⚠️ A ✓ is given in an interactive session, never with a token — whoever the token was issued
+  // for, the owner or an admin included (docs/ROLES.md, section 4). Asked on HOW the request signed
+  // in, before any capability, so it holds even if the token's address someday reads as able to
+  // approve: `can` refuses an agent `approve` too, and this refusal does not lean on that one.
+  if (incoming.type === 'approval' && byToken(who)) {
+    return { status: 403, body: { error: say('api.approval.sessionOnly') } };
+  }
   // Approving belongs to owner and admin. Only the owner's ✓ becomes a lock in the repository —
   // `holdrim sync` takes theirs alone — and an admin's is recorded, and stays an opinion.
-  if (incoming.type === 'approval' && !roles.can('approve', email)) {
+  if (incoming.type === 'approval' && !roles.can('approve', who)) {
     return { status: 403, body: { error: say('api.approval.ownerOnly') } };
   }
   if (['request', 'comment', 'supplement'].includes(incoming.type) && !incoming.text?.trim()) {
@@ -437,8 +453,8 @@ const asRead = (e: Event, threads: Map<string, Event[]>) => {
  * resolved to an address — so this never has to ask the store a second time for what the first read
  * already had in hand.
  */
-async function personDisplay(subject: string, id: string | undefined, viewer: string | null, lang: string): Promise<string> {
-  const alwaysNamed = viewer !== null && (subject === viewer || roles.can('people', viewer));
+async function personDisplay(subject: string, id: string | undefined, viewer: Who | null, lang: string): Promise<string> {
+  const alwaysNamed = viewer !== null && (subject === addressOf(viewer) || roles.can('people', viewer));
   // Only asked when the answer could actually change: `alwaysNamed` and `people.show: "name"` are
   // the only two paths `personAs` reads `name` on at all, and behind no password there is no account
   // to find in the first place — an identity proxy holds no name Holdrim could show instead.
@@ -455,7 +471,7 @@ async function personDisplay(subject: string, id: string | undefined, viewer: st
  * page's history repeats the same few people, and a busy home page many more.
  */
 async function authorDisplaysFor(
-  events: { author: string; authorId?: string }[], viewer: string | null, lang: string,
+  events: { author: string; authorId?: string }[], viewer: Who | null, lang: string,
 ): Promise<Map<string, string>> {
   const distinct = new Map<string, string | undefined>();
   for (const e of events) if (!distinct.has(e.author)) distinct.set(e.author, e.authorId);
@@ -500,11 +516,12 @@ function removalSubjectsOf(
  * @param through  where it came from, for the log only
  */
 async function recordEvent(
-  incoming: NewEvent, email: string, say: (key: string, params?: Record<string, string | number>) => string,
+  incoming: NewEvent, who: Who, say: (key: string, params?: Record<string, string | number>) => string,
   through = 'api',
 ): Promise<{ status: number; body: Record<string, unknown>; event?: Event }> {
-  const canApprove = roles.can('approve', email);
-  const refusal = refusalOf(incoming, email, say);
+  const email = addressOf(who);
+  const canApprove = roles.can('approve', who);
+  const refusal = refusalOf(incoming, who, say);
   if (refusal) return refusal;
 
   if (incoming.type === 'request_state' || incoming.type === 'supplement') {
@@ -528,8 +545,12 @@ async function recordEvent(
       const target = incoming.data?.state as string | undefined;
       if (!target) return { status: 400, body: { error: say('api.state.required') } };
       if (!cycle.exists(target)) return { status: 400, body: { error: say('api.state.unknown') } };
+      // The states the agent owns — applying, waiting, applied — are what an agent keeps
+      // (docs/ROLES.md, section 4): without the second half, `holdrim state` through the API would
+      // be refused to the very identity it exists for, and the agent would have no door but the
+      // local runner's. Triage stays out of reach: `canApprove` is false for every agent.
       const agentState = cycle.agentStates.includes(target);
-      if (!canApprove && !(iap?.localMode && agentState)) {
+      if (!canApprove && !((iap?.localMode || roles.isAgent(who)) && agentState)) {
         return { status: 403, body: { error: say('api.triage.ownerOnly') } };
       }
       if (cycle.requiresReason(target) && !incoming.text?.trim()) {
@@ -554,14 +575,14 @@ async function recordEvent(
   // gains `triage`, with no triage event ever written. Written as a STRING — see `writtenBoolean`'s
   // own comment for why a bare boolean here would silently break the CLI's cloud reader.
   if (incoming.type === 'approval') {
-    incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(roles.can('lock', email)) };
+    incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(roles.can('lock', who)) };
   } else if (incoming.type === 'request') {
-    incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(roles.can('triage', email)) };
+    incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(roles.can('triage', who)) };
   }
   // Every event, not only the ones an agent may not write: the trail has to say an agent closed an
   // impact or moved a request (docs/ROLES.md §4), and it has to say so from the identity the server
   // saw, never from a `data.asAgent` the client sent — spread LAST so that one is always replaced.
-  incoming.data = { ...incoming.data, [AS_AGENT_FIELD]: String(roles.isAgent(email)) };
+  incoming.data = { ...incoming.data, [AS_AGENT_FIELD]: String(roles.isAgent(who)) };
 
   // Resolved BEFORE the write, not after: an event's author is never null — the row has to exist
   // for the event to mean anything — so this is the one log id that must still find-OR-CREATE.
@@ -577,8 +598,30 @@ async function recordEvent(
   return { status: 201, body: e as unknown as Record<string, unknown>, event: e };
 }
 
-async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: string) {
+/**
+ * What a request that came in with an agent token may reach: the events, and what reading them
+ * needs, and nothing else. Every account route — sign-out, a password, people, tokens — is out of
+ * reach, so no route has to remember on its own that a token is not a session. An allowlist, not a
+ * list of refusals: a route added tomorrow is closed to tokens until someone decides it should not be.
+ */
+const TOKEN_READS = new Set(['/me', '/events', '/fingerprints', '/impact-radius', '/graph', '/requests/open']);
+const TOKEN_WRITES = new Set(['/events']);
+const ONE_EVENT_ROUTE = /^\/events\/[A-Za-z0-9_-]+$/;
+function tokenMayReach(method: string | undefined, route: string): boolean {
+  if (method === 'GET') return TOKEN_READS.has(route) || ONE_EVENT_ROUTE.test(route);
+  if (method === 'POST') return TOKEN_WRITES.has(route);
+  return false;
+}
+
+async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who) {
   const route = url.pathname.replace(/^\/api/, '');
+  // The address, for what compares or stores one. Every question about what `who` may do is asked
+  // of `who` itself (see `Who`).
+  const email = addressOf(who);
+
+  if (byToken(who) && !tokenMayReach(req.method, route)) {
+    return json(res, 403, { error: i18n.t(languageOf(req), 'api.token.routeRefused') });
+  }
 
   // ---------------------------------------------------------------- in and out (password identity)
   if (byPassword && req.method === 'POST' && route === '/sign-out') {
@@ -620,10 +663,10 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
   if (req.method === 'GET' && route === '/me') {
     return json(res, 200, {
       email,
-      role: roles.roleOf(email),
-      canApprove: roles.can('approve', email),
-      canTriage: roles.can('triage', email),
-      owner: roles.isOwner(email),
+      role: roles.roleOf(who),
+      canApprove: roles.can('approve', who),
+      canTriage: roles.can('triage', who),
+      owner: roles.isOwner(who),
       admins: roles.admins,
       // The language this person reads in, decided here by the one rule the server's screens use —
       // their own choice, then the browser, then the project — so the panel does not decide it a
@@ -653,7 +696,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
   // the user store. The two are different questions: the store answers "does this person have a
   // way in", the configuration answers "what may they do". Putting the role in the row would
   // create a second truth, and on the day they disagree nobody can say which one is the service.
-  if (byPassword && (await userRoutes(req, res, route, email, byPassword.users, languageOf(req)))) return;
+  if (byPassword && (await userRoutes(req, res, route, who, byPassword.users, languageOf(req)))) return;
 
   if (req.method === 'GET' && route === '/events') {
     const page = url.searchParams.get('page');
@@ -662,7 +705,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     const all = await events.list(page);
     const threads = cycle.threadsOf(all);
     const lang = languageOf(req);
-    const displays = await authorDisplaysFor(all, email, lang);
+    const displays = await authorDisplaysFor(all, who, lang);
     // `own`, never a raw address the panel could compare `me` against: `author` below is already
     // whatever `people.show` says this viewer may see, which for anyone but the viewer themselves is
     // not necessarily an e-mail at all — docs/ROLES.md, "The front end obeys the server" (the panel
@@ -685,7 +728,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     const lang = languageOf(req);
     // Unlike the list route above, `all` here spans every page, so `[found]` alone would miss the
     // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
-    const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], email, lang);
+    const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], who, lang);
     return json(res, 200, {
       ...asRead(found, cycle.threadsOf(all)), author: displays.get(found.author) ?? found.author,
       textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
@@ -771,7 +814,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
     // contract, and a value that changes with the reader's locale is a value nobody can match on.
     const say = (key: string, params?: Record<string, string | number>) =>
       i18n.t(languageOf(req), key, params);
-    const outcome = await recordEvent(incoming, email, say);
+    const outcome = await recordEvent(incoming, who, say);
     if (outcome.event) res.setHeader('location', `/api/events/${outcome.event.id}`);
     return json(res, outcome.status, outcome.body);
   }
@@ -795,12 +838,15 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, email: s
  * password with a much wider audience than the account it opens.
  */
 async function userRoutes(
-  req: IncomingMessage, res: ServerResponse, route: string, email: string,
+  req: IncomingMessage, res: ServerResponse, route: string, who: Who,
   users: UserStore, lang: string,
 ): Promise<boolean> {
+  // `api` never lets a token identity this far (`tokenMayReach`); every guard below still asks `who`,
+  // never the bare address, so each of them fails closed for a token on its own if that ever changes.
+  const email = addressOf(who);
   const say = (key: string, params?: Record<string, string | number>) => i18n.t(lang, key, params);
   /** Owner and admin, and nobody else: the `people` capability, which member does not hold. */
-  const manages = () => roles.can('people', email);
+  const manages = () => roles.can('people', who);
   const forbidden = () => (json(res, 403, { error: say('api.users.adminOnly') }), true);
 
   // ---------------------------------------------------------------- the list
@@ -842,7 +888,7 @@ async function userRoutes(
     // window any admin could create it, read the generated password from this very response, sign
     // in, and from then on be the owner for every purpose: their ✓ locks, and nobody can disable
     // them. They never needed the reset route at all.
-    if (roles.isOwner(address) && !roles.isOwner(email)) {
+    if (roles.isOwner(address) && !roles.isOwner(who)) {
       json(res, 409, { error: say('api.users.ownerIsProvisionedAtBoot', { email: address }) });
       return true;
     }
@@ -858,7 +904,7 @@ async function userRoutes(
     // message withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically
     // — never the fact of the reservation itself, which the 409 already gives away (round 3 of #29's
     // review, finding 5; round 2's finding 5 first wrote this check, overclaiming what it hides).
-    if (roles.isLockHolder(address) && !roles.isOwner(email)) {
+    if (roles.isLockHolder(address) && !roles.isOwner(who)) {
       json(res, 409, { error: say('api.users.lockHolderIsOwnerToCreate', { email: address }) });
       return true;
     }
@@ -923,7 +969,7 @@ async function userRoutes(
     //
     // The message does not say "holds a lock" here either — see the create route's own comment,
     // above, for why (round 2 of #29's review, finding 5).
-    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+    if (roles.isLockHolder(target) && !roles.isOwner(who)) {
       return json(res, 409, { error: say('api.users.lockHolderPasswordIsOwnerToReset', { email: target }) }), true;
     }
     const { password, sessionsDropped } = await users.resetPassword(target);
@@ -975,7 +1021,7 @@ async function userRoutes(
     // who can disable a lock-holder at will can silence their ✓ at the exact moment it would matter,
     // with no password needed to do it. One check now, not two: `roles.isLockHolder` does not care
     // which direction `body.enabled` asks for, only who is asking (round 2 of #29's review, finding 1).
-    if (roles.isLockHolder(target) && !roles.isOwner(email)) {
+    if (roles.isLockHolder(target) && !roles.isOwner(who)) {
       const key = body.enabled ? 'api.users.lockHolderIsOwnerToEnable' : 'api.users.lockHolderIsOwnerToDisable';
       json(res, 409, { error: say(key, { email: target }) });
       return true;
@@ -989,6 +1035,82 @@ async function userRoutes(
       log('ERROR', 'user_sessions_not_dropped', { person: await idForLog(target), reason: 'disabling the account' });
     }
     json(res, 200, { user: await users.find(target), ...(sessionsDropped ? {} : { sessionsDropped }) });
+    return true;
+  }
+
+  // ---------------------------------------------------------------- agent tokens (docs/ROLES.md §4)
+  //
+  // An agent's credential of its own. Listing is for whoever manages people, since the screen that
+  // shows the list is theirs; issuing and revoking are the OWNER's alone, and the `people`
+  // capability does not reach them — an admin who could issue a token could issue one for an
+  // address and then act through it, a door around the owner's decision of who acts for the project.
+  //
+  // What never leaves here is the one thing the whole feature rests on: the token's secret is in the
+  // body of the answer that issued it, and nowhere else — not in a list, an event or a log line.
+  if (route === '/agent-tokens' && req.method === 'GET') {
+    if (!manages()) return forbidden();
+    json(res, 200, { agents: await users.listAgentTokens() });
+    return true;
+  }
+
+  if (route === '/agent-tokens' && req.method === 'POST') {
+    // Asked before the body is read: a refusal must not depend on, or reveal, what was sent.
+    if (!roles.isOwner(who)) return (json(res, 403, { error: say('api.agentTokens.ownerOnly') }), true);
+    const body = (await jsonBody(req)) as { email?: unknown };
+    const address = normalizeEmail(typeof body.email === 'string' ? body.email : '');
+    if (!isEmailAddress(address)) {
+      json(res, 400, { error: say('api.users.emailInvalid', { email: String(body.email ?? '') }) });
+      return true;
+    }
+    // ⚠️ The owner is never an agent: a token for the owner's address would be a credential that
+    // passed through a script, in the owner's name. The server refuses such a token even if one
+    // exists (`apiViewerOf`); this refuses to make one.
+    if (roles.isOwner(address)) {
+      json(res, 409, { error: say('api.agentTokens.notForTheOwner') });
+      return true;
+    }
+    // The same rule `rolesOf` applies at start to HOLDRIM_AGENTS — a grant that names an agent
+    // refuses — applied to the token's address: an admin or a lock-holder is a person the deployment
+    // trusts with a decision, and giving that address an agent's credential too makes it two things
+    // at once. `can` would refuse the token everything an agent is never given anyway; this says so
+    // before anything is issued, instead of leaving it to be found out.
+    if (roles.admins.includes(address) || roles.isLockHolder(address)) {
+      json(res, 409, { error: say('api.agentTokens.notForAGrant', { email: address }) });
+      return true;
+    }
+    const { token, agent, tokenId, replaced } = await users.issueAgentToken(address);
+    // The trail, with who did it (issue #122): the agent by its person id, the token by its public
+    // id, never the secret. Written after the token, like every account change here: the credential
+    // is real the moment the store has it, and the event records that it happened.
+    const agentId = await events.personFor(address);
+    const { event: e } = await recordAuthored(events, issuedEvent(agentId, tokenId, replaced, roles.isAgent(who)), email);
+    // `tokenId` and not `token`: this is the line where the secret would be easiest to put.
+    log('INFO', 'agent_token_issued', { ...await actedOn(address, email), id: e.id, tokenId, replaced });
+    json(res, 201, { agent, token });
+    return true;
+  }
+
+  const revoke = route.match(/^\/agent-tokens\/([^/]+)\/revoke$/);
+  if (revoke && req.method === 'POST') {
+    if (!roles.isOwner(who)) return (json(res, 403, { error: say('api.agentTokens.ownerOnly') }), true);
+    let address: string;
+    try {
+      address = normalizeEmail(decodeURIComponent(revoke[1]!));
+    } catch {
+      json(res, 404, { error: say('api.agentTokens.notFound', { email: revoke[1]! }) });
+      return true;
+    }
+    // The row is gone before this answers, on every store: the next request with the token finds
+    // nothing to compare it to, on any instance (`fromAgentToken`, users.ts).
+    const tokenId = await users.revokeAgentToken(address);
+    if (!tokenId) {
+      json(res, 404, { error: say('api.agentTokens.notFound', { email: address }) });
+      return true;
+    }
+    const agentId = await events.personFor(address);
+    const { event: e } = await recordAuthored(events, revokedEvent(agentId, tokenId, roles.isAgent(who)), email);
+    log('INFO', 'agent_token_revoked', { ...await actedOn(address, email), id: e.id, tokenId });
+    json(res, 200, { ok: true });
     return true;
   }
 
@@ -1025,6 +1147,55 @@ const SIGN_IN_SCREEN = '/sign-in';
  */
 async function viewerOf(req: IncomingMessage): Promise<string | null> {
   return byPassword ? (await byPassword.fromRequest(req.headers))?.email ?? null : await iap!.email(req.headers);
+}
+
+/**
+ * Whoever is asking the API, or the key of the sentence that says why nobody is. The screens never
+ * ask this: an agent token opens the API and nothing a browser renders — `viewerOf` reads only the
+ * session, so a page, the home and the people screen stay behind the sign-in whatever header comes.
+ *
+ * An `Authorization` header counts only under password sign-in, where the tokens live (in the user
+ * store, next to the people). Behind an identity proxy or the development identity there are no
+ * tokens, and the header is left alone: a proxy may carry its own there.
+ *
+ * ⚠️ A request with a session cookie AND an `Authorization` header is refused outright, never
+ * resolved to either one. Which one wins would be a rule every client had to know, and each answer
+ * is wrong somewhere: the session winning lets a token-carrying script act as the person whose
+ * browser it runs in; the token winning makes a person's own tab act as an agent. A browser never
+ * sets `Authorization` cross-site without a CORS preflight this server never answers, so refusing
+ * the mix costs no legitimate client anything. The JSON-only guard and `SameSite=Strict` stand as
+ * they did, since this runs after the first and changes nothing about the cookie.
+ *
+ * Any `Authorization` that is not a live agent token is a 401 too, never a quiet fall back to "no
+ * credential": a client that sent one meant it, and answering as if it had not would hide a revoked
+ * token behind a different error. The log line names the reason, never what was presented.
+ */
+async function apiViewerOf(req: IncomingMessage): Promise<{ who: Who } | { refused: string }> {
+  const presented = req.headers.authorization;
+  if (!byPassword || presented === undefined) {
+    const email = await viewerOf(req);
+    return email ? { who: email } : { refused: 'api.notAuthenticated' };
+  }
+  if (byPassword.sessionIdFrom(req.headers)) {
+    log('WARNING', 'agent_token_refused', { reason: 'sent with a session cookie' });
+    return { refused: 'api.token.withSession' };
+  }
+  const bearer = /^Bearer (\S+)$/i.exec(presented.trim())?.[1];
+  const agent = await byPassword.users.fromAgentToken(bearer);
+  if (!agent) {
+    log('WARNING', 'agent_token_refused', { reason: 'not a live agent token' });
+    return { refused: 'api.token.invalid' };
+  }
+  // ⚠️ The owner is never an agent. The owner's address cannot be issued a token, but it can BECOME
+  // the owner's after one was issued — a handover to the address an agent already used. From that
+  // restart on, the token opens nothing: `isOwner` is false for a token identity anyway, and this
+  // makes the owner's address unusable through a script at all, not merely stripped of the owner's
+  // powers.
+  if (roles.isOwner(agent.email)) {
+    log('WARNING', 'agent_token_refused', { reason: 'issued for the address that is now the owner\'s' });
+    return { refused: 'api.token.invalid' };
+  }
+  return { who: agentByToken(agent.email) };
 }
 
 /**
@@ -1068,6 +1239,9 @@ async function servePeople(req: IncomingMessage, res: ServerResponse) {
   res.end(renderPeoplePage(i18n, languageOf(req), {
     projectName: project.name, people: await byPassword.users.list(),
     roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),
+    // The screen draws the issue and revoke controls from this, and only for the owner — the same
+    // answer the routes give (`userRoutes`), so nobody is offered a button the server then refuses.
+    agents: await byPassword.users.listAgentTokens(), viewerIsOwner: roles.isOwner(viewer),
   }, projectTheme, nonce));
 }
 
@@ -1338,9 +1512,9 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname.startsWith('/api/')) {
-      const email = await viewerOf(req);
-      if (!email) return json(res, 401, { error: i18n.t(languageOf(req), 'api.notAuthenticated') });
-      return await api(req, res, url, email);
+      const asking = await apiViewerOf(req);
+      if ('refused' in asking) return json(res, 401, { error: i18n.t(languageOf(req), asking.refused) });
+      return await api(req, res, url, asking.who);
     }
 
     // With an identity proxy, the edge blocks before anything reaches here. With password login

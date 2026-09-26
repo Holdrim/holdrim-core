@@ -36,7 +36,7 @@ test('the owner\'s rendered row carries no action; a member\'s still offers rese
     projectName: 'P',
     people: [person('owner@x.org'), person('mem@x.org')],
     roleOf: (e) => (e === 'owner@x.org' ? 'owner' : 'member'),
-    isOwner: (e) => e === 'owner@x.org',
+    isOwner: (e) => e === 'owner@x.org', agents: [], viewerIsOwner: true,
   }, ENGINE_THEME, 'n1');
   const rowFor = (email) => html.split('\n').find((line) => line.includes(`<td>${email}</td>`));
   assert.doesNotMatch(rowFor('owner@x.org'), /data-action=/, 'the owner\'s row must offer no action at all');
@@ -63,7 +63,7 @@ test('a name or an address somebody typed is shown, never run', () => {
     people: [person('owner@x.org'), person('x@x.org', { name: '<img src=x onerror=alert(1)>' }),
       person('"><script>alert(1)</script>@x.org')],
     roleOf: (e) => (e === 'owner@x.org' ? 'owner' : 'member'),
-    isOwner: (e) => e === 'owner@x.org',
+    isOwner: (e) => e === 'owner@x.org', agents: [], viewerIsOwner: true,
   }, ENGINE_THEME, 'n0nce');
   // One script, the page's own, carrying the nonce; nothing a person typed opens another.
   assert.equal(html.match(/<script/g).length, 1);
@@ -75,7 +75,7 @@ test('a name or an address somebody typed is shown, never run', () => {
 test('a translation cannot close the script it is handed to', () => {
   const hostile = createI18n({ ...dictionaries, en: { ...dictionaries.en, 'people.noAnswer': '</script><b>x' } }, 'en');
   const html = renderPeoplePage(hostile, 'en',
-    { projectName: 'P', people: [], roleOf: () => 'member', isOwner: () => false },
+    { projectName: 'P', people: [], roleOf: () => 'member', isOwner: () => false, agents: [], viewerIsOwner: false },
     ENGINE_THEME, 'n');
   assert.equal(html.match(/<\/script>/g).length, 1, 'only the page\'s own script closes');
   assert.match(html, /\\u003c\/script>/);
@@ -85,9 +85,46 @@ test('the owner comes first, then admins, then everyone else, whatever their nam
   const roles = { 'zed@x.org': 'owner', 'yan@x.org': 'admin', 'abe@x.org': 'member' };
   const html = renderPeoplePage(i18n, 'en', {
     projectName: 'P', people: Object.keys(roles).map((e) => person(e)).reverse(), roleOf: (e) => roles[e],
-    isOwner: (e) => roles[e] === 'owner',
+    isOwner: (e) => roles[e] === 'owner', agents: [], viewerIsOwner: true,
   }, ENGINE_THEME, 'n');
   const at = (email) => html.indexOf(`<td>${email}</td>`);
   assert.ok(at('zed@x.org') < at('yan@x.org') && at('yan@x.org') < at('abe@x.org'),
     'by role, not by name: the alphabet would put abe first');
+});
+
+// ---------------------------------------------------------------- agent tokens (issue #122)
+const agent = (email, issuedAt = '2026-09-25T14:03:59.123Z') => ({ email, kind: 'agent', issuedAt });
+const withAgents = (viewerIsOwner, agents = [agent('bot@x.org')]) => renderPeoplePage(i18n, 'en', {
+  projectName: 'P', people: [person('owner@x.org')], roleOf: () => 'owner', isOwner: (e) => e === 'owner@x.org',
+  agents, viewerIsOwner,
+}, ENGINE_THEME, 'n');
+
+test('the owner is offered to issue and revoke an agent token; whoever else manages people sees the list and no control', () => {
+  // The routes refuse everybody but the owner (server.ts, `userRoutes`); a button they would refuse
+  // is a door painted on a wall, so the screen draws none for them.
+  const owner = withAgents(true);
+  assert.match(owner, /<form id="issue"/);
+  assert.match(owner, /data-action="revoke" data-email="bot@x.org"/);
+  const admin = withAgents(false);
+  assert.doesNotMatch(admin, /<form id="issue"/, 'an admin is offered to issue a token the server refuses them');
+  assert.doesNotMatch(admin, /data-action="revoke"/, 'an admin is offered to revoke a token the server refuses them');
+  assert.match(admin, /<td>bot@x\.org<\/td>/, 'the list itself is theirs to read');
+});
+
+test('the people screen shows when each agent token was issued, to the minute, in UTC', () => {
+  // Owner decision 2 (issue #122): a token never expires, so when it was issued is the one thing
+  // that tells an old one from a fresh one.
+  assert.match(withAgents(false), /<time datetime="2026-09-25T14:03:59.123Z">2026-09-25 14:03 UTC<\/time>/);
+});
+
+test('with no agent holding a token, the screen says so instead of drawing an empty table', () => {
+  const html = withAgents(true, []);
+  assert.ok(html.includes(dictionaries.en['people.agents.none']));
+  assert.match(html, /<form id="issue"/, 'and the owner can still issue the first one');
+});
+
+test('an agent address somebody typed is shown, never run', () => {
+  const html = withAgents(true, [agent('"><script>alert(1)</script>@x.org')]);
+  assert.equal(html.match(/<script/g).length, 1);
+  assert.match(html, /data-email="&quot;&gt;&lt;script&gt;/);
 });

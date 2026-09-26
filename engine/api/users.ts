@@ -1,4 +1,4 @@
-import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
+import { scrypt, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { normalizeEmail, isEmailAddress, MAX_EMAIL_LENGTH } from '../core/email.js';
 
@@ -191,8 +191,43 @@ export interface UserStore {
   fromSession(id: string | undefined): Promise<User | null>;
   closeSession(id: string | undefined): Promise<void>;
   purgeExpiredSessions(): Promise<void>;
+  /**
+   * A new agent token for `email` (docs/ROLES.md, section 4), returned to be shown ONCE. One per
+   * address: whatever token the address held before stops working the moment this one is written,
+   * because it is the same row, overwritten. `replaced` is the previous token's public id, for the
+   * trail, or null when there was none — never its secret, which nothing here can give back.
+   */
+  issueAgentToken(email: string): Promise<{ token: string; agent: AgentToken; tokenId: string; replaced: string | null }>;
+  /** Removes the address's token; the public id of the one removed, or null when it held none. */
+  revokeAgentToken(email: string): Promise<string | null>;
+  /** The agent a presented token belongs to, or null for anything that is not a live token. */
+  fromAgentToken(token: string | undefined): Promise<AgentToken | null>;
+  /** Every address holding a token, ordered by address. No secret and no hash, ever: it goes to HTTP. */
+  listAgentTokens(): Promise<AgentToken[]>;
   close(): Promise<void>;
 }
+
+/**
+ * An agent's credential as anything outside this file sees it. `kind` is always `'agent'`: the one
+ * kind of token this store keeps, written into the row so a later kind cannot be read as this one.
+ */
+export interface AgentToken {
+  email: string;
+  kind: 'agent';
+  issuedAt: string;
+}
+
+/** A token row as a database keeps it: the public id it is found by, and the hash of its secret. */
+export interface StoredAgentToken extends AgentToken {
+  tokenId: string;
+  hash: Buffer;
+}
+
+/**
+ * The shape of every agent token: a prefix a secret scanner can match, a public id the row is found
+ * by, and the secret. Both parts are lower-case hex, so no separator can appear inside either.
+ */
+export const AGENT_TOKEN_FORMAT = /^holdrim_agent_([0-9a-f]{24})_([0-9a-f]{64})$/;
 
 /** A row as a database keeps it: the profile plus the two things that must never leave this file. */
 export interface StoredUser extends User {
@@ -261,6 +296,17 @@ export abstract class UserStoreBase implements UserStore {
    * there is nothing for a concurrent request to race.
    */
   protected abstract deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void>;
+  /**
+   * Writes the address's token row, REPLACING any row the address already had, in one statement.
+   * Returns the public id of the row it replaced, or null. One statement and not delete-then-insert:
+   * between the two, a second issue for the same address could land and leave two live tokens.
+   */
+  protected abstract writeAgentToken(row: StoredAgentToken): Promise<string | null>;
+  protected abstract readAgentTokenById(tokenId: string): Promise<StoredAgentToken | null>;
+  /** Every token row, ordered by address. The hashes are dropped above, in `listAgentTokens()`. */
+  protected abstract readAllAgentTokens(): Promise<StoredAgentToken[]>;
+  /** Deletes the address's token row; the public id of the row deleted, or null when there was none. */
+  protected abstract deleteAgentToken(email: string): Promise<string | null>;
 
   abstract close(): Promise<void>;
 
@@ -486,6 +532,66 @@ export abstract class UserStoreBase implements UserStore {
   async purgeExpiredSessions(): Promise<void> {
     await this.deleteSessionsExpiredBefore(new Date().toISOString());
   }
+
+  // ------------------------------------------------------------- agent tokens
+  /**
+   * The stored form of a token's secret: plain SHA-256, no salt, no scrypt — and that is a choice,
+   * not a shortcut. scrypt and a salt exist for a PASSWORD, which a person picks from a small space
+   * an attacker can enumerate; the slowness is what makes each guess expensive. This secret is 32
+   * bytes from `randomBytes`, never chosen by anyone: 2^256 possibilities leave nothing to enumerate,
+   * so a slow hash would add nothing an attacker has to pay, and would charge scrypt's 50 ms to every
+   * API call the agent makes instead. A salt protects a guessable value from a precomputed table;
+   * nobody can precompute a table of random 256-bit values. What the hash still buys: a copy of the
+   * users database hands over no token anyone can present.
+   */
+  #tokenHash(secret: string): Buffer {
+    return createHash('sha256').update(secret, 'utf8').digest();
+  }
+
+  async issueAgentToken(email: string): Promise<{ token: string; agent: AgentToken; tokenId: string; replaced: string | null }> {
+    const tokenId = randomBytes(12).toString('hex');
+    const secret = randomBytes(32).toString('hex');
+    const agent: AgentToken = { email: normalizeEmail(email), kind: 'agent', issuedAt: new Date().toISOString() };
+    const replaced = await this.writeAgentToken({ ...agent, tokenId, hash: this.#tokenHash(secret) });
+    // The secret leaves here once, inside `token`, and is kept nowhere: from the next line on only its
+    // hash exists, so "shown once" is a property of the store, not a promise every caller has to keep.
+    return { token: `holdrim_agent_${tokenId}_${secret}`, agent, tokenId, replaced };
+  }
+
+  async revokeAgentToken(email: string): Promise<string | null> {
+    return this.deleteAgentToken(normalizeEmail(email));
+  }
+
+  /**
+   * Whose token this is, or null. Every refusal is the same `null` — malformed, unknown id, wrong
+   * secret — so the answer says nothing about which part was wrong.
+   *
+   * ⚠️ `timingSafeEqual`, never `equals` or `===`: the id finds the row, and an attacker who knows an
+   * id (it is in the trail) could otherwise time how many leading bytes of a guessed hash match and
+   * walk towards the stored one byte by byte. Comparing hashes, not secrets, already blunts that; the
+   * constant-time compare removes it, for the cost of nothing. `agent-tokens.test.js` holds the line
+   * to this call, since no test can see a timing difference on its own.
+   */
+  async fromAgentToken(token: string | undefined): Promise<AgentToken | null> {
+    const parts = AGENT_TOKEN_FORMAT.exec(token ?? '');
+    if (!parts) return null;
+    const row = await this.readAgentTokenById(parts[1]!);
+    if (!row) return null;
+    const presented = this.#tokenHash(parts[2]!);
+    if (presented.length !== row.hash.length || !timingSafeEqual(presented, row.hash)) return null;
+    // Read back from the row, never assumed: a row some future kind wrote must not pass as an agent's.
+    if (row.kind !== 'agent') return null;
+    return tokenProfileOf(row);
+  }
+
+  async listAgentTokens(): Promise<AgentToken[]> {
+    return (await this.readAllAgentTokens()).map(tokenProfileOf);
+  }
+}
+
+/** Drops the hash and the id. Every token that leaves this file goes through here. */
+function tokenProfileOf(row: StoredAgentToken): AgentToken {
+  return { email: row.email, kind: row.kind, issuedAt: row.issuedAt };
 }
 
 /** Drops the secret. Anything that leaves this file goes through here. */

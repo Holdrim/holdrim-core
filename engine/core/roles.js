@@ -293,6 +293,46 @@ export function parseAgents(raw) {
 export const AGENT_NEVER = Object.freeze(['triage', 'approve', 'lock', 'people']);
 
 /**
+ * Who the server saw, when it came in with an agent token the owner issued (docs/ROLES.md, section
+ * 4, "a credential of its own") rather than with a session. The second source of the agent flag,
+ * next to `HOLDRIM_AGENTS`: the address alone cannot say it, since the same address may also have a
+ * password and sign in as a person, so the flag rides on the identity itself.
+ *
+ * Frozen, and built only by the server after it checked the token: a JSON body is never turned into
+ * one, so a client cannot claim to be a token identity, and nothing claiming to be one can be
+ * mutated into something else after the check.
+ * @param {string} email the address the token was issued for
+ * @returns {Readonly<{email: string, byToken: true}>}
+ */
+export function agentByToken(email) {
+  return Object.freeze({ email: normalizeEmail(email), byToken: true });
+}
+
+/**
+ * Whether `who` came in with an agent token. `=== true`, never truthiness: an address is a string,
+ * and a string's `byToken` is `undefined`, so an address can never read as a token identity.
+ * @param {unknown} who
+ */
+export function byToken(who) {
+  return typeof who === 'object' && who !== null && /** @type {{byToken?: unknown}} */ (who).byToken === true;
+}
+
+/**
+ * The address behind `who`, which is either an address or `agentByToken`'s identity. Every question
+ * `createRoles` answers takes either, so a caller holding a token identity cannot drop the flag by
+ * handing over the bare address by mistake — it hands over what it holds.
+ *
+ * Anything that is not an identity object passes through untouched — `null` included: every
+ * question here was asked of a missing viewer before identities existed, and answered "no" through
+ * `normalizeEmail`, which a throw here would turn into a 500.
+ * @param {string|{email: string}|null|undefined} who
+ * @returns {string}
+ */
+export function addressOf(who) {
+  return typeof who === 'object' && who !== null ? who.email : /** @type {string} */ (who);
+}
+
+/**
  * @param {string|undefined|null} owner  ONE e-mail. Zero or more than one is a config error.
  * @param {string|undefined|null} admins comma-separated e-mails; may be empty.
  * @param {string|undefined|null} [locksRaw] `HOLDRIM_LOCKS`, in `parseLocks`'s format
@@ -330,14 +370,26 @@ export function createRoles(owner, admins, locksRaw, agentsRaw) {
   const lockHolders = new Set(parseLocks(locksRaw).map((l) => l.email));
   // Validated at construction for the same reason as `lockHolders`, just above.
   const agents = new Set(parseAgents(agentsRaw));
-  /** Whether `e` is marked as an agent by the deployment — an identity check, like `isOwner`. */
-  const isAgent = (e) => agents.has(normalized(e));
+  /**
+   * Whether `e` is an agent — an identity check, like `isOwner`. Two sources, either one enough: an
+   * address `HOLDRIM_AGENTS` marks, and anyone who came in with an agent token (`agentByToken`),
+   * whatever their address. Without the second, a token issued for an address the variable does not
+   * list would reach the server as whoever that address is to a person's grants.
+   */
+  const isAgent = (e) => byToken(e) || agents.has(normalized(addressOf(e)));
 
-  /** Whether `e` is THE owner — an identity check, not a capability. Defined once, here, so `can`
-   *  and the returned `isOwner` are provably the same question asked the same way. */
-  const isOwner = (e) => normalized(e) === ownerEmail;
+  /**
+   * Whether `e` is THE owner — an identity check, not a capability. Defined once, here, so `can`
+   * and the returned `isOwner` are provably the same question asked the same way.
+   *
+   * Never true for a token identity, even one issued for the owner's address before a handover made
+   * it the owner's: the owner is a person signed in, and every guard that reads `isOwner` — who
+   * issues a token, who resets the owner's account — has to fail closed for a token, not trust that
+   * the server refused it earlier.
+   */
+  const isOwner = (e) => !byToken(e) && normalized(addressOf(e)) === ownerEmail;
   /** The shipped role `e` holds — never handed to a caller, only used to look up its capabilities. */
-  const roleOf = (e) => (isOwner(e) ? 'owner' : everyone.has(normalized(e)) ? 'admin' : 'member');
+  const roleOf = (e) => (isOwner(e) ? 'owner' : everyone.has(normalized(addressOf(e))) ? 'admin' : 'member');
 
   return {
     owner: ownerEmail,
@@ -356,11 +408,12 @@ export function createRoles(owner, admins, locksRaw, agentsRaw) {
      *
      * Not yet read by `can('lock', …)` — see the comment there for why.
      */
-    isLockHolder: (e) => lockHolders.has(normalized(e)),
+    isLockHolder: (e) => lockHolders.has(normalized(addressOf(e))),
     /**
-     * Whether `e` is named in `HOLDRIM_AGENTS` — who they ARE, not what they may do. `can` asks it
-     * first, and `recordEvent` (engine/api/server.ts) writes its answer onto every event, so the
-     * trail says an agent wrote it however the agent's grants later change.
+     * Whether `e` is an agent — named in `HOLDRIM_AGENTS`, or come in with an agent token — who they
+     * ARE, not what they may do. `can` asks it first, and `recordEvent` (engine/api/server.ts)
+     * writes its answer onto every event, so the trail says an agent wrote it however the agent's
+     * grants later change.
      */
     isAgent,
     /** The role `e` holds, for display only — the people screen's column, `/api/me`'s `role` field.

@@ -141,7 +141,7 @@ const ALLOWED = [
   { file: 'engine/core/cycle.js', text: "const owner = ownedBy('owner');", why: 'same cycle vocabulary as above' },
   { file: 'engine/core/cycle.js', text: "ownedBy: table.states[state]?.owned_by ?? 'owner',",
     why: 'same cycle vocabulary as above' },
-  { file: 'engine/api/server.ts', text: 'role: roles.roleOf(email),',
+  { file: 'engine/api/server.ts', text: 'role: roles.roleOf(who),',
     why: 'the /api/me response\'s DISPLAY field, read by nothing this process does — a client may ' +
       'show it, never branch a server decision on it' },
   { file: 'engine/api/server.ts', text: 'roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),',
@@ -322,7 +322,7 @@ test('does not flag the one allow-listed instance of the lookup shape it otherwi
 });
 
 test('does not flag any of the allow-listed roleOf() call sites themselves', () => {
-  assert.deepEqual(offendersIn('role: roles.roleOf(email),', 'engine/api/server.ts'), []);
+  assert.deepEqual(offendersIn('role: roles.roleOf(who),', 'engine/api/server.ts'), []);
   assert.deepEqual(offendersIn('roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),',
     'engine/api/server.ts'), []);
   assert.deepEqual(offendersIn('const role = data.roleOf(p.email);', 'engine/api/people-page.ts'), []);
@@ -382,10 +382,10 @@ test('planting rank[role] === 0 into the real people-page.ts is caught, by name'
 
 test('planting a new, un-allow-listed roleOf() call into the real server.ts is caught, by name', () => {
   const real = readFileSync(join(ROOT, 'engine/api/server.ts'), 'utf8');
-  const marker = 'role: roles.roleOf(email),';
+  const marker = 'role: roles.roleOf(who),';
   assert.ok(real.includes(marker), 'the real line this test plants its evasion next to moved or was reworded');
   const planted = real.replace(marker,
-    `${marker}\n      impersonatingOwner: roles.roleOf(email) === roles.roleOf(roles.owner),`);
+    `${marker}\n      impersonatingOwner: roles.roleOf(who) === roles.roleOf(roles.owner),`);
   const found = offendersIn(planted, 'engine/api/server.ts');
   assert.ok(found.some((f) => f.includes('roleOf() outside its allowed call sites')),
     'planting a brand-new roleOf() call into the real server.ts was not caught');
