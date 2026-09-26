@@ -312,3 +312,18 @@ test('a process that cannot give the registry away prints a warning, and the sav
     b: { file: 'p/X02.html', date: '2026-02-02', fingerprint: 'new' } }, 'an EPERM on chown must not fail the save');
   assert.ok(errors.some((l) => l.includes('owner could not be kept')), errors.join('\n'));
 });
+
+test('a chown failure that is not EPERM still fails the save — only "cannot give it away" is a warning', (t) => {
+  const tmp = project(t, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } });
+  spy(t, 'chownSync', (real, p) => {
+    // EIO here means something is actually wrong with the disk, not merely "not privileged enough" —
+    // a save that pressed on regardless would report success over a registry it never finished writing.
+    throw Object.assign(new Error(`EIO: i/o error, chown '${p}'`), { code: 'EIO' });
+  });
+  assert.throws(() => saveRegistry(tmp, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' },
+    b: { file: 'p/X02.html', date: '2026-02-02', fingerprint: 'new' } }), { code: 'EIO' });
+
+  assert.deepEqual(loadRegistry(tmp), { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } },
+    'the old registry, unwritten');
+  assert.deepEqual(leftovers(tmp), [], `left files behind: ${leftovers(tmp).join(', ')}`);
+});
