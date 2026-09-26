@@ -18,6 +18,7 @@
     "registry": "approvals.json",
     "home": "/engine/home",
     "trimPrefix": "pages/",
-    "pageExamples": "A01 or A02"
+    "pageExamples": "A01 or A02",
+    "glossary": ["fingerprint", "block", "event", "sheet"]
   }
 }

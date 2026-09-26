@@ -73,8 +73,9 @@
     "or whatever wrote it.",
     "",
     "`dependency` is `holdrim propose-deps`'s own category (engine/cli/propose.ts, issue #43): two",
-    "blocks that share a glossary term and declare no data-depends on one another, so it is worth a",
-    "human looking. It walks the same cycle as every other request — approving one is not writing the",
-    "data-depends itself, only agreeing a human should add it by hand."
+    "blocks that share a term of the PROJECT's own content.glossary (holdrim.json) and declare no",
+    "data-depends on one another, so it is worth a human looking. It walks the same cycle as every",
+    "other request — approving one is not writing the data-depends itself, only agreeing a human",
+    "should add it by hand."
   ]
 }

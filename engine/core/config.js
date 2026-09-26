@@ -23,6 +23,57 @@ import { HOME_SCREEN } from './screens.js';
 import { readFeatures } from './features.js';
 import { readPeopleShow } from './people-show.js';
 
+/** `content.glossary`'s own limits — generous enough for a real vocabulary, small enough that a
+ *  request text built from it (`holdrim propose-deps`, engine/cli/propose.ts) cannot itself become
+ *  the oversized payload `engine/core/limits.js` exists to catch. */
+const GLOSSARY_TERM_MAX_LENGTH = 64;
+const GLOSSARY_MAX_TERMS = 1000;
+
+/**
+ * `content.glossary`: the PROJECT's own vocabulary, never the engine's — `holdrim propose-deps`
+ * proposes a dependency between two blocks that use the same one of these terms and declare no
+ * `data-depends` on each other. It is the project's content that names its terms, in whatever
+ * language the project reviews in; nothing here assumes English, or assumes a term is a single
+ * word (docs/GLOSSARY.md is a different list entirely — the METHOD's own vocabulary, not a project's).
+ *
+ * Untrusted input, like every other value in this file: a term's text reaches a `request`'s own
+ * `text` field verbatim (`textOf`, engine/cli/propose.ts), so it is checked the same way a theme
+ * colour or a feature toggle is — refused loudly at load, never sanitised and let through as
+ * something else. A control character would not corrupt anything downstream (the request is stored
+ * as an ordinary string, not interpreted), but a term that carries one could not be read back
+ * correctly by a person triaging the request either, so it is refused for the same reason a 3000
+ * character "term" is: this is a short, human word or phrase, not a place to smuggle anything larger.
+ *
+ * @param {unknown} configured  `file.content.glossary`, or undefined
+ * @param {string} root         only for the error message, as this file's other checks do
+ * @returns {string[]}
+ */
+function readGlossary(configured, root) {
+  if (configured === undefined) return [];
+  if (!Array.isArray(configured)) {
+    throw new Error(`${root}/holdrim.json's "content.glossary" must be an array of strings.`);
+  }
+  if (configured.length > GLOSSARY_MAX_TERMS) {
+    throw new Error(
+      `${root}/holdrim.json's "content.glossary" names ${configured.length} terms, more than the ` +
+      `${GLOSSARY_MAX_TERMS} this version accepts.`);
+  }
+  configured.forEach((term, i) => {
+    if (typeof term !== 'string' || term.length < 1 || term.length > GLOSSARY_TERM_MAX_LENGTH) {
+      throw new Error(
+        `${root}/holdrim.json's "content.glossary[${i}]" must be a string of 1–` +
+        `${GLOSSARY_TERM_MAX_LENGTH} characters; got ${JSON.stringify(term)}.`);
+    }
+    // eslint-disable-next-line no-control-regex -- exactly what this line exists to catch.
+    if (/[\x00-\x1f\x7f]/.test(term)) {
+      throw new Error(
+        `${root}/holdrim.json's "content.glossary[${i}]" carries a control character, which is ` +
+        'refused rather than silently kept: a term is short, plain text.');
+    }
+  });
+  return configured;
+}
+
 /**
  * The keys that would grant authority, refused in `holdrim.json`. `roles` and `grants` joined this
  * list in the rework of #29: reading a project's own roles and who holds them from the file would
@@ -144,6 +195,9 @@ export function readConfig(root, io, env = {}) {
     trimPrefix: content.trimPrefix ?? 'pages/',
     /** Only for the invalid-page error message. Empty means: give no example. */
     pageExamples: content.pageExamples ?? '',
+    /** The project's own vocabulary for `holdrim propose-deps` — see `readGlossary`, above.
+     *  Empty when the project names none, which `propose-deps` reads as "nothing configured yet". */
+    glossary: readGlossary(content.glossary, root),
     /**
      * The project's default language, when the reader states no preference.
      *

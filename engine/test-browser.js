@@ -875,7 +875,7 @@ try {
     await reader.page.getByRole('button', { name: 'Request a change' }).click();
     const offCategories = await reader.page.locator('.rv-form select option').allTextContents();
     expect('and neither the bug nor the page category is offered',
-      'Adjust the text,Replace a term,Remove,Doubt', offCategories.join(','));
+      'Adjust the text,Replace a term,Remove,Doubt,Propose a dependency', offCategories.join(','));
     expect('and nothing failed', '', reader.problems.join(' | '));
 
     // The default server, above, leaves every toggle at its default — on — and offers every one.
@@ -887,7 +887,8 @@ try {
     await onReader.page.getByRole('button', { name: 'Request a change' }).click();
     const onCategories = await onReader.page.locator('.rv-form select option').allTextContents();
     expect('and every category is offered, bug and page included',
-      'Adjust the text,Replace a term,Remove,Doubt,Report a bug,Ask for a new page', onCategories.join(','));
+      'Adjust the text,Replace a term,Remove,Doubt,Report a bug,Ask for a new page,Propose a dependency',
+      onCategories.join(','));
     expect('and nothing failed', '', onReader.problems.join(' | '));
   }
 
