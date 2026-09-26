@@ -818,7 +818,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   if (req.method === 'GET' && route === '/tampered') {
     const found: TamperReport[] = [];
     const all = await events.list(null, found);
-    return json(res, 200, { findings: openFindings(found, all), canAcknowledge: mayAcknowledge(roles, email) });
+    return json(res, 200, { findings: openFindings(found, all), canAcknowledge: mayAcknowledge(roles, who) });
   }
 
   // The owner's acknowledgement of ONE finding. Its own route, not `POST /events`: that path takes
@@ -829,16 +829,18 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   if (req.method === 'POST' && route === '/tampered/acknowledge') {
     const say = (key: string, params?: Record<string, string | number>) => i18n.t(languageOf(req), key, params);
     // Identity before the body is read: a refusal must not depend on, or reveal, what was sent.
-    if (!mayAcknowledge(roles, email)) return json(res, 403, { error: say('api.tamper.ownerOnly') });
+    // `who` whole, not `email`: flattened to the address first, a token identity reads as the
+    // person its address names and `isOwner` can no longer fail closed for it (roles.js).
+    if (!mayAcknowledge(roles, who)) return json(res, 403, { error: say('api.tamper.ownerOnly') });
     const body = await jsonBody(req);
     const found: TamperReport[] = [];
     const all = await events.list(null, found);
-    const verdict = acknowledgementRefusal(roles, email, body, openFindings(found, all));
+    const verdict = acknowledgementRefusal(roles, who, body, openFindings(found, all));
     if ('refused' in verdict) return json(res, verdict.refused.status, { error: say(verdict.refused.key) });
     const incoming = acknowledgementOf(verdict.found);
     // `asAgent` from the identity the server saw, as `recordEvent` writes it on every other event
     // (docs/ROLES.md, section 4) — never from the client, whose body this never spreads.
-    incoming.data = { ...incoming.data, [AS_AGENT_FIELD]: String(roles.isAgent(email)) };
+    incoming.data = { ...incoming.data, [AS_AGENT_FIELD]: String(roles.isAgent(who)) };
     const { author, event: e } = await recordAuthored(events, incoming, email);
     log('INFO', 'tamper_acknowledged', {
       id: e.id, eventId: verdict.found.event, field: verdict.found.field, kind: verdict.found.kind,

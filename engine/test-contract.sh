@@ -2098,9 +2098,14 @@ expect "nor the token list → 403"                403 "$(bot_code $B/api/agent-
 expect "nor issue a token → 403"                 403 "$(bot_code -d '{"email":"another@example.org"}' $B/api/agent-tokens)"
 # The tamper banner (issue #107) is not in TOKEN_READS, and its acknowledgement is not in
 # TOKEN_WRITES: neither route existed when TOKEN_READS was written, and an allowlist stays closed
-# to a route it never named — the acknowledgement stays refused before `mayAcknowledge` is even asked.
-expect "nor read the tamper banner → 403"         403 "$(bot_code $B/api/tampered)"
-expect "nor acknowledge a finding → 403"          403 "$(bot_code -d '{"finding":"x","asAgent":"true"}' $B/api/tampered/acknowledge)"
+# to a route it never named — the acknowledgement stays refused before `mayAcknowledge` is even
+# asked. The status alone cannot tell that refusal apart from `mayAcknowledge`'s own — moving the
+# route into an allowlist and leaving the route's owner-only guard to fail (both answer 403) would
+# pass a check on the status only; the sentence names which one fired.
+expect "nor read the tamper banner → 403"         "403 $(say_en api.token.routeRefused)" \
+  "$(as_bot -w '\n%{http_code}' $B/api/tampered | { read -r body; read -r code; echo "$code $(echo "$body" | jfield error)"; })"
+expect "nor acknowledge a finding → 403"          "403 $(say_en api.token.routeRefused)" \
+  "$(as_bot -w '\n%{http_code}' -d '{"finding":"x","asAgent":"true"}' $B/api/tampered/acknowledge | { read -r body; read -r code; echo "$code $(echo "$body" | jfield error)"; })"
 expect "nor change a password → 403"             403 "$(bot_code -d '{"current":"x","next":"y"}' $B/api/change-password)"
 expect "nor sign out → 403"                      403 "$(bot_code -X POST $B/api/sign-out)"
 expect "and it opens no screen: the people screen still wants a session" 0 \
