@@ -19,6 +19,12 @@ import { log, jsonForTerminal } from './log.ts';
  * trail is the product.
  */
 /**
+ * How long a connection waits for another connection's write on the same file before answering
+ * "database is locked". One number for the event store and the user store (users-sqlite.ts): two
+ * copies drift, and the one left shorter fails first under the same load.
+ */
+export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+/**
  * Attempts a ROLLBACK, swallowing only ITS OWN failure — the caller still throws whatever error
  * sent it here. Round 3 of the #91 review, MINOR: a bare `db.exec('ROLLBACK')` in a catch block, on
  * a connection already gone or a WAL past saving, can fail on its own, and an unguarded call there
@@ -345,7 +351,7 @@ export class SqliteEventStore implements EventStore {
 
     // Before anything else writes: two processes on one file (the server and the CLI) otherwise
     // get "database is locked" the instant their writes meet, instead of one waiting for the other.
-    this.#db.exec('PRAGMA busy_timeout = 5000');
+    this.#db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     // WAL: a read does not block a write. In a review tool, several tabs read at the same time.
     this.#db.exec('PRAGMA journal_mode = WAL');
     this.#db.exec('PRAGMA foreign_keys = ON');

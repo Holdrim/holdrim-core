@@ -118,6 +118,11 @@ Worth knowing before you run it:
   it: the guard is in the application. Without a session, every static page redirects to the login
   screen. That guard has a test in the HTTP contract suite, because its absence would be silent:
   every page would simply be served to anyone.
+- **It stores agent tokens** (`docs/ROLES.md`, section 4) as SHA-256 of a 256-bit random secret,
+  compared in constant time. A token is shown once, to the owner who issued it, and never again: not
+  in a list, an event or a log line. It opens the API's event routes and nothing else, never gives a
+  ✓, and is refused when the same request also carries a session. A copy of the user store hands
+  over no token anyone can present.
 - **It stores passwords** with scrypt, per-user salt, and constant-time comparison. A test asserts
   the password does not appear in the raw database file.
 - **The first-access password is random**, printed once, and must be changed at first login. There
@@ -165,9 +170,13 @@ Worth knowing before you run it:
 
 ## Known limits
 
-- The agent's CLI can read the event store directly, bypassing the API — and therefore the cycle,
-  the roles and the limits. It only reads, and it is marked in the code. The right fix is the agent
-  having an identity of its own.
+- The agent's CLI can read the event store directly, bypassing the API. It only reads, and it is
+  marked in the code: every write it makes goes through the API with the agent's own token, and the
+  code that wrote to the cloud directly is gone (#122).
+- **An agent token does not expire.** It lasts until the owner revokes it or issues the address a
+  new one, so a token that leaks is good until someone notices. Revoke it on the people screen the
+  moment it may have been seen. The CLI sends it over https only, or over http to this machine, and
+  never to the local runner `--local` names.
 - **An old revision still taking traffic after the new one has written its lock baseline can record
   events the new version will trust as if it had written them itself.** `locks` and
   `authorCouldTriage` are trusted on any event dated after the baseline, whichever revision recorded

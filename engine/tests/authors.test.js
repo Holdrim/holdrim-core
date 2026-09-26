@@ -15,7 +15,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { authorOf, withAuthors, PERSON_ID, idForLog, actedOn, recordAuthored } from '../api/people.ts';
+import { authorOf, withAuthors, idForLog, actedOn, recordAuthored } from '../api/people.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { Source } from '../cli/remote.ts';
 import { stub } from './helpers/stub.js';
@@ -129,12 +129,6 @@ async function withGcloud(t, body) {
   return readFileSync(log, 'utf8').split('\n').filter(Boolean);
 }
 
-test('the CLI refuses to write to a cloud with no project before it asks gcloud for anything', async (t) => {
-  const calls = await withGcloud(t, () => assert.rejects(
-    new Source({ account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }), /cloud\.project|HOLDRIM_PROJECT/));
-  assert.deepEqual(calls, [], 'gcloud was asked for a write that could not happen');
-});
-
 test('the CLI refuses to read a cloud with no project before it asks gcloud for anything', async (t) => {
   const calls = await withGcloud(t, () => assert.rejects(new Source({ account: 'ci@example.org' }).events(),
     /cloud\.project|HOLDRIM_PROJECT/));
@@ -157,22 +151,6 @@ async function cloudProject(t) {
   return { project, db, store };
 }
 
-test('[firestore] the CLI\'s direct write names its author by an id the server\'s store knows', cloud, async (t) => {
-  const { project, db, store } = await cloudProject(t);
-  const source = new Source({ project, account: 'ci@example.org' });
-  await source.add({ type: 'comment', page: 'A01', text: 'first' });
-  await source.add({ type: 'comment', page: 'A01', text: 'second' });
-
-  const stored = (await db.collection('events').get()).docs.map((d) => d.data());
-  assert.equal(stored.length, 2);
-  assert.ok(!JSON.stringify(stored).includes('@'), `an address in the events collection: ${JSON.stringify(stored)}`);
-  assert.match(stored[0].author, PERSON_ID);
-  assert.equal(stored[1].author, stored[0].author, 'the second write finds the person the first made');
-  assert.equal(await store.personFor('agent via ci@example.org'), stored[0].author,
-    'the server\'s store finds the CLI\'s person under the same address, so one person has one id');
-  assert.deepEqual((await store.list('A01')).map((e) => e.author), ['agent via ci@example.org', 'agent via ci@example.org']);
-});
-
 test('[firestore] the CLI reads the cloud\'s authors as the server does: address, old address, forgotten id', cloud, async (t) => {
   const { project, db, store } = await cloudProject(t);
   await db.collection('events').doc('old').create({ type: 'comment', page: 'A01', author: 'old@example.org',
@@ -187,86 +165,11 @@ test('[firestore] the CLI reads the cloud\'s authors as the server does: address
   assert.deepEqual(cli, (await store.list(null)).map((e) => e.author), 'the CLI and the server read one cloud the same way');
 });
 
-test('[firestore] a person the server made first is the one the CLI\'s write names', cloud, async (t) => {
-  const { project, db, store } = await cloudProject(t);
-  const id = await store.personFor('agent via ci@example.org');
-  await new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' });
-  assert.deepEqual((await db.collection('events').get()).docs.map((d) => d.data().author), [id]);
-  assert.equal((await db.collection('people').get()).size, 1, 'no second person for one address');
-});
-
-test('[firestore] first writes by one account at once are one person', cloud, async (t) => {
-  // Each write looks for the person, finds none, and makes one: only one make can win, and the
-  // others have to take the winner's id instead of failing the write they were asked for.
-  const { project, db } = await cloudProject(t);
-  const source = () => new Source({ project, account: 'ci@example.org' });
-  await Promise.all(Array.from({ length: 4 }, (_, i) => source().add({ type: 'comment', page: 'A01', text: `w${i}` })));
-  const authors = new Set((await db.collection('events').get()).docs.map((d) => d.data().author));
-  assert.equal(authors.size, 1, `one account became ${authors.size} people`);
-  assert.equal((await db.collection('people').get()).size, 1);
-});
-
-/**
- * Runs `body` with `fetch` passing through to the emulator, except that `answer` may take a call
- * over — it gets the URL and the parsed body and returns a Response, or nothing to pass it on —
- * and every commit is recorded, so a test can say which writes were attempted.
- */
-async function withFetch(answer, body) {
-  const real = globalThis.fetch;
-  const commits = [];
-  globalThis.fetch = async (url, init) => {
-    const sent = init?.body ? JSON.parse(String(init.body)) : null;
-    if (String(url).endsWith(':commit')) commits.push(sent);
-    return (await answer(String(url), sent)) ?? real(url, init);
-  };
-  try { return await body(commits); } finally { globalThis.fetch = real; }
-}
-
-const writesPeople = (commit) => commit.writes.some((w) => /\/people(_by_email)?\//.test(w.update.name));
-
-test('[firestore] a person the cloud refuses to make, with nobody else\'s to take, writes no event', cloud, async (t) => {
-  const { project, db } = await cloudProject(t);
-  await withFetch(
-    // Only the commit that makes the person: the event's own commit goes through, so an event
-    // written for a person who was never made would be there to count.
-    (url, sent) => (url.endsWith(':commit') && writesPeople(sent)
-      ? new globalThis.Response('{"error":{"message":"refused on purpose"}}', { status: 500 }) : null),
-    async () => {
-      await assert.rejects(new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }),
-        /error 500 writing to Firestore: refused on purpose/);
-    });
-  assert.equal((await db.collection('events').get()).size, 0, 'an event naming a person who does not exist');
-  assert.equal((await db.collection('people').get()).size, 0);
-});
-
-test('[firestore] a second write by the same account finds its person and makes none', cloud, async (t) => {
-  const { project, db } = await cloudProject(t);
-  await new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'first' });
-  await withFetch(() => null, async (commits) => {
-    await new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'second' });
-    assert.equal(commits.filter(writesPeople).length, 0, 'the second write tried to make the person again');
-    assert.equal(commits.length, 1, 'the event, and nothing else');
-  });
-  assert.equal((await db.collection('events').get()).size, 2);
-});
-
 test('the cloud tests ran when this run was told to expect Firestore', () => {
   // CI's `stores` job starts the emulator and promises it: without this, an emulator that failed to
   // come up would turn every [firestore] test above into a skip and the job green.
   const required = (process.env.HOLDRIM_TEST_REQUIRE ?? '').split(',').map((s) => s.trim());
   if (required.includes('firestore')) assert.ok(process.env.FIRESTORE_EMULATOR_HOST, 'promised Firestore and none was set');
-});
-
-test('[firestore] a person that cannot be looked up stops the write before anything is committed', cloud, async (t) => {
-  const { project, db } = await cloudProject(t);
-  await withFetch(
-    (url) => (url.includes('/people_by_email/') ? new globalThis.Response('{"error":{"message":"down on purpose"}}', { status: 500 }) : null),
-    async (commits) => {
-      await assert.rejects(new Source({ project, account: 'ci@example.org' }).add({ type: 'comment', page: 'A01', text: 'x' }),
-        /error 500 reading Firestore: down on purpose/);
-      assert.deepEqual(commits, [], 'a read that failed was taken for "nobody yet", and a person was made');
-    });
-  assert.equal((await db.collection('events').get()).size, 0);
 });
 
 // ============================================================ idForLog / actedOn, for the server's own log lines

@@ -77,9 +77,13 @@ write the database directly, it holds only as far as the database is made to hol
 - **SQLite**, by trigger, and by the file belonging to the server's user.
 - **Firestore**, by the code alone. Whoever the project's IAM lets write can write anything, events
   included — the gap events already have there, now shared by the people table.
-- **The CLI's own path to the cloud** (`engine/cli/remote.ts`) writes events around the server, the
-  one sanctioned door that does. It goes when the agent writes through the API with an identity of
-  its own.
+- **The CLI** (`engine/cli/remote.ts`) no longer writes around the server: every event it records
+  goes through `POST /api/events` with the agent's own token, and is held to the same checks, and
+  given the same `asAgent`, as any other (`docs/ROLES.md`, section 4). It still READS the cloud and
+  the events file directly, which writes nothing. The token itself lives in the user store, beside
+  the passwords: the agent's address, a hash of the secret and when it was issued — never the
+  secret. The events that record issuing and revoking one name the agent by its person id and the
+  token by a public id, never an address.
 
 A role on the event does not widen this: a direct writer can forge the owner's ✓ today by writing the
 owner's e-mail as its author, and the owner's e-mail is no secret. What closes it is a **signature**:
@@ -206,4 +210,4 @@ Said here so nobody promises it:
 | Removing a person, documented procedure | ✅ built — section 5, run by hand |
 | Removing a person, from the people screen | ⬜ 0.1.0 |
 | Events signed by the server, and readers that trust only signed roles | ⬜ 0.1.0 (phase E) |
-| The agent writing through the API with its own credential, and no direct write to the cloud | ⬜ 0.1.0 (`docs/ROLES.md` §4) |
+| The agent writing through the API with its own credential, and no direct write to the cloud | ✅ built (#122) — `docs/ROLES.md` §4 |

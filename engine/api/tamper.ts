@@ -1,5 +1,14 @@
+import type { agentByToken } from '../core/roles.js';
 import { AS_AGENT_FIELD, type Event, type NewEvent } from './types.ts';
 import { TAMPER_KINDS, type TamperKind, type TamperReport, type TextField } from './texts.ts';
+
+/**
+ * Who asks: an address, or the identity a token carries (`agentByToken`, engine/core/roles.js).
+ * The same shape server.ts's own `Who` takes — a caller here must hand over what it holds, never
+ * the bare address first, or the agent flag a token carries is gone before `isOwner`/`isAgent` ever
+ * see it (issue #138's own rule, server.ts, on `Who`).
+ */
+type Who = string | ReturnType<typeof agentByToken>;
 
 /**
  * Tampered texts, as a person sees them (issue #107): which findings are open, and the owner's
@@ -81,25 +90,30 @@ function isAcknowledgement(e: Event): boolean {
   return e.type === TAMPER_ACKNOWLEDGED && typeof e.data?.finding === 'string' && e.data?.[AS_AGENT_FIELD] === 'false';
 }
 
-/** The two identity questions this needs of `createRoles` (engine/core/roles.js), and no more. */
+/**
+ * The two identity questions this needs of `createRoles` (engine/core/roles.js), and no more. Both
+ * take `Who` whole, like `createRoles`'s own `isOwner`/`isAgent` do — asking either of a bare address
+ * a token's caller already flattened would answer as if the token were the person its address names.
+ */
 export interface WhoIs {
-  isOwner(email: string): boolean;
-  isAgent(email: string): boolean;
+  isOwner(who: Who): boolean;
+  isAgent(who: Who): boolean;
 }
 
 /**
- * Whether `email` may acknowledge a finding — the owner, and only the owner (issue #107's decision:
+ * Whether `who` may acknowledge a finding — the owner, and only the owner (issue #107's decision:
  * no new capability, and `admin` does not grant it). Asked of IDENTITY, like resetting the owner's
  * account, never of `can`: no role a project defines can then ever carry it.
  *
  * The agent first, as `can` asks it first (docs/ROLES.md, section 4): `rolesOf` already refuses to
  * start when `HOLDRIM_OWNER` names an agent, so today this line changes no answer — it is here so
  * that bypassing that refusal still leaves an agent unable to quiet an alert about the store it
- * writes to.
+ * writes to. Takes `Who`, never the address alone: `isOwner` (roles.js) fails closed for a token by
+ * itself, but only if it is asked of the token identity and not the address flattened out of it first.
  */
-export function mayAcknowledge(roles: WhoIs, email: string): boolean {
-  if (roles.isAgent(email)) return false;
-  return roles.isOwner(email);
+export function mayAcknowledge(roles: WhoIs, who: Who): boolean {
+  if (roles.isAgent(who)) return false;
+  return roles.isOwner(who);
 }
 
 /**
@@ -110,9 +124,9 @@ export function mayAcknowledge(roles: WhoIs, email: string): boolean {
  * built from `found`, the server's own read.
  */
 export function acknowledgementRefusal(
-  roles: WhoIs, email: string, body: Record<string, unknown>, open: readonly Finding[],
+  roles: WhoIs, who: Who, body: Record<string, unknown>, open: readonly Finding[],
 ): { refused: { status: number; key: string } } | { found: Finding } {
-  if (!mayAcknowledge(roles, email)) return { refused: { status: 403, key: 'api.tamper.ownerOnly' } };
+  if (!mayAcknowledge(roles, who)) return { refused: { status: 403, key: 'api.tamper.ownerOnly' } };
   const finding = body.finding;
   if (typeof finding !== 'string' || !/^[0-9a-f]{64}$/.test(finding)) return { refused: { status: 400, key: 'api.tamper.findingRequired' } };
   // Only an OPEN finding: one already acknowledged, one no longer found, and one that does not exist

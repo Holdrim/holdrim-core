@@ -259,7 +259,9 @@ From a clone of this repository it is `npm run cli -- lights`, or
 
 `list`, `show`, `sync` and the rest of the request commands need to know where the events are:
 `--local` against `bash engine/run-local.sh`, `--db <file>` for a SQLite events file, or
-`cloud.project` in `holdrim.json` for Firestore. Run it with no command for the full help.
+`cloud.project` in `holdrim.json` for Firestore. `state` writes, and writes only through the server:
+`HOLDRIM_URL` names it, and `HOLDRIM_AGENT_TOKEN` carries the token the owner issued the agent on the
+people screen. Run it with no command for the full help.
 
 **The engine calls no model and holds no API key.** `apply` writes a brief and hands it to whichever
 agent CLI the person already has, running with their own account. Nothing here runs unattended on

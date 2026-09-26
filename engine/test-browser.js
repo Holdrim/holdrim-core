@@ -1198,6 +1198,34 @@ try {
     await page.unroute('**/api/users/*/enabled', withFailedDrop);
   }
 
+  // Issue #122: the owner issues an agent its token from this screen, sees it once, and revokes it.
+  // Only a browser running the screen's own script, under its nonce policy, shows the form posts,
+  // the token lands in the once-box and nowhere else, and the revoke button reaches its route.
+  // The token is tried from outside the browser: a request carrying the owner's cookie AND the token
+  // is refused by design, so the page's own context cannot stand in for the agent.
+  console.log('an agent token, issued and revoked from the people screen:');
+  {
+    const asAgent = (token) => fetch(`${SIGN_IN}/api/me`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.status);
+    await page.goto(`${SIGN_IN}/engine/people`);
+    await page.locator('#issue input[name="email"]').fill('bot@example.org');
+    await page.locator('#issue button[type="submit"]').click();
+    await must('issuing shows the token, once', () => page.locator('#once', { hasText: 'bot@example.org' }).locator('code').waitFor());
+    const token = await page.locator('#once code').textContent();
+    expect('an agent token, not an empty box', true, /^holdrim_agent_[0-9a-f]{24}_[0-9a-f]{64}$/.test(token));
+    expect('and the agent signs in with it', 200, await asAgent(token));
+    await page.reload();
+    await must('after a reload the token is gone from the screen', () => page.locator('#once').waitFor({ state: 'hidden' }));
+    expect('and from everything the page holds', false, (await page.content()).includes(token));
+    await must('the agent is listed, with when its token was issued',
+      () => page.locator('tr', { hasText: 'bot@example.org' }).locator('time').waitFor());
+    dialogs.length = 0;
+    await page.locator('button[data-action="revoke"][data-email="bot@example.org"]').click();
+    await must('revoking asks first, then redraws the list without the agent',
+      () => page.locator('button[data-action="revoke"][data-email="bot@example.org"]').waitFor({ state: 'detached' }));
+    expect('having asked before it revoked', true, dialogs.some((d) => d.includes('bot@example.org')));
+    expect('and the token stops working at once', 401, await asAgent(token));
+  }
+
   expect('and nothing was refused on the way', '', problems.join(' | '));
 } catch (e) {
   console.log(`  FAIL ${e.message}`);

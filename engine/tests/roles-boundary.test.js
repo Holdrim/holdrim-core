@@ -141,7 +141,7 @@ const ALLOWED = [
   { file: 'engine/core/cycle.js', text: "const owner = ownedBy('owner');", why: 'same cycle vocabulary as above' },
   { file: 'engine/core/cycle.js', text: "ownedBy: table.states[state]?.owned_by ?? 'owner',",
     why: 'same cycle vocabulary as above' },
-  { file: 'engine/api/server.ts', text: 'role: roles.roleOf(email),',
+  { file: 'engine/api/server.ts', text: 'role: roles.roleOf(who),',
     why: 'the /api/me response\'s DISPLAY field, read by nothing this process does — a client may ' +
       'show it, never branch a server decision on it' },
   { file: 'engine/api/server.ts', text: 'roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),',
@@ -322,7 +322,7 @@ test('does not flag the one allow-listed instance of the lookup shape it otherwi
 });
 
 test('does not flag any of the allow-listed roleOf() call sites themselves', () => {
-  assert.deepEqual(offendersIn('role: roles.roleOf(email),', 'engine/api/server.ts'), []);
+  assert.deepEqual(offendersIn('role: roles.roleOf(who),', 'engine/api/server.ts'), []);
   assert.deepEqual(offendersIn('roleOf: (e) => roles.roleOf(e), isOwner: (e) => roles.isOwner(e),',
     'engine/api/server.ts'), []);
   assert.deepEqual(offendersIn('const role = data.roleOf(p.email);', 'engine/api/people-page.ts'), []);
@@ -382,10 +382,10 @@ test('planting rank[role] === 0 into the real people-page.ts is caught, by name'
 
 test('planting a new, un-allow-listed roleOf() call into the real server.ts is caught, by name', () => {
   const real = readFileSync(join(ROOT, 'engine/api/server.ts'), 'utf8');
-  const marker = 'role: roles.roleOf(email),';
+  const marker = 'role: roles.roleOf(who),';
   assert.ok(real.includes(marker), 'the real line this test plants its evasion next to moved or was reworded');
   const planted = real.replace(marker,
-    `${marker}\n      impersonatingOwner: roles.roleOf(email) === roles.roleOf(roles.owner),`);
+    `${marker}\n      impersonatingOwner: roles.roleOf(who) === roles.roleOf(roles.owner),`);
   const found = offendersIn(planted, 'engine/api/server.ts');
   assert.ok(found.some((f) => f.includes('roleOf() outside its allowed call sites')),
     'planting a brand-new roleOf() call into the real server.ts was not caught');
@@ -435,4 +435,35 @@ test('no caller outside engine/core/roles.js decides anything from a role\'s nam
     'roles.isOwner(...) instead, or add a named, explained entry to ALLOWED if this really is not one:',
     ...offenders,
   ].join('\n  '));
+});
+
+// A role question asked of `email` instead of `who` flattens an agent token to the address it
+// carries, and `isOwner` then answers for the owner's address as though the owner had signed in
+// (holdrim#138, the tamper routes after #134 merged). Only the TOKEN_READS/TOKEN_WRITES allowlist
+// stops such a call today, so no request can reach it; this scan is what fails if one comes back.
+// `email` and `addressOf(who)` are the two spellings of the flattened address in server.ts; the last
+// alternative is the other shape of the same mistake, deciding "is this the owner?" by comparing
+// addresses instead of asking `isOwner(who)`, which a token's address would pass.
+const ADDRESS = String.raw`(?:email\b|addressOf\(\s*who\s*\))`;
+const ROLE_QUESTION_OF_ADDRESS = new RegExp([
+  String.raw`\broles\.(?:isOwner|isLockHolder|isAgent|roleOf)\(\s*` + ADDRESS,
+  String.raw`\broles\.can\([^)]*,\s*` + ADDRESS,
+  String.raw`\b(?:mayAcknowledge|acknowledgementRefusal)\(\s*roles\s*,\s*` + ADDRESS,
+  String.raw`\bisOwner\(\s*(\w+)\s*\)\s*&&\s*\1\s*!==\s*email\b`,
+].join('|'));
+
+test('server.ts asks every role question of who, never of the flattened address', () => {
+  const real = readFileSync(join(ROOT, 'engine/api/server.ts'), 'utf8');
+  const hits = real.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => ROLE_QUESTION_OF_ADDRESS.test(l));
+  assert.deepEqual(hits, [], 'a role question of `email` flattens an agent token');
+});
+
+test('the address scan catches a role asked of email or addressOf(who), and an owner decided by comparing addresses', () => {
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, email)) return'));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('String(roles.isAgent(email))'));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test("roles.can('triage', email)"));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, addressOf(who))) return'));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('if (roles.isOwner(target) && target !== email) {'));
+  assert.ok(!ROLE_QUESTION_OF_ADDRESS.test('if (roles.isOwner(target) && !roles.isOwner(who)) {'));
+  assert.ok(!ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, who)) return'));
 });

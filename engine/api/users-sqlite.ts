@@ -1,7 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
+import { SQLITE_BUSY_TIMEOUT_MS } from './store-sqlite.ts';
+import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
  * People and sessions in SQLite, on the built-in `node:sqlite` — **no external dependency**.
@@ -24,6 +25,11 @@ export class UsersSqlite extends UserStoreBase {
     this.#db = new DatabaseSync(path);
     // WAL: a read does not block a write. Every page load checks a session.
     this.#db.exec('PRAGMA journal_mode = WAL');
+    // Wait for another connection's write instead of failing at once, as long as the event store
+    // does. Without it, the `BEGIN IMMEDIATE` below answers "database is locked" the moment a second
+    // process on this file is mid-write, and an issue or an account creation fails for nothing but
+    // timing.
+    this.#db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS users (
         email       TEXT PRIMARY KEY,
@@ -42,15 +48,82 @@ export class UsersSqlite extends UserStoreBase {
         expires_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions (expires_at);
+      -- One row per agent address (docs/ROLES.md, section 4): the primary key is what makes a second
+      -- issue REPLACE the first, so an old token cannot outlive the one that superseded it. No
+      -- reference to users: an agent is not a person and needs no password to hold a token.
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        email     TEXT PRIMARY KEY,
+        kind      TEXT NOT NULL CHECK (kind = 'agent'),
+        token_id  TEXT NOT NULL UNIQUE,
+        hash      BLOB NOT NULL,
+        issued_at TEXT NOT NULL
+      );
     `);
   }
 
+  protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
+    return this.#immediate(() => {
+      if (this.#db.prepare('SELECT 1 FROM users WHERE email = ?').get(row.email)) {
+        throw new AddressInUse(row.email, 'account');
+      }
+      const before = this.#db.prepare('SELECT token_id FROM agent_tokens WHERE email = ?').get(row.email) as
+        { token_id: string } | undefined;
+      this.#db.prepare(
+        'INSERT INTO agent_tokens (email, kind, token_id, hash, issued_at) VALUES (?, ?, ?, ?, ?) '
+        + 'ON CONFLICT(email) DO UPDATE SET kind = excluded.kind, token_id = excluded.token_id, '
+        + 'hash = excluded.hash, issued_at = excluded.issued_at',
+      ).run(row.email, row.kind, row.tokenId, row.hash, row.issuedAt);
+      return before?.token_id ?? null;
+    });
+  }
+
+  /**
+   * `body` inside `BEGIN IMMEDIATE`, so its reads and its write see the same file: another process on
+   * it could otherwise slip an issue or an account in between, and the trail would name the wrong
+   * predecessor, or one address would end up both a person and an agent (`writeAgentToken`, users.ts).
+   * Within this process nothing interleaves anyway: `body` is synchronous, with no await to yield at.
+   */
+  #immediate<T>(body: () => T): T {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = body();
+      this.#db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  protected async readAgentTokenById(tokenId: string): Promise<StoredAgentToken | null> {
+    const r = this.#db.prepare('SELECT * FROM agent_tokens WHERE token_id = ?').get(tokenId) as
+      Record<string, string | Uint8Array> | undefined;
+    return r ? rowToToken(r) : null;
+  }
+
+  protected async readAllAgentTokens(): Promise<StoredAgentToken[]> {
+    const rows = this.#db.prepare('SELECT * FROM agent_tokens ORDER BY email').all() as
+      Record<string, string | Uint8Array>[];
+    return rows.map(rowToToken);
+  }
+
+  protected async deleteAgentToken(email: string): Promise<string | null> {
+    const r = this.#db.prepare('DELETE FROM agent_tokens WHERE email = ? RETURNING token_id').get(email) as
+      { token_id: string } | undefined;
+    return r?.token_id ?? null;
+  }
+
   protected async insertUser(row: StoredUser): Promise<void> {
-    this.#db.prepare(
-      'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
-      + 'VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(row.email, row.name, row.salt, row.hash, row.mustChangePassword ? 1 : 0, row.createdAt,
-      row.enabled ? 1 : 0);
+    this.#immediate(() => {
+      if (this.#db.prepare('SELECT 1 FROM agent_tokens WHERE email = ?').get(row.email)) {
+        throw new AddressInUse(row.email, 'agentToken');
+      }
+      this.#db.prepare(
+        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(row.email, row.name, row.salt, row.hash, row.mustChangePassword ? 1 : 0, row.createdAt,
+        row.enabled ? 1 : 0);
+    });
   }
 
   protected async readUser(email: string): Promise<StoredUser | null> {
@@ -129,5 +202,13 @@ function rowToUser(r: Record<string, string | number | Uint8Array>): StoredUser 
     salt: Buffer.from(r.salt as Uint8Array), hash: Buffer.from(r.hash as Uint8Array),
     mustChangePassword: !!r.must_change, createdAt: r.created_at as string,
     enabled: !!r.enabled,
+  };
+}
+
+/** One row of `agent_tokens`, shaped as `users.ts` expects it, for the single read and the listing. */
+function rowToToken(r: Record<string, string | Uint8Array>): StoredAgentToken {
+  return {
+    email: r.email as string, kind: r.kind as 'agent', tokenId: r.token_id as string,
+    hash: Buffer.from(r.hash as Uint8Array), issuedAt: r.issued_at as string,
   };
 }
