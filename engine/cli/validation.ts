@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { readBlocks, sheetFiles, resolveBlock, spliceAttributes, attributeText, textOf, shortName, ofProject, projectRoles,
-  type Block, type Stamp, type MarkPlan } from './pages.ts';
+  namesNotLowerCase, browserIdOf, browserBlocks, type Block, type Stamp, type MarkPlan } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
@@ -78,8 +78,9 @@ export async function check(root: string): Promise<number> {
       problems++;
     }
   }
+  problems += duplicateIds(root);
   problems += sealMismatches(registry, blocks);
-  problems += sealNamesNotLowerCase(blocks);
+  problems += namesNotInLowerCase(root);
   problems += await orphanMarks(root, registry);
   problems += missingProofs(root, blocks);
   problems += upwardDependencies(blocks);
@@ -144,23 +145,52 @@ function sameDependencies(page: Record<string, unknown>, recorded: Record<string
 }
 
 /**
- * A seal attribute on any block whose name is not written in lower case — with or without a
- * registry entry.
+ * An attribute the engine reads a block by — its id, code, dependencies or seal (`BLOCK_NAMES`) —
+ * whose name is not written in lower case, on ANY element of any page, block or not, recorded or not.
  *
- * A browser lowercases attribute names and keeps the first of two that then collide, so a
- * `DATA-VALIDATED-FINGERPRINT` ahead of the real one is the value the panel paints from, and a
- * `DATA-VALIDATED` alone is a seal the page shows. linkedom keeps the case, so every other sweep here,
- * `orphanMarks` included, reads straight past it: this is the one that sees it.
+ * A browser lowercases attribute names and keeps the first of two that then collide; linkedom keeps
+ * the case, and every other read here asks for the lower-case name. So a `DATA-VALIDATED-FINGERPRINT`
+ * ahead of the real one is the value the panel paints from, a `DATA-VALIDATED` alone is a seal the
+ * page shows, and a `DATA-ID` is a whole block — seal and all — that `readBlocks`, `orphanMarks` and
+ * every sweep built on them never see. Every element, not only `readBlocks`' blocks: those are exactly
+ * the ones selected by the lower-case name. Named by the id a browser reads there, or by its page.
  */
-export function sealNamesNotLowerCase(blocks: Map<string, Block>): number {
+export function namesNotInLowerCase(root: string): number {
   let found = 0;
-  for (const [id, block] of [...blocks].sort(([a], [b]) => a.localeCompare(b))) {
-    for (const { name } of block.seal) {
-      if (name === name.toLowerCase()) continue;
-      console.log(`  ✗ ${id}: carries ${name}, which a browser reads as ${name.toLowerCase()} — and it reads `
-        + 'whichever copy comes first; a seal attribute is written in lower case only');
-      found++;
+  for (const path of sheetFiles(root)) {
+    const { document } = parseHTML(readFileSync(path, 'utf8'));
+    for (const el of document.querySelectorAll('*')) {
+      for (const name of namesNotLowerCase(el)) {
+        console.log(`  ✗ ${browserIdOf(el) ?? shortName(root, path)}: carries ${name}, which a browser reads as `
+          + `${name.toLowerCase()} — and it reads whichever copy comes first, where this engine reads only the `
+          + 'lower-case name; write it in lower case');
+        found++;
+      }
     }
+  }
+  return found;
+}
+
+/**
+ * An id carried by more than one block, across every page, read as a browser reads it.
+ *
+ * `readBlocks` keys blocks by id and keeps the last, so every sweep built on it judges one of the
+ * two and never learns the other exists — while the browser paints a seal on each, from its own
+ * attributes. A twin whose seal matches its own text passes every other check here; so a second
+ * block under one id is a problem in itself, whichever of the two is the real one.
+ */
+export function duplicateIds(root: string): number {
+  const where = new Map<string, string[]>();
+  for (const path of sheetFiles(root)) {
+    const { document } = parseHTML(readFileSync(path, 'utf8'));
+    for (const { id } of browserBlocks(document)) where.set(id, [...(where.get(id) ?? []), shortName(root, path)]);
+  }
+  let found = 0;
+  for (const [id, pages] of [...where].sort(([a], [b]) => a.localeCompare(b))) {
+    if (pages.length < 2) continue;
+    console.log(`  ✗ ${id}: carried by ${pages.length} blocks (${pages.join(', ')}) — a browser paints a seal on `
+      + 'each, and this engine judges only one of them');
+    found++;
   }
   return found;
 }

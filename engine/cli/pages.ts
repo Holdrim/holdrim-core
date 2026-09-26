@@ -63,6 +63,44 @@ export function sealOf(el: Element): SealAttribute[] {
 }
 
 /**
+ * Every attribute name the engine reads a block by: what it is, what it depends on, and its seal.
+ * Each is read here in lower case only, and a browser reads each in ANY case — so one written
+ * otherwise is an attribute the page shows and every read in this engine walks past.
+ */
+export const BLOCK_NAMES: readonly string[] = ['data-id', 'data-code', 'data-depends', ...SEAL_NAMES];
+
+/** The names in `BLOCK_NAMES` that `el` carries in some case other than lower, as written. */
+export function namesNotLowerCase(el: Element): string[] {
+  return Array.from(el.attributes ?? []).map((a) => (a as Attr).name)
+    .filter((name) => name !== name.toLowerCase() && BLOCK_NAMES.includes(name.toLowerCase()));
+}
+
+/**
+ * The id a browser gives `el`: the value of its first attribute named `data-id` in any case, which
+ * is the copy a browser keeps. `null` when it carries none. linkedom's `getAttribute('data-id')`
+ * sees only the lower-case spelling, so `<p Data-Id="q" data-id="y">` is `y` to it and `q` to a reader.
+ */
+export function browserIdOf(el: Element): string | null {
+  const first = Array.from(el.attributes ?? []).find((a) => (a as Attr).name.toLowerCase() === 'data-id');
+  return first ? (first as Attr).value : null;
+}
+
+/**
+ * Every element under `main` a browser selects as a block, with the id it reads there. A browser
+ * matches `main [data-id]` case-insensitively on the name, so this is the list the panel paints;
+ * linkedom's own `main [data-id]` is not, because it matches the name case-sensitively.
+ */
+export function browserBlocks(document: { querySelectorAll(selector: string): Iterable<Element> }):
+  { element: Element; id: string }[] {
+  const out: { element: Element; id: string }[] = [];
+  for (const element of document.querySelectorAll('main *')) {
+    const id = browserIdOf(element);
+    if (id !== null) out.push({ element, id });
+  }
+  return out;
+}
+
+/**
  * The project's configuration, read from `holdrim.json` at `root`, with the environment on top. The
  * one place the CLI reads it from disk: `readConfig` takes its reader as a parameter so it can be
  * tested without one, and five callers each building their own reader was five places to change the
@@ -209,7 +247,25 @@ export function resolveBlock(root: string, id: string): BlockLookup {
   const matches: { path: string; html: string; element: Element }[] = [];
   for (const path of sheetFiles(root)) {
     const html = readFileSync(path, 'utf8');
-    for (const element of blocksNamed(parseHTML(html).document, id)) matches.push({ path, html, element });
+    const { document } = parseHTML(html);
+    const named = blocksNamed(document, id);
+    // A page where a browser finds a block linkedom does not — `DATA-ID`, or a `Data-Id` ahead of the
+    // `data-id` read here — or reads its code or dependencies from a name linkedom skips, is a page the
+    // seal would be written onto blind: the id resolved here may not be the block the browser paints
+    // under it, and a twin in any case is a second seal nothing here sees. So such a page refuses, as a
+    // whole, and says which name to fix. The seal names are left to `spliceAttributes`, which refuses
+    // them on the block itself or, for a new ✓, replaces them.
+    if (named.length || browserBlocks(document).some((b) => b.id === id)) {
+      const identity = BLOCK_NAMES.filter((name) => !(SEAL_NAMES as readonly string[]).includes(name));
+      for (const el of document.querySelectorAll('*')) {
+        const odd = namesNotLowerCase(el).find((name) => identity.includes(name.toLowerCase()));
+        if (odd) {
+          return { ok: false, kind: 'invalid', message: `${shortName(root, path)} carries ${odd}, which a browser `
+            + `reads as ${odd.toLowerCase()} and this engine does not, so no seal is written on that page` };
+        }
+      }
+    }
+    for (const element of named) matches.push({ path, html, element });
   }
   if (matches.length === 0) return { ok: false, kind: 'not-found', message: 'not found' };
   if (matches.length > 1) {
@@ -265,6 +321,14 @@ export interface MarkPlan {
  * The index of the `>` that closes a tag opened before `from`, skipping one sitting inside a quoted
  * attribute value — `title="a>b"` must not end the tag one character early. `null` when the tag
  * never closes.
+ *
+ * A second scanner beside `startTagAt`, on purpose. This one opens a quote at ANY `'` or `"`, where
+ * the standard opens one only right after `=`: on a tag like `<p data-id="y" it's>`, whose `it's` is
+ * one attribute name to a browser, it runs past the real `>` and every candidate it offers is refused
+ * by `writesOnlyThe`. `startTagAt` finds the real `>` there and the write it offers is accepted — so
+ * swapping it in here changes what a first ✓ does on those tags from a refusal to a stamp, which the
+ * #141 tests pin as refusals. Where the two disagree is only on such malformed tags, and both only
+ * PROPOSE a place: `writesOnlyThe` decides for either. Making the first ✓ stamp there is its own change.
  */
 function tagEndFrom(html: string, from: number): number | null {
   let quote: string | null = null;
@@ -413,8 +477,11 @@ function reseal(html: string, document: Parsed, target: Element, id: string,
     && planned.every(({ attr, value }) => carried.some((a) => a.name === attr && a.value === readBack(value)));
   if (already) return { html };
 
+  // Taken before `withoutSeal`, which strips the seal off `target` itself.
+  const parsedNames = Array.from(target.attributes ?? []).map((a) => (a as Attr).name);
   const original = withoutSeal(document, target, SEAL_NAMES);
   const needle = `data-id="${id}"`;
+  let hidden = false;
 
   for (const start of occurrences(html, needle)) {
     const needleEnd = start + needle.length;
@@ -422,6 +489,18 @@ function reseal(html: string, document: Parsed, target: Element, id: string,
     // The needle has to BE the tag's `data-id` attribute, not text inside another attribute's value:
     // tokens found around a needle in a value belong to some other element's tag.
     if (!tag?.tokens.some((t) => t.nameAt === start && t.to === needleEnd)) continue;
+    // And the `<` has to be where the element's tag really starts. One inside an earlier quoted value
+    // (`title="a<b"`) still reads the needle as an attribute, but whatever sits before it — a seal copy
+    // included — is out of sight: rewritten or not, it stays, and (a) cannot count it, because the
+    // parser keeps only the first of two copies spelt alike and (a) reads the parser. So the names read
+    // from this `<` must be the parser's own, in order, each first copy only, as the parser keeps them:
+    // the attribute holding the `<`, and any before it, is one the parser lists and this reading does
+    // not. A value that spells those names out itself can still line the lists up; then every copy the
+    // parser keeps is out of reach of the edits, and (a) accepts only where it already reads the
+    // planned seal. Finding the real `<` further back instead would mean trusting a backwards guess the
+    // raw text cannot settle — every `<` inside a value looks like a tag start — so this is a refusal.
+    const tokenNames = [...new Set(tag.tokens.map((t) => t.name))];
+    if (tokenNames.join('\0') !== parsedNames.join('\0')) { hidden = true; continue; }
 
     const edits: Edit[] = [];
     for (const name of SEAL_NAMES) {
@@ -443,6 +522,10 @@ function reseal(html: string, document: Parsed, target: Element, id: string,
     }
     const candidate = applyEdits(html, edits);
     if (writesOnlyThe(candidate, id, planned, original, SEAL_NAMES)) return { html: candidate };
+  }
+  if (hidden) {
+    return { error: 'a "<" inside one of its attribute values hides where its start tag begins, so its whole '
+      + 'seal cannot be seen to be replaced — write that "<" as &lt;' };
   }
   return { error: 'could not locate its tag without risking another block' };
 }

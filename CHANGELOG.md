@@ -116,6 +116,17 @@ who ran the engine from `main` before it.
   `restamp` then writes the registry's value (it refuses a block that still carries a name not in
   lower case). `data-validated`, which `restamp` never writes, still has to carry the registry's
   `date`, as `check` already required.
+- **`holdrim check` now reads every block a browser reads.** A `data-id`, `data-code`,
+  `data-depends` or seal attribute written in any case other than lower case, on any element of any
+  page, is a problem: a browser reads it, and the engine, which reads the lower-case name only, did
+  not — a block named that way was on no list `check` printed. And an id carried by more than one
+  block, across all pages and read as a browser reads it, is a problem: the registry and every sweep
+  judged one of them, while the browser painted a seal on each. What an adopter's CI sees: a
+  `✗ <id or page>: carries …` or `✗ <id>: carried by N blocks (…)` line for each, counted in `check`'s
+  total, and a non-zero exit. What to change: write the name in lower case, or give each block its own
+  id. `holdrim sync` and `holdrim restamp` also refuse, with that reason, to write a seal on a page
+  where a block reads differently to a browser — a `data-id`, `data-code` or `data-depends` not in
+  lower case, on the page of the block or on any page where a browser finds a block by that id.
 
 ### Added
 
@@ -334,3 +345,6 @@ who ran the engine from `main` before it.
   seal. A block with no seal is stamped exactly as before. `holdrim restamp` still never overwrites;
   it now refuses, and says why, a block carrying a seal attribute whose name is not in lower case,
   rather than writing a copy the browser would ignore or counting the block as already stamped.
+  A re-approval is refused, with the reason, when a `<` inside one of the block's attribute values
+  hides where its start tag begins: the seal's every copy could not be seen, so it could not be seen
+  to be replaced.

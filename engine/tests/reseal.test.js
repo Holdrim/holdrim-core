@@ -14,12 +14,12 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
-import { readBlocks } from '../cli/pages.ts';
+import { readBlocks, SEAL_NAMES } from '../cli/pages.ts';
 import { loadRegistry, sync, mark, restamp, check } from '../cli/validation.ts';
+import { fingerprintOfText } from '../core/fingerprint.js';
 import { trafficLightOf, blockState } from '../web/src/state.js';
 
 const OWNER = 'owner@example.org';
-const SEAL = ['data-validated', 'data-validated-fingerprint', 'data-depended-on'];
 const BASELINE = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER,
   when: '2026-01-01T09:00:00Z', data: null };
 
@@ -34,6 +34,16 @@ function onePage(t, html, registry = {}) {
   writeFileSync(join(tmp, 'r.json'), JSON.stringify(registry));
   return { tmp, sheet, page: () => readFileSync(sheet, 'utf8') };
 }
+
+/** A second page, `X02.html`, beside the one `onePage` wrote; returns a reader for it. */
+function secondPage(tmp, html) {
+  const sheet = join(tmp, 'p', 'X02.html');
+  writeFileSync(sheet, html);
+  return () => readFileSync(sheet, 'utf8');
+}
+
+/** The fingerprint of a block whose text is `text` — every block in this file reads `real` unless it says otherwise. */
+const fingerprintOf = (text = 'real') => fingerprintOfText(text);
 
 /** What `fn` printed through console.log, as one string, and what it returned. */
 async function printed(t, fn) {
@@ -59,7 +69,7 @@ const syncing = (t, tmp, events) =>
 /** The seal attributes of the block `id` on `html`, names as written, in source order. */
 function sealOn(html, id) {
   const el = parseHTML(html).document.querySelector(`[data-id="${id}"]`);
-  return Array.from(el.attributes).filter((a) => SEAL.includes(a.name.toLowerCase())).map((a) => [a.name, a.value]);
+  return Array.from(el.attributes).filter((a) => SEAL_NAMES.includes(a.name.toLowerCase())).map((a) => [a.name, a.value]);
 }
 
 // ---------------------------------------------------------------- a new ✓ replaces the seal
@@ -134,6 +144,31 @@ const OLD_SEALS = [
   ['as a second copy running into data-id with no space between',
     '<p data-validated-fingerprint="0000" DATA-VALIDATED-FINGERPRINT="1111"data-id="y">',
     '<p data-validated-fingerprint="FP" data-id="y" data-validated="2026-09-22">'],
+  // An unquoted value runs to whitespace or `>`, `/` included: stopping at the `/` leaves `/01/01`
+  // behind as attributes the browser never sees.
+  ['unquoted, with a / inside its value',
+    '<p data-id="y" data-validated=2026/01/01 data-validated-fingerprint=0000>',
+    '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP">'],
+  // A `/` ends the tag name and separates attributes, as whitespace does.
+  ['right behind the tag name, after a /',
+    '<p/data-validated="2026-01-01" data-id="y">',
+    '<p/data-validated="2026-09-22" data-id="y" data-validated-fingerprint="FP">'],
+  // A no-break space is not HTML whitespace: `\u00a0data-validated` is one name, not the seal's, and
+  // it stays where it is.
+  ['beside a name that starts with a no-break space',
+    '<p data-id="y" data-validated-fingerprint="0000"\u00a0data-validated="2026-01-01">',
+    '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP"\u00a0data-validated="2026-01-01">'],
+  // A lone `=` where a name should start is itself a name, and the attribute after it is the seal's.
+  ['after a lone = the browser reads as a name',
+    '<p data-id="y" = data-validated="2026-01-01">',
+    '<p data-id="y" = data-validated="2026-09-22" data-validated-fingerprint="FP">'],
+  // What the seal lacks goes where a first ✓ puts it: the date right after data-id, the rest at the end.
+  ['that lacks only data-validated',
+    '<p data-id="y" data-code="1.1" data-validated-fingerprint="0000">',
+    '<p data-id="y" data-validated="2026-09-22" data-code="1.1" data-validated-fingerprint="FP">'],
+  ['that lacks only its fingerprint',
+    '<p data-id="y" data-validated="2026-01-01" data-code="1.1">',
+    '<p data-id="y" data-validated="2026-09-22" data-code="1.1" data-validated-fingerprint="FP">'],
 ];
 
 for (const [where, tag, rewritten] of OLD_SEALS) {
@@ -154,22 +189,89 @@ for (const [where, tag, rewritten] of OLD_SEALS) {
 
 /**
  * The start tag is found from the `<` nearest before `data-id`. A `<` inside an earlier quoted value
- * hides whatever sits before it, here an upper-case copy the browser reads first: a rewrite that
- * cannot reach it would leave it on the page, still read ahead of the new seal. Counting every copy,
- * whatever its case, refuses that write, and nothing is recorded.
+ * hides whatever sits before it — here a seal copy the browser reads first. In upper case, or spelt
+ * exactly like the one after it, which the parser drops as a duplicate so that nothing reading the
+ * parsed block can count it: either way a rewrite from that `<` leaves it on the page, a second copy
+ * of the seal. The write is refused, with the reason, and nothing is recorded.
  */
-test('a re-approval refuses, and writes nothing, when an upper-case seal copy sits behind a < it cannot see past',
-  async (t) => {
-    const html = '<main><p DATA-VALIDATED-FINGERPRINT="0000" title="a<b" data-id="y" data-validated="2026-01-01">real</p></main>';
-    const { tmp, page } = onePage(t, html);
+for (const [what, html] of [
+  ['in upper case', '<main><p DATA-VALIDATED-FINGERPRINT="0000" title="a<b" data-id="y" data-validated="2026-01-01">real</p></main>'],
+  ['spelt exactly like the copy the ✓ writes', '<main><p data-validated-fingerprint="FP" title="a<b" data-id="y" '
+    + 'data-validated="2026-01-01">real</p></main>'],
+]) {
+  test(`a re-approval refuses, and writes nothing, when a seal copy ${what} sits behind a < it cannot see past`,
+    async (t) => {
+      const page0 = html.replace('FP', await fingerprintOf());
+      const { tmp, page } = onePage(t, page0);
+
+      const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
+
+      assert.equal(r.refused, 1);
+      assert.match(out, /✗ y: a "<" inside one of its attribute values hides where its start tag begins/);
+      assert.equal(page(), page0);
+      assert.equal(loadRegistry(tmp).y, undefined);
+    });
+}
+
+/**
+ * A `<` that starts no tag at all (`x < y`) before data-id: the start tag cannot be found from it,
+ * and finding it further back would be a guess, so a re-approval is refused — said, and the page kept.
+ */
+test('a re-approval refuses, and writes nothing, when a < that starts no tag sits in an earlier value', async (t) => {
+  const html = '<main><p title="x < y" data-id="y" data-validated="2026-01-01">real</p></main>';
+  const { tmp, page } = onePage(t, html);
+
+  const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
+
+  assert.equal(r.refused, 1);
+  assert.match(out, /✗ y: could not locate its tag without risking another block; nothing written/);
+  assert.equal(page(), html);
+});
+
+/**
+ * A block with no seal takes the first-✓ path whatever `sync` asks, and that path reads from the
+ * needle on: the `<` inside `title` and the apostrophe after it, which would lead a reading from the
+ * nearest `<` into an unclosed value, never come into it. Exactly what holdrim#141 writes.
+ */
+test('a first ✓ through sync stamps a block whose earlier value holds a < and an apostrophe, as #141 does', async (t) => {
+  const { tmp, page } = onePage(t, '<main><p title="a<b c=\'" data-id="y" data-code="1.1">real</p></main>');
+
+  const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
+
+  assert.equal(r.added, 1, out);
+  assert.equal(page(), '<main><p title="a<b c=\'" data-id="y" data-validated="2026-09-22" data-code="1.1" '
+    + `data-validated-fingerprint="${await fingerprintOf()}">real</p></main>`);
+});
+
+/**
+ * A ✓ the page already shows needs no write — but only when the page carries exactly that seal: each
+ * name once, in lower case, and nothing the ✓ leaves out. A registry with no entry for `y` is what
+ * lets `sync` reach the block at all.
+ */
+const ALREADY = [
+  ['keeps no stale data-depended-on beside a date and fingerprint that already match',
+    '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP" '
+      + 'data-depended-on="{&quot;gone&quot;:&quot;1&quot;}">',
+    '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP">'],
+  ['keeps no upper-case name whose value already matches',
+    '<p data-id="y" DATA-VALIDATED="2026-09-22" data-validated-fingerprint="FP">',
+    '<p data-id="y" data-validated="2026-09-22" data-validated-fingerprint="FP">'],
+  ['leaves a single-quoted seal that is already exact untouched, quotes and all',
+    '<p data-id="y" data-validated=\'2026-09-22\' data-validated-fingerprint=\'FP\'>',
+    '<p data-id="y" data-validated=\'2026-09-22\' data-validated-fingerprint=\'FP\'>'],
+];
+
+for (const [what, tag, after] of ALREADY) {
+  test(`a ✓ the page already shows ${what}`, async (t) => {
+    const fp = await fingerprintOf();
+    const { tmp, page } = onePage(t, `<main>${tag.replace('FP', fp)}real</p></main>`);
 
     const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
 
-    assert.equal(r.refused, 1);
-    assert.match(out, /✗ y: could not locate its tag without risking another block; nothing written/);
-    assert.equal(page(), html);
-    assert.equal(loadRegistry(tmp).y, undefined);
+    assert.equal(r.added, 1, out);
+    assert.equal(page(), `<main>${after.replace('FP', fp)}real</p></main>`);
   });
+}
 
 test('a first ✓ on a block with no seal writes it exactly where it always has', async (t) => {
   const { tmp, page } = onePage(t, '<main><p data-id="y" data-code="1.1" title="a>b">real</p></main>');
@@ -283,3 +385,116 @@ test('check counts an upper-case seal on a block the registry never recorded, wh
     assert.equal(value, 1, out);
     assert.match(out, /✗ y: carries DATA-VALIDATED/);
   });
+
+test('check counts a data-depended-on missing a dependency the registry records as a problem', async (t) => {
+  const { value, out } = await recorded(t, (fy, fd) =>
+    `data-validated="2026-09-22" data-validated-fingerprint="${fy}" data-depended-on="${snapshotOf({ d: fd })}"`,
+  (fy, fd) => ({ fingerprint: fy, dependsOn: { d: fd, e: '1111111111111111' } }));
+  assert.equal(value, 1, out);
+  assert.match(out, /✗ y: the page's data-depended-on \(\{"d":"[0-9a-f]+"\}\) is not the registry's dependsOn/);
+});
+
+test('check passes a data-depended-on whose keys are written in another order than the registry\'s', async (t) => {
+  const { value, out } = await recorded(t, (fy, fd) =>
+    `data-validated="2026-09-22" data-validated-fingerprint="${fy}" data-depended-on="${snapshotOf({ e: '1111111111111111', d: fd })}"`,
+  (fy, fd) => ({ fingerprint: fy, dependsOn: { d: fd, e: '1111111111111111' } }));
+  assert.equal(value, 0, out);
+});
+
+test('check names the fingerprint a browser reads — the first copy, in upper case — not the later lower-case one',
+  async (t) => {
+    const { value, out } = await recorded(t, (fy, fd) => 'data-validated="2026-09-22" '
+      + `DATA-VALIDATED-FINGERPRINT="0000000000000000" data-validated-fingerprint="${fy}" data-depended-on="${snapshotOf({ d: fd })}"`);
+    assert.equal(value, 2, out);
+    assert.match(out, /✗ y: the page's data-validated-fingerprint \(0000000000000000\) is not the registry's/);
+  });
+
+// ---------------------------------------------------------------- check sees every block a browser sees
+
+/**
+ * A browser reads an attribute name in any case, and selects `main [data-id]` whatever the case of
+ * the name. linkedom, and so every sweep of `check` built on `readBlocks`, reads the lower-case name
+ * only. Each page below shows a reader a block, or a seal, that no other line of `check` reports.
+ */
+test('check counts a block whose every name is in upper case, seal included, though it is on no other list',
+  async (t) => {
+    const { tmp } = onePage(t, '<main><p DATA-ID="z" DATA-CODE="1.2" DATA-VALIDATED="2026-01-01" '
+      + `DATA-VALIDATED-FINGERPRINT="${await fingerprintOf()}">real</p></main>`);
+    const { value, out } = await printed(t, () => check(tmp));
+    assert.equal(value, 4, out);
+    for (const name of ['DATA-ID', 'DATA-CODE', 'DATA-VALIDATED', 'DATA-VALIDATED-FINGERPRINT']) {
+      assert.match(out, new RegExp(`✗ z: carries ${name}, which a browser reads as ${name.toLowerCase()} `));
+    }
+  });
+
+test('check names a block by the id a browser reads — the first, whatever its case — and an element with none by its page',
+  async (t) => {
+    const { tmp } = onePage(t, '<main><div DATA-DEPENDS="x"><p Data-Id="q" data-id="y">real</p></div></main>');
+    const { value, out } = await printed(t, () => check(tmp));
+    assert.equal(value, 2, out);
+    assert.match(out, /✗ p\/X01\.html: carries DATA-DEPENDS, which a browser reads as data-depends/);
+    assert.match(out, /✗ q: carries Data-Id, which a browser reads as data-id/);
+  });
+
+/**
+ * `readBlocks` files blocks by id and keeps the last, so a second block under a registered id, sealed
+ * against its own text, passes every sweep that reads the map — while the browser paints both.
+ */
+const Y_SEALED = async () => `<p data-id="y" data-code="1.1" data-validated="2026-09-22" data-validated-fingerprint="${await fingerprintOf()}">real</p>`;
+const Y_ENTRY = async () => ({ y: { file: 'X01.html', date: '2026-09-22', fingerprint: await fingerprintOf() } });
+
+test('check counts an id carried by two blocks on one page as a problem', async (t) => {
+  const { tmp } = onePage(t, `<main>${await Y_SEALED()}${await Y_SEALED()}</main>`, await Y_ENTRY());
+  const { value, out } = await printed(t, () => check(tmp));
+  assert.equal(value, 1, out);
+  assert.match(out, /✗ y: carried by 2 blocks \(p\/X01\.html, p\/X01\.html\)/);
+});
+
+test('check counts an id carried by blocks on two pages, one of them in upper case, as a problem', async (t) => {
+  const { tmp } = onePage(t, `<main>${await Y_SEALED()}</main>`, await Y_ENTRY());
+  secondPage(tmp, `<main>${(await Y_SEALED()).replace('data-id', 'DATA-ID')}</main>`);
+  const { value, out } = await printed(t, () => check(tmp));
+  // Three lines: the twin, its upper-case name, and — from `orphanMarks` — its lower-case seal on a
+  // block that sweep finds no data-id on.
+  assert.equal(value, 3, out);
+  assert.match(out, /✗ y: carried by 2 blocks \(p\/X01\.html, p\/X02\.html\)/);
+  assert.match(out, /✗ y: carries DATA-ID/);
+  assert.match(out, /a validated mark on a block with NO data-id/);
+});
+
+// ---------------------------------------------------------------- no seal on a page a browser reads otherwise
+
+test('sync refuses a ✓, and writes nothing, when another page carries the same id in upper case', async (t) => {
+  const html = '<main><p data-id="y" data-code="1.1">real</p></main>';
+  const { tmp, page } = onePage(t, html);
+  const other = secondPage(tmp, '<main><p DATA-ID="y">real</p></main>');
+
+  const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
+
+  assert.equal(r.refused, 1);
+  assert.match(out, /✗ y: p\/X02\.html carries DATA-ID, which a browser reads as data-id and this engine does not, so no seal is written on that page; nothing written/);
+  assert.equal(page(), html);
+  assert.equal(other(), '<main><p DATA-ID="y">real</p></main>');
+  assert.equal(loadRegistry(tmp).y, undefined);
+});
+
+test('restamp refuses, and writes nothing, on a page where the block\'s id is not the one a browser reads', async (t) => {
+  const html = '<main><p Data-Id="q" data-id="y">real</p></main>';
+  const { tmp, page } = onePage(t, html, { y: { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } });
+
+  const { value, out } = await printed(t, () => restamp(tmp));
+
+  assert.deepEqual(value, { written: 0, alreadyHad: 0, noSuchBlock: 0, refused: 1 });
+  assert.match(out, /✗ y: p\/X01\.html carries Data-Id/);
+  assert.equal(page(), html);
+});
+
+test('a page where no block reads as the id is no reason to refuse it', async (t) => {
+  const { tmp, page } = onePage(t, '<main><p data-id="y" data-code="1.1">real</p></main>');
+  secondPage(tmp, '<main><p DATA-ID="z">other</p></main>');
+
+  const { value: r, out } = await syncing(t, tmp, await approvedOn(tmp, ['y'], '2026-09-22'));
+
+  assert.equal(r.added, 1, out);
+  assert.match(page(), /data-validated="2026-09-22"/);
+});
