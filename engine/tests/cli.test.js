@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, cpSync, re
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
-import { readBlocks, sheetFiles, withAttribute } from '../cli/pages.ts';
+import { readBlocks, sheetFiles } from '../cli/pages.ts';
 import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, restamp, check, ifITouch } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests, queue, list, show } from '../cli/requests.ts';
@@ -108,7 +108,7 @@ test('a validated block whose text changed is caught by check, and intact otherw
  * character of the id literally, so this suite plants each hostile id NEXT TO an innocent neighbour
  * and checks the neighbour never moves.
  */
-const HOSTILE_IDS = ['a+b', 'a(b', 'a|b', 'a[b', 'a\\b', 'a$&b'];
+const HOSTILE_IDS = ['a+b', 'a(b', 'a|b', 'a[b', 'a\\b'];
 const OTHER_ID = 'safe-neighbour';
 
 /** Two blocks on one page: the id under test, and an innocent neighbour right after it. */
@@ -160,19 +160,6 @@ for (const id of HOSTILE_IDS) {
 }
 
 /**
- * Without this guard, re-approving a block (`mark` called a second time, as `sync` does whenever
- * the site's ✓ post-dates the last one already recorded) would append a SECOND
- * `data-validated-fingerprint` to the same tag instead of updating the one already there — an
- * attribute a browser resolves in an undefined order, painted from whichever one it happens to
- * read.
- */
-test('withAttribute does not duplicate an attribute the tag already carries', () => {
-  const html = '<div data-id="X" data-validated-fingerprint="aaa">text</div>';
-  const after = withAttribute(html, 'X', 'data-validated-fingerprint', 'bbb');
-  assert.equal(after, html, 'an attribute already in the tag must be left alone, not duplicated');
-});
-
-/**
  * The dot case is mainly a regression guard: the old code escaped `.` on purpose, so `a.b` never
  * broke it. What it did not guard is ORDER — a neighbour whose id loosely resembles the pattern
  * (`aXb`, where `.` reads as "any character") sitting BEFORE the real target. This plants `aXb`
@@ -219,6 +206,307 @@ test('a dependency id containing $& lands intact in data-depended-on', async (t)
   const expectedValue = JSON.stringify({ [depId]: 'dddddddddddddddd' }).replace(/"/g, '&quot;');
   assert.ok(after.includes(`data-depended-on="${expectedValue}"`),
     'the dependency id must appear exactly as JSON.stringify produced it, not mangled by $-substitution');
+});
+
+/**
+ * `"`, `&`, `<` and `>` have no literal `data-id="${id}"` to find at all — an id carrying one names
+ * something this raw-text format cannot represent unescaped. `mark` refuses up front, before
+ * scanning a single file, rather than let the id's own character decide which tag the entity or the
+ * tag boundary it introduces actually belongs to.
+ */
+const INVALID_IDS = ['a"b', 'a&b', 'a<b', 'a>b'];
+for (const id of INVALID_IDS) {
+  test(`mark refuses id ${JSON.stringify(id)}: it cannot be matched by a literal needle`, async (t) => {
+    const tmp = project(t);
+    const sheet = join(tmp, 'p', 'X01.html');
+    const html = '<main><p data-id="safe" data-code="1.1">safe text</p></main>';
+    writeFileSync(sheet, html);
+    const registry = {};
+
+    const result = await mark(tmp, registry, id, '2026-09-22', 'test');
+
+    assert.equal(result, null, `mark must refuse an id containing ${JSON.stringify(id)}`);
+    assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
+    assert.equal(registry[id], undefined);
+  });
+}
+
+/**
+ * The MAJOR from round 1: `<main><p data-id="a"b"="">decoy a</p><p data-id="a&quot;b">real</p></main>`
+ * — an id containing `"` used to stamp the DECOY block, because the raw text `data-id="a"b"=""`
+ * reads, to a needle search, as `data-id="a"` followed by unrelated text. Refusing the id outright
+ * (rather than trying to locate it) means this decoy is never even reached.
+ */
+test('mark refuses the double-quote decoy id from round 1, and leaves both blocks untouched', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<main><p data-id="a"b"="">decoy a</p><p data-id="a&quot;b">real</p></main>';
+  writeFileSync(sheet, html);
+  const registry = {};
+
+  const result = await mark(tmp, registry, 'a"b', '2026-09-22', 'test');
+
+  assert.equal(result, null, 'an id with a `"` cannot be matched by a literal needle');
+  assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
+});
+
+/**
+ * The lock-grade bug from round 1: `mark` used to take the FIRST `[data-id]` anywhere in the FIRST
+ * file with the needle, while `sync` verified the ✓ against `readBlocks`'s view (`main [data-id]`).
+ * A hidden `<span data-id="y" hidden>` OUTSIDE `<main>`, before the real block, made the registry
+ * record the HIDDEN span's fingerprint and text — an owner's ✓ on the real text, locked onto a
+ * different one entirely. Both now resolve the same way: `main [data-id]` only.
+ */
+test('sync approves the block inside main, and never a same-id element outside it', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const header = '<header><span data-id="y" hidden>Always deploy on Friday</span></header>';
+  const main = '<main><p data-id="y" data-code="1.1">Never deploy on Friday</p></main>';
+  writeFileSync(sheet, header + main);
+
+  const blocks = await readBlocks(tmp);
+  const mainFingerprint = blocks.get('y').fingerprint;
+
+  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
+    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
+  const events = [
+    baseline,
+    { id: 'e1', type: 'approval', page: 'X01', block: 'y', fingerprint: mainFingerprint,
+      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
+  ];
+  const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
+  assert.equal(r.added, 1);
+
+  const registry = loadRegistry(tmp);
+  assert.equal(registry.y.fingerprint, mainFingerprint, 'the registry records the MAIN block');
+  assert.match(registry.y.text, /Never deploy on Friday/, 'and its text, not the hidden span\'s');
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.ok(after.includes(header), 'the hidden header span must stay untouched');
+  assert.match(after, /<p data-id="y" data-validated="2026-09-22" data-code="1\.1"/, 'the real block gets the seal');
+});
+
+/**
+ * Two candidates for one ✓ is not "the first one": with nothing to say which block the write is FOR,
+ * `mark` refuses rather than guess — whether the duplicate sits in one file or is split across two.
+ */
+test('mark refuses when two blocks in the same file carry the same id', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<main><p data-id="y" data-code="1.1">first</p><p data-id="y" data-code="1.2">second</p></main>';
+  writeFileSync(sheet, html);
+  const registry = {};
+
+  const result = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+
+  assert.equal(result, null, 'mark must refuse, not guess which one');
+  assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
+  assert.equal(registry.y, undefined);
+});
+
+test('mark refuses when two files each carry a block with the same id', async (t) => {
+  const tmp = project(t);
+  const sheetA = join(tmp, 'p', 'X01.html');
+  const sheetB = join(tmp, 'p', 'X02.html');
+  const htmlA = '<main><p data-id="y" data-code="1.1">first</p></main>';
+  const htmlB = '<main><p data-id="y" data-code="1.1">second</p></main>';
+  writeFileSync(sheetA, htmlA);
+  writeFileSync(sheetB, htmlB);
+  const registry = {};
+
+  const result = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+
+  assert.equal(result, null, 'mark must refuse, not guess which file');
+  assert.equal(readFileSync(sheetA, 'utf8'), htmlA, 'nothing written in the first file');
+  assert.equal(readFileSync(sheetB, 'utf8'), htmlB, 'nothing written in the second file');
+});
+
+/**
+ * `sync` passes the fingerprint it already checked the ✓ against, and `mark` refuses if the block it
+ * resolves computes a different one — the two views of the page disagreeing about what the id names
+ * is not something either one can safely settle by writing anyway.
+ */
+test('mark refuses when the expected fingerprint does not match the resolved block', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<main><p data-id="y" data-code="1.1">the real text</p></main>';
+  writeFileSync(sheet, html);
+  const registry = {};
+
+  const result = await mark(tmp, registry, 'y', '2026-09-22', 'test', undefined, undefined,
+    'not-the-real-fingerprint');
+
+  assert.equal(result, null);
+  assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
+  assert.equal(registry.y, undefined);
+});
+
+/**
+ * The needle `data-id="y"` can sit in another block's own TEXT, inside an HTML comment, or inside a
+ * `<script>` — all three BEFORE the real block. A splice that trusted the first textual match would
+ * land there instead; verifying against a re-parse is what lets the scan skip past all three and
+ * still find the one block that is really named `y`.
+ */
+test('mark on a page where the needle sits inside another block\'s text stamps only the real block', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const decoy = '<p data-id="z" data-code="1.1">this text mentions data-id="y" in passing</p>';
+  const real = '<p data-id="y" data-code="1.2">the real y</p>';
+  writeFileSync(sheet, `<main>${decoy}${real}</main>`);
+  const registry = {};
+
+  const fingerprint = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  assert.ok(fingerprint, 'mark must succeed, finding the real tag past the decoy text');
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.ok(after.includes(decoy), 'the decoy block must stay byte-identical');
+  assert.match(after, /data-id="y" data-validated="2026-09-22" data-code="1\.2"/);
+});
+
+/**
+ * Why checking the target's own attributes is not enough on its own: call `mark` again on the SAME
+ * text (as `sync` does whenever the recorded fingerprint already matches — an ordinary idempotent
+ * re-run). The real `y` already carries everything the plan asks for, so a check that only asks "does
+ * the target have the right attributes" is satisfied trivially, by history, no matter WHERE this
+ * second call spliced — and it would accept the decoy occurrence first, stamping the decoy's own text
+ * with garbage instead of touching `y` at all. Only comparing every OTHER block's text against
+ * `before` catches that the decoy, not `y`, is where this candidate actually landed.
+ */
+test('marking an already-marked block a second time still leaves an earlier decoy untouched', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const decoy = '<p data-id="z" data-code="1.1">this text mentions data-id="y" in passing</p>';
+  const real = '<p data-id="y" data-code="1.2">the real y</p>';
+  writeFileSync(sheet, `<main>${decoy}${real}</main>`);
+  const registry = {};
+
+  await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  const once = readFileSync(sheet, 'utf8');
+  await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  const twice = readFileSync(sheet, 'utf8');
+
+  assert.equal(twice, once, 'a second, idempotent mark must change nothing at all — the decoy least of all');
+});
+
+test('mark on a page where the needle sits inside a comment stamps only the real block', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const comment = '<!-- data-id="y" appears here for documentation -->';
+  const real = '<p data-id="y" data-code="1.1">the real y</p>';
+  writeFileSync(sheet, `<main>${comment}${real}</main>`);
+  const registry = {};
+
+  const fingerprint = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  assert.ok(fingerprint, 'mark must succeed, finding the real tag past the comment');
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.ok(after.includes(comment), 'the comment must stay byte-identical');
+  assert.match(after, /data-id="y" data-validated="2026-09-22" data-code="1\.1"/);
+});
+
+test('mark on a page where the needle sits inside a <script> stamps only the real block', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const script = '<script>// data-id="y" appears here only as a code comment</script>';
+  const real = '<main><p data-id="y" data-code="1.1">the real y</p></main>';
+  writeFileSync(sheet, `${script}${real}`);
+  const registry = {};
+
+  const fingerprint = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  assert.ok(fingerprint, 'mark must succeed, finding the real tag past the script');
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.ok(after.includes(script), 'the script must stay byte-identical');
+  assert.match(after, /data-id="y" data-validated="2026-09-22" data-code="1\.1"/);
+});
+
+/**
+ * A `>` sitting inside a quoted attribute value must not end the tag one character early — the
+ * quote-aware scan keeps reading past it, to the `>` that really closes the tag.
+ */
+test('mark on a block whose tag hides a `>` inside a quoted attribute stamps before the real `>`', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  writeFileSync(sheet, '<main><p data-id="y" title="a>b">real y</p></main>');
+  const registry = {};
+
+  const fingerprint = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  assert.ok(fingerprint, 'mark must not end the tag early at the `>` inside title="a>b"');
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.match(after,
+    new RegExp(`<p data-id="y" data-validated="2026-09-22" title="a>b" data-validated-fingerprint="${fingerprint}">real y</p>`),
+    'the seal lands before the real `>`, and the text is unchanged');
+});
+
+/**
+ * Proof P1 (round 1's review): no fixture had `data-id` as the LAST attribute before `>` — an
+ * off-by-one in the needle's own end would slip past unnoticed.
+ */
+test('mark on a tag where data-id is the last attribute before `>`', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  writeFileSync(sheet, '<main><div data-id="X">text</div></main>');
+  const registry = {};
+
+  const fingerprint = await mark(tmp, registry, 'X', '2026-09-22', 'test');
+  assert.ok(fingerprint);
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.match(after,
+    new RegExp(`<div data-id="X" data-validated="2026-09-22" data-validated-fingerprint="${fingerprint}">text</div>`));
+});
+
+/**
+ * Proof P2 (round 1's review): calling `mark` twice on the same id must leave exactly one
+ * `data-validated` — the FIRST date, never silently overwritten by a second call.
+ */
+test('mark called twice on the same id leaves exactly one data-validated attribute', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  writeFileSync(sheet, '<main><p data-id="y" data-code="1.1">the text</p></main>');
+  const registry = {};
+
+  await mark(tmp, registry, 'y', '2026-09-22', 'test');
+  await mark(tmp, registry, 'y', '2026-09-23', 'test');
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.equal((after.match(/data-validated="/g) ?? []).length, 1, 'data-validated must not be duplicated');
+  assert.equal((after.match(/data-validated-fingerprint="/g) ?? []).length, 1);
+  assert.match(after, /data-validated="2026-09-22"/, 'the first date wins: mark never overwrites an existing mark');
+});
+
+/**
+ * Proof P3 (round 1's review): a tag with no closing `>` anywhere in the file is not a block a
+ * parser can resolve at all — the same parser `readBlocks` uses never turns it into an element, so
+ * `resolveBlock` reports it as not found rather than guessing where an attribute would even go.
+ * `mark` has to refuse, and `restamp` must not count it as written.
+ */
+test('mark on a tag that never closes refuses instead of guessing where it ends', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<main><p data-id="y" data-code="1.1"never closed here';
+  writeFileSync(sheet, html);
+  const registry = {};
+
+  const result = await mark(tmp, registry, 'y', '2026-09-22', 'test');
+
+  assert.equal(result, null);
+  assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
+});
+
+test('restamp on a tag that never closes does not count it as written', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<main><p data-id="y" data-code="1.1"never closed here';
+  writeFileSync(sheet, html);
+  writeFileSync(join(tmp, 'r.json'),
+    JSON.stringify({ y: { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } }));
+
+  const written = await restamp(tmp);
+
+  assert.equal(written, 0, 'a tag that cannot be closed safely must not count as written');
+  assert.equal(readFileSync(sheet, 'utf8'), html, 'nothing written');
 });
 
 /**

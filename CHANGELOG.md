@@ -266,12 +266,15 @@ who ran the engine from `main` before it.
 
 ### Fixed
 
-- **A block id containing a regex or CSS metacharacter (`+ * ( [ | ? \` and more) is now marked,
-  synced and restamped correctly, instead of possibly hitting the wrong block, missing the right
-  one, or throwing.** `mark`, `sync` and `restamp` built a regex, and in one place a CSS selector,
-  straight out of the id — which is page text a documentation author writes, not something the
-  engine controls. The opening tag is now located by plain string search on `data-id="..."`
-  (`engine/cli/pages.ts`), so the id's own characters no longer choose what matches. Along the way,
-  writing `data-depended-on` (which carries other block ids inside a JSON blob) stopped going
-  through `String.replace` with a string replacement, whose `$&`/`$1`/`$$` syntax could corrupt an
-  id containing `$&`.
+- **A ✓ is now stamped only on the one block it was given to — never on a decoy, a duplicate, or
+  whichever block a regex happened to match first.** `mark`, `sync` and `restamp` used to locate a
+  block by a regex or a CSS selector built straight out of its id, or by the first raw-text match in
+  the first file that had it — either could land the seal on the wrong block, or throw, depending on
+  characters the id itself carried (a documentation author's choice, not the engine's). A block is
+  now resolved the same way the traffic light already reads it, and a write is verified, by
+  re-parsing, against every other block on the page before it lands. Three cases now REFUSE, and say
+  why, instead of writing anywhere: an id carried by more than one block; an id containing `"`, `&`,
+  `<` or `>`, which cannot be located safely; and a page where the tag cannot be found without
+  risking another block. Along the way, writing `data-depended-on` (which carries other block ids
+  inside a JSON blob) stopped going through `String.replace` with a string replacement, whose
+  `$&`/`$1`/`$$` syntax could corrupt an id containing `$&`.

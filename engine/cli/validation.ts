@@ -2,8 +2,8 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, projectRoles, openTag, withAttribute,
-  withValidatedMark, type Block } from './pages.ts';
+import { readBlocks, sheetFiles, resolveBlock, spliceAttributes, shortName, ofProject, projectRoles,
+  type Block, type Stamp, type MarkPlan } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
@@ -194,30 +194,41 @@ export async function orphanMarks(root: string, registry: Registry, files?: stri
   return found;
 }
 
-/** Writes a block's lock: marks the HTML and records the fingerprint. */
+/** Prints why a write did not happen — a single format, so "nothing written" always means it. */
+function refuse(id: string, message: string): null {
+  console.log(`  ✗ ${id}: ${message}; nothing written`);
+  return null;
+}
+
+/** Writes a block's lock: marks the HTML and records the fingerprint.
+ *
+ * `expectedFingerprint`, when given, is the fingerprint a caller already checked the ✓ against
+ * (`sync`, against `readBlocks`'s view) — if the block THIS call resolves computes a different one,
+ * the two views of the page disagree about what that id names, and writing the seal would be a guess
+ * about which view was right. Refusing, rather than trusting either view over the other, is the safe
+ * side of a disagreement neither one of them can settle alone.
+ */
 export async function mark(root: string, registry: Registry, id: string, when: string,
                            source: string, event?: string,
-                           fingerprintsNow?: Map<string, string>): Promise<string | null> {
-  const found = findBlockFile(root, id);
-  if (!found) { console.log(`  ✗ ${id}: not found`); return null; }
+                           fingerprintsNow?: Map<string, string>,
+                           expectedFingerprint?: string): Promise<string | null> {
+  const resolved = resolveBlock(root, id);
+  if (!resolved.ok) return refuse(id, resolved.message);
+  const { path, html, element } = resolved;
 
-  const marked = withValidatedMark(found.html, id, when);
-  if (marked !== found.html) writeFileSync(found.path, marked, 'utf8');
-
-  const { document } = parseHTML(marked);
-  // Not a selector built from `id`: the id is page text, and a `"` or `\` inside it would break or
-  // mis-match `[data-id="${id}"]`. Comparing the attribute's actual value has no such reading.
-  const el = [...document.querySelectorAll('[data-id]')].find((e) => e.getAttribute('data-id') === id);
-  if (!el) { console.log(`  ✗ ${id}: not found after marking`); return null; }
-  const copy = el.cloneNode(true) as Element;
+  const copy = element.cloneNode(true) as Element;
   copy.querySelectorAll('[data-review-ui]').forEach((x: Element) => x.remove());
   const text = copy.textContent ?? '';
   const fingerprint = await fingerprintOfText(text);
 
+  if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
+    return refuse(id, 'the text resolved here does not match the ✓ that was checked');
+  }
+
   // What this block depends on, and how each dependency looked RIGHT NOW. Keeping the snapshot of the
   // dependencies is what allows saying, months later, "the text is still the same but the base moved".
   // Without it the red light would have nothing to compare against.
-  const declared = (el.getAttribute('data-depends') ?? '').split(/\s+/).filter(Boolean);
+  const declared = (element.getAttribute('data-depends') ?? '').split(/\s+/).filter(Boolean);
   const dependsOn: Record<string, string> = {};
   for (const other of declared) {
     const d = fingerprintsNow?.get(other);
@@ -229,18 +240,22 @@ export async function mark(root: string, registry: Registry, id: string, when: s
   //   data-validated-fingerprint  the text that was approved  → without it there is no 🟡
   //   data-depended-on            the ground at that moment   → without it there is no 🔴
   // The JSON is the truth; these attributes are the copy that travels with the page.
-  const attributes: Record<string, string> = { 'data-validated-fingerprint': fingerprint };
+  const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: fingerprint }];
   if (Object.keys(dependsOn).length) {
-    attributes['data-depended-on'] = JSON.stringify(dependsOn).replace(/"/g, '&quot;');
+    attributes.push({ attr: 'data-depended-on', value: JSON.stringify(dependsOn).replace(/"/g, '&quot;') });
   }
-  let html = readFileSync(found.path, 'utf8');
-  for (const [attr, value] of Object.entries(attributes)) {
-    html = withAttribute(html, id, attr, value);
-  }
-  writeFileSync(found.path, html, 'utf8');
+
+  // Always the FULL plan, never pre-filtered by what the element already has: `spliceAttributes`
+  // itself is what decides "already there, leave it" per attribute, against the tag it actually
+  // splices into — the one check, used here and by `restamp`, rather than a second one guessing the
+  // same thing from the resolved element before any splice is even attempted.
+  const plan: MarkPlan = { validatedAt: when, attributes };
+  const result = spliceAttributes(html, id, plan);
+  if ('error' in result) return refuse(id, result.error);
+  if (result.html !== html) writeFileSync(path, result.html, 'utf8');
 
   registry[id] = {
-    file: shortName(root, found.path),
+    file: shortName(root, path),
     date: when, fingerprint, source,
     text: text.replace(/\s+/g, ' ').trim().slice(0, 120),
     ...(Object.keys(dependsOn).length ? { dependsOn } : {}),
@@ -328,7 +343,10 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
       expired++; continue;
     }
     if (registry[id]?.fingerprint === block.fingerprint) { unchanged++; continue; }
-    if (await mark(root, registry, id, when, 'site', e.id, fingerprintsNow)) {
+    // block.fingerprint is what was just verified against e.fingerprint above (the two are equal at
+    // this point) — passed on so `mark` refuses instead of writing if the block IT resolves ever
+    // disagrees with the one `readBlocks` saw here.
+    if (await mark(root, registry, id, when, 'site', e.id, fingerprintsNow, block.fingerprint)) {
       console.log(`  ✓ ${id} validated by you on the site on ${when}`);
       added++;
     }
@@ -414,38 +432,43 @@ export async function showLights(root: string, options: { only?: string } = {}) 
 export async function restamp(root: string) {
   const registry = loadRegistry(root);
   const blocks = await readBlocks(root);
-  let written = 0, alreadyHad = 0, noSuchBlock = 0;
+  let written = 0, alreadyHad = 0, noSuchBlock = 0, refused = 0;
   const willTurnYellow: string[] = [];
 
   for (const [id, entry] of Object.entries(registry)) {
     const recorded = entry.fingerprint;
     if (!recorded) continue;
-    const found = findBlockFile(root, id);
-    if (!found) { noSuchBlock++; continue; }
+    const resolved = resolveBlock(root, id);
+    if (!resolved.ok) {
+      // Not found is the ordinary "the page moved on" case `noSuchBlock` always reported; a
+      // duplicate id or an id this format cannot represent is a REFUSAL — the block may well still
+      // be there, but nothing can be written to it safely — and gets its own count and its reason.
+      if (resolved.kind === 'not-found') { noSuchBlock++; continue; }
+      refuse(id, resolved.message); refused++; continue;
+    }
+    const { path, html } = resolved;
 
     const current = blocks.get(id)?.fingerprint;
     if (current && current !== recorded) willTurnYellow.push(id);
 
-    const tag = openTag(found.html, id);
-    if (tag && found.html.slice(tag.needleEnd, tag.tagEnd).includes('data-validated-fingerprint')) {
-      alreadyHad++; continue;
-    }
-
-    const attributes: Record<string, string> = { 'data-validated-fingerprint': recorded };
+    const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: recorded }];
     if (entry.dependsOn && Object.keys(entry.dependsOn).length) {
-      attributes['data-depended-on'] = JSON.stringify(entry.dependsOn).replace(/"/g, '&quot;');
+      attributes.push({ attr: 'data-depended-on', value: JSON.stringify(entry.dependsOn).replace(/"/g, '&quot;') });
     }
 
-    let html = readFileSync(found.path, 'utf8');
-    for (const [attr, value] of Object.entries(attributes)) {
-      html = withAttribute(html, id, attr, value);
-    }
-    writeFileSync(found.path, html, 'utf8');
+    const result = spliceAttributes(html, id, { attributes });
+    if ('error' in result) { refuse(id, result.error); refused++; continue; }
+    // "Already had it" and "written" are the same question asked in opposite directions — whether
+    // this splice changed anything — so one comparison answers both, instead of a text-based check
+    // for the first and a write for the second.
+    if (result.html === html) { alreadyHad++; continue; }
+    writeFileSync(path, result.html, 'utf8');
     written++;
   }
 
   console.log(`\n${written} block(s) got the mark they were missing · ${alreadyHad} already had it`);
   if (noSuchBlock) console.log(`⚠ ${noSuchBlock} entries in the registry no longer exist in the pages`);
+  if (refused) console.log(`⚠ ${refused} entries could not be stamped safely — see the messages above`);
   if (willTurnYellow.length) {
     console.log(`\n🟡 ${willTurnYellow.length} will show up YELLOW on the site, and that is right —`);
     console.log(`   the text changed after the ✓:\n   ${willTurnYellow.join('  ')}`);
