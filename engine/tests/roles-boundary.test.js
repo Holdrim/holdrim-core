@@ -436,3 +436,26 @@ test('no caller outside engine/core/roles.js decides anything from a role\'s nam
     ...offenders,
   ].join('\n  '));
 });
+
+// A role question asked of `email` instead of `who` flattens an agent token to the address it
+// carries, and `isOwner` then answers for the owner's address as though the owner had signed in
+// (holdrim#138, the tamper routes after #134 merged). Only the TOKEN_READS/TOKEN_WRITES allowlist
+// stops such a call today, so no request can reach it; this scan is what fails if one comes back.
+const ROLE_QUESTION_OF_ADDRESS = new RegExp([
+  String.raw`\broles\.(?:isOwner|isLockHolder|isAgent|roleOf)\(\s*email\b`,
+  String.raw`\broles\.can\([^)]*,\s*email\b`,
+  String.raw`\b(?:mayAcknowledge|acknowledgementRefusal)\(\s*roles\s*,\s*email\b`,
+].join('|'));
+
+test('server.ts asks every role question of who, never of the flattened address', () => {
+  const real = readFileSync(join(ROOT, 'engine/api/server.ts'), 'utf8');
+  const hits = real.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => ROLE_QUESTION_OF_ADDRESS.test(l));
+  assert.deepEqual(hits, [], 'a role question of `email` flattens an agent token');
+});
+
+test('the address scan catches mayAcknowledge(roles, email) and roles.isOwner(email), by name', () => {
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, email)) return'));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test('String(roles.isAgent(email))'));
+  assert.ok(ROLE_QUESTION_OF_ADDRESS.test("roles.can('triage', email)"));
+  assert.ok(!ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, who)) return'));
+});

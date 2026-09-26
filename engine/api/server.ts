@@ -1270,7 +1270,7 @@ const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer &&
  * Whether the people SCREEN (and its link in the nav) is reachable at all — `features.peopleScreen`.
  *
  * ⚠️ This is the ONLY place that toggle is read. The `/api/users*` routes (`userRoutes`, above) ask
- * `manages()` — `roles.can('people', email)` — and never this: hiding the screen must never mean
+ * `manages()` — `roles.can('people', who)` — and never this: hiding the screen must never mean
  * disabling what it fronts (docs/ROLES.md, "no toggle may disable a guard"). An owner who knows the
  * routes, or a script that calls them directly, keeps every ability the screen merely gives a button
  * to; turning this off hides the button, nothing else. `engine/tests/features.test.js` proves the
