@@ -226,10 +226,11 @@ export function warnOfTampering() {
  */
 export function refuseToActOnBrokenGuards(source: Partial<Pick<Source, 'guardsTampered'>>): void {
   if (!source.guardsTampered) return;
-  throw new Error('refusing to act on this events file: its guards are not the ones this version installs '
-    + '(each is named above), so an approval in it may be forged.\n'
+  throw new Error('refusing to act on this events file: its guards are not the ones this version installs, '
+    + 'or cannot see the rows they guard (each is named above), so an approval in it may be forged.\n'
     + '  Start the server against the file once — it puts the guards back and names them in its log — '
-    + 'check what was written while they were gone, then run this again.');
+    + 'check what was written while they were gone, then run this again. A column hiding the rowid, or a '
+    + 'row at the largest rowid, no boot repairs: a person does (SECURITY.md).');
 }
 
 export async function list(root: string, source: Parameters<typeof queue>[1], options: { all?: boolean; json?: boolean } = {}) {

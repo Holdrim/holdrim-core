@@ -76,15 +76,39 @@ Worth knowing before you run it:
     rowid above `MAX(rowid) + 1`, or above 1 on an empty table: without it, one event parked at the
     largest rowid SQLite has sends every later append to a random rowid below it, where
     `events_no_low_rowid` refuses each one — the owner's ✓ included — calling a genuine write a
-    forgery, and the parked row cannot be deleted. Between the two, an insert takes exactly the
-    next rowid. That stops the parking, not a file parked before the guard existed, which stays
-    unable to append until someone recovers it by hand. What no guard closes: an attacker who also drops and restores `events_no_delete`
-    and `events_no_low_rowid` between two reads (the same gap `sqlite_guard_missing` already admits
-    for every other one: the server on its next boot, and the CLI's `--db` reader on every read,
-    name a guard still dropped, and neither names one put back) can delete every hashed row and
-    start the boundary over, or delete an event and its texts row together and leave nothing to
-    compare against at all — an erasure, not a mismatch, and the panel already cannot tell an
-    erased event from one that was never made. One more limit worth naming plainly: `hashText`
+    forgery, and the parked row cannot be deleted. Between the two, an insert into a table that
+    holds a row takes exactly the next rowid; the first row of an empty table may take any rowid
+    of 1 or below, a negative one included, which traps nothing, since every rowid above it is
+    still free. That does not stop the parking outright, and nothing can: a connection that turns
+    triggers off for itself (`SQLITE_DBCONFIG_ENABLE_TRIGGER`, `.dbconfig enable_trigger off` in
+    the `sqlite3` shell) runs no guard at all, and `events_no_high_rowid` dropped, a row parked and
+    the guard recreated by its exact text leaves every guard as it was. What it stops is the
+    silence: an `events` table whose highest rowid is the ceiling, however it got there, is named
+    by the server on every boot and by the CLI's `--db` reader on every read (a
+    `sqlite_guard_missing` WARNING with `kind: "parked"`; `guardsTampered`, so `sync`, `apply` and
+    `state` refuse), and an append refused because of it says that is the cause instead of calling
+    the write a forgery. Nothing repairs it: the row cannot be deleted, so a person recovers such a
+    file by hand. A row one short of the ceiling traps nothing until a genuine append takes the
+    ceiling, and is named from then on.
+    A column named `rowid`, `oid` or `_rowid_`, in any case and generated ones included, on
+    `events`, `people` or `texts`, takes that name from the real rowid for every guard that says it,
+    and `ALTER TABLE ... ADD COLUMN` makes one with every trigger's text unchanged. While it is
+    there, a row can go in at any rowid through `_rowid_` — below the boundary, or at the ceiling —
+    a DEFAULT on it makes every append collide, and an `UPDATE OR REPLACE` onto another person's
+    rowid erases that person's row. The server on every boot and the CLI's `--db` reader on every
+    read name such a column (`kind: "shadowed"`), the CLI refuses to act, and nothing repairs it.
+    Once the column is dropped again, only a row it parked at the ceiling is still named (above);
+    a row it let in below the boundary, or a person's row it erased, leaves nothing any check here
+    can find — the same gap as a guard dropped and put back. What no guard closes: an attacker who
+    also drops and restores `events_no_delete` and `events_no_low_rowid` between two reads (the
+    same gap `sqlite_guard_missing` already admits for every other one: the server on its next
+    boot, and the CLI's `--db` reader on every read, name a guard still dropped, and neither names
+    one put back) can delete every hashed row and start the boundary over, or delete an event and
+    its texts row together and leave nothing to compare against at all — an erasure, not a
+    mismatch, and the panel already cannot tell an erased event from one that was never made.
+    Dropping and restoring `events_no_high_rowid` the same way parks a row at the ceiling; that
+    one is still named afterwards, by the row it leaves (above), and a row parked short of the
+    ceiling is not. One more limit worth naming plainly: `hashText`
     (`engine/api/texts.ts`) is an UNKEYED hash — plain sha256 of the salt, a NUL byte and the value,
     with no secret the write access lacks — so that same write access can just as easily compute
     a correct hash as strip one, and append a forged row at `MAX(rowid) + 1` with a matching

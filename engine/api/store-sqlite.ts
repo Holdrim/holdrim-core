@@ -86,27 +86,33 @@ export const GUARDS: Record<string, string> = {
   // below that row — so `events_no_low_rowid` refuses every append after it, the owner's ✓ included,
   // and tells the operator each genuine write is a forgery. The row cannot be deleted, so the only
   // way out would be dropping a guard. So an insert may name no rowid above the one SQLite would
-  // have picked itself, MAX(rowid) + 1: with `events_no_low_rowid` beside it, every insert takes
-  // exactly that one, and nobody can park an event at the ceiling.
+  // have picked itself, MAX(rowid) + 1: with `events_no_low_rowid` beside it, every insert into a
+  // table that holds a row takes exactly that one. Like every guard, it binds only a connection
+  // that runs triggers and a file that still holds it: `guardMismatches` below names a table parked
+  // at the ceiling however it got there, and `append` says so when that is why it was refused.
   //
-  // AFTER, for the reason `events_no_low_rowid` is: in a BEFORE trigger NEW.rowid is still -1 for an
-  // insert that leaves the rowid to SQLite, and a BEFORE version of this would refuse every normal
-  // append. By AFTER, the row is already in the table, so the maximum it is compared with leaves
-  // it out (`rowid <> NEW.rowid`): that is the table's maximum before this insert wherever the row
-  // landed, so an insert below it trips `events_no_low_rowid` alone, with that guard's own words,
-  // and never this one as well. SQLite still reads it as one step in from the end of the rowid
-  // tree, not a scan of the table.
+  // AFTER, not BEFORE, although today the two behave alike: SQLite documents NEW.rowid in a BEFORE
+  // INSERT trigger as undefined when the insert leaves the rowid to SQLite. node:sqlite gives -1
+  // there, which is never above MAX + 1, so a BEFORE version passes every normal append too — but
+  // only because of a placeholder nobody promises. After the insert, NEW.rowid is the rowid the row
+  // really got, and it is the same shape as `events_no_low_rowid`. The price of AFTER is that the
+  // row is already in the table: compared with a MAX that counted it, NEW.rowid is never above
+  // MAX + 1 and this guard would never fire. `rowid <> NEW.rowid` leaves it out, so the comparison
+  // is with the maximum before this insert — which also means an insert BELOW that maximum trips
+  // `events_no_low_rowid` alone, never this one as well. SQLite still reads it as one step in from
+  // the end of the rowid tree, not a scan of the table.
   //
   // On an empty table the bound is 1, not none: 1 is the rowid SQLite gives the first insert that
   // names none, so a genuine first append always passes, and an empty `events` is not a fresh file
   // — `people` can already hold rows, and one event parked at the ceiling before the first real one
-  // traps every append after it just the same. A first rowid of 1 or below passes: nothing is held
-  // yet for it to sort under, and the rowids above it are all still free.
+  // traps every append after it just the same. The first row may still take any rowid of 1 or
+  // below, a negative one included, and `events_no_low_rowid` is not narrowed to refuse that: it
+  // traps nothing, since every rowid above it is still free, and changing that guard's text would
+  // make every existing file read it as "not the one this version installs".
   //
   // MAX + 1 on a table already parked at the ceiling is a REAL in SQLite, not an overflow error, so
   // this guard neither refuses nor excuses anything there: a file parked before it existed still
-  // refuses every append, through `events_no_low_rowid`. This stops the parking, and does not undo
-  // one that already happened.
+  // refuses every append, through `events_no_low_rowid`, and is named for it (`parked`, below).
   events_no_high_rowid: `AFTER INSERT ON events
     WHEN NEW.rowid > IFNULL((SELECT MAX(rowid) FROM events WHERE rowid <> NEW.rowid), 0) + 1
     BEGIN SELECT RAISE(ABORT, 'an event is not inserted past the next rowid: the trail is the product'); END`,
@@ -197,14 +203,22 @@ export const GUARDS: Record<string, string> = {
  */
 export function installGuards(db: DatabaseSync, guards: Record<string, string> = GUARDS,
                               warn: (line: string) => void = console.warn): void {
-  if (guardMismatches(db, guards).length === 0) return;
+  const all = guardMismatches(db, guards);
+  // Said on every boot for as long as it is so, and never with the write lock taken: nothing a
+  // boot can do repairs a column that hides the rowid or a row parked at the ceiling (the comment on
+  // `rowidMismatches`), so taking the lock for them would only make each boot wait behind a writer.
+  for (const m of all.filter((x) => !repairable(x))) {
+    warn(`holdrim: ${guardMismatchSaid(m)}; nothing a boot does repairs this`);
+    log('WARNING', 'sqlite_guard_missing', { guard: m.name, kind: m.kind });
+  }
+  if (!all.some(repairable)) return;
   // The name comes from the file, so it is quoted: unquoted, a trigger named
   // `x; DROP TRIGGER events_no_delete` would drop a guard and keep itself.
   const drop = (name: string) => db.exec(`DROP TRIGGER IF EXISTS "${name.replace(/"/g, '""')}"`);
   db.exec('BEGIN IMMEDIATE');
   try {
     // Read again under the lock: another process may have repaired it while this one waited.
-    const found = guardMismatches(db, guards);
+    const found = guardMismatches(db, guards).filter(repairable);
     // Neither half alone is enough: a fresh file can hold a foreign trigger (still reported below,
     // just not as one of OUR guards missing) before it ever holds a row, and an old, real database
     // can hold rows with none of our guards on it at all — see the long comment above the function.
@@ -240,10 +254,66 @@ export function installGuards(db: DatabaseSync, guards: Record<string, string> =
 }
 
 /**
- * One way the triggers a file holds on `events`, `people` and `texts` differ from `guards`: a guard
- * not held at all, one held under its name with a different text, or a trigger that is not a guard.
+ * One way a file's `events`, `people` and `texts` are not what `guards` promise: a guard not held at
+ * all, one held under its name with a different text, or a trigger that is not a guard — `name` is
+ * the trigger's — or, beyond the triggers, a column that hides the rowid from them (`shadowed`,
+ * named `table.column`) or an `events` table parked at the ceiling (`parked`, named `events`).
+ * The first three a boot repairs; the last two nothing repairs (`repairable`).
  */
-export type GuardMismatch = { name: string; kind: 'missing' | 'changed' | 'foreign' };
+export type GuardMismatch = { name: string; kind: 'missing' | 'changed' | 'foreign' | 'shadowed' | 'parked' };
+
+/** Whether a boot can put this right: a trigger it can drop or create, not a column or a row. */
+export const repairable = (m: GuardMismatch): boolean => m.kind !== 'shadowed' && m.kind !== 'parked';
+
+/** The largest rowid SQLite has, as SQL: a JavaScript number cannot hold it exactly. */
+const ROWID_CEILING = '9223372036854775807';
+
+/**
+ * What the triggers cannot see about the rows they guard, since every guard reads `rowid`.
+ *
+ * A column named `rowid`, `oid` or `_rowid_`, in any case, takes that name from the real rowid for
+ * every statement that says it, the guards' own included, and `ALTER TABLE ... ADD COLUMN` makes
+ * one with every trigger's text left exactly as it was. While it is there, `events_no_replace`,
+ * `events_no_low_rowid` and `events_no_high_rowid` compare the column, not the rowid: a row goes in
+ * at any rowid through `_rowid_`, a DEFAULT makes every append collide, and on `people` an
+ * `UPDATE OR REPLACE` onto another person's rowid erases that person's row. `pragma_table_xinfo`,
+ * not `table_info`: a generated column named `rowid` hides it just the same, and only xinfo lists it.
+ * Rejected: comparing each table's `CREATE` text with this version's, which would also catch a
+ * `writable_schema` edit — `ensureColumn` rewrites that text on every file an older version made,
+ * so it would either call every upgraded file tampered or need every shape any version ever wrote.
+ * Nothing repairs it: dropping the column undoes nothing it let through, and could drop data.
+ *
+ * Once the column is dropped again, the row it let in is all that is left, and only one such row
+ * can still be named: an `events` table whose highest rowid is the ceiling, however it got there —
+ * that column, triggers turned off on a connection (`SQLITE_DBCONFIG_ENABLE_TRIGGER`), or
+ * `events_no_high_rowid` dropped and put back by its exact text. Exactly the ceiling, not "near"
+ * it: that row is what sends SQLite to random rowids below it, so every append after it is refused
+ * as a forgery, and a row one short of it traps nothing until a genuine append takes the ceiling —
+ * at which point this names it. The rowid is compared in SQL through a name no column hides: read
+ * into JavaScript, it throws. What a dropped column let through otherwise — a row below
+ * `extractionBoundary`, a person's row erased — leaves nothing here to find (SECURITY.md).
+ */
+function rowidMismatches(db: DatabaseSync): GuardMismatch[] {
+  const out: GuardMismatch[] = [];
+  const aliases = ['rowid', '_rowid_', 'oid'];
+  let eventsRowid: string | undefined = 'rowid';
+  for (const table of ['events', 'people', 'texts']) {
+    const hiding = (db.prepare(`SELECT name FROM pragma_table_xinfo('${table}')`).all() as { name: string }[])
+      .map((c) => c.name).filter((n) => aliases.includes(n.toLowerCase()));
+    for (const column of hiding) out.push({ name: `${table}.${column}`, kind: 'shadowed' });
+    if (table === 'events') {
+      const hidden = new Set(hiding.map((n) => n.toLowerCase()));
+      eventsRowid = aliases.find((a) => !hidden.has(a));
+    }
+  }
+  // All three names hidden leaves no way to ask for the rowid at all, and each is named above.
+  const parked = eventsRowid !== undefined && db.prepare(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'
+       AND EXISTS (SELECT 1 FROM events WHERE ${eventsRowid} = ${ROWID_CEILING})`
+  ).get();
+  if (parked) out.push({ name: 'events', kind: 'parked' });
+  return out;
+}
 
 /**
  * The comparison `installGuards` repairs from, and the only one: the CLI's `--db` reader
@@ -253,9 +323,10 @@ export type GuardMismatch = { name: string; kind: 'missing' | 'changed' | 'forei
  * this comparison would drift the day a guard's text or the set of tables changes, and the reader
  * whose copy fell behind would call a sound file tampered, or a tampered one sound.
  *
- * Reads `sqlite_master` and nothing else, and writes nothing: the CLI's connection is read-only,
- * and a comparison that repaired as it went could not run there. Foreign triggers come first, then
- * the guards in `guards`' own order — the order `installGuards` repairs in.
+ * Reads `sqlite_master`, each table's columns and one rowid lookup, and writes nothing: the CLI's
+ * connection is read-only, and a comparison that repaired as it went could not run there. Foreign
+ * triggers come first, then the guards in `guards`' own order — the order `installGuards` repairs
+ * in — then what `rowidMismatches` finds, which no boot repairs.
  *
  * A foreign trigger counts: one that answers `RAISE(IGNORE)` to every ✓, or inserts a forged one
  * after each real event, leaves every guard intact and the lock off all the same.
@@ -281,7 +352,9 @@ export function guardMismatches(db: DatabaseSync, guards: Record<string, string>
     if (found === undefined) out.push({ name, kind: 'missing' });
     else if (flat(found) !== flat(sql)) out.push({ name, kind: 'changed' });
   }
-  return out;
+  // Here and not beside it: every reader that asks whether the guards hold asks this too, so a
+  // guard blinded by a column is never read as a guard in place.
+  return [...out, ...rowidMismatches(db)];
 }
 
 /**
@@ -302,6 +375,9 @@ export function guardMismatchSaid(m: GuardMismatch): string {
     case 'missing': return `the database's guard ${name} is missing`;
     case 'changed': return `the database's guard ${name} was not the one this version installs`;
     case 'foreign': return `the database holds a trigger this version does not install, ${name}`;
+    case 'shadowed': return `the database has a column ${name} that hides the real rowid from every guard`;
+    case 'parked': return `the database's events table holds a row at the largest rowid, ${ROWID_CEILING}, `
+      + 'so every append after it lands below that row and is refused as a forgery, which it is not';
   }
 }
 
@@ -334,8 +410,10 @@ export function guardMismatchSaid(m: GuardMismatch): string {
  * guard leaves (the long comment on `installGuards` above), not a new one this closes.
  */
 export function extractionBoundary(db: DatabaseSync): number | null {
+  // REAL, as every reader of the rowid takes it (`list`, `Source#fromFile`): a row parked at the
+  // ceiling read as an integer throws in JavaScript, and a reader that throws names nothing.
   return (db.prepare(
-    'SELECT MIN(rowid) AS boundary FROM events WHERE text_hash IS NOT NULL OR snapshot_hash IS NOT NULL'
+    'SELECT CAST(MIN(rowid) AS REAL) AS boundary FROM events WHERE text_hash IS NOT NULL OR snapshot_hash IS NOT NULL'
   ).get() as { boundary: number | null }).boundary;
 }
 
@@ -350,6 +428,24 @@ export function extractionBoundary(db: DatabaseSync): number | null {
 function ensureColumn(db: DatabaseSync, table: string, column: string, type: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   if (!columns.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
+/**
+ * The error an append that failed is reported with. On a table parked at the ceiling, or with a
+ * column hiding the rowid, the guard that refused speaks of a forgery — "inserted below one already
+ * held", "not replaced" — about the operator's own genuine write, and the cause is somewhere else
+ * entirely: so the cause is what is said, and the guard's words go along as `cause`.
+ */
+function refusedBecause(db: DatabaseSync, err: unknown): unknown {
+  let found: GuardMismatch[];
+  try {
+    found = rowidMismatches(db).filter((m) => m.kind === 'parked' || m.name.startsWith('events.'));
+  } catch {
+    return err; // the original failure is the one to report, not a failure to explain it
+  }
+  if (found.length === 0) return err;
+  return new Error(`the event was not recorded: ${found.map(guardMismatchSaid).join('; and ')}. `
+    + 'This is how the file was left, not what this write did: see SECURITY.md', { cause: err });
 }
 
 export class SqliteEventStore implements EventStore {
@@ -504,7 +600,7 @@ export class SqliteEventStore implements EventStore {
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');
-      throw err;
+      throw refusedBecause(this.#db, err);
     }
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
@@ -572,9 +668,12 @@ export class SqliteEventStore implements EventStore {
         // picks. Today's SQLite already hands ties back in rowid order, so dropping it changes
         // nothing a test can see; naming it turns that accident into a promise. `rowid DESC` fails
         // the suite. Selected explicitly (not `SELECT *`, which hides it on a table with a non-integer
-        // primary key): `extractionBoundary` below is compared against it, per row.
-        ? this.#db.prepare('SELECT *, rowid FROM events ORDER BY happened_at, rowid').all()
-        : this.#db.prepare('SELECT *, rowid FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
+        // primary key): `extractionBoundary` below is compared against it, per row. As a REAL: an
+        // integer above 2^53 throws on its way into JavaScript, so one row parked at the ceiling
+        // would make every read of its page fail instead of reading; exact below 2^53, where every
+        // genuine append is.
+        ? this.#db.prepare('SELECT *, CAST(rowid AS REAL) AS rowid FROM events ORDER BY happened_at, rowid').all()
+        : this.#db.prepare('SELECT *, CAST(rowid AS REAL) AS rowid FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
       people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
         .map((p) => [p.id, p.email]));
       texts = new Map((this.#db.prepare('SELECT event, field, value, salt FROM texts').all() as

@@ -200,8 +200,9 @@ test('the database REFUSES an insert whose rowid lands below one already held, e
     // distinguishing this guard from `events_no_replace`, which only ever sees a HELD rowid as a
     // conflict, never a free one that merely happens to be low. This version never opens such a
     // gap (`events_no_high_rowid` holds every insert to MAX + 1), but a file written before that
-    // guard existed can hold one, so it is opened here with that guard lifted, and put back by its
-    // exact text before the refusal this test is for.
+    // guard existed can hold one, so it is opened here with that guard lifted. Putting it back is
+    // housekeeping, not proof: the refusal below is `events_no_low_rowid`'s, 101 is MAX + 1 either
+    // way, and the reopen at the end would reinstall it anyway — only with a "missing" warning.
     db.exec('DROP TRIGGER events_no_high_rowid');
     insertAt(100, 'above-first');
     db.exec(`CREATE TRIGGER events_no_high_rowid ${GUARDS.events_no_high_rowid}`);

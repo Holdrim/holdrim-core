@@ -92,23 +92,30 @@ who ran the engine from `main` before it.
   sign-in (`sign_in_refused`) still logs the address exactly as typed: it never became a person.
   `docs/PRIVACY.md`, section 5, documents the manual procedure for removing a person, until there is
   a screen for it.
-- **A SQLite events file refuses an event whose rowid skips past the next one, and a file made
-  before this reads, once, as missing that guard.** A new guard, `events_no_high_rowid`
+- **A SQLite events file refuses an event whose rowid skips past the next one, names a file whose
+  rowid its guards cannot see, and a file made before this reads, once, as missing that guard.** A
+  new guard, `events_no_high_rowid`
   ([holdrim#109](https://github.com/Holdrim/holdrim-core/issues/109)), refuses an insert naming a
   rowid above `MAX(rowid) + 1`, or above 1 on an empty table. Without it, one event written straight
   into the file at the largest rowid SQLite has sent every later append to a rowid below it, where
-  `events_no_low_rowid` refused each one — the owner's ✓ included — as a forgery. Holdrim's own
-  appends never name a rowid, so nothing they write changes. What to change, for a file an earlier
-  build made: start the server of this version against it before anything else. Its first boot
-  says `the database's guard "events_no_high_rowid" is missing; installing it` and logs one
+  `events_no_low_rowid` refused each one — the owner's ✓ included — as a forgery. It makes that
+  harder, not impossible: a connection with triggers turned off, or this guard dropped, a row
+  parked and the guard recreated by its exact text, still parks one. So the server on every boot,
+  and the CLI's `--db` reader on every read, now also name an `events` table whose highest rowid is
+  the ceiling (`sqlite_guard_missing`, `kind: "parked"`), and a column named `rowid`, `oid` or
+  `_rowid_` on `events`, `people` or `texts`, which hides the real rowid from every guard
+  (`kind: "shadowed"`); an append refused on such a file says that is why. Neither is repaired by
+  a boot: it is said on every one, and a person recovers the file by hand (SECURITY.md). Holdrim's
+  own appends never name a rowid, so nothing they write changes. What to change, for a file an
+  earlier build made: start the server of this version against it before anything else. Its first
+  boot says `the database's guard "events_no_high_rowid" is missing; installing it` and logs one
   `sqlite_guard_missing` WARNING. That is expected, once, on that boot: the file cannot tell a guard
   never installed from one dropped, so it says both the same way, and the same line on any later
   boot is not the upgrade. Until that boot, `holdrim … --db` of this version names the guard
-  missing on the same file: `list` exits non-zero with `guardsTampered`, and `sync`, `apply` and
-  `state` refuse. A file that already holds an event at the largest rowid stays stuck — this guard
-  stops the parking and does not undo one — and recovering it is done by hand. Moving a pin back
-  below this version drops the guard on the next boot, named as a trigger that version does not
-  install.
+  missing on the same file: `list` exits non-zero, `list --json` carries `guardsTampered: true` and
+  an empty `requests` — an agent reading it sees an empty queue — and `sync`, `apply` and `state`
+  refuse. Moving a pin back below this version drops the guard on the next boot, named as a trigger
+  that version does not install.
 
 ### Added
 
