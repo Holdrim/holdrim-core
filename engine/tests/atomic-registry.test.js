@@ -75,10 +75,13 @@ test('with nothing interrupting it, the new registry lands under the real name',
 test('a save keeps the mode already on approvals.json, rather than the temp file\'s fresh one', (t) => {
   const tmp = project(t, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } });
   const path = join(tmp, 'r.json');
-  chmodSync(path, 0o440); // "do not touch by hand" — an operator's own choice, not this call's to override
+  // Private to its owner: an operator's own choice, not this call's to override. It has to stay
+  // WRITABLE — a read-only registry is refused outright (the test below), which a suite running as
+  // root never sees, and CI runs as a plain user — and it has to differ from a new file's default.
+  chmodSync(path, 0o600);
   saveRegistry(tmp, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' },
     b: { file: 'p/X02.html', date: '2026-02-02', fingerprint: 'new' } });
-  assert.equal(statSync(path).mode & 0o777, 0o440, 'the rename must not quietly reset the mode to a new file\'s default');
+  assert.equal(statSync(path).mode & 0o777, 0o600, 'the rename must not quietly reset the mode to a new file\'s default');
 });
 
 test('a registry this process cannot write to is refused with EACCES, and nothing is written', (t) => {
