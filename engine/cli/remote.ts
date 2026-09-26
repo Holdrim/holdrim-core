@@ -255,7 +255,7 @@ export class Source {
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
-    const { extractionBoundary, rollbackQuietly, guardMismatches, guardMismatchSaid } =
+    const { extractionBoundary, rollbackQuietly, guardMismatches, guardMismatchSaid, repairable } =
       await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
     let mismatches: ReturnType<typeof guardMismatches>;
@@ -284,11 +284,16 @@ export class Source {
         // ties back in rowid order, so dropping this changes nothing the suite below can see; naming
         // it turns that accident into a promise. `rowid DESC` does fail it. It is also what
         // `extractionBoundary` below is compared against, per row, for the downgrade check.
-        rows = db.prepare('SELECT *, rowid FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
+        // REAL, as the server's `list` reads it: a row parked at the ceiling read as an integer
+        // throws, and this reader would stop before it named the very thing it found.
+        rows = db.prepare('SELECT *, CAST(rowid AS REAL) AS rowid FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
         // A file written before the people table existed has no such table, and every author in it
         // is an address: an empty table resolves none of them, which is what they need. The read
         // is the same rule the server's store applies, through the same resolver.
-        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
+        // NOCASE, as SQLite resolves the name the reads below use: a `people` renamed to `PEOPLE` is
+        // still the table the server reads, and a case-sensitive lookup here would read it as absent,
+        // no author resolved, where the server resolves them all.
+        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people' COLLATE NOCASE").get();
         people = new Map(hasPeople
           ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
             .map((p) => [p.id, p.email ?? null])
@@ -296,7 +301,8 @@ export class Source {
         // A file written before texts were extracted has no `texts` table either, and every row's
         // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
         // an empty people map gives an author (docs/PRIVACY.md, section 4).
-        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
+        // NOCASE for the same reason: read as absent, every hashed text would read as tampered.
+        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts' COLLATE NOCASE").get();
         texts = new Map(hasTexts
           ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
               { event: string; field: TextField; value: string; salt: string }[])
@@ -328,11 +334,15 @@ export class Source {
       // stderr, both lines, so `list --json` stays parseable with `guardsTampered` in it.
       this.#guardsTampered = mismatches.length > 0;
       for (const m of mismatches) {
+        // Only a trigger is the server's to put back: promising that of a column hiding the rowid,
+        // a row below rowid 1 or a row parked at the ceiling would send the operator to a boot that
+        // fixes nothing.
         console.error(`holdrim: WARNING — ${guardMismatchSaid(m)}; read as it is, nothing repaired. `
-          + 'Whatever was written while it was so may be forged; the server repairs it on its next start.');
-        // `kind`, which the server's line does not carry: the server logs only a guard gone missing,
-        // while this reader says all three, and an alert rule keyed on the one event name still
-        // has to tell a foreign trigger from a guard that is not there.
+          + 'Whatever was written while it was so may be forged; '
+          + (repairable(m) ? 'the server repairs it on its next start.' : 'no boot repairs this: a person has to (SECURITY.md).'));
+        // `kind`, which the server's line carries only for what it cannot repair: it logs a guard
+        // gone missing without one, while this reader says every kind, and an alert rule keyed on
+        // the one event name still has to tell a foreign trigger from a guard that is not there.
         log('WARNING', 'sqlite_guard_missing', { guard: m.name, kind: m.kind }, console.error);
       }
       const events = withAuthors(rows.map((row) => ({

@@ -123,6 +123,34 @@ who ran the engine from `main` before it.
   sign-in (`sign_in_refused`) still logs the address exactly as typed: it never became a person.
   `docs/PRIVACY.md`, section 5, documents the manual procedure for removing a person, until there is
   a screen for it.
+- **A SQLite events file refuses a row whose rowid skips past the next one or falls below 1,
+  names a file whose rowid its guards cannot see, and a file made before this reads, once, as
+  missing those guards.** Four new guards
+  ([holdrim#109](https://github.com/Holdrim/holdrim-core/issues/109)): `events_no_high_rowid`
+  refuses an insert naming a rowid above `MAX(rowid) + 1`, or above 1 on an empty table, and
+  `events_no_first_rowid_below_one` (on an empty `events`), `people_no_rowid_below_one` and
+  `texts_no_rowid_below_one` refuse one below 1. Without them, one row written straight into the
+  file at the largest rowid SQLite has sent every later append to a rowid below it, where
+  `events_no_low_rowid` refused each one — the owner's ✓ included — as a forgery; and one row at
+  rowid -1 made every later insert into its table read as a replace: no new person, and no ✓ or
+  comment, each of which carries a text. They make that harder, not impossible: a connection with
+  triggers turned off, or a guard dropped, a row written and the guard recreated by its exact text,
+  still leaves one. So the server on every boot, and the CLI's `--db` reader on every read, now
+  also name an `events` table whose highest rowid is the ceiling (`sqlite_guard_missing`,
+  `kind: "parked"`), a row below rowid 1 in `events`, `people` or `texts` (`kind: "sunk"`), and a
+  column named `rowid`, `oid` or `_rowid_` on any of the three, which hides the real rowid from
+  every guard (`kind: "shadowed"`); a write refused on such a file says that is why. None is
+  repaired by a boot: it is said on every one, and a person recovers the file by hand
+  (SECURITY.md). Holdrim's own writes never name a rowid, so nothing they write changes. What to
+  change, for a file an earlier build made: start the server of this version against it before
+  anything else. Its first boot says `the database's guard "…" is missing; installing it` for each
+  of the four and logs one `sqlite_guard_missing` WARNING for each. That is expected, once, on that
+  boot: the file cannot tell a guard never installed from one dropped, so it says both the same
+  way, and the same line on any later boot is not the upgrade. Until that boot, `holdrim … --db` of
+  this version names them missing on the same file: `list` exits non-zero, `list --json` carries
+  `guardsTampered: true` and an empty `requests` — an agent reading it sees an empty queue — and
+  `sync`, `apply` and `state` refuse. Moving a pin back below this version drops the four on the
+  next boot, each named as a trigger that version does not install.
 - **`holdrim sync` and `holdrim restamp` exit non-zero when a ✓ could not be stamped safely.** A ✓
   whose block cannot be written without risking another one (see the entry under **Fixed** about
   stamping only the block a ✓ was given to) is refused, and it used to be refused with exit 0 — the
