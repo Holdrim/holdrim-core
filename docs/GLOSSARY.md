@@ -111,7 +111,7 @@ forgot one.
 | **admin** | every capability but `lock`. A role of the **project**, not of the method. Named by `HOLDRIM_ADMINS`, and only there |
 | **member** | `read`, `comment`, `request` — any other allowed identity |
 | **founder** | a tag that grants the power to see the whole documentation. It sits **on the role, not on the person**, so the second holder of that role sees it too, without an exception. ⚠️ A concept of the method only: no code reads it yet |
-| **capability** | what the engine actually asks about — one of a closed list, `engine/core/roles.js`'s `CAPABILITIES`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`. A role is a name and a subset of it (`capabilitiesOf`); every caller asks `roles.can(capability, email)`, never a role's name — role names change with every company, capabilities do not. `lock` is validated the same as the other six but never part of a role's GRANTABLE set (`docs/ROLES.md`, "Capabilities are the engine's") |
+| **capability** | what the engine actually asks about — one of a closed list, `engine/core/roles.js`'s `CAPABILITIES`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`. A role is a name and a subset of it (`capabilitiesOf`); every caller asks `roles.can(capability, who, where)` — `where` a page, a block or `EVERYWHERE`, never a role's name — role names change with every company, capabilities do not. `lock` is validated the same as the other six but never part of a role's GRANTABLE set (`docs/ROLES.md`, "Capabilities are the engine's") |
 | **project role** | a role the PROJECT will define, at the owner's settings screen (not built): a name and a subset of `CAPABILITIES` — never one this version already ships, and never read from `holdrim.json` (`AUTHORITY_KEYS` refuses the file the moment it names `roles`). Its own name format has no caller until that screen exists, so it is not built ahead of one (round 2 of #29's review, finding 11) — unlike `isValidScope` (`engine/core/roles.js`), which `HOLDRIM_LOCKS` calls today. `lock` may be listed like any of the other six, but will never be actually granted by it (see **grant**) |
 | **grant** | who will hold a project role — an e-mail, a role, and an optional scope: a page, a page family (`"P0*"`) or a block id. No scope means everywhere. From the settings screen, by the owner (not built); never `holdrim.json`, which refuses the `grants` key the same way |
 | **lock-holder** | someone besides the owner whose ✓ is meant to become a lock, named in `HOLDRIM_LOCKS` — the environment, next to `HOLDRIM_OWNER`, never `holdrim.json`. Their account is guarded like the owner's: only the owner creates, resets, disables or re-enables it (`roles.isLockHolder`). `can('lock', …)` does not trust one yet — that needs docs/ROLES.md section 3's session-and-credential-history rule, not built |
@@ -246,7 +246,7 @@ reads the old format: history does not get rewritten.
 | `createRoles` | `roles.js` | the roles, from `HOLDRIM_OWNER` and `HOLDRIM_ADMINS`; throws on zero or two owners |
 | `isOwner` / `isAdmin` | `roles.js` | who someone is |
 | `can` / `scopeCovers` / `EVERYWHERE` | `roles.js` | what someone may do, always asked with a page, a block or `EVERYWHERE`; whether a grant's scope reaches that place |
-| `roleOf` | `roles.js` | returns `owner`, `admin` or `other` |
+| `roleOf` | `roles.js` | returns `owner`, `admin` or `member`, for display only |
 | `overLimit` | `limits.js` | the first limit an event breaks, as a key and its parameters |
 | `validCommit` | `limits.js` | `applied` without a real commit is a hollow trail |
 | `LIMITS` | `limits.js` | the sizes themselves |
@@ -281,5 +281,6 @@ reads the old format: history does not get rewritten.
 | `close` | release the database |
 
 `/api/me` answers in the same vocabulary: `email`, `role`, `owner`, `admins`, `language` (the one
-the panel draws itself in), `mustChangePassword` when it applies, and — asked with `?page=` and the
-`blocks=` the panel draws — `here`, what this person may do on that page and on each of those blocks.
+the panel draws itself in) and `mustChangePassword` when it applies. What this person may do is asked
+of one page, `POST /api/here` with the page and the blocks the panel draws: `may`, and a `triage` and
+`approve` for each of those blocks.

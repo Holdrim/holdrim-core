@@ -689,26 +689,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   }
 
   if (req.method === 'GET' && route === '/me') {
-    // What this person may do on the page the panel is drawing, and on each block it names
-    // (`hereOf`, `blocksAsked`, engine/api/here.ts) — asked per page, since a grant may be limited to
-    // some. No global "may approve" any more: answered without a place, it would be the unscoped
-    // answer. The blocks are the ones the PANEL draws, the way `/fingerprints` takes its ids, not the
-    // ones this server reads from disk: a page served from outside `content.folders` still has blocks
-    // a person may approve. The page is checked against the page-code format before anything uses
-    // it, and never echoed back when it fails: it is whatever the query string held.
-    const page = url.searchParams.get('page');
-    if (page !== null && !PAGE_FORMAT.test(page)) {
-      return json(res, 400, { error: i18n.t(languageOf(req), 'api.me.badPage') });
-    }
-    const asked = page === null ? { ids: [] } : blocksAsked(page, url.searchParams.get('blocks'));
-    if ('tooMany' in asked) {
-      return json(res, 400, { error: i18n.t(languageOf(req), 'api.me.tooManyBlocks', { max: MAX_BLOCKS_ASKED }) });
-    }
-    const here = page === null ? undefined : hereOf(roles, who, page, asked.ids);
     return json(res, 200, {
       email,
       role: roles.roleOf(who),
-      ...(here ? { here } : {}),
       owner: roles.isOwner(who),
       admins: roles.admins,
       // The language this person reads in, decided here by the one rule the server's screens use —
@@ -740,6 +723,22 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   // way in", the configuration answers "what may they do". Putting the role in the row would
   // create a second truth, and on the day they disagree nobody can say which one is the service.
   if (byPassword && (await userRoutes(req, res, route, who, byPassword.users, languageOf(req)))) return;
+
+  // What this person may do on one page, and on each block the panel names on it (`hereOf`,
+  // `blocksAsked`, engine/api/here.ts) — asked per page, since a grant may be limited to some. There
+  // is no answer about everywhere: without a place it would be the unscoped answer. The blocks are the ones the PANEL draws, the way `/fingerprints` takes its
+  // ids, not the ones this server reads from disk: a page served from outside `content.folders` still
+  // has blocks a person may approve. A POST only because the list can be long (see `blocksAsked`):
+  // it writes nothing, and it passes the JSON-only guard every API POST does. The page is checked
+  // against the page-code format before anything uses it, and never echoed back when it fails.
+  if (req.method === 'POST' && route === '/here') {
+    const body = await jsonBody(req);
+    const say = (key: string, params?: Record<string, string | number>) => i18n.t(languageOf(req), key, params);
+    if (typeof body.page !== 'string' || !PAGE_FORMAT.test(body.page)) return json(res, 400, { error: say('api.here.badPage') });
+    const asked = blocksAsked(body.page, body.blocks);
+    if ('refused' in asked) return json(res, 400, { error: say(asked.refused, { max: MAX_BLOCKS_ASKED }) });
+    return json(res, 200, hereOf(roles, who, body.page, asked.ids));
+  }
 
   if (req.method === 'GET' && route === '/events') {
     const page = url.searchParams.get('page');

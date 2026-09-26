@@ -25,7 +25,7 @@ const COMMIT_FORMAT = /^[0-9a-f]{7,40}$/;
 /**
  * Whether `id` is a block id an event may name: the length and the characters `overLimit` holds an
  * event's own `block` to, below. Exported so a route that takes block ids from a query string
- * (`/api/me?blocks=`, engine/api/here.ts) accepts exactly the ids a ✓ on them could carry, and no id
+ * (`POST /api/here`, engine/api/here.ts) accepts exactly the ids a ✓ on them could carry, and no id
  * the store would have refused.
  * @param {unknown} id
  */

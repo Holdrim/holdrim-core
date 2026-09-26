@@ -63,29 +63,37 @@ export function statusFor<S extends { triage: string[] }>(
 }
 
 /**
- * How many block ids one `/api/me?blocks=` may name. The panel names the blocks it draws, so the
+ * How many block ids one `POST /api/here` may name. The panel names the blocks it draws, so the
  * question grows with the page; without a ceiling, one request is a `can` call per id for as many ids
- * as the header limit lets through. Far above any real page: the template's longest has a few dozen.
+ * as a 1 MB body holds. Far above any real page: the template's longest has a few dozen. At the
+ * longest id an event may name (`LIMITS.block`, 64), 2000 of them are about 134 KB of JSON, well
+ * inside the body limit `rawBody` (server.ts) holds every request to.
  */
 export const MAX_BLOCKS_ASKED = 2000;
 
 /**
- * The block ids `/api/me?blocks=` asks about, kept only when each is a block id an event could name
+ * The block ids `POST /api/here` asks about, kept only when each is a block id an event could name
  * (`isBlockId`) AND lives on `page` (`pageOfBlock`) — the answer is about THIS page, and an id from
- * another page, or a string that is no id at all, is left out without a word: nothing a client wrote
- * there is sent back unless it is one of this page's block ids. Over `MAX_BLOCKS_ASKED` is refused
- * whole rather than cut short, since a panel told about only some of its blocks would draw no ✓ on
- * the rest and look like a refusal.
- * @param raw the query's `blocks` value, comma separated, or null when absent
+ * another page, or anything that is no id at all, is left out without a word: nothing a client wrote
+ * there is sent back unless it is one of this page's block ids. A `blocks` that is not a list, and a
+ * list over `MAX_BLOCKS_ASKED`, are refused whole rather than cut short, since a panel told about
+ * only some of its blocks would draw no ✓ on the rest and look like a refusal.
+ *
+ * In a body and not a query string: at the longest id an event may name, a query holding every
+ * block of a long page passes Node's header limit and is answered 431 before any route runs — and
+ * the panel switches itself off on a failed answer, for the owner too.
+ * @param raw the body's `blocks`, absent when the page level is all that is asked
+ * @returns the ids kept, or the locale key of why the list was refused
  */
-export function blocksAsked(page: string, raw: string | null): { ids: string[] } | { tooMany: true } {
-  const named = (raw ?? '').split(',').filter(Boolean);
-  if (named.length > MAX_BLOCKS_ASKED) return { tooMany: true };
-  return { ids: [...new Set(named)].filter((id) => isBlockId(id) && pageOfBlock(id) === page) };
+export function blocksAsked(page: string, raw: unknown): { ids: string[] } | { refused: string } {
+  if (raw === undefined) return { ids: [] };
+  if (!Array.isArray(raw)) return { refused: 'api.here.badBlocks' };
+  if (raw.length > MAX_BLOCKS_ASKED) return { refused: 'api.here.tooManyBlocks' };
+  return { ids: [...new Set(raw)].filter((id): id is string => isBlockId(id) && pageOfBlock(id) === page) };
 }
 
 /**
- * `/api/me`'s `here`: what `who` may do on `page`, and on each block the panel named. Booleans
+ * `POST /api/here`'s answer: what `who` may do on `page`, and on each block the panel named. Booleans
  * only — never a scope, a role or a grant — because the panel draws buttons from this and learns
  * nothing about roles (docs/ROLES.md, section 2), and because a scope string that reached the page
  * would be configuration landing in HTML.

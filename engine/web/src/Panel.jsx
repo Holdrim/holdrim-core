@@ -158,7 +158,7 @@ function AddDetails({ request, onRecord }) {
 }
 
 /**
- * What the server said this reader may do on `block` — `/api/me`'s `here`, answered for this page.
+ * What the server said this reader may do on `block` — `POST /api/here`'s answer, for this page.
  * A block it does not name reads as "nothing": a button the server did not say yes to is not drawn.
  */
 const mayOn = (here, block) => here?.blocks?.[block] ?? {};

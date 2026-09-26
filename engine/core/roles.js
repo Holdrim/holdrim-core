@@ -203,13 +203,17 @@ function familyCovers(family, page) {
  */
 export function scopeCovers(scope, where) {
   if (scope === null || scope === undefined) return true;
-  if (where === EVERYWHERE || typeof scope !== 'string') return false;
+  // No guard for `EVERYWHERE`, on purpose: it names no page and no block, so every branch below
+  // compares a scope against nothing and answers false — a guard here would be one no test could
+  // tell from its absence. `typeof onPage` below is the one check `EVERYWHERE` does lean on: without
+  // it a family would read the length of a page that is not there, and throw.
   const { page, block } = /** @type {{page?: string, block?: string}} */ (where);
   // The block's own page, never the `page` a caller put beside it: see `pageOfBlock`.
   const onPage = block ? pageOfBlock(block) : page;
   if (PAGE_FORMAT.test(scope)) return scope === onPage;
   if (SCOPE_FAMILY_FORMAT.test(scope)) return typeof onPage === 'string' && familyCovers(scope, onPage);
-  if (SCOPE_BLOCK_FORMAT.test(scope)) return Boolean(block) && scope === block;
+  // Compared with the block alone: a page question has none, so it can never equal a block scope.
+  if (SCOPE_BLOCK_FORMAT.test(scope)) return scope === block;
   return false;
 }
 

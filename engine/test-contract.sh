@@ -177,10 +177,12 @@ echo "identity and roles:"
 expect "no identity → 401"             401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/events)"
 expect "owner is owner"                owner "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield role)"
 expect "reviewer is a member"          member "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/api/me | jfield role)"
-# What /api/me?page=$2&blocks=$3 says $1 may do on block $3, as "triage approve", or "none" when the
-# answer leaves the block out. Its own reader because `jfield` splits its path on ".", and every
-# block id holds one. The panel names the blocks it draws, and the server answers exactly those.
-may_on() { curl -s -H "X-Dev-Email: $1" "$B/api/me?page=$2&blocks=$3" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s).here?.blocks?.[process.argv[1]];console.log(b?b.triage+' '+b.approve:'none')})" "$3"; }
+# What POST /api/here says $1 may do on page $2, asked with a JSON body (`$3`, `blocks` and all).
+here_of() { curl -s -H "X-Dev-Email: $1" -H 'Content-Type: application/json' -d "{\"page\":\"$2\"${3:+,\"blocks\":$3}}" $B/api/here; }
+# What it says $1 may do on block $3 of page $2, as "triage approve", or "none" when the answer leaves
+# the block out. Its own reader because `jfield` splits its path on ".", and every block id holds one.
+# The panel names the blocks it draws, and the server answers exactly those.
+may_on() { here_of "$1" "$2" "[\"$3\"]" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const b=JSON.parse(s).blocks?.[process.argv[1]];console.log(b?b.triage+' '+b.approve:'none')})" "$3"; }
 echo "what each person may do here (#33, docs/ROLES.md section 2):"
 expect "the owner may triage and approve this block"   "true true"   "$(may_on $OWNER A01 A01.1.1)"
 expect "an admin may too"                              "true true"   "$(may_on $LEAD A01 A01.1.1)"
@@ -188,17 +190,26 @@ expect "a member may neither"                          "false false" "$(may_on $
 expect "nor may an agent"                              "false false" "$(may_on $AGENT A01 A01.1.1)"
 expect "a block the site does not read is answered too" "true true"  "$(may_on $OWNER Y01 Y01.1.1)"
 expect "but no block of another page"                  none          "$(may_on $OWNER A01 A02.1.2)"
-expect "nor an id no event could name"                 none          "$(may_on $OWNER A01 'A01.1%2F1')"
-expect "and what was left out is not echoed back"      1 "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/me?page=A01&blocks=A02.1.2,A01.%3Cx%3E" | has -e 'A02.1.2' -e '<x>'; echo $?)"
-expect "2000 ids are answered"                         200 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" "$B/api/me?page=A01&blocks=$(node -e "console.log(Array(2000).fill('x').join(','))")")"
-expect "2001 ids → 400"                                400 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" "$B/api/me?page=A01&blocks=$(node -e "console.log(Array(2001).fill('x').join(','))")")"
+expect "nor an id no event could name"                 none          "$(may_on $OWNER A01 'A01.1/1')"
+expect "and what was left out is not echoed back"      1 "$(here_of $OWNER A01 '["A02.1.2","A01.<x>"]' | has -e 'A02.1.2' -e '<x>'; echo $?)"
+# Ids of the longest length an event may name (64): the size a real long page sends — the reason the
+# question is a body, since as a query string 250 of these already pass Node's header limit. Written
+# to a file and sent with `@`: 2000 of them are ~134 KB, over what Linux lets one argument hold.
+long_body() { node -e "const ids=Array.from({length:+process.argv[1]},(_,i)=>'A01.'+String(i).padStart(4,'0')+'x'.repeat(56));require('fs').writeFileSync(process.argv[2],JSON.stringify({page:'A01',blocks:ids}))" "$1" "$2"; }
+long_body 2000 $WORK/ids-2000.json; long_body 2001 $WORK/ids-2001.json
+here_file() { curl -s -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' --data-binary "@$1" "${@:2}" $B/api/here; }
+expect "an id of that length is 64 characters"         64 "$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).blocks[0].length)" $WORK/ids-2000.json)"
+expect "2000 ids of 64 characters are all answered"    2000 "$(here_file $WORK/ids-2000.json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(Object.keys(JSON.parse(s).blocks).length))")"
+expect "2001 → 400"                                    400 "$(here_file $WORK/ids-2001.json -o /dev/null -w '%{http_code}')"
+expect "blocks that are not a list → 400"              400 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d '{"page":"A01","blocks":"A01.1.1"}' $B/api/here)"
+expect "sent as text/plain → 415, like every API POST" 415 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: text/plain' -d '{"page":"A01"}' $B/api/here)"
 expect "the page itself: a member may ask for a change" "true false" \
-  "$(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/me?page=A01" | jfield here.may.request) $(curl -s -H "X-Dev-Email: $REVIEWER" "$B/api/me?page=A01" | jfield here.may.triage)"
-expect "there is no answer about everywhere any more"  "" "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/me?page=A01" | jfield canApprove)$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/me?page=A01" | jfield canTriage)"
-expect "and no here without a page"                    "" "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield here)"
-expect "a page that is not a page code → 400"          400 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" "$B/api/me?page=%3Cscript%3E")"
-expect "and what was sent is not echoed back"          1 "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/me?page=%3Cscript%3E" | has -F '<script>'; echo $?)"
-expect "an empty page → 400 too"                       400 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" "$B/api/me?page=")"
+  "$(here_of $REVIEWER A01 | jfield may.request) $(here_of $REVIEWER A01 | jfield may.triage)"
+expect "there is no answer about everywhere any more"  "" "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield canApprove)$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield canTriage)"
+expect "a page that is not a page code → 400"          400 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d '{"page":"<script>"}' $B/api/here)"
+expect "and what was sent is not echoed back"          1 "$(here_of $OWNER '<script>' | has -F '<script>'; echo $?)"
+expect "an empty page → 400 too"                       400 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d '{"page":""}' $B/api/here)"
+expect "no page at all → 400"                          400 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d '{}' $B/api/here)"
 
 echo "approval:"
 expect "reviewer does NOT approve → 403" 403 "$(post $REVIEWER '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc123"}')"
@@ -423,7 +434,7 @@ expect "the agent's own request is marked too"                           true \
 expect "an agent gives no ✓ → 403"                                       403 \
   "$(post $AGENT '{"type":"approval","page":"A02","block":"A02.1.3","fingerprint":"abc123"}')"
 expect "and /api/me offers it none"                                      "false false" \
-  "$(curl -s -H "X-Dev-Email: $AGENT" "$B/api/me?page=A02" | jfield here.may.approve) $(curl -s -H "X-Dev-Email: $AGENT" "$B/api/me?page=A02" | jfield here.may.triage)"
+  "$(here_of $AGENT A02 | jfield may.approve) $(here_of $AGENT A02 | jfield may.triage)"
 
 echo "asking for a page from the home:"
 # A plain form, no script: what a person who is not a developer uses to say "this is missing". It
@@ -2019,6 +2030,29 @@ expect "and logs what it reaches"                   0 "$(grep '"event":"lock_sco
 expect "without naming who it was granted to"       1 "$(grep '"event":"lock_scope_coverage"' $WORK/coverage.log | has -F 'lead@example.org'; echo $?)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
+
+echo "the server judges triage and details on the STORED request's place (#33):"
+# Booted with engine/tests/hooks/scoped-roles.js: one person, $SCOPED, holds `triage` on A01 alone
+# and `approve` on A02 alone — a shape no shipped role takes, and the only way to see which place the
+# server's own event path asks about. Each post names a block on the OTHER page than the request it
+# acts on: judged on the post's block instead of the stored one, every answer below flips.
+SCOPED=scoped@example.org
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT HOLDRIM_SITE="$SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js --import ./engine/tests/hooks/scoped-roles.js \
+  engine/api/server.ts >$WORK/scoped.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "the hook is in effect: triage on A01, approve on A02" "true false false true" \
+  "$(may_on $SCOPED A01 A01.1.1) $(may_on $SCOPED A02 A02.1.1)"
+ON_A01=$(new_request $REVIEWER '{"type":"request","page":"A01","block":"A01.1.1","fingerprint":"x","text":"stored on A01"}')
+ON_A02=$(new_request $REVIEWER '{"type":"request","page":"A02","block":"A02.1.1","fingerprint":"x","text":"stored on A02"}')
+require_id "$ON_A01" ON_A01; require_id "$ON_A02" ON_A02
+scoped_post() { post $SCOPED "{\"type\":\"$1\",\"page\":\"$2\",\"block\":\"$3\",\"text\":\"why\",\"data\":{\"request\":\"$4\"${5:+,\"state\":\"$5\"}}}"; }
+expect "triage on a request stored on A01, the post naming A02 → 201"   201 "$(scoped_post request_state A01 A02.1.1 "$ON_A01" question)"
+expect "triage on a request stored on A02, the post naming A01 → 403"   403 "$(scoped_post request_state A02 A01.1.1 "$ON_A02" rejected)"
+expect "details on a request stored on A02, the post naming A01 → 201"  201 "$(scoped_post supplement A02 A01.1.1 "$ON_A02")"
+expect "details on a request stored on A01, the post naming A02 → 403"  403 "$(scoped_post supplement A01 A02.1.1 "$ON_A01")"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
 # ------------------------------------------------------------------ an agent's token of its own
 # Issue #122, docs/ROLES.md section 4. Its own server, under password sign-in — the only identity
 # with a user store for tokens to live in — with an owner, an admin, a member and a lock-holder, so
@@ -2125,7 +2159,9 @@ bot_code() { as_bot -o /dev/null -w '%{http_code}' "$@"; }
 A011_FP=$(cli_fingerprint A01.1.1)
 expect "the token signs the agent in → 200"      200 "$(bot_code $B/api/me)"
 expect "as the address it was issued for"        "$BOT" "$(as_bot $B/api/me | jfield email)"
-expect "which may neither approve nor triage"    "false false" "$(as_bot "$B/api/me?page=A01" | jfield here.may.approve) $(as_bot "$B/api/me?page=A01" | jfield here.may.triage)"
+# `/api/here` is not on the token's allowlist: an agent has no panel to draw, and a route stays closed
+# to tokens until someone decides otherwise. What it may not do is proved by what it is refused below.
+expect "and is not let ask what it may do here → 403" 403 "$(bot_code -d '{"page":"A01"}' $B/api/here)"
 BOT_COMMENT=$(as_bot -d '{"type":"comment","page":"A01","block":"A01.1.1","text":"the agent was here","data":{"asAgent":"false"}}' $B/api/events)
 expect "a comment through the token is recorded" comment "$(echo "$BOT_COMMENT" | jfield type)"
 expect "as an agent's, whatever the body claimed" true "$(echo "$BOT_COMMENT" | jfield data.asAgent)"
@@ -2234,7 +2270,7 @@ BOT_TOKEN=$PROMOTED_TOKEN
 T_REQUEST=$(t_member -d '{"type":"request","page":"A01","block":"A01.1.1","text":"another wording","data":{"category":"text"}}' $B/api/events | jfield id)
 require_id "$T_REQUEST" T_REQUEST
 T_STATE=approved T_STATE_TEXT=ok
-expect "a token whose address is now an admin's still signs in as an agent" "$PROMOTED false" "$(as_bot $B/api/me | jfield email) $(as_bot "$B/api/me?page=A01" | jfield here.may.approve)"
+expect "a token whose address is now an admin's still signs in as an agent" "$PROMOTED" "$(as_bot $B/api/me | jfield email)"
 expect "and reads as a member, not an admin"     member "$(as_bot $B/api/me | jfield role)"
 expect "and its ✓ is refused → 403"              403 "$(bot_code -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A011_FP\"}" $B/api/events)"
 expect "as a ✓ given without a session"          "$(say_en api.approval.sessionOnly)" "$(as_bot -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A011_FP\"}" $B/api/events | jfield error)"

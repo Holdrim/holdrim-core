@@ -231,6 +231,7 @@
     "POST /api/agent-tokens/:param/revoke",
     "POST /api/change-password",
     "POST /api/events",
+    "POST /api/here",
     "POST /api/sign-in",
     "POST /api/sign-out",
     "POST /api/tampered/acknowledge",

@@ -46,16 +46,18 @@ who ran the engine from `main` before it.
   sign-in screen is the gate), or have the gateway strip `Authorization` before it forwards. And an agent — named in `HOLDRIM_AGENTS` or come in with
   a token — may now move an approved request through `applying`, `waiting` and `applied` through the
   API, as `docs/ROLES.md` section 4 already said it keeps; before, only the local runner let it.
-- **`/api/me` no longer answers `canApprove` or `canTriage`; it answers what the person may do on
-  one page, `GET /api/me?page=P03&blocks=P03.1.1,P03.1.2` → `here` (#33, `docs/ROLES.md` section
-  2).** A grant may be limited to some pages or blocks, so "may this person approve?" has no answer
-  without a place. `here` is `{ page, may: { comment, request, triage, approve }, blocks: { "<block
-  id>": { triage, approve } } }`, booleans only, for the page and for each block `blocks` names that
-  is a block id and lives on that page — any other id is left out, never echoed. A `page` that is
-  not a page code, or more than 2000 ids, answers 400; without `?page=` there is no `here`. A request's
+- **`/api/me` no longer answers `canApprove` or `canTriage`; what a person may do is asked of one
+  page, with `POST /api/here` and a body `{ "page": "P03", "blocks": ["P03.1.1", …] }` (#33,
+  `docs/ROLES.md` section 2).** A grant may be limited to some pages or blocks, so "may this person
+  approve?" has no answer without a place. The answer is `{ page, may: { comment, request, triage,
+  approve }, blocks: { "<block id>": { triage, approve } } }`, booleans only, for the page and for
+  each id in `blocks` that is a block id and lives on that page — any other id is left out, never
+  echoed. A `page` that is not a page code, a `blocks` that is not a list, or more than 2000 ids
+  answers 400. A POST because a long page's ids do not fit in a query string; it writes nothing, and
+  an agent token does not reach it. New on the surface: `POST /api/here`. A request's
   `status.triage`, in `/api/events` and `/api/events/:id`, now lists destinations only for a reader
   who may triage that request, and is empty for everyone else. What to change: anything reading
-  `canApprove`/`canTriage` asks `/api/me?page=` and reads `here`. Every check the server makes is
+  `canApprove`/`canTriage` asks `POST /api/here` for the page and the blocks it draws. Every check the server makes is
   now asked with the place: a ✓ by its block (the block's own page, never the `page` sent beside
   it), triage and "add details" by where the STORED request was filed, never by the page or block
   the triage event names. Who may do what does not change for the three shipped roles, which are

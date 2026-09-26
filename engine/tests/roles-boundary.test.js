@@ -2,7 +2,7 @@
  * No caller outside `engine/core/roles.js` decides anything from a role's NAME.
  *
  * `roles.js` is the one place allowed to know that a role is called `owner`, `admin` or `member`:
- * everywhere else asks `roles.can(capability, email)` or `roles.isOwner(email)`, so a check keeps
+ * everywhere else asks `roles.can(capability, who, where)` or `roles.isOwner(who)`, so a check keeps
  * working the day a project renames a role, or gets its answer from a grant in `holdrim.json` (#29)
  * instead of the three names this version ships. A caller that wrote `role === 'admin'` instead
  * would silently stop working the day either of those lands, with nothing here to say so — which is
@@ -474,35 +474,74 @@ test('the address scan catches a role asked of email or addressOf(who), and an o
 // such a call fails here whether or not anything ever runs it.
 
 /**
- * Every `.can(` call in `text` given fewer than three arguments, as `line: call`. Arguments are
- * counted at the call's own depth, past strings, so a comma inside `{ page, block }` or a quoted
- * message is not mistaken for a third argument.
+ * How many arguments the call whose `(` is at `open` in `code` is given, and where it ends. Counted
+ * at the call's own depth, past strings, so a comma inside `{ page, block }` or a quoted message is
+ * not mistaken for another argument, and a trailing comma adds none.
+ */
+function argumentsAt(code, open) {
+  let depth = 0;
+  let args = 0;
+  let filled = false;            // whether the argument being read has anything in it yet
+  let quote = null;
+  let i = open;
+  for (; i < code.length; i++) {
+    const c = code[i];
+    if (depth >= 1 && !/\s/.test(c) && !(depth === 1 && (c === ',' || c === ')'))) filled = true;
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+    } else if (c === '\'' || c === '"' || c === '`') quote = c;
+    else if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c) && --depth === 0) break;
+    else if (c === ',' && depth === 1) { if (filled) args++; filled = false; }
+  }
+  if (filled) args++;
+  return { args, end: i };
+}
+
+/**
+ * The names `can` is bound to in `code`, the way `roleOfBindings` tracks `roleOf`: taken out of an
+ * object (`const { can } = roles`, `const { can: ask } = roles`) or copied off one (`const ask =
+ * roles.can`, `.bind(...)` included). A call through such a name is the same question, and a scan of
+ * `.can(` alone would never see it.
+ */
+function canBindings(code) {
+  const names = new Set();
+  for (const [, body] of code.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=/g)) {
+    for (const [, alias] of body.matchAll(/(?:^|,)\s*can\s*(?::\s*(\w+))?\s*(?==|,|$)/g)) names.add(alias ?? 'can');
+  }
+  for (const [, name] of code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*[\w$.]+\.can\b(?!\s*(?:\?\.\s*)?\()/g)) names.add(name);
+  return names;
+}
+
+/**
+ * Every question `text` asks of `can` without saying where, as `line: what`. Three ways in:
+ *   - a call, `x.can(…)` or `x.can?.(…)`, or through a name `canBindings` found, given fewer than
+ *     three arguments;
+ *   - `can` reached some other way — by a bracket (`roles['can']`), through `.call`, `.apply` or
+ *     `.bind`, or handed on as a value (`f(roles.can)`): the arguments are then out of this scan's
+ *     sight, so the shape itself is refused. Copying it into a name is the one exception, since the
+ *     name's calls are then checked like any other.
  */
 function canCallsWithoutWhere(text) {
   const code = withoutComments(text);
   const found = [];
-  for (const match of code.matchAll(/\.can\(/g)) {
-    let depth = 0;
-    let args = 0;
-    let filled = false;          // whether the argument being read has anything in it yet
-    let quote = null;
-    let i = match.index + match[0].length - 1;
-    for (; i < code.length; i++) {
-      const c = code[i];
-      if (depth >= 1 && !/\s/.test(c) && !(depth === 1 && (c === ',' || c === ')'))) filled = true;
-      if (quote) {
-        if (c === '\\') i++;
-        else if (c === quote) quote = null;
-      } else if (c === '\'' || c === '"' || c === '`') quote = c;
-      else if ('([{'.includes(c)) depth++;
-      else if (')]}'.includes(c) && --depth === 0) break;
-      else if (c === ',' && depth === 1) { if (filled) args++; filled = false; }
-    }
-    if (filled) args++;
-    if (args < 3) {
-      const line = code.slice(0, match.index).split('\n').length;
-      found.push(`${line}: ${code.slice(match.index, i + 1).replace(/\s+/g, ' ')}`);
-    }
+  const lineOf = (index) => code.slice(0, index).split('\n').length;
+  const short = (from, to) => code.slice(from, to + 1).replace(/\s+/g, ' ');
+  const calls = [...code.matchAll(/\.can\s*(?:\?\.\s*)?\(/g)];
+  for (const name of canBindings(code)) {
+    calls.push(...code.matchAll(new RegExp(`(?<![.\\w$])${name}\\s*(?:\\?\\.\\s*)?\\(`, 'g')));
+  }
+  for (const match of calls) {
+    const { args, end } = argumentsAt(code, match.index + match[0].length - 1);
+    if (args < 3) found.push(`${lineOf(match.index)}: ${short(match.index, end)}`);
+  }
+  for (const match of code.matchAll(/\[\s*(['"`])can\1\s*\]|\.can\b(?!\s*(?:\?\.\s*)?\()/g)) {
+    // The statement it sits in is all that says whether it is a copy into a name: a few lines back is plenty.
+    const before = code.slice(Math.max(0, match.index - 200), match.index);
+    if (match[0].startsWith('.') && /\b(?:const|let|var)\s+\w+\s*=\s*[\w$.]*$/.test(before)
+        && !/^\.can\s*\.\s*(?:call|apply)\b/.test(code.slice(match.index))) continue;
+    found.push(`${lineOf(match.index)}: ${code.slice(match.index, match.index + 24).split('\n')[0]}  (can reached indirectly)`);
   }
   return found;
 }
@@ -514,6 +553,24 @@ test('the where scan catches a call with two arguments, and passes one with thre
   assert.equal(canCallsWithoutWhere("roles.can('approve', who, whereOf({ page, block: 'a,b' }))").length, 0);
   assert.equal(canCallsWithoutWhere("roles.can('approve', f(a, b))").length, 1, 'commas inside a nested call do not count');
   assert.equal(canCallsWithoutWhere("// roles.can('approve', who)\nx").length, 0, 'a comment is prose');
+});
+
+test('the where scan follows can into a name, destructured or copied, and checks the calls made through it', () => {
+  assert.equal(canCallsWithoutWhere("const { can } = roles;\ncan('people', who);").length, 1, 'destructured');
+  assert.equal(canCallsWithoutWhere("const { isOwner, can: ask } = roles;\nask('people', who);").length, 1, 'destructured under another name');
+  assert.equal(canCallsWithoutWhere("const ask = roles.can;\nask('people', who);").length, 1, 'copied off the object');
+  assert.equal(canCallsWithoutWhere("const ask = roles.can.bind(roles);\nask('people', who);").length, 1, 'copied with bind');
+  assert.equal(canCallsWithoutWhere("const { can } = roles;\ncan('people', who, EVERYWHERE);").length, 0, 'a call through the name that says where');
+  assert.equal(canCallsWithoutWhere("roles.can?.('people', who)").length, 1, 'an optional call');
+});
+
+test('the where scan refuses can reached where its arguments cannot be counted', () => {
+  assert.equal(canCallsWithoutWhere("roles['can']('people', who, EVERYWHERE)").length, 1, 'by a bracket');
+  assert.equal(canCallsWithoutWhere('roles["can"](\'people\', who)').length, 1, 'by a bracket, double quotes');
+  assert.equal(canCallsWithoutWhere("roles.can.call(roles, 'people', who, EVERYWHERE)").length, 1, 'through call');
+  assert.equal(canCallsWithoutWhere("roles.can.apply(roles, ['people', who])").length, 1, 'through apply');
+  assert.equal(canCallsWithoutWhere("ask(roles.can)").length, 1, 'handed on as a value');
+  assert.equal(canCallsWithoutWhere("roles.canAcknowledge(who)").length, 0, 'a different name that starts the same');
 });
 
 test('planting a can() call with no where into the real server.ts is caught, by name', () => {

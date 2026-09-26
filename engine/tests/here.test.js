@@ -93,16 +93,25 @@ test('here, for the shipped roles: the owner and an admin may triage and approve
 });
 
 test('blocksAsked keeps only block ids of the page asked about, and says nothing of the rest', () => {
-  assert.deepEqual(blocksAsked('P03', 'P03.1,P03.2.1,P03.1'), { ids: ['P03.1', 'P03.2.1'] }, 'each once');
-  assert.deepEqual(blocksAsked('P03', 'P09.1,P03.1,P030.1'), { ids: ['P03.1'] }, 'another page\'s block is left out');
-  assert.deepEqual(blocksAsked('P03', 'P03.<b>,P03.1/2,P03."x",P03.1'), { ids: ['P03.1'] }, 'what no event could name is left out');
-  assert.deepEqual(blocksAsked('P03', `P03.${'1'.repeat(61)}`), { ids: [] }, 'longer than a block id may be');
-  assert.deepEqual(blocksAsked('P03', null), { ids: [] });
-  assert.deepEqual(blocksAsked('P03', ''), { ids: [] });
+  assert.deepEqual(blocksAsked('P03', ['P03.1', 'P03.2.1', 'P03.1']), { ids: ['P03.1', 'P03.2.1'] }, 'each once');
+  assert.deepEqual(blocksAsked('P03', ['P09.1', 'P03.1', 'P030.1']), { ids: ['P03.1'] }, 'another page\'s block is left out');
+  assert.deepEqual(blocksAsked('P03', ['P03.<b>', 'P03.1/2', 'P03."x"', 7, null, { id: 'P03.1' }, 'P03.1']), { ids: ['P03.1'] },
+    'what no event could name is left out');
+  assert.deepEqual(blocksAsked('P03', [`P03.${'1'.repeat(61)}`]), { ids: [] }, 'longer than a block id may be');
+  assert.deepEqual(blocksAsked('P03', undefined), { ids: [] }, 'the page level alone');
+  assert.deepEqual(blocksAsked('P03', []), { ids: [] });
 });
 
-test('blocksAsked answers up to MAX_BLOCKS_ASKED ids and refuses one more, whole', () => {
-  const ids = (n) => Array.from({ length: n }, (_, i) => `P03.${i}`).join(',');
+test('blocksAsked refuses a list that is not one, rather than reading it as none', () => {
+  for (const raw of ['P03.1,P03.2', null, { 0: 'P03.1' }, 3]) {
+    assert.deepEqual(blocksAsked('P03', raw), { refused: 'api.here.badBlocks' }, JSON.stringify(raw));
+  }
+});
+
+test('blocksAsked answers up to MAX_BLOCKS_ASKED ids of the longest length and refuses one more, whole', () => {
+  // The longest id an event may name (LIMITS.block, 64): the size a real long page would send.
+  const ids = (n) => Array.from({ length: n }, (_, i) => `P03.${String(i).padStart(4, '0')}${'x'.repeat(56)}`);
+  assert.equal(ids(1)[0].length, 64);
   assert.equal(blocksAsked('P03', ids(MAX_BLOCKS_ASKED)).ids.length, MAX_BLOCKS_ASKED);
-  assert.deepEqual(blocksAsked('P03', ids(MAX_BLOCKS_ASKED + 1)), { tooMany: true });
+  assert.deepEqual(blocksAsked('P03', ids(MAX_BLOCKS_ASKED + 1)), { refused: 'api.here.tooManyBlocks' });
 });
