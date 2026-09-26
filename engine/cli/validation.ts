@@ -407,6 +407,7 @@ async function markWith(say: (line: string) => void, root: string, registry: Reg
 
   const result = spliceAttributes(html, id, planned.plan);
   if ('error' in result) return refused(result.error);
+  // The write stays above `record`: `sync` saves the registry even when this write throws.
   if (result.html !== html) writeFileSync(path, result.html, 'utf8');
 
   record(root, registry, id, path, when, source, event, planned);
@@ -436,11 +437,12 @@ interface SiteStamp { id: string; when: string; event: string; expected: string;
  * while the run is under way is stamped past, where `mark` refuses the whole page, and a block moved
  * off the page is looked for where it no longer is. The whole text is compared, through its digest:
  * an edit that keeps the page's length is an edit all the same. A page deleted since it was located is
- * treated the same way, rather than letting the read throw and abort the run before the pages already
- * written are recorded: `mark`'s own path re-lists the sheet files and resolves the id fresh, so a
- * page genuinely gone is refused as "not found", exactly as it always was. Any other read error — a
- * page turned into a folder, say — still aborts: `mark`'s path would meet it too, and saying it
- * loudly beats claiming to handle it.
+ * treated the same way, rather than letting the read throw and abort the whole run over one ✓:
+ * `mark`'s own path re-lists the sheet files and resolves the id fresh, so a page genuinely gone is
+ * refused as "not found", exactly as it always was. Any other read error — a page turned into a
+ * folder, say — still aborts: `mark`'s path would meet it too, and saying it loudly beats claiming to
+ * handle it. `sync` saves the registry on the way out either way, so the pages already written keep
+ * their entries (holdrim#148).
  *
  * ⚠️ The digest only re-checks the page THIS id was located on, once, at the moment its turn comes —
  * not every other page, and not again afterwards. A second block gaining this id, or a `DATA-ID`
@@ -493,6 +495,7 @@ async function markAll(root: string, registry: Registry, stamps: readonly SiteSt
       planned.push({ index, planned: plan });
     }
     const written = spliceAll(html, document, planned.map(({ index, planned: p }) => ({ id: stamps[index].id, plan: p.plan })));
+    // The write stays above `record`: `sync` saves the registry even when this write throws.
     if (written.html !== html) writeFileSync(path, written.html, 'utf8');
     for (const [k, { index, planned: p }] of planned.entries()) {
       const { id, when, event, say } = stamps[index];
@@ -594,6 +597,7 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     while (printed < sorted.length && settled[printed]) for (const line of lines[printed++]) console.log(line);
   };
   let pending = [...sorted.keys()];
+  let unwinding = false;
   try {
     while (pending.length) {
       const later: number[] = [];
@@ -641,11 +645,38 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
       });
       pending = later;
     }
+  } catch (e) {
+    unwinding = true;
+    throw e;
   } finally {
     // A run that throws half-way still shows what it had to say about every ✓ it got to.
     for (const slot of sorted.keys()) if (slot >= printed) for (const line of lines[slot]) console.log(line);
+    // Saved whether the run finished or threw: saved only on success, an abort half-way — a page
+    // turned into a folder, which `markAll` lets propagate — leaves the seals of the pages already
+    // written on disk with no entry, and `check` calls each of those genuine ✓ "marked without a
+    // registry entry" for as long as whatever aborted the run is still there (holdrim#148). Nothing
+    // unwritten gets in: `markWith` and `markAll` add an entry only once its page's write has
+    // returned. The error still propagates, so the CLI still exits non-zero.
+    //
+    // Not the registry first and the page after: a process killed between the two would leave an
+    // entry for a seal no page carries — a lock recorded for text the ✓ never reached. This order,
+    // killed there, leaves the seal without the entry, which `check` flags and the next `sync`
+    // records again from the owner's ✓. Nor once per page: every page would rewrite the whole
+    // registry, and a sync would grow with pages times entries again (holdrim#144).
+    //
+    // A save that fails while another error is on its way out is said and let go, so the error that
+    // aborted the run is the one the run ends with: thrown from here, it would replace it, and the
+    // cause of the abort would be lost behind the registry's. With nothing on its way out, the save's
+    // own error is the run's error. ⚠️ The registry file itself is still written in place, not written
+    // aside and renamed, so a process killed during the save can still leave it truncated.
+    try {
+      saveRegistry(root, registry);
+    } catch (saveError) {
+      if (!unwinding) throw saveError;
+      console.error(`⚠ the registry could not be saved either, so the ✓ stamped above are on their pages `
+        + `without an entry until the next sync records them: ${(saveError as Error).message}`);
+    }
   }
-  saveRegistry(root, registry);
   console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${refused} refused · `
     + `${Object.keys(registry).length} validated in all`);
   if (refused) console.log(`⚠ ${refused} ✓ could not be stamped safely — see the messages above; this run exits non-zero`);
