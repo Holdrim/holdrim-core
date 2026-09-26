@@ -82,7 +82,8 @@ Worth knowing before you run it:
     -1 makes `events_no_replace`, `people_no_replace` or `texts_no_replace` read every genuine
     insert into its table as a replace — no first event on an empty `events`, no new person (a new
     reviewer, or the owner after a handover), no ✓ and no comment, since each carries a text — and
-    that row cannot be deleted either. A genuine insert never takes a rowid below 1, so
+    on `events` and `people` that row cannot be deleted either. A genuine insert takes a rowid
+    below 1 only when a row below 1 is already there (SQLite gives it `MAX(rowid) + 1`), so
     `events_no_first_rowid_below_one` (an empty `events`, where `events_no_low_rowid` has nothing to
     compare with), `people_no_rowid_below_one` and `texts_no_rowid_below_one` refuse one.
     What no trigger can close from inside the file: a connection that turns triggers off for
@@ -94,9 +95,11 @@ Worth knowing before you run it:
     `texts` (`kind: "sunk"`), however either got there, are named by the server on every boot and
     by the CLI's `--db` reader on every read (a `sqlite_guard_missing` WARNING; `guardsTampered`,
     so `sync`, `apply` and `state` refuse), and a write refused because of one says that is the
-    cause instead of calling the write a forgery. Nothing repairs either: the row cannot be
-    deleted, so a person recovers such a file by hand. A row one short of the ceiling traps nothing
-    until a genuine append takes the ceiling, and is named from then on.
+    cause instead of calling the write a forgery. No boot repairs either. A parked row, and a row
+    below 1 on `events` or `people`, cannot be deleted, so a person recovers such a file by hand;
+    a row below 1 on `texts` that names an existing event can be removed with `removeText`
+    (docs/PRIVACY.md, section 5), which records a `text_removed` event for it. A row one short of
+    the ceiling traps nothing until a genuine append takes the ceiling, and is named from then on.
     A column named `rowid`, `oid` or `_rowid_`, in any case and generated ones included, on
     `events`, `people` or `texts`, takes that name from the real rowid for every guard that says it,
     and `ALTER TABLE ... ADD COLUMN` makes one with every trigger's text unchanged. While it is

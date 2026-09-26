@@ -286,7 +286,10 @@ export class Source {
         // A file written before the people table existed has no such table, and every author in it
         // is an address: an empty table resolves none of them, which is what they need. The read
         // is the same rule the server's store applies, through the same resolver.
-        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
+        // NOCASE, as SQLite resolves the name the reads below use: a `people` renamed to `PEOPLE` is
+        // still the table the server reads, and a case-sensitive lookup here would read it as absent,
+        // no author resolved, where the server resolves them all.
+        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people' COLLATE NOCASE").get();
         people = new Map(hasPeople
           ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
             .map((p) => [p.id, p.email ?? null])
@@ -294,7 +297,8 @@ export class Source {
         // A file written before texts were extracted has no `texts` table either, and every row's
         // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
         // an empty people map gives an author (docs/PRIVACY.md, section 4).
-        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
+        // NOCASE for the same reason: read as absent, every hashed text would read as tampered.
+        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts' COLLATE NOCASE").get();
         texts = new Map(hasTexts
           ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
               { event: string; field: TextField; value: string; salt: string }[])

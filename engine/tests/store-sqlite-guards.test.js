@@ -1018,7 +1018,8 @@ test("a rowid column on people lets UPDATE OR REPLACE erase another person's row
 // ================================================ holdrim#109, round 3: below rowid 1, and the proofs
 // In a BEFORE INSERT trigger, NEW.rowid is -1 for an insert that leaves the rowid to SQLite, so one
 // row held at -1 makes `events_no_replace`, `people_no_replace` and `texts_no_replace` read every
-// genuine insert after it as replacing that row. A genuine insert never takes a rowid below 1.
+// genuine insert after it as replacing that row. A genuine insert takes a rowid below 1 only once
+// a row below 1 is already there.
 
 const BELOW_ONE = { events: /an event is not inserted below rowid 1/, people: /a person is not inserted below rowid 1/,
   texts: /a text is not inserted below rowid 1/ };
@@ -1050,17 +1051,20 @@ test('a row below rowid 1 is refused on people and texts whatever they hold, and
     db.close();
   }
   const store = new SqliteEventStore(path);
+  let remark;
   try {
-    await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'ana@example.org');
+    remark = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'ana@example.org');
   } finally {
     await store.close();
   }
-  const ro = new DatabaseSync(path, { readOnly: true });
+  const rw = new DatabaseSync(path);
   try {
-    assert.deepEqual(['events', 'people', 'texts'].map((t) => Number(ro.prepare(`SELECT MIN(rowid) m FROM ${t}`).get().m)), [1, 1, 1],
+    assert.deepEqual(['events', 'people', 'texts'].map((t) => Number(rw.prepare(`SELECT MIN(rowid) m FROM ${t}`).get().m)), [1, 1, 1],
       'and a genuine insert into each table, texts included, went through at 1 or above');
+    // texts again, now that it holds a row: above, it was tried only while empty.
+    for (const rowid of [-1, 0]) assert.throws(() => rw.exec(textAt(rowid, remark.id)), BELOW_ONE.texts, `texts, holding a row: ${rowid}`);
   } finally {
-    ro.close();
+    rw.close();
   }
 }));
 
@@ -1129,6 +1133,77 @@ for (const [table, how] of Object.entries(SUNK)) {
   }));
 }
 
+// Below 1, not below 0: a row at 0 traps nothing by itself, but no genuine insert takes it either.
+const AT_ZERO = {
+  events: without('events_no_first_rowid_below_one', insertAt(0, 'zero')),
+  people: without('people_no_rowid_below_one', personAt(0, 'p_zero')),
+  texts: without('texts_no_rowid_below_one', `${insertAt(1, 'first')}; ${textAt(0, 'first')}`),
+};
+
+for (const [table, sql] of Object.entries(AT_ZERO)) {
+  test(`a row at rowid 0 on ${table} is named sunk too`, withFile(async (path) => {
+    await reopen(path);
+    outside(path, sql);
+    assert.deepEqual(mismatchesOf(path), [{ name: table, kind: 'sunk' }]);
+  }));
+}
+
+// SQLite resolves a table name in any case, so a table renamed through a temporary name to upper
+// case (a rename that changes only the case is refused, one through another name is not) is still
+// the one every guard's `ON texts` binds to and every write goes into — with every guard dropped
+// first and put back by its exact text, nothing about the triggers shows it.
+const everyGuardAround = (sql) => `${Object.keys(GUARDS).map((g) => `DROP TRIGGER ${g};`).join(' ')} ${sql};
+  ${Object.entries(GUARDS).map(([g, body]) => `CREATE TRIGGER ${g} ${body};`).join(' ')}`;
+const toUpper = (table) => `ALTER TABLE ${table} RENAME TO ${table}_aside; ALTER TABLE ${table}_aside RENAME TO ${table.toUpperCase()}`;
+
+for (const [table, how] of Object.entries(SUNK)) {
+  test(`${table} renamed to ${table.toUpperCase()} with a row at rowid -1: still named, and the refused write still says why`, withFile(async (path) => {
+    const store = new SqliteEventStore(path);
+    await how.setup(store);
+    await store.close();
+    const event = new DatabaseSync(path, { readOnly: true });
+    const firstEvent = event.prepare('SELECT id FROM events LIMIT 1').get()?.id;
+    event.close();
+    outside(path, how.sql.replace('__EVENT__', firstEvent));
+    outside(path, everyGuardAround(toUpper(table)));
+    assert.deepEqual(mismatchesOf(path), [{ name: table, kind: 'sunk' }], 'every guard is in place, on the renamed table too');
+    assert.equal((await readWithCli(path)).tampered, true, 'so sync, apply and state refuse');
+    const again = new SqliteEventStore(path);
+    try {
+      const err = await how.write(again).then(() => null, (e) => e);
+      assert.match(err.message, new RegExp(`^the ${how.what} was not recorded: the database's ${table} table holds a row below rowid 1`));
+      assert.match(err.cause.message, how.guard);
+    } finally {
+      await again.close();
+    }
+  }));
+}
+
+test('events renamed to EVENTS with a row parked at the ceiling: still named', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  await store.append(approval, 'owner@example.org');
+  await store.close();
+  outside(path, everyGuardAround(`${insertAt(CEILING, 'parked')}; ${toUpper('events')}`));
+  assert.deepEqual(mismatchesOf(path), [{ name: 'events', kind: 'parked' }]);
+}));
+
+test('the --db reader reads people and texts renamed to upper case as the server does: the author resolved, the text not tampered', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'ana@example.org');
+  await store.close();
+  outside(path, everyGuardAround(`${toUpper('people')}; ${toUpper('texts')}`));
+  const read = (e) => ({ author: e.author, text: e.text, textTampered: e.textTampered });
+  const cli = await readWithCli(path);
+  assert.equal(cli.tampered, false, 'nothing is wrong with this file: the names are only in another case');
+  assert.deepEqual(cli.events.map(read), [{ author: 'ana@example.org', text: 'a remark', textTampered: false }]);
+  const server = new SqliteEventStore(path);
+  try {
+    assert.deepEqual((await server.list()).map(read), cli.events.map(read), 'and the server reads the same');
+  } finally {
+    await server.close();
+  }
+}));
+
 test('a refused write names only what is wrong with the tables it wrote to, on the person path and the event path alike', withFile(async (path) => {
   const store = new SqliteEventStore(path);
   const first = await store.append({ type: 'comment', page: 'A01', text: 'first' }, 'ana@example.org');
@@ -1158,6 +1233,23 @@ test('removeText on a parked file says the row is why', withFile(async (path) =>
     const err = await again.removeText(e.id, 'text', 'owner@example.org').then(() => null, (x) => x);
     assert.match(err.message, /^the event was not recorded: the database's events table holds a row at the largest rowid/);
     assert.match(err.cause.message, /not inserted below one already held/);
+  } finally {
+    await again.close();
+  }
+}));
+
+test('removeText refused on a parked file names events only: a row below 1 on people or texts cannot refuse a removal', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const e = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'owner@example.org');
+  await store.close();
+  outside(path, without('events_no_high_rowid', insertAt(CEILING, 'parked'))
+    + without('people_no_rowid_below_one', personAt(-1, 'p_trap'))
+    + without('texts_no_rowid_below_one', textAt(-1, e.id)));
+  const again = new SqliteEventStore(path);
+  try {
+    const err = await again.removeText(e.id, 'text', 'owner@example.org').then(() => null, (x) => x);
+    // One cause, then the closing sentence: a second table named would come after a ';'.
+    assert.match(err.message, /^the event was not recorded: the database's events table holds a row at the largest rowid[^;]*\. This is how/);
   } finally {
     await again.close();
   }

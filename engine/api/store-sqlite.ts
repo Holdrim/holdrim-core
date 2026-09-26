@@ -119,8 +119,10 @@ export const GUARDS: Record<string, string> = {
   // the AFTER comments above name), so `events_no_replace`, which is BEFORE and asks
   // `rowid = NEW.rowid`, reads every genuine append as replacing the row at -1 and refuses it as a
   // forgery. Any row below 1 leads there: SQLite gives the next insert MAX + 1, so a table topped
-  // by -5 counts up to -1. A genuine insert never takes a rowid below 1 on its own — 1 on an empty
-  // table, MAX + 1 after — so refusing one refuses only a rowid someone named.
+  // by -5 counts up to -1. A genuine insert takes a rowid below 1 only once a row below 1 is
+  // already there — 1 on an empty table, MAX + 1 after, which is below 1 only when MAX is — so
+  // refusing one refuses a rowid someone named, or a genuine insert that such a row sent below 1,
+  // and `guardMismatches` names that row as the cause (`sunk`).
   // `events_no_low_rowid` already refuses it on a table that holds a row above it; this one is the
   // empty table, where that guard has no maximum to compare with. Only there, so that the two never
   // both fire and a low insert into a table that holds rows keeps that guard's words. A new trigger,
@@ -319,10 +321,10 @@ export const ROWID_CEILING = '9223372036854775807';
  * Once the column is dropped again, the row it let in is all that is left, and two kinds of row can
  * still be named, however they got there — that column, triggers turned off on a connection
  * (`SQLITE_DBCONFIG_ENABLE_TRIGGER`), or a guard dropped and put back by its exact text:
- * - a row below rowid 1 in any of the three tables (`sunk`). No genuine insert takes one, and one
- *   at -1 makes every insert after it read as a replace (the comment on
- *   `events_no_first_rowid_below_one`); on `events` it also sorts below `extractionBoundary`, the
- *   forgery that boundary exists to name.
+ * - a row below rowid 1 in any of the three tables (`sunk`). No genuine insert takes one while
+ *   none is there (after one, SQLite's MAX + 1 can be below 1 too), and one at -1 makes every
+ *   insert after it read as a replace (the comment on `events_no_first_rowid_below_one`); on
+ *   `events` it also sorts below `extractionBoundary`, the forgery that boundary exists to name.
  * - an `events` table whose highest rowid is the ceiling (`parked`). Exactly the ceiling, not "near"
  *   it: that row is what sends SQLite to random rowids below it, so every append after it is
  *   refused as a forgery, and a row one short of it traps nothing until a genuine append takes the
@@ -339,7 +341,10 @@ function rowidMismatches(db: DatabaseSync): GuardMismatch[] {
       .map((c) => c.name).filter((n) => aliases.includes(n.toLowerCase()));
     for (const column of hiding) out.push({ name: `${table}.${column}`, kind: 'shadowed' });
     // A file an older version made has no `people` or `texts` at all, and the CLI still reads it.
-    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)) continue;
+    // NOCASE, as SQLite itself resolves a table name: `texts` renamed through a temporary name to
+    // `TEXTS` is still the table every guard's `ON texts` binds to and every write goes into, and a
+    // case-sensitive lookup here would skip it, so a sunk or parked row there goes unnamed.
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? COLLATE NOCASE").get(table)) continue;
     const hidden = new Set(hiding.map((n) => n.toLowerCase()));
     const rowid = aliases.find((a) => !hidden.has(a));
     // All three names hidden leaves no way to ask for the rowid at all, and each is named above.
@@ -474,8 +479,9 @@ function ensureColumn(db: DatabaseSync, table: string, column: string, type: str
  * below rowid 1, or with a column hiding the rowid, the guard that refused speaks of a forgery —
  * "inserted below one already held", "not replaced" — about the operator's own genuine write, and
  * the cause is somewhere else entirely: so the cause is what is said, and the guard's words go along
- * as `cause`. Only what is wrong with a table the write touched is said: a column on `people` does
- * not explain an event refused, and naming it would send the operator to the wrong table.
+ * as `cause`. Only what is wrong with a table whose guards could have refused the write is said: a
+ * column on `people` does not explain an event refused, and naming it would send the operator to
+ * the wrong table.
  */
 function refusedBecause(db: DatabaseSync, err: unknown, what: 'event' | 'person', touched: string[]): unknown {
   let found: GuardMismatch[];
@@ -683,7 +689,11 @@ export class SqliteEventStore implements EventStore {
       this.#db.exec('ROLLBACK');
       // A text that is not there is its own answer, whatever else is wrong with the file: wrapped,
       // "no text to remove" would read as the file's fault.
-      throw err === absent ? err : refusedBecause(this.#db, err, 'event', ['events', 'texts']);
+      // `events` alone, not `texts` too: this writes `texts` only by a DELETE, which fires only
+      // `texts_no_delete`, and that reads OLD.event, OLD.field and `events`, never a rowid. So a
+      // row below 1 or a column hiding the rowid on `texts` cannot refuse a removal, and naming one
+      // would send the operator to a table that did not cause it.
+      throw err === absent ? err : refusedBecause(this.#db, err, 'event', ['events']);
     }
     return {
       id, type: TEXT_REMOVED, page: original.page, block: original.block ?? null, fingerprint: null,
