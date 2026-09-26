@@ -90,6 +90,19 @@ test('a pair already proposed before is not proposed again — idempotent across
   assert.equal(proposalsOf(blocks, ['lock'], already).length, 0, 'the same pair does not come back a second run');
 });
 
+test('a marker naming the pair in the OTHER order still counts — idempotence must not depend on which id a stray edit named first', () => {
+  const blocks = new Map([
+    block('A.1.1', 'A', 'a fingerprint'),
+    block('A.1.2', 'A', 'another fingerprint'),
+  ]);
+  // `proposalsOf` always builds A.1.1 ⇄ A.1.2 (sorted); a marker naming them the other way round
+  // still has to be read as the SAME pair, not as a pair never proposed before.
+  const already = existingProposalMarkers([
+    { type: 'request', data: { category: 'dependency' }, text: 'Proposed dependency: A.1.2 ⇄ A.1.1 — reversed by hand' },
+  ]);
+  assert.equal(proposalsOf(blocks, ['fingerprint'], already).length, 0);
+});
+
 test('a rejected or applied proposal is still not proposed again — the DECISION, not the outcome, is what stops it', () => {
   // `existingProposalMarkers` reads every request with this category, whatever its state: a
   // proposal the owner already rejected must not come back just because nobody approved it.
@@ -171,6 +184,17 @@ test('content.glossary refuses more than 1000 terms, and anything that is not an
   assert.throws(() => readConfig('/p', { readFile: notArray }), /must be an array/);
   const notString = () => JSON.stringify({ content: { glossary: [42] } });
   assert.throws(() => readConfig('/p', { readFile: notString }), /content\.glossary\[0\]/);
+});
+
+test('content.glossary accepts exactly 1000 terms — the limit is a boundary, not a rough guess', () => {
+  const exactly = () => JSON.stringify({ content: { glossary: Array.from({ length: 1000 }, (_, i) => `t${i}`) } });
+  const config = readConfig('/p', { readFile: exactly });
+  assert.equal(config.glossary.length, 1000);
+});
+
+test('content.glossary refuses an empty term', () => {
+  const read = () => JSON.stringify({ content: { glossary: [''] } });
+  assert.throws(() => readConfig('/p', { readFile: read }), /content\.glossary\[0\]/);
 });
 
 // ---------------------------------------------------------------- proposeDeps (the I/O shell)

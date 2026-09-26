@@ -41,13 +41,18 @@ function marker(a: string, b: string): string {
  * events the moment anybody edited one by hand. Read from `text`, not `data`: a request's `data` is
  * the small, closed vocabulary every event shares (`category`, `commit`, …), the same way a `term`
  * or `text` request already carries its whole explanation in `text` and nothing else.
+ *
+ * The two ids are sorted before they reach `marker`, never used in whatever order the text happens
+ * to name them: `proposalsOf` always looks a pair up as `marker(p.a, p.b)` with `a` and `b` already
+ * the pair's own sorted ids, so a marker built from the text's own order — "B ⇄ A" instead of
+ * "A ⇄ B" — would silently fail to match and the SAME pair would be proposed again.
  */
 export function existingProposalMarkers(events: Event[]): Set<string> {
   const found = new Set<string>();
   for (const e of events) {
     if (e.type !== 'request' || e.data?.category !== 'dependency' || typeof e.text !== 'string') continue;
     const m = /^Proposed dependency: (\S+) ⇄ (\S+)/.exec(e.text);
-    if (m) found.add(marker(m[1], m[2]));
+    if (m) found.add(m[1] < m[2] ? marker(m[1], m[2]) : marker(m[2], m[1]));
   }
   return found;
 }
