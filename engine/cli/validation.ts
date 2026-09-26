@@ -463,8 +463,8 @@ async function markAll(root: string, registry: Registry, stamps: readonly SiteSt
  * `plan`: the seal for the block it names on the page as read now — with whatever else the caller
  * wants back at `settle` — or `null` when the caller refuses it (having said why). `settle`: that plan
  * and its outcome from `spliceAll`, once the page at `path` is written. A plan lives from its page's
- * planning to its settling and no longer, because `sync`'s carries the block's whole text: kept for
- * every page, it would make a run grow with the site again.
+ * planning to its settling and no longer, because `sync`'s plan, a `Planned`, carries the block's
+ * whole text: kept for every page, it would make a run grow with the site again.
  */
 interface PageWork<T extends { plan: MarkPlan }> {
   unlocated(index: number, where: Extract<Location, { ok: false }>): void;
@@ -527,7 +527,8 @@ async function stampByPage<T extends { plan: MarkPlan }>(root: string, ids: read
       if (plan) planned.push({ index, planned: plan });
     }
     const written = spliceAll(html, document, planned.map(({ index, planned: p }): PageStamp => ({ id: ids[index], plan: p.plan })));
-    // The write stays above `settle`: `sync` saves the registry even when this write throws.
+    // The write stays above `settle`, so no plan is settled for a page that never reached the disk:
+    // `sync`, whose `settle` records each ✓, then saves a registry that holds only what was written.
     if (written.html !== html) writeFileSync(path, written.html, 'utf8');
     for (const [k, { index, planned: p }] of planned.entries()) work.settle(index, p, written.results[k], path);
   }
