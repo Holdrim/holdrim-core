@@ -155,11 +155,16 @@ who ran the engine from `main` before it.
   SQLite file whose guard was dropped from outside the store now warns, naming it, instead of
   putting it back without a word. The CLI reading that file with `--db` compares the guards too, on
   every read, and repairs nothing: it names each one missing or changed, and each trigger that is
-  not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; `list` and
-  `sync` exit non-zero when it is set; and `apply` (`--dry-run` included) and `state` refuse to
-  act on such a file at all, before any brief, agent or event. Every guard warning, the server's
-  included, now quotes the trigger's name as JSON, so a name carrying control characters is
-  printed escaped.
+  not a guard, on stderr; `holdrim list --json` carries a `guardsTampered` key; `list` exits
+  non-zero when it is set, and its `--json` output carries no `requests` at all while it is —
+  `toTriage` and both flags still say what happened, but an agent acting on the JSON gets nothing
+  to act on. (The table, with no `--json`, still shows them: the owner judging the file has to be
+  able to look at it.) `examples/hello-world/AGENTS.md` and the Claude Code skill now tell the
+  agent to stop — apply nothing, change no state — on either flag or a non-zero exit; and `sync`,
+  `apply` (`--dry-run` included) and `state` refuse to act on such a file at all, before any lock,
+  brief, agent or event. Every guard warning, the server's included, now quotes the trigger's name
+  as JSON, with control, C1 and bidirectional characters escaped, and so does every structured log
+  line.
 - **A text that fails its own hash raises a CRITICAL alert.** Every read that resolves a field to
   tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
   field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite

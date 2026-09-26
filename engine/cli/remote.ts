@@ -262,10 +262,11 @@ export class Source {
     try {
       db.exec('BEGIN DEFERRED');
       try {
-        // The guards in the same snapshot as the rows: compared outside it, a server repairing the
-        // file between the two reads would have this say a guard was missing from rows it never
-        // read without one. Only the server's next boot compared before (holdrim#108), so a guard
-        // dropped was enough, for this reader, to forge a row and never be named.
+        // The guards in the same snapshot as the rows, and first in it, so the snapshot starts here.
+        // Compared before the transaction, a guard dropped and a row forged between the comparison
+        // and the rows would be read as guarded; compared after it, a drop the rows never saw would
+        // be named against them. Only the server's next boot compared before (holdrim#108), so a
+        // guard dropped was enough, for this reader, to forge a row and never be named.
         mismatches = guardMismatches(db);
         // `*, rowid`, not a named list: a file from before `text_hash`/`snapshot_hash` existed has no
         // such columns at all, and naming them would fail the query outright rather than read the

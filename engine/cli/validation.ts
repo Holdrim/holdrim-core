@@ -10,7 +10,7 @@ import { createRoles } from '../core/roles.js';
 import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
-import { warnOfTampering } from './requests.ts';
+import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -294,12 +294,21 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     console.log(`  Going on with the registry in the repository: ${Object.keys(registry).length} validated (a frozen snapshot).`);
     return { added: 0, unchanged: 0, expired: 0, refused: 0, offline: true, tampered: false, guardsTampered: false };
   }
+  // `sync` acts: it writes the owner's ✓ into approvals.json and data-validated into the pages. So
+  // on a file whose guards are broken it refuses, as `apply` and `state` do, before one approval is
+  // read — with `events_no_update` dropped, an approval's fingerprint can be rewritten to today's
+  // text, and a sync that went on would lock what the owner never saw. Outside the `try` above on
+  // purpose: in it, the refusal would read as "could not reach the cloud" and sync would go on.
+  refuseToActOnBrokenGuards(source);
   // Which of the three cases it was already went out through `reportTampered`, wherever `events` was
   // resolved — this is only the flag `sync` warns from and exits non-zero on (issue #91).
   const tampered = suspectsOf(events).length > 0;
   if (tampered) warnOfTampering();
   // Already said, guard by guard, by the reader that compared them (`Source#fromFile`); carried
-  // here only so the CLI exits non-zero on it, as `list` does (holdrim#108).
+  // here only so the CLI exits non-zero on it, as `list` does (holdrim#108). `refuseToActOnBrokenGuards`
+  // above already stops this function cold when it is true, so by this line it can only be false —
+  // kept, rather than dropped, so a caller combining conditions (`holdrim.ts`'s exit expression) still
+  // has the field to read, exactly as `list`'s result does.
   const guardsTampered = source.guardsTampered ?? false;
   const approvals = events.filter((e) => e.type === 'approval');
   // Read from what the server wrote when the ✓ was GIVEN, never recomputed from who holds `lock`

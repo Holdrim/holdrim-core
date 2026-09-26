@@ -12,6 +12,7 @@ import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { jsonForTerminal } from '../api/log.ts';
 import { SqliteEventStore, GUARDS } from '../api/store-sqlite.ts';
 import { TEXT_REMOVED } from '../api/texts.ts';
 import { readBlocks } from '../cli/pages.ts';
@@ -40,6 +41,13 @@ function runApart(args, cwd, env = {}) {
     { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '', ...env } });
   return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+}
+
+/** Every code point from `start` to `end`, inclusive — for walking a Unicode range one by one. */
+function range(start, end) {
+  const points = [];
+  for (let p = start; p <= end; p += 1) points.push(p);
+  return points;
 }
 
 /** A disposable copy of the hello world, so a command that writes cannot dirty the repository. */
@@ -427,9 +435,10 @@ const guardLines = (stderr) => stderr.split('\n')
 
 /**
  * What every mismatch has to come out as: `list --json` still parses — every warning went to
- * stderr — with `guardsTampered` set and `tampered` not, since no text was touched; a non-zero exit;
- * the server's own words for it, and one structured line naming it, and nothing else named. The
- * file is left exactly as found: this reader warns, it never repairs.
+ * stderr — with `guardsTampered` set, `tampered` not (no text was touched), and `requests` itself
+ * empty (holdrim#108, decision 4): an agent reading `--json` has nothing here safe to act on. A
+ * non-zero exit; the server's own words for it, and one structured line naming it, and nothing else
+ * named. The file is left exactly as found: this reader warns, it never repairs.
  */
 function assertNamed(db, dir, name, kind, words) {
   const before = triggerNames(db);
@@ -438,7 +447,7 @@ function assertNamed(db, dir, name, kind, words) {
   const q = JSON.parse(r.stdout);
   assert.equal(q.guardsTampered, true);
   assert.equal(q.tampered, false, 'no text was touched: the two flags say different things');
-  assert.equal(q.requests.length, 1, 'the file is still read: this warns, it does not refuse');
+  assert.deepEqual(q.requests, [], 'an agent gets nothing to act on when the guards may be forged');
   assert.match(r.stderr, words);
   assert.deepEqual(guardLines(r.stderr), [{ severity: 'WARNING', event: 'sqlite_guard_missing', guard: name, kind }]);
   assert.deepEqual(triggerNames(db), before, 'nothing repaired: the file is opened read-only');
@@ -475,10 +484,14 @@ test('list --db exits non-zero and names a trigger that is not a guard at all', 
 
 test('list --db with every guard in place: guardsTampered false, exit 0, and nothing said about a guard', async (t) => {
   const dir = project(t);
-  const { db } = await guardedDb(dir);
+  const { db, id } = await guardedDb(dir);
   const r = runApart(['list', '--db', db, '--json'], dir);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(JSON.parse(r.stdout).guardsTampered, false);
+  const q = JSON.parse(r.stdout);
+  assert.equal(q.guardsTampered, false);
+  // Guards intact, so the request is real data an agent can act on — this is what would break if
+  // `list` emptied `requests` unconditionally instead of only when `guardsTampered`.
+  assert.deepEqual(q.requests.map((x) => x.id), [id]);
   assert.doesNotMatch(r.stderr, /guard|trigger/);
 });
 
@@ -522,12 +535,16 @@ test('the locks lens\'s reproduction: a request forged below every hashed row, e
          '2026-01-01T00:00:01.000Z', '{"request":"forged","state":"approved","from":"open"}');`);
     const r = runApart(['list', '--db', db, '--json'], dir);
     const q = JSON.parse(r.stdout);
-    assert.deepEqual(q.requests.map((x) => [x.id, x.state]), [['forged', 'approved']],
-      'the forgery still reads as approved: the text check alone cannot see it');
+    // The forgery reads as approved (the text check alone cannot see it) — but `--json` no longer
+    // hands it to an agent at all: `guardsTampered` empties `requests` (holdrim#108, decision 4).
+    assert.deepEqual(q.requests, []);
     assert.equal(q.tampered, false);
     assert.equal(q.guardsTampered, true, 'the dropped guard is what gives it away');
     assert.equal(r.code, 1);
     assert.match(r.stderr, /the database's guard "events_no_low_rowid" is missing/);
+    // The table (no --json) is where the owner still gets to see it and judge for themselves.
+    const table = runApart(['list', '--db', db], dir);
+    assert.match(table.stdout, /forged\s+Approved/);
   });
 
 test('plain list --db (the table) exits non-zero on a dropped guard, with approved requests to show', async (t) => {
@@ -574,25 +591,59 @@ test('list --db names every mismatch at once — foreign, missing and changed �
   assert.match(r.stderr, /the database's guard "texts_no_update" was not the one this version installs; read as it is/);
 });
 
-test('a foreign trigger\'s name reaches the terminal escaped, never as a raw control character', async (t) => {
+test('a foreign trigger\'s name reaches the terminal escaped, never as a raw control or bidi character', async (t) => {
   const dir = project(t);
   const { db, id } = await guardedDb(dir);
   // ESC [2K ESC [1A: erase the line and move up — enough to wipe the warning it sits in off the
-  // screen of `show`, which exits 0 and has nothing else to say that anything is wrong.
-  const name = 'x\x1b[2K\x1b[1A';
+  // screen of `show`, which exits 0 and has nothing else to say that anything is wrong. U+009B is
+  // the same CSI in one C1 character, which `JSON.stringify` alone leaves raw, and U+202E turns
+  // what follows around, so `exe.png` would read as `gnp.exe`.
+  const name = 'x\x1b[2K\x1b[1A\u009b2K‮gnp.exe';
   outside(db, `CREATE TRIGGER "${name}" BEFORE INSERT ON events BEGIN SELECT 1; END`);
   const r = runApart(['show', id.slice(0, 6), '--db', db], dir);
   assert.equal(r.code, 0, r.stderr);
-  assert.ok(!r.stderr.includes('\x1b'), 'no raw ESC byte on stderr');
-  assert.ok(r.stderr.includes('"x\\u001b[2K\\u001b[1A"'), 'the name, quoted, with the escapes spelled out');
+  for (const [raw, what] of [['\x1b', 'ESC'], ['\u009b', 'C1 CSI'], ['‮', 'right-to-left override']]) {
+    assert.ok(!r.stderr.includes(raw), `no raw ${what} on stderr, in either line`);
+  }
+  assert.ok(r.stderr.includes('"x\\u001b[2K\\u001b[1A\\u009b2K\\u202egnp.exe"'),
+    'the name, quoted, with the escapes spelled out');
   assert.deepEqual(guardLines(r.stderr).map((l) => [l.guard, l.kind]), [[name, 'foreign']],
-    'and the structured line still carries the name itself, for a program to read');
+    'and the structured line still parses back to the name itself, for a program to read');
+});
+
+test('jsonForTerminal escapes every code point the regex names, and nothing outside it', () => {
+  // The two tests above cover one C1 control and one bidi override; this walks every code point
+  // `jsonForTerminal`'s regex names, so a range narrowed by a future edit fails here first, on the
+  // exact point dropped, rather than in whichever caller happens to pass a name that used it.
+  const escaped = [
+    ...range(0x007f, 0x009f), // DEL and the C1 controls, ESC's own range
+    0x200e, 0x200f, // left-to-right / right-to-left marks
+    0x2028, 0x2029, // line and paragraph separator: a fresh line a terminal or log parser sees as new
+    ...range(0x202a, 0x202e), // bidi embeddings, override, and pop
+    ...range(0x2066, 0x2069), // bidi isolates
+  ];
+  for (const point of escaped) {
+    const input = `x${String.fromCharCode(point)}y`;
+    const out = jsonForTerminal(input);
+    const hex = point.toString(16).padStart(4, '0');
+    assert.ok(out.includes(`\\u${hex}`), `U+${hex} written as \\u${hex}, got ${out}`);
+    assert.ok(!out.includes(String.fromCharCode(point)), `U+${hex} not left raw, got ${out}`);
+    assert.equal(JSON.parse(out), input, `U+${hex} round-trips through JSON.parse`);
+  }
+
+  // Just outside each range: a point one step short of where the regex starts escaping.
+  for (const point of [0x007e, 0x00a0, 0x2065, 0x206a, 0x2027]) {
+    const input = `x${String.fromCharCode(point)}y`;
+    const out = jsonForTerminal(input);
+    assert.equal(out, JSON.stringify(input), `U+${point.toString(16).padStart(4, '0')} left to JSON.stringify alone`);
+  }
 });
 
 // ------------------------------------------------ acting refuses where reading warns
-// `apply` and `state` act on the queue. With `events_no_update` dropped, a rejection can be rewritten
-// into an approval in `data`, which no text hash covers: reading such a file warns, acting on it
-// would hand a request the owner refused to an agent. So these two refuse, before anything happens.
+// `sync`, `apply` and `state` act. With `events_no_update` dropped, a rejection can be rewritten into
+// an approval in `data`, and an old ✓ onto today's text, which no text hash covers: reading such a
+// file warns, acting on it would hand a request the owner refused to an agent, or lock a text the
+// owner never saw. So these three refuse, before anything happens.
 const REFUSED = /refusing to act on this events file: its guards are not the ones this version installs/;
 
 test('apply --dry-run --db refuses on a dropped guard, and prints no brief', async (t) => {
@@ -623,6 +674,50 @@ test('apply --db refuses on a dropped guard, and never starts the agent', async 
   assert.equal(r.code, 1, r.stdout + r.stderr);
   assert.match(r.stderr, REFUSED);
   assert.equal(existsSync(started), false, 'the agent was never started');
+});
+
+/** Every file of the project but the events file itself, as bytes: what `sync` could have written. */
+function projectFiles(dir) {
+  return new Map(readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((f) => f.isFile() && !f.name.startsWith('events.db'))
+    .map((f) => { const file = join(f.parentPath, f.name); return [file, readFileSync(file)]; }));
+}
+
+/** A store holding the lock baseline and one owner's ✓ on A01.1.1, at `fingerprint`, and its id. */
+async function approvedDb(dir, fingerprint) {
+  const db = join(dir, 'events.db');
+  const store = new SqliteEventStore(db);
+  await store.append({ type: 'lock_baseline', page: '_lock_baseline' }, 'you@example.org');
+  // `isLocked` trusts a written `locks` only on a ✓ dated AFTER the baseline, and two appends can
+  // share one millisecond.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const approval = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint,
+    data: { locks: 'true' } }, 'you@example.org');
+  await store.close();
+  return { db, id: approval.id };
+}
+
+test('sync --db refuses on a dropped guard, and writes neither approvals.json nor a page', async (t) => {
+  const real = (await readBlocks(project(t))).get('A01.1.1').fingerprint;
+  // The fixture is proved to lock first, on an intact file: otherwise "nothing written" below could
+  // only mean this ✓ never locks anything.
+  const control = project(t);
+  const intact = await approvedDb(control, real);
+  const before = projectFiles(control);
+  const ok = runApart(['sync', '--db', intact.db], control);
+  assert.equal(ok.code, 0, ok.stdout + ok.stderr);
+  assert.notDeepEqual(projectFiles(control), before, 'on an intact file, the ✓ is written into the project');
+
+  // The attack: the owner's ✓ was for an older text; with `events_no_update` dropped, its
+  // fingerprint is rewritten to today's, and a sync that went on would lock what the owner never saw.
+  const dir = project(t);
+  const { db, id } = await approvedDb(dir, 'an-older-text');
+  outside(db, `DROP TRIGGER events_no_update; UPDATE events SET fingerprint = '${real}' WHERE id = '${id}';`);
+  const files = projectFiles(dir);
+  const r = runApart(['sync', '--db', db], dir);
+  assert.notEqual(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, REFUSED);
+  assert.deepEqual(projectFiles(dir), files, 'approvals.json and every page byte for byte as they were');
 });
 
 test('state --db refuses on a dropped guard, before anything is recorded', async (t) => {
