@@ -32,14 +32,18 @@ Worth knowing before you run it:
   for the server — neither does emptying every table. Only signed events close that.) For an
   event's own text, moved
   out of the event into its own table, a forged removal dated and ordered after the text it targets
-  can still pass as a genuine one; a backdated one cannot (docs/PRIVACY.md, section 4). Closing this
+  can still pass as a genuine one when the same writer also deletes the row it names; a backdated
+  one cannot, and neither can one beside a row left there and edited, which reads as tampered
+  ([holdrim#133](https://github.com/Holdrim/holdrim-core/issues/133): `removeText` deletes the row
+  with the removal, so the two together are never its work) (docs/PRIVACY.md, section 4). Closing this
   for every kind of forgery, or for a trigger dropped outright, needs the events themselves signed —
   not built yet.
   People are disabled, never deleted, so every ✓ keeps the name of whoever gave it. What that
   means for personal data, and how a person is removed without breaking the trail:
   [`docs/PRIVACY.md`](docs/PRIVACY.md).
 - **A text that fails its own hash raises a CRITICAL alert — but only once something reads it.**
-  A row edited in place, a hash with no row and no valid removal, two removals of the same field,
+  A row edited in place (whatever removal names it), a hash with no row and no valid removal, two
+  removals of the same field,
   or (SQLite only — see below) a hash stripped off a row that postdates when extraction began
   ([holdrim#91](https://github.com/Holdrim/holdrim-core/issues/91)) each log a CRITICAL
   `text_tampered` line (`reportTampered`, `engine/api/texts.ts`) the moment the server, or the CLI

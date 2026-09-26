@@ -27,7 +27,8 @@ import { log } from './log.ts';
  * forged-event path, by dating (round 2, finding F): a removal only counts once it is later, in time
  * and in the list, than the event it names, so it cannot be backdated ahead of a text that, by its
  * own clock, did not exist yet. It does not close the rest — a removal dated and ordered after its
- * target, forged by the same direct writer, still reads as genuine, and dropping a trigger outright
+ * target, forged by the same direct writer who also deletes the row, still reads as genuine (beside
+ * a row left there and edited, it reads as tampered: `resolveOne`), and dropping a trigger outright
  * is not dated at all. Closing either needs the events themselves signed, so a reader can tell the
  * server wrote one from one anybody with the file could insert (docs/PRIVACY.md, section 3, "not
  * built"; SECURITY.md says the same of the file as a whole).
@@ -65,6 +66,16 @@ export function newSalt(): string {
  */
 export function hashText(value: string, salt: string): string {
   return createHash('sha256').update(salt, 'utf8').update('\u0000').update(value, 'utf8').digest('hex');
+}
+
+/**
+ * A stored row's own hash, or null when its value or salt is not a string. Firestore keeps whatever
+ * type a direct writer gives a field, and `hashText` throws on a number or a map: without this, such
+ * an edit makes every read fail before the CRITICAL line is logged, and the alarm becomes a crash.
+ * Null matches no recorded hash, so the row reads as `overwritten`, like any other edit.
+ */
+function rowHash(row: TextRow): string | null {
+  return typeof row.value === 'string' && typeof row.salt === 'string' ? hashText(row.value, row.salt) : null;
 }
 
 /** One freshly-salted row of the texts table, ready to write, for one field an event was given. */
@@ -161,7 +172,8 @@ export function resolveRemovedBy(removed: Removed | null | undefined, displays: 
  * was", so an operator does not have to re-derive it from the raw rows:
  *
  * - `overwritten`: a row is still there, but no longer hashes to what the event claims — the value
- *   was edited in place.
+ *   was edited in place. Whatever removals name the field: `removeText` deletes the row it removes,
+ *   so a removal beside a row that fails its hash is a second forgery, never an explanation.
  * - `unaccounted`: no row, and nothing among `events` says it was let go on purpose.
  * - `double_removal`: no row, and TWO removals claim it — `removeText` can never produce a second
  *   one, so this is forgery even though a single one would have been a clean, ordinary removal.
@@ -215,7 +227,7 @@ export function findingOf(event: string, field: TextField, kind: TamperKind, obs
  * place — its author, say, since only its id is hashed here.
  */
 export function observedOf(recorded: string | null, row: TextRow | undefined, removals: readonly string[]): string {
-  return [recorded ?? '', row ? hashText(row.value, row.salt) : '', [...removals].sort().join(',')].join('\u0000');
+  return [recorded ?? '', row ? (rowHash(row) ?? 'not text') : '', [...removals].sort().join(',')].join('\u0000');
 }
 
 /**
@@ -285,24 +297,29 @@ export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string 
  *   UNLESS the store marks this event `afterExtraction`: then a value with no hash is the downgrade
  *   forgery round 1 of the #91 review names, and reads as tampered instead (`RawEvent`'s own comment).
  * - a hash, and a row whose own hash matches it: the row is what was recorded. Its value is the text.
- * - a hash, and no row that still matches it: the text is gone, and MISSING IS NOT ABSENCE. A
- *   `TEXT_REMOVED` event naming this event and this field, found among `events` — the same list, so
- *   no second read is needed — says it was let go on purpose; `<field>Removed` carries who and when.
- *   With no such event — the row deleted straight in the store, or edited until its hash no longer
- *   matches its own value — nothing at hand can tell "let go on purpose" from "tampered with", and
- *   both are marked `<field>Tampered`: the harsher and the honest reading, since a text a reader
- *   cannot account for is suspect, not gone (the "Done when" of issue #28, and docs/PRIVACY.md,
- *   section 4: "a text that is missing with no such event is shown as missing, which is what
- *   tampering looks like").
+ * - a hash, and no row at all: the text is gone, and MISSING IS NOT ABSENCE. A `TEXT_REMOVED`
+ *   event naming this event and this field, found among `events` — the same list, so no second read
+ *   is needed — says it was let go on purpose; `<field>Removed` carries who and when. With no such
+ *   event — the row deleted straight in the store — nothing at hand can tell "let go on purpose"
+ *   from "tampered with", and it is marked `<field>Tampered`: the harsher and the honest reading,
+ *   since a text a reader cannot account for is suspect, not gone (the "Done when" of issue #28, and
+ *   docs/PRIVACY.md, section 4: "a text that is missing with no such event is shown as missing,
+ *   which is what tampering looks like").
+ * - a hash, and a row that no longer matches it — edited in place: tampered, always, removal or
+ *   not. `removeText` deletes the row and records the removal in one transaction, so a removal
+ *   beside a row still there is a state it never produces; reading that pair as a removal would let
+ *   one forged event silence the alarm the edit raised.
  *
  * A forged `TEXT_REMOVED` event — one the general events path never accepts, but a store method
  * called directly, or a row inserted straight into the file, could still produce — changes nothing
- * while the row it names is still there: the match above is tried first, so a claim with no row
- * change to back it resolves as nothing. `removalsOf` also refuses one dated, or placed, no later
- * than the event it names — a forgery cannot back-date itself ahead of a text that, by its own
- * clock, did not exist yet. What it cannot refuse is a forgery dated and ordered correctly, paired
- * with deleting the row it names: that is a real erasure passed off as a real removal, closed only
- * once events are signed (see the note on `TEXT_REMOVED` above).
+ * while the row it names is still there AND still matches its hash: the match above is tried first,
+ * so a claim with no row change to back it resolves as the text. Beside a row that fails its hash it
+ * cannot explain anything either: that field reads as tampered, as the case above says, and the
+ * removal's id is part of the finding. `removalsOf` also refuses one dated, or placed, no later than
+ * the event it names — a forgery cannot back-date itself ahead of a text that, by its own clock,
+ * did not exist yet. What it cannot refuse is a forgery dated and ordered correctly, paired with
+ * deleting the row it names: that is a real erasure passed off as a real removal, closed only once
+ * events are signed (see the note on `TEXT_REMOVED` above).
  *
  * `reports`, given, is appended to — never replaced — with one `TamperReport` per field this pass
  * finds tampered. It is an accumulator rather than a return value so this function's own shape stays
@@ -401,7 +418,7 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
       continue;
     }
     const row = rows.get(textKey(e.id as string, field));
-    if (row && hashText(row.value, row.salt) === hash) {
+    if (row && rowHash(row) === hash) {
       out[field] = row.value;
       out[`${field}Removed`] = null;
       out[`${field}Tampered`] = false;
@@ -412,12 +429,21 @@ function resolveOne<E>(event: RawEvent<E>, rows: ReadonlyMap<string, TextRow>, r
     const gone = removed.valid.get(key) ?? null;
     out[`${field}Removed`] = gone;
     // Tampered when nothing accounts for it at all, or when TWO removals do — a duplicate is not a
-    // cleaner story than a missing one, it is the same suspicion from the other direction.
+    // cleaner story than a missing one, it is the same suspicion from the other direction. And
+    // tampered whenever a row is still here, whatever removal names it: `row` truthy at this point
+    // failed its hash, and `removeText` deletes the row in the same transaction that records the
+    // removal, so it never leaves a removal beside a row. Without `row != null`, a direct writer who
+    // edits a row and then adds one removal dated and placed after its target turns the
+    // `overwritten` alarm into a clean removal credited to themselves, and the CRITICAL line stops.
+    // `<field>Removed` still names the first valid removal, as for `double_removal`: the field reads
+    // as tampered regardless, and the removal may be genuine with the row re-inserted after it.
     const duplicated = removed.duplicated.has(key);
-    const tampered = gone == null || duplicated;
+    const tampered = gone == null || duplicated || row != null;
     out[`${field}Tampered`] = tampered;
     // `row` truthy here means it FAILED the hash check above — a row that is there but wrong, the
-    // "overwritten" case; no row is either simply unaccounted for, or the double-removal forgery.
+    // "overwritten" case, with or without removals naming it: their ids are in `observed`, so a
+    // removal forged after the owner acknowledged the edit is a new finding, not the old one. No row
+    // is either simply unaccounted for, or the double-removal forgery.
     if (tampered) {
       const kind: TamperKind = row ? 'overwritten' : duplicated ? 'double_removal' : 'unaccounted';
       const observed = observedOf(hash, row, removed.ids.get(key) ?? []);
