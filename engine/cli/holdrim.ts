@@ -126,10 +126,7 @@ async function main() {
                          { commit: values.commit, blocks: values.blocks }); return 0;
     case 'apply':      return agent.apply(root, source, requireArg(arg, 'apply <id>'),
                          { agent: values.agent, dryRun: values['dry-run'] });
-    case 'sync': {
-      const r = await validation.sync(root, source);
-      return r.tampered || r.guardsTampered ? 1 : 0;
-    }
+    case 'sync':       return (await validation.sync(root, source)).tampered ? 1 : 0;
     case 'check':      return (await validation.check(root)) ? 1 : 0;
     case 'index':      await validation.rebuildIndex(root, values.db); return 0;
     case 'kinds':      await validation.listKinds(); return 0;

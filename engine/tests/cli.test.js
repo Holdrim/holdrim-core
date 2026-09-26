@@ -322,7 +322,7 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
       author: 'reviewer@example.org', when: '2026-09-22T10:02:00Z', data: { locks: 'false' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false, tampered: false, guardsTampered: false });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 1, offline: false, tampered: false });
   const registry = loadRegistry(tmp);
   assert.ok(registry['A01.1.1'], 'the owner\'s ✓ for the current text locks');
   assert.equal(registry['A01.1.1'].date, '2026-09-22');
@@ -504,7 +504,7 @@ test('sync locks a ✓ from what was written on it, even once somebody else is H
   // This process's own HOLDRIM_OWNER has since moved on — a handover, or a stale shell variable.
   // Recomputing "is this the CURRENT owner?" would read the ✓ above as no lock at all.
   const r = await sync(tmp, { events: async () => events }, { owner: 'newowner@example.org' });
-  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 0, offline: false, tampered: false, guardsTampered: false });
+  assert.deepEqual(r, { added: 1, unchanged: 0, expired: 0, offline: false, tampered: false });
   assert.ok(loadRegistry(tmp)['A01.1.1'], 'the ✓ locks from what was written, not from today\'s owner');
 });
 

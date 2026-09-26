@@ -22,10 +22,11 @@ Worth knowing before you run it:
   ([holdrim#108](https://github.com/Holdrim/holdrim-core/issues/108)), with the file opened
   read-only, so it repairs nothing: it names each guard missing or changed, and each trigger that
   is not a guard, in a `sqlite_guard_missing` warning on stderr; `holdrim list --json` carries
-  `guardsTampered`; `list` and `sync` exit non-zero, and `show`, `impact` and `summary` warn and go
-  on reading — reading never refuses. Acting does: `apply` (`--dry-run` included) and `state` exit
-  non-zero before a brief is written, an agent started or an event recorded, because a guard gone
-  is how a rejection is rewritten into an approval that no text hash covers. Both checks catch a
+  `guardsTampered`; `list` exits non-zero, and `show`, `impact` and `summary` warn and go on
+  reading — reading never refuses. Acting does: `sync`, `apply` (`--dry-run` included) and `state`
+  exit non-zero before a lock is written into `approvals.json` or a page, a brief written, an agent
+  started or an event recorded, because a guard gone is how a rejection is rewritten into an
+  approval, or an old ✓ onto today's text, where no text hash looks. Both checks catch a
   guard left dropped, not a person who puts it back: dropping a guard, changing rows and recreating
   it by its exact text before anything reads the file leaves nothing either check can see, and —
   for the server — neither does emptying every table. Only signed events close that.) For an

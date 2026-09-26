@@ -36,6 +36,11 @@ the deployment has, and refuses without the owner. It never reads them from `hol
 whatever a request asks — authority is the deployment's to set. `sync` prints the owner it used;
 check it is the person you expect before trusting what it locked.
 
+A non-zero exit from `sync` or `list`, or a `sync` that says it is refusing to act, means stop:
+report no request as ready, and tell the owner the store needs its guards restored — or, if the
+message says `tampered`, that a text does not match its hash. A broken guard makes even the plain
+`list` table show forged requests as **Approved**; there is nothing in that output worth reporting.
+
 Tell the owner, in a few lines: how many new blocks were validated, how many requests are ready to
 apply, and from whom. **Never offer to validate block by block in chat** — validation happens on
 the site.
@@ -43,7 +48,11 @@ the site.
 ## When applying a request
 
 1. `holdrim show <id>` — what was asked, the text then and now, and the conversation.
-   `holdrim list --json` gives the same as data, for every approved request at once.
+   `holdrim list --json` gives the same as data, for every approved request at once. If it reports
+   `guardsTampered`, or exits non-zero, stop there: apply nothing, change no state, and tell the
+   owner the store needs its guards restored before anything in it can be trusted. If it reports
+   `tampered`, stop the same way, but say instead that a text does not match its hash — that is not
+   a guard problem.
 2. `holdrim state <id> applying "Received…"` — the reviewer sees the progress in the panel.
 3. `holdrim impact <id> --term "…"` — **everywhere else the subject shows up**. Never change
    anything without this: the command marks which blocks are **validated**, and those need the
