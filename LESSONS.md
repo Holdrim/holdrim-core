@@ -90,6 +90,17 @@ Locks, tamper detection, the stores, and who holds authority.
   that the target changed.** Taught by #135: a check satisfied by what the target already carried
   let a repeat stamp land on another element. Lives in: `engine/cli/pages.ts` (`writesOnlyThe`).
 
+- **A merge that brings two reviewed features together gets its own locks read, because neither
+  review could see how they meet.** Taught by #138: #134's tamper routes were written where `api()`
+  took a plain address, and after the merge they asked the owner question of the flattened address
+  instead of `who` — a token for the owner's address would have passed the route's own guard. Lives
+  in: not yet in `crew/orchestrator.md`; the scan in `engine/tests/roles-boundary.test.js` catches
+  the known spellings.
+- **An identity is decided by asking the roles (`isOwner(who)`), never by comparing addresses.**
+  Taught by #138: the owner-reset guard's `target !== email` gave every person the right answer and
+  a token the wrong one. Lives in: `engine/api/server.ts` and the address scan; the scan matches
+  spellings, not meaning, so a new spelling still needs a reviewer.
+
 ## Proof
 
 - **A test whose expected value is computed by the function under test proves nothing.** Taught by
@@ -112,6 +123,13 @@ Locks, tamper detection, the stores, and who holds authority.
   in: `.claude/agents/review-proof.md`, under Severity.
 - **An equivalent mutant is read as a sign that the comment's reason is wrong, not only that the
   test is.** Taught by round 1 of #109. Lives in: not yet.
+
+- **A test that must tell two refusal layers apart asserts the refusal's sentence, not only its
+  status.** Taught by #138: "nor acknowledge a finding → 403" stayed green with the allowlist opened,
+  because the route's own guard also answers 403. Asserting `api.token.routeRefused` made the line
+  mean what its comment says — and proved it without widening the allowlist in the repository.
+- **A lens report of `[]` without what it checked is weak evidence, and is asked again.** Taught by
+  #129's correctness lens. Lives in: the lens contract, which asks for "clean with what you checked".
 
 ## Correctness
 
@@ -190,3 +208,5 @@ against these, and a cost that repeats becomes a Process lesson.
 | #28 | 3.5–4M in sub-agents, against a 0.7–1.5M budget | 4 | most of it was one developer resumed across four rounds; a fresh one did round 4 for about 140k |
 | #107 | about 2.4M: developers about 0.75M, lenses about 1.6M | 3 | a fresh round-3 developer took 115k, against about 340k of context for the resumed one |
 | #135 | about 2.5M: developers about 1.05M, lenses about 1.45M | 4 | the round-1 redesign would have come from reading `readBlocks` next to `mark` before any code; round 2 resumed round 1's developer to 340k, against 71k for a fresh one in round 4 |
+| #140 | about 1.3M: developers about 0.46M, lenses about 0.8M | 3 | the round-1 scope added `check` comparing the page seal with the registry, which the issue alone did not ask for and the locks lens then made the core of the PR |
+| #129 | about 0.37M | 1 | tier 2 with four sonnet lenses; the one finding was a test assertion, fixed by the orchestrator directly |
