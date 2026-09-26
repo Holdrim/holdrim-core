@@ -418,8 +418,9 @@ export function guardMismatchSaid(m: GuardMismatch): string {
     case 'changed': return `the database's guard ${name} was not the one this version installs`;
     case 'foreign': return `the database holds a trigger this version does not install, ${name}`;
     case 'shadowed': return `the database has a column ${name} that hides the real rowid from every guard`;
-    case 'sunk': return `the database's ${m.name} table holds a row below rowid 1, which no genuine insert takes, `
-      + 'and one at -1 makes every insert after it read as a replace, refused as a forgery, which it is not';
+    case 'sunk': return `the database's ${m.name} table holds a row below rowid 1, which only a write that named it, `
+      + 'or one sent below 1 by such a row, puts there, and one at -1 makes every insert after it read as a replace, '
+      + 'refused as a forgery, which it is not';
     case 'parked': return `the database's events table holds a row at the largest rowid, ${ROWID_CEILING}, `
       + 'so every append after it lands below that row and is refused as a forgery, which it is not';
   }

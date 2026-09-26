@@ -1093,44 +1093,54 @@ const SUNK = {
   },
 };
 
+// Shared by the plain SUNK case below and the renamed-table case further down: plant the row,
+// then check every reader names it the same way and the genuine write is refused for the same
+// reason. `beforeMismatch`, when given, runs the renamed case's extra step — the table rename
+// itself — before anything is asserted, so the two cases end up checking exactly the same things
+// instead of one silently dropping an assertion the other still makes.
+async function expectSunkRefused(path, said, logged, table, how, beforeMismatch) {
+  const store = new SqliteEventStore(path);
+  await how.setup(store);
+  await store.close();
+  const event = new DatabaseSync(path, { readOnly: true });
+  const firstEvent = event.prepare('SELECT id FROM events LIMIT 1').get()?.id;
+  event.close();
+  outside(path, how.sql.replace('__EVENT__', firstEvent));
+  if (beforeMismatch) beforeMismatch();
+  assert.deepEqual(mismatchesOf(path), [{ name: table, kind: 'sunk' }], 'every guard is in place: only the row is left to name');
+
+  const cli = await readWithCli(path);
+  assert.equal(cli.tampered, true, 'so sync, apply and state refuse');
+  assert.ok(cli.errors.some((l) => l.includes(`the database's ${table} table holds a row below rowid 1`) && /no boot repairs this/.test(l)),
+    cli.errors.join('\n'));
+
+  for (const boot of [1, 2]) {
+    said.length = 0;
+    logged.length = 0;
+    await reopen(path);
+    assert.deepEqual(said, [`holdrim: the database's ${table} table holds a row below rowid 1, which only a write that named it, `
+      + 'or one sent below 1 by such a row, puts there, and one at -1 makes every insert after it read as a replace, '
+      + 'refused as a forgery, which it is not; nothing a boot does repairs this'],
+      `boot ${boot}: said on every boot, since nothing repairs it`);
+    assert.deepEqual(logged.map((l) => ({ event: l.event, guard: l.guard, kind: l.kind })),
+      [{ event: 'sqlite_guard_missing', guard: table, kind: 'sunk' }]);
+  }
+
+  const again = new SqliteEventStore(path);
+  try {
+    const err = await how.write(again).then(() => null, (e) => e);
+    assert.ok(err, 'the genuine write is refused: the row at -1 is still there');
+    assert.match(err.message, new RegExp(`^the ${how.what} was not recorded: the database's ${table} table holds a row below rowid 1`),
+      'and says the cause, not that the operator forged their own write');
+    assert.match(err.cause.message, how.guard, "the guard's own words go along as the cause");
+  } finally {
+    await again.close();
+  }
+}
+
 for (const [table, how] of Object.entries(SUNK)) {
-  test(`a row held at rowid -1 on ${table} is named by guardMismatches, the --db reader and every boot, and the refused write says why`, withFile(async (path, said, logged) => {
-    const store = new SqliteEventStore(path);
-    await how.setup(store);
-    await store.close();
-    const event = new DatabaseSync(path, { readOnly: true });
-    const firstEvent = event.prepare('SELECT id FROM events LIMIT 1').get()?.id;
-    event.close();
-    outside(path, how.sql.replace('__EVENT__', firstEvent));
-    assert.deepEqual(mismatchesOf(path), [{ name: table, kind: 'sunk' }], 'every guard is in place: only the row is left to name');
-
-    const cli = await readWithCli(path);
-    assert.equal(cli.tampered, true, 'so sync, apply and state refuse');
-    assert.ok(cli.errors.some((l) => l.includes(`the database's ${table} table holds a row below rowid 1`) && /no boot repairs this/.test(l)),
-      cli.errors.join('\n'));
-
-    for (const boot of [1, 2]) {
-      said.length = 0;
-      logged.length = 0;
-      await reopen(path);
-      assert.deepEqual(said, [`holdrim: the database's ${table} table holds a row below rowid 1, which no genuine insert takes, `
-        + 'and one at -1 makes every insert after it read as a replace, refused as a forgery, which it is not; nothing a boot does repairs this'],
-        `boot ${boot}: said on every boot, since nothing repairs it`);
-      assert.deepEqual(logged.map((l) => ({ event: l.event, guard: l.guard, kind: l.kind })),
-        [{ event: 'sqlite_guard_missing', guard: table, kind: 'sunk' }]);
-    }
-
-    const again = new SqliteEventStore(path);
-    try {
-      const err = await how.write(again).then(() => null, (e) => e);
-      assert.ok(err, 'the genuine write is refused: the row at -1 is still there');
-      assert.match(err.message, new RegExp(`^the ${how.what} was not recorded: the database's ${table} table holds a row below rowid 1`),
-        'and says the cause, not that the operator forged their own write');
-      assert.match(err.cause.message, how.guard, "the guard's own words go along as the cause");
-    } finally {
-      await again.close();
-    }
-  }));
+  test(`a row held at rowid -1 on ${table} is named by guardMismatches, the --db reader and every boot, and the refused write says why`,
+    withFile((path, said, logged) => expectSunkRefused(path, said, logged, table, how)));
 }
 
 // Below 1, not below 0: a row at 0 traps nothing by itself, but no genuine insert takes it either.
@@ -1157,26 +1167,8 @@ const everyGuardAround = (sql) => `${Object.keys(GUARDS).map((g) => `DROP TRIGGE
 const toUpper = (table) => `ALTER TABLE ${table} RENAME TO ${table}_aside; ALTER TABLE ${table}_aside RENAME TO ${table.toUpperCase()}`;
 
 for (const [table, how] of Object.entries(SUNK)) {
-  test(`${table} renamed to ${table.toUpperCase()} with a row at rowid -1: still named, and the refused write still says why`, withFile(async (path) => {
-    const store = new SqliteEventStore(path);
-    await how.setup(store);
-    await store.close();
-    const event = new DatabaseSync(path, { readOnly: true });
-    const firstEvent = event.prepare('SELECT id FROM events LIMIT 1').get()?.id;
-    event.close();
-    outside(path, how.sql.replace('__EVENT__', firstEvent));
-    outside(path, everyGuardAround(toUpper(table)));
-    assert.deepEqual(mismatchesOf(path), [{ name: table, kind: 'sunk' }], 'every guard is in place, on the renamed table too');
-    assert.equal((await readWithCli(path)).tampered, true, 'so sync, apply and state refuse');
-    const again = new SqliteEventStore(path);
-    try {
-      const err = await how.write(again).then(() => null, (e) => e);
-      assert.match(err.message, new RegExp(`^the ${how.what} was not recorded: the database's ${table} table holds a row below rowid 1`));
-      assert.match(err.cause.message, how.guard);
-    } finally {
-      await again.close();
-    }
-  }));
+  test(`${table} renamed to ${table.toUpperCase()} with a row at rowid -1: still named, and the refused write still says why`,
+    withFile((path, said, logged) => expectSunkRefused(path, said, logged, table, how, () => outside(path, everyGuardAround(toUpper(table))))));
 }
 
 test('events renamed to EVENTS with a row parked at the ceiling: still named', withFile(async (path) => {
