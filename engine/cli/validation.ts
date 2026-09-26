@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { readBlocks, sheetFiles, resolveBlock, locateBlocks, digestOf, fingerprintsByPage, parsePage, spliceAttributes, spliceAll, attributeText, textOf, shortName, ofProject, projectRoles,
-  namesNotLowerCase, browserIdOf, browserBlocks, type Block, type Stamp, type MarkPlan } from './pages.ts';
+  namesNotLowerCase, browserIdOf, browserBlocks, type Block, type Stamp, type MarkPlan, type Location, type PageStamp, type Spliced } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
@@ -419,91 +419,132 @@ interface SiteStamp { id: string; when: string; event: string; expected: string;
 
 /**
  * `mark(…, 'site', event, fingerprintsNow, expected, true)` for many ✓ at once, with one parse and at
- * most one write per page instead of a whole-page read, parse and verification per block: every id is
- * located once (`locateBlocks`), each page's seals are spliced and verified together (`spliceAll`),
- * and the page is written once, only with the seals that were accepted. A ✓ refused anywhere along
- * the way is said through its own `say`, exactly as `mark` would print it, records nothing, and takes
- * no other ✓ down with it. `settled` hears each ✓'s outcome — the fingerprint recorded, or `null` for
- * a refusal — as soon as its page is done.
- *
- * One page at a time: read, parsed, planned, spliced, verified, written, and let go before the next
- * is read. Locating keeps only which page each id lives on and a digest of that page, so what a sync
- * holds is one page, whatever the size of the site.
- *
- * The page read here is the one located only when its digest matches; one that changed since has
- * its ✓ written one by one through `mark`'s own path, which resolves and fingerprints the block afresh.
- * An edit to a block's own text is refused either way, by its fingerprint; what the digest guards is
- * everything else locating decided about the page. Without it, a `DATA-ID` written onto the page
- * while the run is under way is stamped past, where `mark` refuses the whole page, and a block moved
- * off the page is looked for where it no longer is. The whole text is compared, through its digest:
- * an edit that keeps the page's length is an edit all the same. A page deleted since it was located is
- * treated the same way, rather than letting the read throw and abort the whole run over one ✓:
- * `mark`'s own path re-lists the sheet files and resolves the id fresh, so a page genuinely gone is
- * refused as "not found", exactly as it always was. Any other read error — a page turned into a
- * folder, say — still aborts: `mark`'s path would meet it too, and saying it loudly beats claiming to
- * handle it. `sync` saves the registry on the way out either way, so the pages already written keep
- * their entries (holdrim#148).
- *
- * ⚠️ The digest only re-checks the page THIS id was located on, once, at the moment its turn comes —
- * not every other page, and not again afterwards. A second block gaining this id, or a `DATA-ID`
- * written in upper case, on a DIFFERENT page while this run is under way is not caught here: `mark`'s
- * own per-block path re-scans every page before each write and would see it within that one stamp,
- * where this only sees it on the next `sync`. That is a longer window than main's per-stamp one, and
- * it fails safe rather than silently: the seal that lands here is still checked against this id's own
- * fingerprint, so it lands on text that really was approved; the twin element then shows its seal as
- * stale to the next `check` (`sealMismatches`) or is named outright by `duplicateIds`.
+ * most one write per page instead of a whole-page read, parse and verification per block
+ * (`stampByPage`). A ✓ refused anywhere along the way is said through its own `say`, exactly as `mark`
+ * would print it, records nothing, and takes no other ✓ down with it. `settled` hears each ✓'s
+ * outcome — the fingerprint recorded, or `null` for a refusal — as soon as its page is done. A page
+ * that changed since it was located has its ✓ written one by one through `mark`'s own path, which
+ * resolves and fingerprints the block afresh; an edit to a block's own text is refused either way, by
+ * its fingerprint. A read error that aborts the run leaves `sync` to save the registry on the way out,
+ * so the pages already written keep their entries (holdrim#148).
  */
 async function markAll(root: string, registry: Registry, stamps: readonly SiteStamp[],
                        fingerprintsNow: Map<string, string>,
                        settled: (index: number, fingerprint: string | null) => void) {
-  const located = locateBlocks(root, stamps.map((s) => s.id));
-  const pages = new Map<string, { digest: string; entries: number[] }>();
-  for (const [index, { id, say }] of stamps.entries()) {
+  await stampByPage<Planned>(root, stamps.map((s) => s.id), {
+    unlocated(index, where) {
+      const { id, say } = stamps[index];
+      say(refusal(id, where.message));
+      settled(index, null);
+    },
+    async alone(index) {
+      const { id, when, event, expected, say } = stamps[index];
+      settled(index, await markWith(say, root, registry, id, when, 'site', event, fingerprintsNow, expected, true));
+    },
+    async plan(index, element) {
+      const { id, when, expected, say } = stamps[index];
+      const plan = await planSeal(say, id, element, when, fingerprintsNow, expected, true);
+      if ('refused' in plan) { say(refusal(id, plan.refused)); settled(index, null); return null; }
+      return plan;
+    },
+    settle(index, p, result, path) {
+      const { id, when, event, say } = stamps[index];
+      if ('error' in result) { say(refusal(id, result.error)); settled(index, null); return; }
+      record(root, registry, id, path, when, 'site', event, p);
+      settled(index, p.fingerprint);
+    },
+  });
+}
+
+/**
+ * What `stampByPage` asks its caller, one id at a time — each by its index in the caller's list.
+ * `unlocated`: the id is on no block, or on several, or cannot be located (`where` says which).
+ * `alone`: its page changed or vanished since it was located, so it goes the caller's per-block way.
+ * `plan`: the seal for the block it names on the page as read now — with whatever else the caller
+ * wants back at `settle` — or `null` when the caller refuses it (having said why). `settle`: that plan
+ * and its outcome from `spliceAll`, once the page at `path` is written. A plan lives from its page's
+ * planning to its settling and no longer, because `sync`'s plan, a `Planned`, carries the block's
+ * whole text: kept for every page, it would make a run grow with the site again.
+ */
+interface PageWork<T extends { plan: MarkPlan }> {
+  unlocated(index: number, where: Extract<Location, { ok: false }>): void;
+  alone(index: number): Promise<void>;
+  plan(index: number, element: Element): Promise<T | null>;
+  settle(index: number, planned: T, result: Spliced, path: string): void;
+  /** Called with each page's path right before it is read — only tests set it, to change a page
+   *  between locating its blocks and stamping them. */
+  beforeRead?: (path: string) => void;
+}
+
+/**
+ * The page loop `markAll` and `restamp` share: every id located once (`locateBlocks`), then one page
+ * at a time read, parsed, planned, spliced and verified together (`spliceAll`), written once, and let
+ * go before the next is read. Locating keeps only which page each id lives on and a digest of that
+ * page, so what a run holds is one page, whatever the size of the site. The callbacks are heard in the
+ * order of `ids` within each stage: every `unlocated` first, then page by page.
+ *
+ * The page read here is the one located only when its digest matches; one that changed since has
+ * each of its ids handed to `alone`. What the digest guards is everything locating decided about the
+ * page. Without it, a `DATA-ID` written onto the page while the run is under way is stamped past,
+ * where the per-block path refuses the whole page, and a block moved off the page is looked for where
+ * it no longer is. The whole text is compared, through its digest: an edit that keeps the page's length
+ * is an edit all the same. A page deleted since it was located goes to `alone` too, rather than letting
+ * the read throw and abort the whole run over one id: the per-block path re-lists the sheet files and
+ * resolves the id fresh, so a page genuinely gone is "not found", exactly as it always was.
+ *
+ * ⚠️ The digest only re-checks the page an id was located on, once, at the moment its turn comes —
+ * not every other page, and not again afterwards. A second block gaining this id, or a `DATA-ID`
+ * written in upper case, on a DIFFERENT page while the run is under way is not caught here: the
+ * per-block path re-scans every page before each write and would see it within that one stamp, where
+ * this only sees it on the next run. It fails safe rather than silently: a seal `sync` writes is still
+ * checked against its id's own fingerprint, so it lands on text that really was approved, and
+ * `restamp` writes only what the registry recorded; the twin element then shows its seal as stale to
+ * the next `check` (`sealMismatches`) or is named outright by `duplicateIds`.
+ */
+async function stampByPage<T extends { plan: MarkPlan }>(root: string, ids: readonly string[], work: PageWork<T>) {
+  const located = locateBlocks(root, ids);
+  const pages = new Map<string, { digest: string; indexes: number[] }>();
+  for (const [index, id] of ids.entries()) {
     const where = located.get(id)!;
-    if (!where.ok) { say(refusal(id, where.message)); settled(index, null); continue; }
-    const page = pages.get(where.path) ?? { digest: where.digest, entries: [] };
-    page.entries.push(index);
+    if (!where.ok) { work.unlocated(index, where); continue; }
+    const page = pages.get(where.path) ?? { digest: where.digest, indexes: [] };
+    page.indexes.push(index);
     pages.set(where.path, page);
   }
 
-  for (const [path, { digest, entries }] of pages) {
-    let html: string | null;
-    try {
-      html = readFileSync(path, 'utf8');
-    } catch (e) {
-      // ENOENT only: a page deleted since `locateBlocks` ran, which `mark`'s path refuses as "not
-      // found". Anything else — a folder where the page was, say — propagates, because `mark`'s path
-      // would meet the same error and a loud abort beats a silent "try again below".
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') throw e;
-      html = null;
-    }
+  for (const [path, { digest, indexes }] of pages) {
+    work.beforeRead?.(path);
+    const html = pageIfThere(path);
     if (html === null || digestOf(html) !== digest) {
-      for (const index of entries) {
-        const { id, when, event, expected, say } = stamps[index];
-        settled(index, await markWith(say, root, registry, id, when, 'site', event, fingerprintsNow, expected, true));
-      }
+      for (const index of indexes) await work.alone(index);
       continue;
     }
     // The same text parses to the same blocks, so each id names here the one element it was located as.
     const { document, byId } = parsePage(html);
-    const planned: { index: number; planned: Planned }[] = [];
-    for (const index of entries) {
-      const { id, when, expected, say } = stamps[index];
-      const plan = await planSeal(say, id, byId.get(id)![0], when, fingerprintsNow, expected, true);
-      if ('refused' in plan) { say(refusal(id, plan.refused)); settled(index, null); continue; }
-      planned.push({ index, planned: plan });
+    const planned: { index: number; planned: T }[] = [];
+    for (const index of indexes) {
+      const plan = await work.plan(index, byId.get(ids[index])![0]);
+      if (plan) planned.push({ index, planned: plan });
     }
-    const written = spliceAll(html, document, planned.map(({ index, planned: p }) => ({ id: stamps[index].id, plan: p.plan })));
-    // The write stays above `record`: `sync` saves the registry even when this write throws.
+    const written = spliceAll(html, document, planned.map(({ index, planned: p }): PageStamp => ({ id: ids[index], plan: p.plan })));
+    // The write stays above `settle`, so no plan is settled for a page that never reached the disk:
+    // `sync`, whose `settle` records each ✓, then saves a registry that holds only what was written.
     if (written.html !== html) writeFileSync(path, written.html, 'utf8');
-    for (const [k, { index, planned: p }] of planned.entries()) {
-      const { id, when, event, say } = stamps[index];
-      const result = written.results[k];
-      if ('error' in result) { say(refusal(id, result.error)); settled(index, null); continue; }
-      record(root, registry, id, path, when, 'site', event, p);
-      settled(index, p.fingerprint);
-    }
+    for (const [k, { index, planned: p }] of planned.entries()) work.settle(index, p, written.results[k], path);
+  }
+}
+
+/**
+ * The page at `path` as it is now, or `null` when it was deleted since it was located. ENOENT only:
+ * anything else — a folder where the page was, say — propagates, because the per-block path would
+ * meet the same error, and a loud abort beats a silent "try again one by one".
+ */
+function pageIfThere(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    return null;
   }
 }
 
@@ -756,41 +797,19 @@ export async function showLights(root: string, options: { only?: string } = {}) 
  * the very command meant to reveal it. So a block that drifted gets stamped with the OLD
  * fingerprint and correctly shows 🟡.
  */
-export async function restamp(root: string) {
+export async function restamp(root: string, seam: { beforeRead?: (path: string) => void } = {}) {
   const registry = loadRegistry(root);
-  const blocks = await readBlocks(root);
   let written = 0, alreadyHad = 0, noSuchBlock = 0, refused = 0;
   const willTurnYellow: string[] = [];
 
-  for (const [id, entry] of Object.entries(registry)) {
-    const recorded = entry.fingerprint;
-    if (!recorded) continue;
-    const resolved = resolveBlock(root, id);
-    if (!resolved.ok) {
-      // Not found is the ordinary "the page moved on" case `noSuchBlock` always reported; a
-      // duplicate id or an id this format cannot represent is a REFUSAL — the block may well still
-      // be there, but nothing can be written to it safely — and gets its own count and its reason.
-      if (resolved.kind === 'not-found') { noSuchBlock++; continue; }
-      refuse(id, resolved.message); refused++; continue;
-    }
-    const { path, html } = resolved;
-
-    const current = blocks.get(id)?.fingerprint;
-    if (current && current !== recorded) willTurnYellow.push(id);
-
-    const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: attributeText(recorded) }];
-    if (entry.dependsOn && Object.keys(entry.dependsOn).length) {
-      attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(entry.dependsOn)) });
-    }
-
-    const result = spliceAttributes(html, id, { attributes });
-    if ('error' in result) { refuse(id, result.error); refused++; continue; }
-    // "Already had it" and "written" are the same question asked in opposite directions — whether
-    // this splice changed anything — so one comparison answers both, instead of a text-based check
-    // for the first and a write for the second.
-    if (result.html === html) { alreadyHad++; continue; }
-    writeFileSync(path, result.html, 'utf8');
-    written++;
+  const entries = Object.entries(registry).filter(([, entry]) => entry.fingerprint);
+  for (const [index, outcome] of (await restampEach(root, entries, seam)).entries()) {
+    const [id] = entries[index];
+    if (outcome.yellow) willTurnYellow.push(id);
+    if (outcome.counted === 'refused') { refuse(id, outcome.message); refused++; }
+    else if (outcome.counted === 'written') written++;
+    else if (outcome.counted === 'alreadyHad') alreadyHad++;
+    else noSuchBlock++;
   }
 
   console.log(`\n${written} block(s) got the mark they were missing · ${alreadyHad} already had it`);
@@ -802,6 +821,82 @@ export async function restamp(root: string) {
   }
   console.log('');
   return { written, alreadyHad, noSuchBlock, refused };
+}
+
+/**
+ * What `restamp` did with one registry entry, and whether the block's text has moved on from the
+ * recorded fingerprint (`yellow`) — known only for a block that resolved, refused on the page or not.
+ */
+type Restamped = { yellow: boolean } & (
+  | { counted: 'written' | 'alreadyHad' | 'noSuchBlock' }
+  | { counted: 'refused'; message: string });
+
+/**
+ * The seal `restamp` writes for one entry: the registry's fingerprint and dependencies, through
+ * `attributeText`, and nothing else. No `validatedAt` and no `replace` — whatever the block already
+ * carries stays, and a page value that disagrees with the registry is `check`'s to report.
+ */
+function restampPlan(entry: Registry[string]): MarkPlan {
+  const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: attributeText(entry.fingerprint) }];
+  if (entry.dependsOn && Object.keys(entry.dependsOn).length) {
+    attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(entry.dependsOn)) });
+  }
+  return { attributes };
+}
+
+/**
+ * Every entry's outcome, in the registry's order, from one read, parse, verification and write per
+ * page (`stampByPage`, the path `sync` takes). Resolved entry by entry, a page of N recorded blocks is
+ * parsed and verified N times over, and the time grows with the square of the blocks (holdrim#147).
+ * The outcomes are returned rather than printed as they come, so the refusals still read in the
+ * registry's order however the entries fall across pages. A page that changed or vanished since it was
+ * located has its entries restamped one by one (`restampOne`), which resolves each afresh.
+ */
+async function restampEach(root: string, entries: readonly [string, Registry[string]][],
+                           seam: { beforeRead?: (path: string) => void }): Promise<Restamped[]> {
+  const outcomes: Restamped[] = new Array(entries.length);
+  await stampByPage(root, entries.map(([id]) => id), {
+    unlocated(index, where) { outcomes[index] = unresolved(where); },
+    async alone(index) { outcomes[index] = await restampOne(root, ...entries[index]); },
+    async plan(index, element) {
+      const [, entry] = entries[index];
+      return { plan: restampPlan(entry), yellow: await fingerprintOfText(textOf(element)) !== entry.fingerprint };
+    },
+    settle(index, { yellow }, result) {
+      outcomes[index] = 'error' in result ? { yellow, counted: 'refused', message: result.error }
+        : { yellow, counted: result.unchanged ? 'alreadyHad' : 'written' };
+    },
+    beforeRead: seam.beforeRead,
+  });
+  return outcomes;
+}
+
+/**
+ * An entry whose block did not resolve. Not found is the ordinary "the page moved on" case
+ * `noSuchBlock` always reported; a duplicate id or an id this format cannot represent is a REFUSAL —
+ * the block may well still be there, but nothing can be written to it safely — with its own count and
+ * its reason.
+ */
+function unresolved(where: { kind: string; message: string }): Restamped {
+  return where.kind === 'not-found' ? { yellow: false, counted: 'noSuchBlock' }
+    : { yellow: false, counted: 'refused', message: where.message };
+}
+
+/** One entry restamped alone, resolved and spliced against the pages as they are now — the per-block path. */
+async function restampOne(root: string, id: string, entry: Registry[string]): Promise<Restamped> {
+  const resolved = resolveBlock(root, id);
+  if (!resolved.ok) return unresolved(resolved);
+  const { path, html, element } = resolved;
+  const yellow = await fingerprintOfText(textOf(element)) !== entry.fingerprint;
+
+  const result = spliceAttributes(html, id, restampPlan(entry));
+  if ('error' in result) return { yellow, counted: 'refused', message: result.error };
+  // "Already had it" and "written" are the same question asked in opposite directions — whether
+  // this splice changed anything — so one comparison answers both, instead of a text-based check
+  // for the first and a write for the second.
+  if (result.html === html) return { yellow, counted: 'alreadyHad' };
+  writeFileSync(path, result.html, 'utf8');
+  return { yellow, counted: 'written' };
 }
 
 /** What else do I have to look at if I touch this? The question to ask BEFORE editing. */

@@ -449,6 +449,15 @@ who ran the engine from `main` before it.
   of its page is stamped. A page edited while the run is under way is still refused rather than
   overwritten. What an adopter sees differently: the ✓ lines come out a page at a time, as each page
   is written, instead of one by one — in the same order as before.
+- **`holdrim restamp` on a page with many recorded blocks now finishes, in time that grows with the
+  blocks (holdrim#147).** It still resolved and verified every registry entry on its own, re-reading
+  every page to find the block and re-parsing its page to stamp it: 800 blocks on one page took about
+  30 s, and 3 000 about nine and a half minutes. It now stamps a page's entries together, on the path
+  `sync` uses since holdrim#144 — one parse, one verification and one write per page, 3 000 blocks in
+  about three seconds — and holds one page in memory at a time instead of every page of the site.
+  What it writes and what it prints are unchanged: the registry's own fingerprint and dependencies,
+  never over a seal the block already carries; the same refusals, counted and said in the registry's
+  order, with nothing written for a refused entry.
 - **A `holdrim sync` that aborts half-way now records the ✓ it had already stamped
   (holdrim#148).** The registry used to be saved only at the end of a run that finished, while each
   page is written as soon as its seals are stamped: an error in between — a page replaced by a folder
