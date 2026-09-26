@@ -435,11 +435,12 @@ interface SiteStamp { id: string; when: string; event: string; expected: string;
  * everything else locating decided about the page. Without it, a `DATA-ID` written onto the page
  * while the run is under way is stamped past, where `mark` refuses the whole page, and a block moved
  * off the page is looked for where it no longer is. The whole text is compared, through its digest:
- * an edit that keeps the page's length is an edit all the same. A page that cannot be read at all —
- * deleted, or turned into a folder, since it was located — is treated the same way, rather than
- * letting the read throw and abort the run before the pages already written are recorded: `mark`'s
- * own path re-lists the sheet files and resolves the id fresh, so a page genuinely gone is refused as
- * "not found", exactly as it always was.
+ * an edit that keeps the page's length is an edit all the same. A page deleted since it was located is
+ * treated the same way, rather than letting the read throw and abort the run before the pages already
+ * written are recorded: `mark`'s own path re-lists the sheet files and resolves the id fresh, so a
+ * page genuinely gone is refused as "not found", exactly as it always was. Any other read error — a
+ * page turned into a folder, say — still aborts: `mark`'s path would meet it too, and saying it
+ * loudly beats claiming to handle it.
  *
  * ⚠️ The digest only re-checks the page THIS id was located on, once, at the moment its turn comes —
  * not every other page, and not again afterwards. A second block gaining this id, or a `DATA-ID`
@@ -468,11 +469,11 @@ async function markAll(root: string, registry: Registry, stamps: readonly SiteSt
     try {
       html = readFileSync(path, 'utf8');
     } catch (e) {
-      // ENOENT for a page deleted since `locateBlocks` ran, EISDIR for one replaced by a folder — the
-      // two shapes a vanished page takes. Anything else is not a case this loop has seen and is left
-      // to propagate rather than silently folded into "try again below".
+      // ENOENT only: a page deleted since `locateBlocks` ran, which `mark`'s path refuses as "not
+      // found". Anything else — a folder where the page was, say — propagates, because `mark`'s path
+      // would meet the same error and a loud abort beats a silent "try again below".
       const code = (e as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'EISDIR') throw e;
+      if (code !== 'ENOENT') throw e;
       html = null;
     }
     if (html === null || digestOf(html) !== digest) {
