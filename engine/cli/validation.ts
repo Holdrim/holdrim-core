@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, resolveBlock, spliceAttributes, attributeText, textOf, shortName, ofProject, projectRoles,
+import { readBlocks, sheetFiles, resolveBlock, locateBlocks, digestOf, fingerprintsByPage, parsePage, spliceAttributes, spliceAll, attributeText, textOf, shortName, ofProject, projectRoles,
   namesNotLowerCase, browserIdOf, browserBlocks, type Block, type Stamp, type MarkPlan } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
@@ -304,10 +304,75 @@ export async function orphanMarks(root: string, registry: Registry, files?: stri
   return found;
 }
 
-/** Prints why a write did not happen — a single format, so "nothing written" always means it. */
+/** Why a write did not happen, as one line — a single format, so "nothing written" always means it. */
+function refusal(id: string, message: string): string {
+  return `  ✗ ${id}: ${message}; nothing written`;
+}
+
+/** Prints why a write did not happen (`refusal`). */
 function refuse(id: string, message: string): null {
-  console.log(`  ✗ ${id}: ${message}; nothing written`);
+  console.log(refusal(id, message));
   return null;
+}
+
+/** What a ✓ writes onto one resolved block, and what the registry records for it. */
+interface Planned { fingerprint: string; text: string; dependsOn: Record<string, string>; plan: MarkPlan }
+
+/**
+ * The seal a ✓ gives the block `element`, decided from the element itself — or why it must not be
+ * given. One function for `mark` and `markAll`, so the block that stamps alone and the block that
+ * stamps with the rest of its page are held to the same fingerprint check and get the same seal.
+ * `say` is where a dependency that does not exist is reported.
+ */
+async function planSeal(say: (line: string) => void, id: string, element: Element, when: string,
+                        fingerprintsNow: Map<string, string> | undefined, expectedFingerprint: string | undefined,
+                        reseal: boolean): Promise<Planned | { refused: string }> {
+  const text = textOf(element);
+  const fingerprint = await fingerprintOfText(text);
+
+  if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
+    return { refused: 'the text resolved here does not match the ✓ that was checked' };
+  }
+
+  // What this block depends on, and how each dependency looked RIGHT NOW. Keeping the snapshot of the
+  // dependencies is what allows saying, months later, "the text is still the same but the base moved".
+  // Without it the red light would have nothing to compare against.
+  const declared = (element.getAttribute('data-depends') ?? '').split(/\s+/).filter(Boolean);
+  const dependsOn: Record<string, string> = {};
+  for (const other of declared) {
+    const d = fingerprintsNow?.get(other);
+    if (d) dependsOn[other] = d;
+    else say(`  ⚠ ${id} declares a dependency on ${other}, which does not exist`);
+  }
+
+  // The browser needs two snapshots to paint the traffic light without asking the server:
+  //   data-validated-fingerprint  the text that was approved  → without it there is no 🟡
+  //   data-depended-on            the ground at that moment   → without it there is no 🔴
+  // The JSON is the truth; these attributes are the copy that travels with the page.
+  const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: fingerprint }];
+  if (Object.keys(dependsOn).length) {
+    attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(dependsOn)) });
+  }
+
+  // The FULL plan. Without `reseal`, `spliceAttributes` leaves out whatever the resolved element
+  // already carries — the one rule for "already there", shared with `restamp`. With it, the seal on
+  // the page is replaced by this one (see `MarkPlan.replace`).
+  return { fingerprint, text, dependsOn, plan: { validatedAt: when, attributes, replace: reseal } };
+}
+
+/** The registry's entry for a ✓ whose seal is on the page. */
+function record(root: string, registry: Registry, id: string, path: string, when: string, source: string,
+                event: string | undefined, { fingerprint, text, dependsOn }: Planned) {
+  registry[id] = {
+    file: shortName(root, path),
+    date: when, fingerprint, source,
+    // Copied out of the text rather than sliced: V8 keeps a slice of a long string as a view into all
+    // of it, and the registry lives until the run ends. Sliced, every entry holds its block's whole
+    // text, and a sync's memory grows with the site instead of staying at one page.
+    text: Array.from(text.replace(/\s+/g, ' ').trim().slice(0, 120)).join(''),
+    ...(Object.keys(dependsOn).length ? { dependsOn } : {}),
+    ...(event ? { event } : {}),
+  };
 }
 
 /** Writes a block's lock: marks the HTML and records the fingerprint.
@@ -325,53 +390,118 @@ export async function mark(root: string, registry: Registry, id: string, when: s
                            source: string, event?: string,
                            fingerprintsNow?: Map<string, string>,
                            expectedFingerprint?: string, reseal = false): Promise<string | null> {
+  return markWith(console.log, root, registry, id, when, source, event, fingerprintsNow, expectedFingerprint, reseal);
+}
+
+/** `mark`, saying what it has to say through `say` rather than straight to the console. */
+async function markWith(say: (line: string) => void, root: string, registry: Registry, id: string, when: string,
+                        source: string, event: string | undefined, fingerprintsNow: Map<string, string> | undefined,
+                        expectedFingerprint: string | undefined, reseal: boolean): Promise<string | null> {
+  const refused = (message: string) => { say(refusal(id, message)); return null; };
   const resolved = resolveBlock(root, id);
-  if (!resolved.ok) return refuse(id, resolved.message);
+  if (!resolved.ok) return refused(resolved.message);
   const { path, html, element } = resolved;
 
-  const text = textOf(element);
-  const fingerprint = await fingerprintOfText(text);
+  const planned = await planSeal(say, id, element, when, fingerprintsNow, expectedFingerprint, reseal);
+  if ('refused' in planned) return refused(planned.refused);
 
-  if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
-    return refuse(id, 'the text resolved here does not match the ✓ that was checked');
-  }
-
-  // What this block depends on, and how each dependency looked RIGHT NOW. Keeping the snapshot of the
-  // dependencies is what allows saying, months later, "the text is still the same but the base moved".
-  // Without it the red light would have nothing to compare against.
-  const declared = (element.getAttribute('data-depends') ?? '').split(/\s+/).filter(Boolean);
-  const dependsOn: Record<string, string> = {};
-  for (const other of declared) {
-    const d = fingerprintsNow?.get(other);
-    if (d) dependsOn[other] = d;
-    else console.log(`  ⚠ ${id} declares a dependency on ${other}, which does not exist`);
-  }
-
-  // The browser needs two snapshots to paint the traffic light without asking the server:
-  //   data-validated-fingerprint  the text that was approved  → without it there is no 🟡
-  //   data-depended-on            the ground at that moment   → without it there is no 🔴
-  // The JSON is the truth; these attributes are the copy that travels with the page.
-  const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: fingerprint }];
-  if (Object.keys(dependsOn).length) {
-    attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(dependsOn)) });
-  }
-
-  // The FULL plan. Without `reseal`, `spliceAttributes` leaves out whatever the resolved element
-  // already carries — the one rule for "already there", shared with `restamp`. With it, the seal on
-  // the page is replaced by this one (see `MarkPlan.replace`).
-  const plan: MarkPlan = { validatedAt: when, attributes, replace: reseal };
-  const result = spliceAttributes(html, id, plan);
-  if ('error' in result) return refuse(id, result.error);
+  const result = spliceAttributes(html, id, planned.plan);
+  if ('error' in result) return refused(result.error);
   if (result.html !== html) writeFileSync(path, result.html, 'utf8');
 
-  registry[id] = {
-    file: shortName(root, path),
-    date: when, fingerprint, source,
-    text: text.replace(/\s+/g, ' ').trim().slice(0, 120),
-    ...(Object.keys(dependsOn).length ? { dependsOn } : {}),
-    ...(event ? { event } : {}),
-  };
-  return fingerprint;
+  record(root, registry, id, path, when, source, event, planned);
+  return planned.fingerprint;
+}
+
+/** One ✓ for `markAll`: the block, the day and event it came from, and the fingerprint it was checked against. */
+interface SiteStamp { id: string; when: string; event: string; expected: string; say: (line: string) => void }
+
+/**
+ * `mark(…, 'site', event, fingerprintsNow, expected, true)` for many ✓ at once, with one parse and at
+ * most one write per page instead of a whole-page read, parse and verification per block: every id is
+ * located once (`locateBlocks`), each page's seals are spliced and verified together (`spliceAll`),
+ * and the page is written once, only with the seals that were accepted. A ✓ refused anywhere along
+ * the way is said through its own `say`, exactly as `mark` would print it, records nothing, and takes
+ * no other ✓ down with it. `settled` hears each ✓'s outcome — the fingerprint recorded, or `null` for
+ * a refusal — as soon as its page is done.
+ *
+ * One page at a time: read, parsed, planned, spliced, verified, written, and let go before the next
+ * is read. Locating keeps only which page each id lives on and a digest of that page, so what a sync
+ * holds is one page, whatever the size of the site.
+ *
+ * The page read here is the one located only when its digest matches; one that changed since has
+ * its ✓ written one by one through `mark`'s own path, which resolves and fingerprints the block afresh.
+ * An edit to a block's own text is refused either way, by its fingerprint; what the digest guards is
+ * everything else locating decided about the page. Without it, a `DATA-ID` written onto the page
+ * while the run is under way is stamped past, where `mark` refuses the whole page, and a block moved
+ * off the page is looked for where it no longer is. The whole text is compared, through its digest:
+ * an edit that keeps the page's length is an edit all the same. A page deleted since it was located is
+ * treated the same way, rather than letting the read throw and abort the run before the pages already
+ * written are recorded: `mark`'s own path re-lists the sheet files and resolves the id fresh, so a
+ * page genuinely gone is refused as "not found", exactly as it always was. Any other read error — a
+ * page turned into a folder, say — still aborts: `mark`'s path would meet it too, and saying it
+ * loudly beats claiming to handle it.
+ *
+ * ⚠️ The digest only re-checks the page THIS id was located on, once, at the moment its turn comes —
+ * not every other page, and not again afterwards. A second block gaining this id, or a `DATA-ID`
+ * written in upper case, on a DIFFERENT page while this run is under way is not caught here: `mark`'s
+ * own per-block path re-scans every page before each write and would see it within that one stamp,
+ * where this only sees it on the next `sync`. That is a longer window than main's per-stamp one, and
+ * it fails safe rather than silently: the seal that lands here is still checked against this id's own
+ * fingerprint, so it lands on text that really was approved; the twin element then shows its seal as
+ * stale to the next `check` (`sealMismatches`) or is named outright by `duplicateIds`.
+ */
+async function markAll(root: string, registry: Registry, stamps: readonly SiteStamp[],
+                       fingerprintsNow: Map<string, string>,
+                       settled: (index: number, fingerprint: string | null) => void) {
+  const located = locateBlocks(root, stamps.map((s) => s.id));
+  const pages = new Map<string, { digest: string; entries: number[] }>();
+  for (const [index, { id, say }] of stamps.entries()) {
+    const where = located.get(id)!;
+    if (!where.ok) { say(refusal(id, where.message)); settled(index, null); continue; }
+    const page = pages.get(where.path) ?? { digest: where.digest, entries: [] };
+    page.entries.push(index);
+    pages.set(where.path, page);
+  }
+
+  for (const [path, { digest, entries }] of pages) {
+    let html: string | null;
+    try {
+      html = readFileSync(path, 'utf8');
+    } catch (e) {
+      // ENOENT only: a page deleted since `locateBlocks` ran, which `mark`'s path refuses as "not
+      // found". Anything else — a folder where the page was, say — propagates, because `mark`'s path
+      // would meet the same error and a loud abort beats a silent "try again below".
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') throw e;
+      html = null;
+    }
+    if (html === null || digestOf(html) !== digest) {
+      for (const index of entries) {
+        const { id, when, event, expected, say } = stamps[index];
+        settled(index, await markWith(say, root, registry, id, when, 'site', event, fingerprintsNow, expected, true));
+      }
+      continue;
+    }
+    // The same text parses to the same blocks, so each id names here the one element it was located as.
+    const { document, byId } = parsePage(html);
+    const planned: { index: number; planned: Planned }[] = [];
+    for (const index of entries) {
+      const { id, when, expected, say } = stamps[index];
+      const plan = await planSeal(say, id, byId.get(id)![0], when, fingerprintsNow, expected, true);
+      if ('refused' in plan) { say(refusal(id, plan.refused)); settled(index, null); continue; }
+      planned.push({ index, planned: plan });
+    }
+    const written = spliceAll(html, document, planned.map(({ index, planned: p }) => ({ id: stamps[index].id, plan: p.plan })));
+    if (written.html !== html) writeFileSync(path, written.html, 'utf8');
+    for (const [k, { index, planned: p }] of planned.entries()) {
+      const { id, when, event, say } = stamps[index];
+      const result = written.results[k];
+      if ('error' in result) { say(refusal(id, result.error)); settled(index, null); continue; }
+      record(root, registry, id, path, when, 'site', event, p);
+      settled(index, p.fingerprint);
+    }
+  }
 }
 
 /** Brings into the repository the ✓ the owner gave on the site. Only theirs: a reviewer's approval does not lock. */
@@ -441,36 +571,79 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
   }
 
   const registry = loadRegistry(root);
-  const blocks = await readBlocks(root);
-  const fingerprintsNow = new Map([...blocks].map(([id, b]) => [id, b.fingerprint]));
+  // Not `readBlocks`: its `parsed` cache keeps every page's full text and parsed document for the
+  // life of the process, which the server needs and a sync does not — a whole sync would then hold
+  // the whole site, on top of whatever `markAll` holds one page of at a time (holdrim#144, round 3).
+  // `fingerprintsByPage` reads and lets go of one page at a time and keeps only the id and
+  // fingerprint pairs below, which is all this loop and `markAll` ask of it.
+  const fingerprintsNow = await fingerprintsByPage(root);
   let added = 0, unchanged = 0, expired = 0, refused = 0;
 
-  for (const e of theOwners.sort((a, b) => a.when.localeCompare(b.when))) {
-    const id = e.block;
-    if (!id) continue;
-    const when = (e.when || '').slice(0, 10);
-    const block = blocks.get(id);
-    if (!block) { console.log(`  ✗ ${id}: approved on the site, and does not exist in the repository`); continue; }
-    if (e.fingerprint !== block.fingerprint) {
-      console.log(`  ⚠ ${id}: the ✓ from ${when} is for an earlier version of the text — it does not hold any more`);
-      expired++; continue;
+  // Every ✓ still goes through the checks below in the order it was given, and its lines come out in
+  // that order — but the ones that reach a page are stamped together (`markAll`), a page at a time,
+  // instead of one whole-page read, parse and verification each. A ✓ for a block another ✓ in the
+  // same round is already stamping waits for the next round, so it sees the registry that stamp left:
+  // the second ✓ on an unchanged text is "already there", exactly as when each was written in turn.
+  // A ✓'s lines are printed once it and every ✓ before it are settled, so a line never announces a
+  // stamp before the page carrying it is written.
+  const sorted = theOwners.sort((a, b) => a.when.localeCompare(b.when));
+  const lines: string[][] = sorted.map(() => []);
+  const settled: boolean[] = sorted.map(() => false);
+  let printed = 0;
+  const flush = () => {
+    while (printed < sorted.length && settled[printed]) for (const line of lines[printed++]) console.log(line);
+  };
+  let pending = [...sorted.keys()];
+  try {
+    while (pending.length) {
+      const later: number[] = [];
+      const taken = new Set<string>();
+      const stamps: (SiteStamp & { slot: number })[] = [];
+      for (const slot of pending) {
+        const e = sorted[slot];
+        const say = (line: string) => { lines[slot].push(line); };
+        const id = e.block;
+        if (id && taken.has(id)) { later.push(slot); continue; }
+        settled[slot] = true;
+        if (!id) continue;
+        const when = (e.when || '').slice(0, 10);
+        const fingerprint = fingerprintsNow.get(id);
+        if (fingerprint === undefined) { say(`  ✗ ${id}: approved on the site, and does not exist in the repository`); continue; }
+        if (e.fingerprint !== fingerprint) {
+          say(`  ⚠ ${id}: the ✓ from ${when} is for an earlier version of the text — it does not hold any more`);
+          expired++; continue;
+        }
+        if (registry[id]?.fingerprint === fingerprint) { unchanged++; continue; }
+        // fingerprint is what was just verified against e.fingerprint above (the two are equal at
+        // this point) — passed on so `markAll` refuses instead of writing if the block IT resolves ever
+        // disagrees with the one `fingerprintsByPage` saw here.
+        // Every seal `markAll` writes replaces the one on the page: this ✓ is newer than whatever seal
+        // the page carries — a registry that already held this fingerprint was skipped just above — so
+        // the page takes its date, fingerprint and dependencies, and never keeps an older ✓'s (holdrim#140).
+        settled[slot] = false;
+        taken.add(id);
+        stamps.push({ slot, id, when, event: e.id, expected: fingerprint, say });
+      }
+      flush();
+      await markAll(root, registry, stamps, fingerprintsNow, (k, fingerprint) => {
+        const { slot, id, when, say } = stamps[k];
+        if (fingerprint) {
+          say(`  ✓ ${id} validated by you on the site on ${when}`);
+          added++;
+        } else {
+          // The block exists and the ✓ is current, yet `markAll` refused to write it (its own line above
+          // says why). Counted and returned so the CLI exits non-zero: without that, the registry never
+          // gets the entry, the text can be rewritten afterwards, and `check` passes over it in silence.
+          refused++;
+        }
+        settled[slot] = true;
+        flush();
+      });
+      pending = later;
     }
-    if (registry[id]?.fingerprint === block.fingerprint) { unchanged++; continue; }
-    // block.fingerprint is what was just verified against e.fingerprint above (the two are equal at
-    // this point) — passed on so `mark` refuses instead of writing if the block IT resolves ever
-    // disagrees with the one `readBlocks` saw here.
-    // `reseal`: this ✓ is newer than whatever seal the page carries — a registry that already held
-    // this fingerprint was skipped just above — so the page takes its date, fingerprint and
-    // dependencies, and never keeps an older ✓'s (holdrim#140).
-    if (await mark(root, registry, id, when, 'site', e.id, fingerprintsNow, block.fingerprint, true)) {
-      console.log(`  ✓ ${id} validated by you on the site on ${when}`);
-      added++;
-    } else {
-      // The block exists and the ✓ is current, yet `mark` refused to write it (its own line above
-      // says why). Counted and returned so the CLI exits non-zero: without that, the registry never
-      // gets the entry, the text can be rewritten afterwards, and `check` passes over it in silence.
-      refused++;
-    }
+  } finally {
+    // A run that throws half-way still shows what it had to say about every ✓ it got to.
+    for (const slot of sorted.keys()) if (slot >= printed) for (const line of lines[slot]) console.log(line);
   }
   saveRegistry(root, registry);
   console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${refused} refused · `

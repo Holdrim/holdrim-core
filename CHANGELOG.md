@@ -427,3 +427,13 @@ who ran the engine from `main` before it.
   A re-approval is refused, with the reason, when a `<` inside one of the block's attribute values
   hides where its start tag begins: the seal's every copy could not be seen, so it could not be seen
   to be replaced.
+- **`holdrim sync` on a page with many blocks now finishes, in time that grows with the blocks
+  (holdrim#144).** It used to re-read, re-parse and re-verify the whole page for every ✓: a first sync
+  of 800 blocks on one page took about 30 s, and 3 000 never finished. A page's ✓ are now stamped
+  together, with one parse, one verification and one write per page — 3 000 blocks in about a second —
+  and a sync holds one page in memory at a time, whatever the size of the site. Every guarantee a stamp
+  had is kept: the seal lands only on its block, the page is verified before it is written, and a
+  block that cannot be stamped safely is refused alone, with the reason it always gave, while the rest
+  of its page is stamped. A page edited while the run is under way is still refused rather than
+  overwritten. What an adopter sees differently: the ✓ lines come out a page at a time, as each page
+  is written, instead of one by one — in the same order as before.
