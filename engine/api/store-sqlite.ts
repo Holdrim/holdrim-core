@@ -418,6 +418,9 @@ export function guardMismatchSaid(m: GuardMismatch): string {
     case 'changed': return `the database's guard ${name} was not the one this version installs`;
     case 'foreign': return `the database holds a trigger this version does not install, ${name}`;
     case 'shadowed': return `the database has a column ${name} that hides the real rowid from every guard`;
+    // Not "which no genuine insert takes": once a planted row sits below 1, SQLite hands the next
+    // genuine insert MAX(rowid) + 1, which lands below 1 too — so this names what puts such a row
+    // there instead of calling every row down there a forgery.
     case 'sunk': return `the database's ${m.name} table holds a row below rowid 1, which only a write that named it, `
       + 'or one sent below 1 by such a row, puts there, and one at -1 makes every insert after it read as a replace, '
       + 'refused as a forgery, which it is not';
