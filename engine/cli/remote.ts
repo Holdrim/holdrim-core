@@ -346,7 +346,10 @@ export class Source {
       // for the alert to come from.
       const reports: TamperReport[] = [];
       const out = withTexts(events, texts, reports);
-      for (const r of reports) reportTampered(r);
+      // console.error, not `log()`'s default stdout (issue #129): this reader feeds `list --json`,
+      // whose stdout a caller `JSON.parse`s as the queue — the same reason `sqlite_guard_missing`
+      // above is logged through `console.error` rather than left at its default.
+      for (const r of reports) reportTampered(r, console.error);
       return out;
     } finally {
       db.close();
@@ -393,7 +396,9 @@ export class Source {
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
       return withAuthors(removed.map((d) => firestoreEventOf(d)), people);
     }, reports);
-    for (const r of reports) reportTampered(r);
+    // console.error, for the same reason as the file reader above: this is the CLI's answer, not
+    // the server's log, and `list --json` must stay parseable JSON on stdout.
+    for (const r of reports) reportTampered(r, console.error);
     return resolved;
   }
 

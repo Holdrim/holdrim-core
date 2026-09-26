@@ -281,3 +281,13 @@ who ran the engine from `main` before it.
   exact race issue #113's fix closed for a window nobody asked to reopen. Same failure reporting as
   above: a failed drop carries `sessionsDropped: false` and an `ERROR user_sessions_not_dropped` line,
   never a 500 for a credential that changed regardless.
+- **The CRITICAL line a tampered text raises now reaches the CLI's stderr, never its stdout.**
+  `reportTampered` (engine/api/texts.ts) used to log through `log()`'s own default destination,
+  `console.log` — the same stream `holdrim list --json` prints its answer on, so a store read back
+  as tampered put that JSON-formatted alert ahead of the document and `JSON.parse` failed on exactly
+  the read where `tampered: true` mattered most. The server's own logging is unchanged: it still
+  goes to stdout, as its service log. Only the CLI's two direct readers of a store (`Source#fromFile`
+  and the cloud read in `events()`, both in engine/cli/remote.ts) now pass `console.error` to
+  `reportTampered`, the same routing `sqlite_guard_missing` already used for the same reason. Nothing
+  to change for a caller of `holdrim list --json`: its stdout was never valid JSON on a tampered
+  store before this, and always is now.

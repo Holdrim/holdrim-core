@@ -233,8 +233,16 @@ export function observedOf(recorded: string | null, row: TextRow | undefined, re
  *
  * What this cannot do, and no function in this file can: stop the same attacker who forged the write
  * from also silencing this very report — see SECURITY.md's note on this alert's honest limit.
+ *
+ * `write` defaults to `log()`'s own default (the server's stdout, its service log) so the three
+ * stores that call this with no third argument — one process, one log — keep logging there
+ * unchanged (issue #129). The CLI's two direct readers (`Source#fromFile` and `events()`,
+ * engine/cli/remote.ts) pass `console.error`, exactly as `installGuards`'s own CRITICAL-adjacent
+ * cousin, `sqlite_guard_missing`, already does for the same reason: `holdrim list --json` prints
+ * this JSON line on the SAME stdout a caller then hands to `JSON.parse` as the queue, and a CRITICAL
+ * line ahead of the document breaks parsing exactly when the reader most needs `tampered: true`.
  */
-export function reportTampered(report: TamperReport): void {
+export function reportTampered(report: TamperReport, write?: (line: string) => void): void {
   console.error(`holdrim: CRITICAL — event ${report.event}, field ${report.field} reads as tampered ` +
     `(${report.kind}): the store was written to outside the product. Rotate its credentials.`);
   // `eventId`, not `event`: `log()`'s own second argument IS `event` — the stable, greppable NAME
@@ -244,7 +252,7 @@ export function reportTampered(report: TamperReport): void {
   // `finding` too, so the line an operator greps and the acknowledgement a person gave (issue #107)
   // can be matched to each other; it is logged on every read either way — acknowledging quiets the
   // panel's banner, never this line.
-  log('CRITICAL', 'text_tampered', { eventId: report.event, field: report.field, kind: report.kind, finding: report.finding });
+  log('CRITICAL', 'text_tampered', { eventId: report.event, field: report.field, kind: report.kind, finding: report.finding }, write);
 }
 
 /**
