@@ -118,8 +118,8 @@ test('contributors, CI and the image run the same Node major', () => {
  * `engine/test-browser.js` — the other two test-only things at `engine/`'s root — shipping the same
  * way, and a `!` line re-including a path under an exclusion (Docker's own escape hatch for exactly
  * this) would have kept every assertion here green while the image shipped the hook again. So this
- * checks three things, not one: each test-only path is actually excluded, none of them is re-included
- * by a `!` line, and — unchanged from round 3 — `COPY engine ./engine` is still what ships them all
+ * checks three things, not one: each test-only path is actually excluded, no `!` line re-includes
+ * anything, and — unchanged from round 3 — `COPY engine ./engine` is still what ships them all
  * by default, so `.dockerignore` is still the one place doing the excluding.
  */
 test('the image ships no test-only paths: COPY engine and .dockerignore agree on that', () => {
@@ -139,11 +139,12 @@ test('the image ships no test-only paths: COPY engine and .dockerignore agree on
   for (const path of TEST_ONLY) {
     assert.ok(lines.includes(path), `.dockerignore does not exclude ${path}`);
   }
-  // A `!` line un-excludes whatever it names (docker's own syntax for it), so an exclusion above and
-  // a re-inclusion below leave every `includes` check passing while the path still reaches the image.
-  const reincluded = lines.filter((l) => l.startsWith('!'))
-    .map((l) => l.slice(1))
-    .filter((p) => TEST_ONLY.some((path) => p === path || p.startsWith(`${path}/`)));
+  // A `!` line un-excludes whatever its pattern matches (docker's own syntax), so an exclusion above
+  // and a re-inclusion below leave every `includes` check passing while the path still reaches the
+  // image. Matching the `!` line's text against the paths is not enough: a glob such as
+  // `!**/scoped-roles.js` names none of them and still re-includes the hook. Nothing in this file
+  // needs a `!` line, so none is allowed; one that is ever wanted has to change this test on purpose.
+  const reincluded = lines.filter((l) => l.startsWith('!'));
   assert.deepEqual(reincluded, [], `.dockerignore re-includes: ${reincluded.join(', ')}`);
 });
 
