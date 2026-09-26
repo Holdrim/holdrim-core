@@ -447,3 +447,9 @@ who ran the engine from `main` before it.
   none of its ✓; the run still fails, and the CLI still exits non-zero, with the error that aborted it
   even when the registry cannot be saved either (that failure is printed on the way out). A process killed outright between a page write and the save can still leave a seal
   without its entry — never an entry without its seal — and the next `holdrim sync` records it again.
+- **`approvals.json` is now written atomically (holdrim#150).** `saveRegistry` used to overwrite it
+  in place with a single `writeFileSync`, which truncates the file before the new bytes land: a
+  process killed mid-write left every owner ✓ ever recorded in it gone, recoverable only from git.
+  It now writes to a temp file beside it, fsyncs it, and renames it over the real name — a reader
+  sees the previous file or the new one, whole, never a partial one — and fsyncs the containing
+  directory afterwards too, where the platform allows it.
