@@ -96,6 +96,7 @@
   "home.ask.submit": "Send the request",
   "home.ask.what": "What should it explain",
   "home.graph.failed": "The graph could not load.",
+  "home.graph.filterMayAct": "Where I may act",
   "home.graph.filterPrefix": "Pages starting with",
   "home.graph.filterStates": "Show",
   "home.graph.heading": "Dependency graph",

@@ -368,6 +368,16 @@ who ran the engine from `main` before it.
   the pages and states a viewer cares about. The filtered graph is laid out afresh, and an edge is
   drawn only while both of its ends are. It filters in the browser, on what `GET /api/graph`
   already sends: no new route, no new field, and nothing is remembered between visits.
+- **A third filter on the home's graph: "where I may act"** (#42). `GET /api/graph` now sends one
+  more field per node, `mayAct` — whether the viewer may triage or approve it (`mayActOn`, the same
+  `can` every other check reads, asked with the node's own block as its place) — a boolean only,
+  never a scope or a role, decided by the server exactly as `hereOf` already decides what a page's
+  panel may do. The browser only reads it: ticking the box narrows the graph already loaded to the
+  nodes marked true, the same way the prefix and state filters already narrow it, and composes with
+  both. Today no grant `can` reads is scoped, so the owner and an admin see the whole graph and a
+  member or an agent token sees the filter empty it out entirely — a clear "no match" rather than a
+  blank or broken graph; scoped grants (#36) will narrow this to real subsets without the filter, or
+  the field, changing shape.
 
 ### Security
 

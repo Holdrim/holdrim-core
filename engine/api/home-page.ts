@@ -179,7 +179,7 @@ export const HOME_KEYS = [
   'home.ask.lede', 'home.ask.near', 'home.ask.what', 'home.ask.submit', 'home.ask.done',
   'home.graph.heading', 'home.graph.lede', 'home.graph.loading', 'home.graph.failed',
   'home.graph.missing', 'home.graph.label', 'home.graph.zoomIn', 'home.graph.zoomOut', 'home.graph.reset',
-  'home.graph.filterPrefix', 'home.graph.filterStates', 'home.graph.noMatch',
+  'home.graph.filterPrefix', 'home.graph.filterStates', 'home.graph.filterMayAct', 'home.graph.noMatch',
 ] as const;
 
 /**
@@ -363,6 +363,12 @@ export function renderHomePage(
   // script carries no strings of its own for them. `home-graph.js` cancels the form's submit: a
   // filter narrows the graph already loaded and never asks the server again. The "nothing matches"
   // line sits OUTSIDE `#holdrim-graph`, because a successful draw replaces that container's children.
+  //
+  // Box three, "where I may act", is one checkbox and nothing else: `/api/graph` already sent
+  // `mayAct` per node (`mayActOn`, engine/api/here.ts), so there is no second list here for this
+  // screen to keep in step, the way `STATES` is for the legend above — a member or an agent token
+  // still gets the checkbox, and ticking it empties the graph rather than the control disappearing,
+  // which would otherwise be one more thing this render has to compute from a role it never reads.
   const graphSection = !data.pages.length || !data.graphEnabled ? '' : `<section aria-labelledby="home-graph-heading">
     <h2 id="home-graph-heading">${t('home.graph.heading')}</h2>
     <p class="holdrim-muted">${t('home.graph.lede')}</p>
@@ -371,6 +377,7 @@ export function renderHomePage(
         <input class="holdrim-input" type="search" name="prefix" autocomplete="off" spellcheck="false"></label>
       <fieldset class="home-graph__states"><legend class="holdrim-label">${t('home.graph.filterStates')}</legend>
         <ul class="home-lights home-graph__legend">${legend}</ul></fieldset>
+      <label class="home-graph__mayAct"><input type="checkbox" name="mayAct"> ${t('home.graph.filterMayAct')}</label>
     </form>
     <p class="holdrim-muted home-graph__empty" role="status" hidden>${t('home.graph.noMatch')}</p>
     <div id="holdrim-graph" class="home-graph" data-graph-i18n="${graphI18n}">
@@ -411,6 +418,7 @@ ${themeCss(theme)}
 .home-graph__states { border: 0; margin: 0; padding: 0; min-width: 0; }
 .home-graph__states .home-lights { margin-top: var(--holdrim-space-2); }
 .home-graph__legend-item label { display: flex; align-items: center; gap: var(--holdrim-space-2); cursor: pointer; }
+.home-graph__mayAct { display: flex; align-items: center; gap: var(--holdrim-space-2); cursor: pointer; }
 /* touch-action: none keeps a touch drag from also scrolling the PAGE behind the graph — without it
    a pan on a phone fights the browser's own scroll for the same gesture. */
 .home-graph__svg { width: 100%; height: 24rem; display: block; border: 1px solid var(--holdrim-line);

@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRoles, scopeCovers, EVERYWHERE } from '../core/roles.js';
-import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED } from '../api/here.ts';
+import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn } from '../api/here.ts';
 
 const TRIAGER = 'triager@example.org';
 const AGENT = 'agent@example.org';
@@ -114,4 +114,27 @@ test('blocksAsked answers up to MAX_BLOCKS_ASKED ids of the longest length and r
   assert.equal(ids(1)[0].length, 64);
   assert.equal(blocksAsked('P03', ids(MAX_BLOCKS_ASKED)).ids.length, MAX_BLOCKS_ASKED);
   assert.deepEqual(blocksAsked('P03', ids(MAX_BLOCKS_ASKED + 1)), { refused: 'api.here.tooManyBlocks' });
+});
+
+// ---------------------------------------------------------------- mayActOn, the graph's "where I may act" (#42)
+
+test('mayActOn is true on a block the viewer may either triage or approve, and only there', () => {
+  // TRIAGER holds `triage` on P03 alone and `approve` on P09 alone (the stub above) — neither
+  // capability alone covers both pages, so a check that asked only one of the two would miss half
+  // of what the graph's filter has to keep.
+  assert.equal(mayActOn(stub, TRIAGER, 'P03.1.1'), true, 'triage reaches it');
+  assert.equal(mayActOn(stub, TRIAGER, 'P09.1.1'), true, 'approve reaches it');
+  assert.equal(mayActOn(stub, TRIAGER, 'P04.1.1'), false, 'neither capability reaches this page');
+  assert.equal(mayActOn(stub, 'member@example.org', 'P03.1.1'), false, 'not TRIAGER at all');
+});
+
+test('mayActOn, for the shipped roles: owner and admin may act everywhere, a member and an agent nowhere', () => {
+  const roles = createRoles('owner@example.org', 'ana@example.org', undefined, 'agent@example.org');
+  for (const who of ['owner@example.org', 'ana@example.org']) {
+    assert.equal(mayActOn(roles, who, 'A01.1.1'), true, who);
+  }
+  assert.equal(mayActOn(roles, 'carl@example.org', 'A01.1.1'), false, 'a member holds neither capability');
+  // AGENT_NEVER refuses both `triage` and `approve` to an agent before any grant is read
+  // (engine/core/roles.js) — an agent's graph has to empty out exactly like a member's.
+  assert.equal(mayActOn(roles, 'agent@example.org', 'A01.1.1'), false, 'an agent, named in HOLDRIM_AGENTS');
 });
