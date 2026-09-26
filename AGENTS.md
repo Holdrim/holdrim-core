@@ -114,8 +114,9 @@ Each has a test. If you change the code around one, run the contract test and re
   a ✓ at all. An address in `HOLDRIM_AGENTS`, and anyone who comes in with an agent token the owner
   issued, is refused `triage`, `approve`, `lock` and `people` by `can` before any grant is read. A
   grant naming an address in `HOLDRIM_AGENTS` refuses to start; a token is not checked at start,
-  and holds a member's role whatever grant its address is given later, reaches the event routes
-  only, and has a ✓ refused whatever its address. No address holds both an account and a token.
+  holds a member's role whatever admin or lock grant its address is given later, and opens
+  nothing once its address is the owner's; it reaches the event routes only, and has a ✓ refused
+  whatever its address. No address holds both an account and a token.
   Every event records `data.asAgent` (`engine/core/roles.js`, `engine/api/server.ts`).
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
   known format; interpolating a raw string lets `red; } body { display:none } /*` through.

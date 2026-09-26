@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { SQLITE_BUSY_TIMEOUT_MS } from './store-sqlite.ts';
 import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
@@ -24,11 +25,11 @@ export class UsersSqlite extends UserStoreBase {
     this.#db = new DatabaseSync(path);
     // WAL: a read does not block a write. Every page load checks a session.
     this.#db.exec('PRAGMA journal_mode = WAL');
-    // Wait for another connection's write instead of failing at once, as the event store does
-    // (store-sqlite.ts). Without it, the `BEGIN IMMEDIATE` below answers "database is locked" the
-    // moment a second process on this file is mid-write, and an issue or an account creation fails
-    // for nothing but timing.
-    this.#db.exec('PRAGMA busy_timeout = 5000');
+    // Wait for another connection's write instead of failing at once, as long as the event store
+    // does. Without it, the `BEGIN IMMEDIATE` below answers "database is locked" the moment a second
+    // process on this file is mid-write, and an issue or an account creation fails for nothing but
+    // timing.
+    this.#db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS users (
         email       TEXT PRIMARY KEY,

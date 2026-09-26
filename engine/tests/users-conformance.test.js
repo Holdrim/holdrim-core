@@ -147,9 +147,12 @@ async function millisecondsOf(fn) {
 
 /**
  * Registers the same test for every available store, and a skipped one for every store that is
- * not available — so the reason shows up in the output even when nothing ran.
+ * not available — so the reason shows up in the output even when nothing ran. `body` gets the store
+ * and its name. `firestoreTimeout` is for a test whose Firestore run is slow by nature, not by bug:
+ * contended transactions wait on the emulator's lock and retry with a backoff, and a cancellation
+ * there says nothing about the store.
  */
-function forEachStore(title, body) {
+function forEachStore(title, body, { firestoreTimeout = 15_000 } = {}) {
   for (const store of stores) {
     // ⚠️ Firestore only: a loop over pages that never terminates — an off-by-one in what counts as
     // "the page was full", say — would otherwise hang until CI's own ten-minute ceiling, on every
@@ -162,11 +165,11 @@ function forEachStore(title, body) {
     // preempt a running `while` loop from the outside. What this buys is the common case (a bug
     // that hangs on one call that never resolves) failing fast and by name; a true runaway loop
     // still falls back to whatever kills the process from outside it — CI's own job timeout.
-    const options = store.name === 'firestore' ? { timeout: 15_000 } : {};
+    const options = store.name === 'firestore' ? { timeout: firestoreTimeout } : {};
     test(`[${store.name}] ${title}`, options, async () => {
       const s = await store.open();
       try {
-        await body(s);
+        await body(s, store.name);
       } finally {
         await s.close();
       }
@@ -190,6 +193,16 @@ forEachStore('creates a person and finds them again', async (s) => {
   // What comes out of the store must not carry the secret: this object reaches the HTTP layer.
   assert.equal(found.salt, undefined);
   assert.equal(found.hash, undefined);
+});
+
+forEachStore('a second account for one address is refused, and the first one\'s password still gets in', async (s) => {
+  // A store that overwrote here would hand the address to whoever created it second, password and
+  // all, without an error anywhere: Firestore's `create`, where `set` would do exactly that.
+  await s.create('someone@example.org', 'Someone', 'the first password');
+  await assert.rejects(s.create('Someone@Example.org', 'Someone Else', 'the second password'));
+  assert.ok(await s.check('someone@example.org', 'the first password'), 'the first password no longer gets in');
+  assert.equal(await s.check('someone@example.org', 'the second password'), null, 'the second one does');
+  assert.equal((await s.find('someone@example.org'))?.name, 'Someone');
 });
 
 forEachStore('the generated password is what gets in, and only it', async (s) => {
@@ -797,13 +810,16 @@ forEachStore('the list of agent tokens carries no secret, no hash and no id, ord
   }
 });
 
-forEachStore('re-issuing under concurrency leaves one live token, and the trail names every token it stopped', async (s) => {
+forEachStore('re-issuing under concurrency leaves one live token, and the trail names every token it stopped', async (s, name) => {
   // Twelve issues for one address at once, as a double click, a retry and a second tab can make them.
   // The chain the trail keeps (`replacedTokenId`, agent-tokens.ts) is right only when each issue saw
   // the row the one before it wrote: exactly one issue replaced nothing, no token is named as replaced
   // twice, and every token that no longer works is named by the issue that stopped it. An issue that
   // reads the row outside its own write's turn breaks all three while still leaving one row.
-  for (let round = 0; round < 3; round++) {
+  // One round on Firestore: contended transactions there wait on the emulator's lock and retry with
+  // a backoff, so a single round takes from 6 to 15 seconds whatever the number racing, and a store
+  // that reads outside its turn already fails the first.
+  for (let round = 0; round < (name === 'firestore' ? 1 : 3); round++) {
     const address = `race${round}@example.org`;
     const issued = await Promise.all(Array.from({ length: 12 }, () => s.issueAgentToken(address)));
     const live = [];
@@ -815,7 +831,7 @@ forEachStore('re-issuing under concurrency leaves one live token, and the trail 
     const unnamed = issued.filter((i) => !live.includes(i.tokenId) && !named.includes(i.tokenId));
     assert.deepEqual(unnamed.map((i) => i.tokenId), [], `round ${round}: stopped tokens no issue names`);
   }
-});
+}, { firestoreTimeout: 60_000 });
 
 /** A user row as `insertUser` takes it; the hash is never checked here, so any bytes do. */
 const userRow = (email) => ({
@@ -860,7 +876,7 @@ forEachStore('an account and a token written for one address at the same moment:
     assert.ok(refused instanceof AddressInUse, `${email}: refused by something else: ${refused}`);
     assert.equal(Boolean(await s.find(email)) !== tokens.has(email), true, `${email} is both, or neither`);
   }
-});
+}, { firestoreTimeout: 30_000 });
 
 forEachStore('a token row of another kind opens nothing, on a store with no constraint to refuse writing it', async (s) => {
   // SQLite and Postgres refuse the row itself (CHECK kind = 'agent'); Firestore has no constraint, so
