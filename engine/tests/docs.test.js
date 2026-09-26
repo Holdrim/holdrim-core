@@ -34,8 +34,9 @@ const CODE = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude
   .map((f) => read(f)).join('\n');
 
 test('every core document the repository promises exists', () => {
-  for (const f of ['README.md', 'CONTRIBUTING.md', 'SECURITY.md', ...['BUGS', 'GLOSSARY', 'IMPACT',
-    'LAYERS', 'METHOD', 'PRIOR-ART', 'VISION'].map((d) => `docs/${d}.md`)]) {
+  for (const f of ['README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'LESSONS.md',
+    ...['BUGS', 'GLOSSARY', 'IMPACT', 'LAYERS', 'METHOD', 'PRIOR-ART', 'VISION']
+      .map((d) => `docs/${d}.md`)]) {
     assert.ok(DOCS.includes(f), `${f} is missing`);
   }
 });

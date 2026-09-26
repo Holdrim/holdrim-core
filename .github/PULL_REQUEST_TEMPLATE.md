@@ -30,6 +30,15 @@ The five proofs, as CONTRIBUTING lists them:
 Say what you broke and what the failure looked like. A green test nobody has seen fail proves
 nothing.
 
+## The three questions
+
+<!-- Briefly, and every time. LESSONS.md, "The questions every pull request answers", says what
+     each one asks and what a good answer names. -->
+
+- **Did it make sense?**
+- **Was it economical?** <!-- tokens and review rounds, per agent and model -->
+- **Can it expose an error?** <!-- what you checked for security, amateurism and AI delusion -->
+
 ## What this does not cover
 
 <!-- Every change has an edge it does not handle. Naming it here is worth more than pretending
