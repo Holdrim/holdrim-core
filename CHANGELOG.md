@@ -464,9 +464,9 @@ who ran the engine from `main` before it.
   over the real name — a reader sees the previous file or the new one, whole, owned exactly as before,
   never a partial one. **A registry that is a symlink is now refused on both read and write, whether
   the link resolves or is dangling (its target already gone).** The refusal lives in `loadRegistry`
-  itself, so it is not only `holdrim sync` that changes: `holdrim check`, `restamp` and `ifITouch`,
-  and the server's own traffic-light and page-summary routes (`engine/api/server.ts`), all read
-  through `loadRegistry` and now refuse a symlinked registry too, where every one of them used to read
+  itself, so every reader of the registry changes with it, not only `holdrim sync`: `holdrim check`,
+  `restamp`, `lights`, `graph` and `if-i-touch`, and the server's home and `/graph` routes, all read
+  through `loadRegistry` and now refuse a symlinked registry, where every one of them used to read
   through it — an adopter who relies on the panel, or on `check` in CI, and not only on `sync`, will
   see this. This is a behaviour change for a project that shared one `approvals.json` between
   checkouts through a symlink: that used to be read and written straight through, and now refuses
