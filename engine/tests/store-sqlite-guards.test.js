@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { SqliteEventStore, installGuards, guardMismatches, GUARDS } from '../api/store-sqlite.ts';
+import { SqliteEventStore, installGuards, guardMismatches, GUARDS, ROWID_CEILING as CEILING } from '../api/store-sqlite.ts';
 import { ONLY_LOSES } from '../api/people.ts';
 import { outside } from './helpers/sqlite.js';
 import { Source } from '../cli/remote.ts';
@@ -272,8 +272,9 @@ test('a database the previous version made: the changed guards are replaced, the
   // The schema and the triggers exactly as the version before this one wrote them, spacing
   // included: SQLite keeps the text as written, so a comparison that minds spacing would replace
   // all five, and one that ignores the text would replace none. This fixture also predates
-  // events_no_replace, events_no_low_rowid, events_no_high_rowid and the whole texts table — the
-  // guard set an older release shipped with, not tampering — so those six are said as missing,
+  // events_no_replace, events_no_low_rowid, events_no_high_rowid, events_no_first_rowid_below_one,
+  // people_no_rowid_below_one and the whole texts table — the guard set an older release shipped
+  // with, not tampering — so those nine are said as missing,
   // the same as any other guard this open does not find, rather than staying the silent case
   // (holdrim#89).
   outside(path, `
@@ -297,7 +298,8 @@ test('a database the previous version made: the changed guards are replaced, the
   await reopen(path);
   const named = (line) => line.match(/guard "(\w+)"/)?.[1];
   assert.deepEqual(said.map(named).sort(),
-    ['events_no_high_rowid', 'events_no_low_rowid', 'events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
+    ['events_no_first_rowid_below_one', 'events_no_high_rowid', 'events_no_low_rowid', 'events_no_replace', 'people_no_replace',
+      'people_no_rowid_below_one', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_rowid_below_one', 'texts_no_update'],
     'the guards whose text changed are replaced, the ones this fixture never had are installed, and each is said once');
   const store = new SqliteEventStore(path);
   const ana = await store.personFor('ana@example.org');
@@ -727,7 +729,8 @@ test('[sqlite] the --db reader compares the guards in the snapshot it reads the 
   assert.equal(forged, 1, 'the forgery has to have landed during the read for this to prove anything');
   const after = new DatabaseSync(path, { readOnly: true });
   try {
-    assert.deepEqual(guardMismatches(after), [{ name: 'events_no_low_rowid', kind: 'missing' }], 'the guard really is gone now');
+    assert.deepEqual(guardMismatches(after), [{ name: 'events_no_low_rowid', kind: 'missing' }, { name: 'events', kind: 'sunk' }],
+      'the guard really is gone now, and the row it let in below 1 is named too');
     assert.ok(after.prepare("SELECT 1 FROM events WHERE id = 'forged'").get(), 'and the forged row really is in the file');
   } finally {
     after.close();
@@ -743,8 +746,6 @@ test('[sqlite] the --db reader compares the guards in the snapshot it reads the 
 // below it, where `events_no_low_rowid` refuses each one — the owner's ✓ included — as a forgery,
 // and the row cannot be deleted. `events_no_high_rowid` holds every insert to MAX(rowid) + 1.
 
-/** The largest rowid SQLite has, as SQL: a JavaScript number cannot hold it exactly. */
-const CEILING = '9223372036854775807';
 const PAST_NEXT = /not inserted past the next rowid/;
 /** An insert naming its own rowid, the way anyone holding the file could write one. */
 const insertAt = (rowid, id, verb = 'INSERT') => `${verb} INTO events (rowid, id, type, page, author, happened_at)
@@ -954,7 +955,7 @@ for (const [how, sql] of Object.entries(PARKINGS)) {
   }));
 }
 
-test("a rowid column on events lets #91's forgery below every row through: named while it is there, by guardMismatches, the --db reader and the boot", withFile(async (path, said) => {
+test("a rowid column on events lets #91's forgery below every row through: named while it is there, by guardMismatches, the --db reader and the boot, and the row stays named once it is gone", withFile(async (path, said) => {
   const store = new SqliteEventStore(path);
   await store.append(approval, 'owner@example.org');
   await store.close();
@@ -967,10 +968,13 @@ test("a rowid column on events lets #91's forgery below every row through: named
   } finally {
     db.close();
   }
-  assert.deepEqual(mismatchesOf(path), [{ name: 'events.rowid', kind: 'shadowed' }]);
+  assert.deepEqual(mismatchesOf(path), [{ name: 'events.rowid', kind: 'shadowed' }, { name: 'events', kind: 'sunk' }]);
   assert.equal((await readWithCli(path)).tampered, true);
   await reopen(path);
   assert.ok(said.some((l) => l.includes('the database has a column "events.rowid" that hides the real rowid from every guard')), said.join('\n'));
+  // Below 1 is where no genuine insert lands, so the forgery outlives the column that let it in.
+  outside(path, 'ALTER TABLE events DROP COLUMN rowid');
+  assert.deepEqual(mismatchesOf(path), [{ name: 'events', kind: 'sunk' }]);
 }));
 
 test('a rowid column with a DEFAULT makes every append collide: the append says the column is why', withFile(async (path) => {
@@ -1009,4 +1013,243 @@ test("a rowid column on people lets UPDATE OR REPLACE erase another person's row
   assert.equal((await readWithCli(path)).tampered, true, 'so sync, apply and state refuse');
   await reopen(path);
   assert.ok(said.some((l) => l.includes('"people.rowid" that hides the real rowid')), said.join('\n'));
+}));
+
+// ================================================ holdrim#109, round 3: below rowid 1, and the proofs
+// In a BEFORE INSERT trigger, NEW.rowid is -1 for an insert that leaves the rowid to SQLite, so one
+// row held at -1 makes `events_no_replace`, `people_no_replace` and `texts_no_replace` read every
+// genuine insert after it as replacing that row. A genuine insert never takes a rowid below 1.
+
+const BELOW_ONE = { events: /an event is not inserted below rowid 1/, people: /a person is not inserted below rowid 1/,
+  texts: /a text is not inserted below rowid 1/ };
+const personAt = (rowid, id) => `INSERT INTO people (rowid, id, email) VALUES (${rowid}, '${id}', NULL)`;
+const textAt = (rowid, event) => `INSERT INTO texts (rowid, event, field, value, salt) VALUES (${rowid}, '${event}', 'snapshot', 'x', 'y')`;
+/** `sql` run with `guard` lifted and put back by its exact text, as a file made before it can hold what it leaves. */
+const without = (guard, sql) => `DROP TRIGGER ${guard}; ${sql}; CREATE TRIGGER ${guard} ${GUARDS[guard]};`;
+
+test('a row below rowid 1 is refused on people and texts whatever they hold, and on events while it is empty; genuine inserts still start at 1', withFile(async (path) => {
+  await reopen(path);
+  const db = new DatabaseSync(path);
+  try {
+    for (const rowid of [-1, 0]) {
+      for (const verb of ['INSERT', 'REPLACE']) {
+        assert.throws(() => db.exec(insertAt(rowid, `sunk${rowid}`, verb)), BELOW_ONE.events, `events, empty: ${verb} at ${rowid}`);
+      }
+      assert.throws(() => db.exec(personAt(rowid, `p_sunk${rowid}`)), BELOW_ONE.people, `people, empty: ${rowid}`);
+    }
+    db.exec(insertAt(1, 'first'));
+    db.exec(personAt(1, 'p_first'));
+    // Held rows change nothing for people and texts; for events, `events_no_low_rowid` answers
+    // instead, in its own words, and this guard stays silent.
+    assert.throws(() => db.exec(insertAt(-7, 'forged')), /not inserted below one already held/, 'events, holding a row: the low guard, alone');
+    assert.throws(() => db.exec(personAt(-1, 'p_sunk')), BELOW_ONE.people, 'people, holding a row');
+    for (const rowid of [-1, 0]) assert.throws(() => db.exec(textAt(rowid, 'first')), BELOW_ONE.texts, `texts: ${rowid}`);
+    assert.deepEqual({ ...db.prepare('SELECT (SELECT COUNT(*) FROM events) e, (SELECT COUNT(*) FROM people) p, (SELECT COUNT(*) FROM texts) t').get() },
+      { e: 1, p: 1, t: 0 }, 'nothing refused stays');
+  } finally {
+    db.close();
+  }
+  const store = new SqliteEventStore(path);
+  try {
+    await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'ana@example.org');
+  } finally {
+    await store.close();
+  }
+  const ro = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(['events', 'people', 'texts'].map((t) => Number(ro.prepare(`SELECT MIN(rowid) m FROM ${t}`).get().m)), [1, 1, 1],
+      'and a genuine insert into each table, texts included, went through at 1 or above');
+  } finally {
+    ro.close();
+  }
+}));
+
+// Each way a row already held below 1 traps the next genuine write, with every guard in place by
+// the time anyone looks. Each is set up the way a file made before its guard could hold it.
+const SUNK = {
+  people: {
+    setup: async (store) => { await store.personFor('ana@example.org'); },
+    sql: without('people_no_rowid_below_one', personAt(-1, 'p_trap')),
+    // A new person: a new reviewer, or the owner after a handover.
+    write: (store) => store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'new@example.org'),
+    what: 'person', guard: /can only lose their e-mail/,
+  },
+  texts: {
+    setup: async (store) => { await store.append({ type: 'comment', page: 'A01', text: 'first' }, 'ana@example.org'); },
+    sql: without('texts_no_rowid_below_one', textAt(-1, '__EVENT__')),
+    write: (store) => store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'ana@example.org'),
+    what: 'event', guard: /a text is not replaced/,
+  },
+  events: {
+    // Not a fresh file: a person is there, and no event yet.
+    setup: async (store) => { await store.personFor('ana@example.org'); },
+    sql: without('events_no_first_rowid_below_one', insertAt(-1, 'sunk')),
+    write: (store) => store.append(approval, 'ana@example.org'),
+    what: 'event', guard: /an event is not replaced/,
+  },
+};
+
+for (const [table, how] of Object.entries(SUNK)) {
+  test(`a row held at rowid -1 on ${table} is named by guardMismatches, the --db reader and every boot, and the refused write says why`, withFile(async (path, said, logged) => {
+    const store = new SqliteEventStore(path);
+    await how.setup(store);
+    await store.close();
+    const event = new DatabaseSync(path, { readOnly: true });
+    const firstEvent = event.prepare('SELECT id FROM events LIMIT 1').get()?.id;
+    event.close();
+    outside(path, how.sql.replace('__EVENT__', firstEvent));
+    assert.deepEqual(mismatchesOf(path), [{ name: table, kind: 'sunk' }], 'every guard is in place: only the row is left to name');
+
+    const cli = await readWithCli(path);
+    assert.equal(cli.tampered, true, 'so sync, apply and state refuse');
+    assert.ok(cli.errors.some((l) => l.includes(`the database's ${table} table holds a row below rowid 1`) && /no boot repairs this/.test(l)),
+      cli.errors.join('\n'));
+
+    for (const boot of [1, 2]) {
+      said.length = 0;
+      logged.length = 0;
+      await reopen(path);
+      assert.deepEqual(said, [`holdrim: the database's ${table} table holds a row below rowid 1, which no genuine insert takes, `
+        + 'and one at -1 makes every insert after it read as a replace, refused as a forgery, which it is not; nothing a boot does repairs this'],
+        `boot ${boot}: said on every boot, since nothing repairs it`);
+      assert.deepEqual(logged.map((l) => ({ event: l.event, guard: l.guard, kind: l.kind })),
+        [{ event: 'sqlite_guard_missing', guard: table, kind: 'sunk' }]);
+    }
+
+    const again = new SqliteEventStore(path);
+    try {
+      const err = await how.write(again).then(() => null, (e) => e);
+      assert.ok(err, 'the genuine write is refused: the row at -1 is still there');
+      assert.match(err.message, new RegExp(`^the ${how.what} was not recorded: the database's ${table} table holds a row below rowid 1`),
+        'and says the cause, not that the operator forged their own write');
+      assert.match(err.cause.message, how.guard, "the guard's own words go along as the cause");
+    } finally {
+      await again.close();
+    }
+  }));
+}
+
+test('a refused write names only what is wrong with the tables it wrote to, on the person path and the event path alike', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const first = await store.append({ type: 'comment', page: 'A01', text: 'first' }, 'ana@example.org');
+  await store.close();
+  outside(path, without('people_no_rowid_below_one', personAt(-1, 'p_trap'))
+    + without('texts_no_rowid_below_one', textAt(-1, first.id)));
+  const again = new SqliteEventStore(path);
+  try {
+    // A person already held: `people` is not written, so what is wrong there did not refuse this.
+    const byAna = await again.append({ type: 'comment', page: 'A01', text: 'again' }, 'ana@example.org').then(() => null, (e) => e);
+    assert.match(byAna.message, /^the event was not recorded: the database's texts table holds a row below rowid 1[^;]*\. This is how/);
+    // A new person is refused at `people`, before any event or text is written.
+    const byNew = await again.personFor('new@example.org').then(() => null, (e) => e);
+    assert.match(byNew.message, /^the person was not recorded: the database's people table holds a row below rowid 1[^;]*\. This is how/);
+  } finally {
+    await again.close();
+  }
+}));
+
+test('removeText on a parked file says the row is why', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const e = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'owner@example.org');
+  await store.close();
+  outside(path, without('events_no_high_rowid', insertAt(CEILING, 'parked')));
+  const again = new SqliteEventStore(path);
+  try {
+    const err = await again.removeText(e.id, 'text', 'owner@example.org').then(() => null, (x) => x);
+    assert.match(err.message, /^the event was not recorded: the database's events table holds a row at the largest rowid/);
+    assert.match(err.cause.message, /not inserted below one already held/);
+  } finally {
+    await again.close();
+  }
+}));
+
+test('removeText of a text that is not there says so even on a file with a row below 1: that answer is not the file\'s fault', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  const e = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'owner@example.org');
+  await store.close();
+  outside(path, without('texts_no_rowid_below_one', textAt(-1, e.id)));
+  const again = new SqliteEventStore(path);
+  try {
+    // The first removal writes an event and deletes a row, and inserts no text: it goes through.
+    await again.removeText(e.id, 'text', 'owner@example.org');
+    const err = await again.removeText(e.id, 'text', 'owner@example.org').then(() => null, (x) => x);
+    assert.match(err.message, /^no text to remove on event /);
+    assert.equal(err.cause, undefined);
+  } finally {
+    await again.close();
+  }
+}));
+
+// The proof lens's round 2 cases: each is here because a mutation of the code it names survived
+// the suite without it.
+
+test('a row parked at the ceiling that is the only hashed row: list with and without a page, and the --db reader, still read it', withFile(async (path) => {
+  await reopen(path);
+  // The only hashed row, so `extractionBoundary` is its rowid: read as an integer, that throws.
+  outside(path, without('events_no_high_rowid', `INSERT INTO events (rowid, id, type, page, author, happened_at, text_hash)
+    VALUES (${CEILING}, 'parked', 'comment', 'A01', 'p_000000000000000000000000', '2026-01-01T00:00:00.000Z', 'h')`));
+  const cli = await readWithCli(path);
+  assert.deepEqual(cli.events.map((x) => x.id), ['parked'], 'the --db reader');
+  assert.equal(cli.tampered, true);
+  const store = new SqliteEventStore(path);
+  try {
+    assert.deepEqual((await store.list()).map((x) => x.id), ['parked'], 'list, every page');
+    assert.deepEqual((await store.list('A01')).map((x) => x.id), ['parked'], 'list, one page');
+    assert.equal((await store.list())[0].textTampered, true, 'read after the boundary, so its missing text is named, not trusted');
+  } finally {
+    await store.close();
+  }
+}));
+
+test('a ROWID column and a row parked at the ceiling: both named, the rowid read through a name the column does not hide in any case', withFile(async (path) => {
+  await reopen(path);
+  outside(path, `ALTER TABLE events ADD COLUMN ROWID INTEGER; ${insertAt(CEILING, 'parked').replace('(rowid,', '(_rowid_,')};`);
+  assert.deepEqual(mismatchesOf(path), [{ name: 'events.ROWID', kind: 'shadowed' }, { name: 'events', kind: 'parked' }]);
+}));
+
+test('all three rowid names hidden on events: each is named, and nothing throws for want of a name to ask with', withFile(async (path) => {
+  await reopen(path);
+  outside(path, 'ALTER TABLE events ADD COLUMN rowid INTEGER; ALTER TABLE events ADD COLUMN oid INTEGER; ALTER TABLE events ADD COLUMN _rowid_ INTEGER;');
+  assert.deepEqual(mismatchesOf(path).map((m) => m.name).sort(), ['events._rowid_', 'events.oid', 'events.rowid']);
+}));
+
+test('a row one short of the ceiling is not named, until a genuine append takes the ceiling', withFile(async (path) => {
+  await reopen(path);
+  outside(path, without('events_no_high_rowid', insertAt('9223372036854775806', 'near')));
+  assert.deepEqual(mismatchesOf(path), [], 'one short traps nothing: the next append still gets the next rowid');
+  const store = new SqliteEventStore(path);
+  try {
+    await store.append(approval, 'owner@example.org');
+  } finally {
+    await store.close();
+  }
+  assert.deepEqual(mismatchesOf(path), [{ name: 'events', kind: 'parked' }], 'that append took the ceiling: from here on, every one is refused');
+}));
+
+test('a file parked before events_no_high_rowid existed: the boot installs the guard, names the row, and comes up', withFile(async (path, said) => {
+  await reopen(path);
+  outside(path, `DROP TRIGGER events_no_high_rowid; ${insertAt(CEILING, 'parked')};`);
+  await reopen(path);
+  assert.deepEqual(said, [
+    `holdrim: the database's events table holds a row at the largest rowid, ${CEILING}, `
+      + 'so every append after it lands below that row and is refused as a forgery, which it is not; nothing a boot does repairs this',
+    'holdrim: the database\'s guard "events_no_high_rowid" is missing; installing it',
+  ]);
+  assert.deepEqual(mismatchesOf(path), [{ name: 'events', kind: 'parked' }], 'the guard is back; only the row is left');
+}));
+
+test('a boot on a parked file with every guard in place does not wait on another writer', withFile(async (path) => {
+  await reopen(path);
+  outside(path, without('events_no_high_rowid', insertAt(CEILING, 'parked')));
+  const writer = new DatabaseSync(path);
+  writer.exec('BEGIN IMMEDIATE');
+  try {
+    // Nothing a boot can repair: taking the write lock would wait out the busy timeout, and fail.
+    const started = Date.now();
+    await reopen(path);
+    assert.ok(Date.now() - started < 2000, 'the open has to go through without waiting for the lock');
+  } finally {
+    writer.exec('ROLLBACK');
+    writer.close();
+  }
 }));

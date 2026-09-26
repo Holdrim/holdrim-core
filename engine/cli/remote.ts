@@ -327,7 +327,8 @@ export class Source {
       this.#guardsTampered = mismatches.length > 0;
       for (const m of mismatches) {
         // Only a trigger is the server's to put back: promising that of a column hiding the rowid,
-        // or of a row parked at the ceiling, would send the operator to a boot that fixes nothing.
+        // a row below rowid 1 or a row parked at the ceiling would send the operator to a boot that
+        // fixes nothing.
         console.error(`holdrim: WARNING — ${guardMismatchSaid(m)}; read as it is, nothing repaired. `
           + 'Whatever was written while it was so may be forged; '
           + (repairable(m) ? 'the server repairs it on its next start.' : 'no boot repairs this: a person has to (SECURITY.md).'));
