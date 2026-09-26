@@ -194,6 +194,40 @@ test('a hash, and a row that no longer hashes to it: tampered, even though the r
   assert.equal(out.textTampered, true);
 });
 
+// Issue #133 (case B2 of the #107 lens run): `removeText` deletes the row and records the removal in
+// one transaction, so a valid removal beside a row that fails its hash is a state it never produces.
+// Read as a removal, one forged event would silence the alarm the edit raised.
+const B2_REMOVAL = { id: 'r1', type: TEXT_REMOVED, author: 'forger@example.org', when: '2026-01-02T00:00:00.000Z',
+  data: { event: 'e1', field: 'text' } };
+
+test('a row that fails its hash, with a valid removal of the same field, reads as tampered, not removed', () => {
+  const edited = { ...AN_EVENT, text: null, textHash: hashText('the real text', newSalt()) };
+  const rows = new Map([[textKey('e1', 'text'), { value: 'a forged text', salt: newSalt() }]]);
+  const reports = [];
+  const [out] = withTexts([edited, B2_REMOVAL], rows, reports);
+  assert.equal(out.text, null, 'a value that fails its own hash is not handed out as the text');
+  assert.equal(out.textTampered, true, 'a forged removal must not turn an edited row into a clean removal');
+  assert.deepEqual(cases(reports), [{ event: 'e1', field: 'text', kind: 'overwritten' }],
+    'the alarm is raised, as the edit it is');
+  const without = [];
+  withTexts([edited], rows, without);
+  assert.notEqual(reports[0].finding, without[0].finding,
+    'the forged removal is part of the finding: acknowledging the edit alone does not quiet it');
+});
+
+test('a row that still matches its hash, with a valid removal of the same field, still reads as the text', () => {
+  // The other half of B2's condition: a forged removal with no row change to back it explains
+  // nothing and alarms nothing — the row proves the text is the one recorded (texts.ts, `withTexts`).
+  const salt = newSalt();
+  const reports = [];
+  const [out] = withTexts([{ ...AN_EVENT, text: null, textHash: hashText('the real text', salt) }, B2_REMOVAL],
+    new Map([[textKey('e1', 'text'), { value: 'the real text', salt }]]), reports);
+  assert.equal(out.text, 'the real text');
+  assert.equal(out.textRemoved, null);
+  assert.equal(out.textTampered, false);
+  assert.deepEqual(reports, []);
+});
+
 test('a removal event whose target is not a string names no removal, even one that would print as the right id', () => {
   const salt = newSalt();
   // `['e1']` stringifies to exactly `'e1'` wherever a template literal reads it — `textKey` does —
@@ -420,6 +454,48 @@ test('[sqlite] the CLI\'s own direct reader of the events file raises the alert 
     const structured = said.map(tryParse).filter((p) => p && typeof p.severity === 'string');
     assert.ok(structured.some((l) => l.severity === 'CRITICAL' && l.kind === 'overwritten'));
     assert.deepEqual(logged, [], 'this reader\'s alert never reaches stdout');
+  }));
+
+// Issue #133, case B2, in the file: a row edited straight in the database, then ONE forged removal
+// of it, dated and placed after its target. The memory store has no such writer — its rows are
+// private to the process — and resolves through the same `withTexts` the unit tests above prove.
+async function sqliteB2(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-tamper-b2-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'events.db');
+  const store = new SqliteEventStore(path);
+  const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+  await store.close();
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path);
+  db.exec(`DROP TRIGGER IF EXISTS texts_no_update`);
+  db.prepare("UPDATE texts SET value = 'forged' WHERE event = ?").run(written.id);
+  db.close();
+  const forger = new SqliteEventStore(path);
+  await forger.append({ type: TEXT_REMOVED, page: 'A01', data: { event: written.id, field: 'text' } }, 'forger@example.org');
+  await forger.close();
+  return { path, written };
+}
+
+test('[sqlite] list() raises the alert for an edited row a forged removal claims', capturingReports(
+  async (t, said, logged) => {
+    const { path, written } = await sqliteB2(t);
+    const reopened = new SqliteEventStore(path);
+    const read = (await reopened.list(null)).find((e) => e.id === written.id);
+    await reopened.close();
+    assert.equal(read.textTampered, true, 'never a clean removal');
+    assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(written.id)));
+    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.event === 'text_tampered'
+      && l.eventId === written.id && l.field === 'text' && l.kind === 'overwritten'));
+  }));
+
+test('[sqlite] the CLI\'s direct file reader raises the alert for an edited row a forged removal claims', capturingReports(
+  async (t, said) => {
+    const { path, written } = await sqliteB2(t);
+    const read = (await new Source({ db: path }).events()).find((e) => e.id === written.id);
+    assert.equal(read.textTampered, true, 'never a clean removal');
+    const structured = said.map(tryParse).filter((p) => p && typeof p.severity === 'string');
+    assert.ok(structured.some((l) => l.severity === 'CRITICAL' && l.eventId === written.id && l.kind === 'overwritten'));
   }));
 
 test('suspectsOf, exported for the CLI\'s own list/sync, reads the same pairs on a final resolved list', () => {
@@ -901,6 +977,40 @@ test('[firestore] the CLI\'s own reader of the cloud raises the alert too', clou
     const structured = said.map(tryParse).filter((p) => p && typeof p.severity === 'string');
     assert.ok(structured.some((l) => l.severity === 'CRITICAL' && l.eventId === kept.id && l.kind === 'double_removal'));
     assert.deepEqual(logged, [], 'this reader\'s alert never reaches stdout');
+  }));
+
+// Issue #133, case B2, in the cloud: the text's document edited straight through the SDK, then ONE
+// forged removal of it, dated and placed after its target — the same forgery as the file's above.
+async function firestoreB2(t) {
+  const project = freshFirestoreProject('holdrim-texts');
+  const { Firestore } = await import('@google-cloud/firestore');
+  const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+  const store = new FirestoreEventStore(project);
+  const db = new Firestore({ projectId: project });
+  t.after(async () => { await store.close(); await db.terminate(); });
+  const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+  await db.collection('texts').doc(`${written.id}:text`).update({ value: 'forged' });
+  await store.append({ type: TEXT_REMOVED, page: 'A01', data: { event: written.id, field: 'text' } }, 'forger@example.org');
+  return { project, store, written };
+}
+
+test('[firestore] list() raises the alert for an edited row a forged removal claims', cloud, capturingReports(
+  async (t, said, logged) => {
+    const { store, written } = await firestoreB2(t);
+    const read = (await store.list('A01')).find((e) => e.id === written.id);
+    assert.equal(read.textTampered, true, 'never a clean removal');
+    assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(written.id)));
+    assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.event === 'text_tampered' && l.eventId === written.id
+      && l.field === 'text' && l.kind === 'overwritten'));
+  }));
+
+test('[firestore] the CLI\'s reader of the cloud raises the alert for an edited row a forged removal claims', cloud,
+  capturingReports(async (t, said) => {
+    const { project, written } = await firestoreB2(t);
+    const read = (await new Source({ project, account: 'ci@example.org' }).events()).find((e) => e.id === written.id);
+    assert.equal(read.textTampered, true, 'never a clean removal');
+    const structured = said.map(tryParse).filter((p) => p && typeof p.severity === 'string');
+    assert.ok(structured.some((l) => l.severity === 'CRITICAL' && l.eventId === written.id && l.kind === 'overwritten'));
   }));
 
 test('[firestore] the CLI pages through more documents than one page holds, and drops none', cloud, async (t) => {

@@ -352,6 +352,16 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **A text edited straight in the store now raises its CRITICAL alert even when a forged removal
+  claims it (#133).** Before, a direct writer who edited a text's row and then added one
+  `text_removed` event for it, dated and placed after its target, made the field read as a clean
+  removal credited to themselves: no `text_tampered` line, no banner finding, no non-zero exit from
+  `holdrim list`/`sync`. `EventStore.removeText` deletes the row in the same step as it records the
+  removal, so a removal beside a row still there is never its work; the field now reads as
+  tampered, of kind `overwritten`, in every store and in the CLI's direct readers. The finding
+  includes the removal's id, so an owner who acknowledged the edit before the removal was forged
+  sees it again. Nothing to change: an operator whose store holds this forgery sees the alarm on the
+  next read of that field.
 - **Disabling an account, or resetting its password, now drops every session already open under
   it.** Before, a stolen cookie came back to life the moment the account was re-enabled, or even
   sooner: a reset alone left an already-open session untouched, since only the disabled flag was
