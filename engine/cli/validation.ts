@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, existsSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync,
+  lstatSync, statSync, chmodSync, accessSync, constants } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseHTML } from 'linkedom';
@@ -67,30 +68,15 @@ function fsyncFile(path: string) {
 }
 
 /**
- * Fsyncs the directory `dir`, so the rename that just happened inside it survives a crash too — a
- * rename is only a change to the directory's own metadata, cached the same way file contents are.
- * Not every platform lets a directory be opened or fsynced this way (Windows refuses the open
- * outright; some filesystems refuse the fsync) — that is not a sign the rename itself is unsafe
- * there, only that this extra step does not apply, so only the codes those platforms are known to
- * raise for it are swallowed here; anything else propagates as the surprise it would be.
+ * Fsyncs the directory `dir`. Left to throw whatever `openSync` or `fsyncSync` raise: by the time a
+ * caller reaches this, the rename it follows has already succeeded, so there is no "ignorable" code
+ * to filter here any more — a platform that cannot do this (Windows refuses the open outright; some
+ * filesystems refuse the fsync) and a real failure look the same from here, and `saveRegistry` treats
+ * every one of them the same way, as a durability warning rather than a lost write.
  */
 function fsyncDir(dir: string) {
-  const ignorable = (code: string | undefined) =>
-    code === 'EPERM' || code === 'EISDIR' || code === 'ENOSYS' || code === 'EINVAL';
-  let fd: number;
-  try {
-    fd = openSync(dir, 'r');
-  } catch (e) {
-    if (ignorable((e as NodeJS.ErrnoException).code)) return;
-    throw e;
-  }
-  try {
-    fsyncSync(fd);
-  } catch (e) {
-    if (!ignorable((e as NodeJS.ErrnoException).code)) throw e;
-  } finally {
-    closeSync(fd);
-  }
+  const fd = openSync(dir, 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 
 /**
@@ -109,6 +95,27 @@ export function saveRegistry(root: string, registry: Registry, interrupt: () => 
   for (const k of Object.keys(registry).sort()) sorted[k] = registry[k];
   const path = registryPath(root);
   const dir = dirname(path);
+  const existing = existsSync(path);
+
+  if (existing) {
+    // A link is not followed: the rename below would replace the LINK ITSELF with a plain file, and
+    // whatever it used to point at — a registry shared between two checkouts, say — would keep
+    // whatever it last held forever. The same reason `exportSite` refuses a symlinked `out` rather
+    // than write through it.
+    if (lstatSync(path).isSymbolicLink()) {
+      throw new Error(`refusing to save ${path}: it is a link, and a link is not followed`);
+    }
+    // A registry made read-only on purpose (0444, to mark "do not touch by hand") used to refuse
+    // with EACCES the instant the old in-place write tried to open it. A rename only needs the
+    // DIRECTORY to be writable, never its target, so that refusal has to be made explicit here or
+    // the fresh temp file would silently land in place of a file nobody meant to be overwritten.
+    try {
+      accessSync(path, constants.W_OK);
+    } catch {
+      throw Object.assign(new Error(`EACCES: permission denied, open '${path}'`), { code: 'EACCES', path });
+    }
+  }
+
   // Same folder as the target: a rename is only atomic within one filesystem, and a temp directory
   // elsewhere could sit on a different one. pid and randomness only need to keep two runs writing at
   // once from choosing the SAME name — the two are still two different files, so neither can ever
@@ -118,6 +125,10 @@ export function saveRegistry(root: string, registry: Registry, interrupt: () => 
   try {
     writeFileSync(tmp, JSON.stringify(sorted, null, 1) + '\n', 'utf8');
     fsyncFile(tmp);
+    // A fresh file gets a fresh mode; copying the target's over the temp file before the rename is
+    // what keeps whatever an operator set on approvals.json ITSELF, instead of quietly loosening or
+    // tightening it to a new file's default every time a sync writes it.
+    if (existing) chmodSync(tmp, statSync(path).mode);
     interrupt();
     renameSync(tmp, path);
   } catch (e) {
@@ -126,7 +137,15 @@ export function saveRegistry(root: string, registry: Registry, interrupt: () => 
     try { unlinkSync(tmp); } catch { /* nothing to remove */ }
     throw e;
   }
-  fsyncDir(dir);
+  try {
+    fsyncDir(dir);
+  } catch (e) {
+    // The rename above already succeeded — the new registry IS saved, safely, under its real name.
+    // Losing the directory's own metadata flush in a crash is a durability gap, not a lost write, so
+    // this is a warning and a normal return, never the error `sync`'s finally reads as "the registry
+    // could not be saved" (holdrim#151) — that message has to stay true to what actually happened.
+    console.error(`⚠ ${path} was saved, but its folder could not be flushed: ${(e as Error).message}`);
+  }
 }
 
 /**

@@ -450,6 +450,11 @@ who ran the engine from `main` before it.
 - **`approvals.json` is now written atomically (holdrim#150).** `saveRegistry` used to overwrite it
   in place with a single `writeFileSync`, which truncates the file before the new bytes land: a
   process killed mid-write left every owner ✓ ever recorded in it gone, recoverable only from git.
-  It now writes to a temp file beside it, fsyncs it, and renames it over the real name — a reader
-  sees the previous file or the new one, whole, never a partial one — and fsyncs the containing
-  directory afterwards too, where the platform allows it.
+  It now writes to a temp file beside it, fsyncs it, copies the target's own mode onto it, and
+  renames it over the real name — a reader sees the previous file or the new one, whole, in the
+  same mode as before, never a partial one. A registry that is a symlink is now refused rather than
+  replaced, the way `exportSite` already refuses a symlinked `out`, so the file it pointed at is
+  never overwritten in its place; a registry this process cannot write to is refused with `EACCES`
+  before anything is touched, where the old in-place write refused it too. Fsyncing the containing
+  directory afterwards, where the platform allows it, is a durability step on top of an already
+  successful save: a failure there is a warning, never a reason to report the save itself as failed.
