@@ -143,6 +143,20 @@ body.rv-on main [data-code]::after { content: none !important; }
 .rv-alert { margin: 0; padding: .7rem 1rem; background: #FDF3D7; border-bottom: 1px solid #E4C96B;
             color: #5A4708; font-size: .9rem; text-align: center; position: sticky; top: 0; z-index: 10; }
 
+/* The tampered-text banner (issue #107). Red, sticky and above the "could not load" warning: it says
+   the store was written to outside the product, which outranks anything else the page can say. It
+   has no close control on purpose — only the owner's acknowledgement, recorded by the server, takes
+   a line of it down. The host is its own class so `switchOff` can leave it standing. */
+.rv-tamper-host { display: block; position: sticky; top: 0; z-index: 11; }
+.rv-tamper { margin: 0; padding: .7rem 1rem; background: #FBE3E1; border-bottom: 2px solid #B42318;
+             color: #7A1A12; font-size: .9rem; }
+.rv-tamper-title { margin: 0 0 .3rem; font-weight: 700; }
+.rv-tamper-list { margin: 0; padding-left: 1.2rem; }
+.rv-tamper-line { margin: .15rem 0; }
+.rv-tamper-ack { margin-left: .6rem; font: inherit; font-size: .85rem; padding: .1rem .6rem; cursor: pointer; }
+.rv-tamper-error { margin-left: .6rem; font-weight: 700; }
+.rv-tamper-note { margin: .3rem 0 0; font-size: .85rem; }
+
 /* ---------------------------------------------------------------- the traffic light
    Four states, and only two of them ask for action. The colour is not decoration: it is the only way
    to see, on a page of fifty blocks, where to stop. */

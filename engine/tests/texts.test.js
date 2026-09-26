@@ -233,6 +233,15 @@ test('removeText refuses a field with no row, whether it was never given or alre
 // "Every read that resolves a field to tampered reports it once to a single place in the engine,
 // with the event id, the field, and which of the three cases it was."
 
+/**
+ * `reports` as the cases these tests name, after checking every one carries a finding (issue #107):
+ * what a finding IS — which tamperings it tells apart — is engine/tests/tamper.test.js's to prove.
+ */
+const cases = (reports) => reports.map(({ event, field, kind, finding }) => {
+  assert.match(finding, /^[0-9a-f]{64}$/, `the report on ${event}/${field} carries its finding`);
+  return { event, field, kind };
+});
+
 test('withTexts reports nothing when nothing is tampered, even with `reports` given', () => {
   const salt = newSalt();
   const hash = hashText('the real text', salt);
@@ -246,13 +255,13 @@ test('withTexts reports "overwritten" for a row that is there but fails its own 
   const reports = [];
   withTexts([{ ...AN_EVENT, text: null, textHash: hashText('the real text', newSalt()) }],
     new Map([[textKey('e1', 'text'), { value: 'a forged text', salt: newSalt() }]]), reports);
-  assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'overwritten' }]);
+  assert.deepEqual(cases(reports), [{ event: 'e1', field: 'text', kind: 'overwritten' }]);
 });
 
 test('withTexts reports "unaccounted" for a hash with no row and no removal', () => {
   const reports = [];
   withTexts([{ ...AN_EVENT, text: null, textHash: hashText('gone', newSalt()) }], new Map(), reports);
-  assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'unaccounted' }]);
+  assert.deepEqual(cases(reports), [{ event: 'e1', field: 'text', kind: 'unaccounted' }]);
 });
 
 test('withTexts reports "double_removal" for a field two removals claim', () => {
@@ -264,15 +273,15 @@ test('withTexts reports "double_removal" for a field two removals claim', () => 
     data: { event: 'e1', field: 'text' } };
   const reports = [];
   withTexts([tampered, firstRemoval, secondRemoval], new Map(), reports);
-  assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'double_removal' }]);
+  assert.deepEqual(cases(reports), [{ event: 'e1', field: 'text', kind: 'double_removal' }]);
 });
 
 test('withTexts appends to `reports` rather than replacing it, and reports both fields when both are tampered',
   () => {
-    const reports = [{ event: 'earlier', field: 'text', kind: 'overwritten' }];
+    const reports = [{ event: 'earlier', field: 'text', kind: 'overwritten', finding: 'f'.repeat(64) }];
     withTexts([{ ...AN_EVENT, text: null, snapshot: null,
       textHash: hashText('a', newSalt()), snapshotHash: hashText('b', newSalt()) }], new Map(), reports);
-    assert.deepEqual(reports, [
+    assert.deepEqual(cases(reports), [
       { event: 'earlier', field: 'text', kind: 'overwritten' },
       { event: 'e1', field: 'text', kind: 'unaccounted' },
       { event: 'e1', field: 'snapshot', kind: 'unaccounted' },
@@ -281,7 +290,7 @@ test('withTexts appends to `reports` rather than replacing it, and reports both 
 
 test('reportTampered prints a human line AND a structured CRITICAL log line, never the text itself',
   capturingReports(async (t, said, logged) => {
-    reportTampered({ event: 'e1', field: 'text', kind: 'overwritten' });
+    reportTampered({ event: 'e1', field: 'text', kind: 'overwritten', finding: 'f'.repeat(64) });
     assert.equal(said.length, 1, 'exactly one human line');
     assert.match(said[0], /CRITICAL/);
     assert.match(said[0], /e1/);
@@ -290,7 +299,7 @@ test('reportTampered prints a human line AND a structured CRITICAL log line, nev
     // `event` stays the log's own stable NAME (never the tampered event's id, which is `eventId`) —
     // an alert rule keyed on `event: "text_tampered"` has to keep matching no matter which event.
     assert.deepEqual(logged[0], { severity: 'CRITICAL', event: 'text_tampered', time: logged[0].time,
-      eventId: 'e1', field: 'text', kind: 'overwritten' });
+      eventId: 'e1', field: 'text', kind: 'overwritten', finding: 'f'.repeat(64) });
   }));
 
 // ===================================================================== withTextsRetrying must not
@@ -319,7 +328,7 @@ test('withTextsRetrying reports a field the retry could not explain either', () 
   const reports = [];
   return withTextsRetrying([tampered], new Map(), async () => [], reports).then((out) => {
     assert.equal(out[0].textTampered, true);
-    assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'unaccounted' }],
+    assert.deepEqual(cases(reports), [{ event: 'e1', field: 'text', kind: 'unaccounted' }],
       'genuinely nothing explains it, on the FINAL pass: this is the real answer, not a torn read');
   });
 });
@@ -338,7 +347,7 @@ test('withTextsRetrying never reports a tampered field that belongs to another p
   const reports = [];
   return withTextsRetrying([e1], new Map(), async () => [foreign], reports).then((out) => {
     assert.deepEqual(out.map((e) => e.id), ['e1'], 'only the caller\'s own event comes back');
-    assert.deepEqual(reports, [{ event: 'e1', field: 'text', kind: 'unaccounted' }],
+    assert.deepEqual(cases(reports), [{ event: 'e1', field: 'text', kind: 'unaccounted' }],
       'the foreign event\'s own tampering is never this caller\'s to report');
   });
 });

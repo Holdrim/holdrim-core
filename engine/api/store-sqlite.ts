@@ -714,7 +714,7 @@ export class SqliteEventStore implements EventStore {
    * not what either alone shows — the same torn read `FirestoreEventStore.list` closes with a
    * transaction of its own — and a legitimate removal would read back as tampering.
    */
-  async list(page?: string | null): Promise<Event[]> {
+  async list(page?: string | null, found?: TamperReport[]): Promise<Event[]> {
     this.#db.exec('BEGIN DEFERRED');
     let rows: unknown[];
     let people: Map<string, string | null>;
@@ -760,6 +760,7 @@ export class SqliteEventStore implements EventStore {
     const reports: TamperReport[] = [];
     const out = withTexts(events, texts, reports);
     for (const r of reports) reportTampered(r);
+    found?.push(...reports);
     return out;
   }
 

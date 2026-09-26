@@ -26,6 +26,13 @@ export const record = (event) => call('/events', event);
 export const fingerprintsOf = (ids) => call(`/fingerprints?ids=${ids.map(encodeURIComponent).join(',')}`);
 
 /**
+ * The tampered texts nobody has acknowledged yet, and whether this reader may acknowledge one —
+ * both decided by the server (issue #107); the panel only draws them.
+ */
+export const tamperedFindings = () => call('/tampered');
+export const acknowledgeFinding = (finding) => call('/tampered/acknowledge', { finding });
+
+/**
  * Every block that depends on this one, directly or through another — the panel's "impact radius"
  * (docs/IMPACT.md). Asked of the server, not computed here: the browser only has the DOM of the
  * page it is on, and a dependent three pages away is invisible to it otherwise.

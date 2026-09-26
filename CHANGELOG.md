@@ -120,6 +120,14 @@ who ran the engine from `main` before it.
   `guardsTampered: true` and an empty `requests` — an agent reading it sees an empty queue — and
   `sync`, `apply` and `state` refuse. Moving a pin back below this version drops the four on the
   next boot, each named as a trigger that version does not install.
+- **`holdrim sync` and `holdrim restamp` exit non-zero when a ✓ could not be stamped safely.** A ✓
+  whose block cannot be written without risking another one (see the entry under **Fixed** about
+  stamping only the block a ✓ was given to) is refused, and it used to be refused with exit 0 — the
+  registry never got the entry, so a later rewrite of that text passed `holdrim check` in silence.
+  What an adopter's CI sees now: a `✗ <id>: <reason>; nothing written` line per refused block, `sync`'s
+  summary line counting them (`… · 1 refused · …`), a `⚠ … could not be stamped safely` line, and exit
+  code 1. What to change: fix what the reason names on the page — most often two blocks sharing one
+  id — and run the command again; nothing to change in the pipeline itself.
 
 ### Added
 
@@ -189,14 +197,27 @@ who ran the engine from `main` before it.
   tampered — a row edited in place, a hash with no accounting removal, or two removals of the same
   field, or a value with a stripped hash on a row that postdates when text extraction began (SQLite
   only) — logs a CRITICAL `text_tampered` line from the one place every reader shares (`reportTampered`,
-  `engine/api/texts.ts`), EVERY time a read resolves it: there is no acknowledgement yet to quiet it
-  (a follow-up issue), so it repeats rather than go silent after its first sighting. `holdrim list
+  `engine/api/texts.ts`), EVERY time a read resolves it — the owner's acknowledgement, below, quiets
+  the panel's banner and never this line, so it repeats rather than go silent after its first
+  sighting. The line now carries the `finding` the acknowledgement names. `holdrim list
   --json` now carries a `tampered` key, and `holdrim list`/`sync` warn and exit non-zero when it is
   set. See SECURITY.md for what this can and cannot catch, store by store. No released version
   predates text extraction, so there is nothing to roll a pin back to yet — but once a later version
   exists, moving the pin back to one from before this alert would write fresh events with their text
   stored inline again, above where this version's own hashed rows begin, and every one of those reads
   as `downgraded` tampering the next time any version opens the same file.
+- **A banner on every page the panel runs on while a text reads as tampered, and an acknowledgement
+  for the owner.** `GET /api/tampered` answers every signed-in reader with the findings still open, as
+  ids and locale keys (`panel.tamper.<case>`), and the panel draws one line each, with no control that
+  closes it. The owner — only the owner: `admin` does not grant it, and an agent never can — sends
+  `POST /api/tampered/acknowledge` with one `finding`, and the server records a `tamper_acknowledged`
+  event on the tampered event's own page and block, built from its own read, never from the client's
+  body (`POST /events` refuses the type). A finding is the event, the field, the case and what was
+  found there, so a NEW tampering of an acknowledged field shows again. Acknowledging repairs nothing:
+  the text goes on reading as tampered, and its CRITICAL line on every read. There is no
+  `holdrim.json` toggle for the banner, on purpose: an alert the repository can switch off is one a
+  committer can hide. `EventStore.list` takes an optional second argument that collects the tampered
+  fields a read found; a store written against the interface keeps working without it.
 - **English, Portuguese and Spanish**, including the sign-in screen, which the server renders
   already translated, and the review panel, which asks the server which language the person reads.
 - **A theme** from `holdrim.json`: a brand colour (hex only), a logo inlined by the server, and a
@@ -296,3 +317,22 @@ who ran the engine from `main` before it.
   exact race issue #113's fix closed for a window nobody asked to reopen. Same failure reporting as
   above: a failed drop carries `sessionsDropped: false` and an `ERROR user_sessions_not_dropped` line,
   never a 500 for a credential that changed regardless.
+
+### Fixed
+
+- **A ✓ is now stamped only on the one block it was given to — never on a decoy, a duplicate, or
+  whichever block a regex happened to match first.** `mark`, `sync` and `restamp` used to locate a
+  block by a regex or a CSS selector built straight out of its id, or by the first raw-text match in
+  the first file that had it — either could land the seal on the wrong block, or throw, depending on
+  characters the id itself carried (a documentation author's choice, not the engine's). A block is
+  now resolved the same way the traffic light already reads it, and a write is verified, by
+  re-parsing, against the whole page before it lands: the only difference allowed is the attributes
+  added to that one block's tag. An attribute the block already carries is never written a second
+  time. Three cases now REFUSE, and say why, instead of writing anywhere: an id carried by more than
+  one block; an id containing `"` or `&`, which a page normally holds as an entity (`&quot;`,
+  `&amp;`) that a literal search cannot find; and a page where the tag cannot be found without
+  risking another block. Along the way, writing `data-depended-on` (which carries other block ids
+  inside a JSON blob) stopped going through `String.replace` with a string replacement, whose
+  `$&`/`$1`/`$$` syntax could corrupt an id containing `$&`, and now escapes `&` as well as `"`: a
+  dependency id holding a literal `&quot;` or `&lt;` used to read back, in the browser, as `"` or
+  `<` — a dependency naming a block that does not exist.

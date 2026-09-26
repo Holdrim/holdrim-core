@@ -111,6 +111,18 @@ export async function readBlocks(root: string): Promise<Map<string, Block>> {
 }
 
 /**
+ * A block's text as a reader sees it, with the review UI stripped out — raw, before whitespace is
+ * collapsed, because that is what the fingerprint is computed over. One function for `readBlocks`
+ * and `mark`: two copies of this extraction are two places for the fingerprint a ✓ records and the
+ * one the traffic light recomputes to drift apart.
+ */
+export function textOf(el: Element): string {
+  const copy = el.cloneNode(true) as Element;
+  copy.querySelectorAll('[data-review-ui]').forEach((x: Element) => x.remove());
+  return copy.textContent ?? '';
+}
+
+/**
  * The blocks of one page. Frozen, lists included, because they are shared by every later read of an
  * unchanged file: a caller that changed one would change it for the next request too, and throws
  * instead. The casts only say so to the type, whose fields are plain arrays everywhere else.
@@ -121,9 +133,7 @@ async function blocksOf(file: string, path: string, html: string): Promise<reado
   for (const el of document.querySelectorAll('main [data-id]')) {
     const code = el.getAttribute('data-code') ?? '';
     const id = el.getAttribute('data-id')!;
-    const copy = el.cloneNode(true) as Element;
-    copy.querySelectorAll('[data-review-ui]').forEach((x: Element) => x.remove());
-    const text = copy.textContent ?? '';
+    const text = textOf(el);
     const attributes: Record<string, string> = {};
     for (const a of Array.from(el.attributes ?? [])) attributes[(a as Attr).name] = (a as Attr).value;
     const context = {
@@ -149,13 +159,188 @@ async function blocksOf(file: string, path: string, html: string): Promise<reado
   return blocks;
 }
 
-/** One specific block, without scanning everything (used when marking a validation). */
-export function findBlockFile(root: string, id: string): { path: string; html: string } | null {
+/**
+ * One block, resolved the way `readBlocks` sees blocks — a `main [data-id]` element, matched by
+ * comparing the attribute's actual VALUE rather than a needle or a CSS selector built from the id,
+ * which the id's own `"` or `\` could break or mis-match (holdrim#135). `mark` and `restamp` write
+ * a ✓'s seal, so the write has to land on the one block a person or the server meant by that id —
+ * never on "whichever matched first": zero or several candidates get no write at all, with a reason.
+ */
+export type BlockLookup =
+  | { ok: true; path: string; html: string; element: Element }
+  | { ok: false; kind: 'not-found' | 'multiple' | 'invalid'; message: string };
+
+export function resolveBlock(root: string, id: string): BlockLookup {
+  // Stated policy, not what makes a stamp safe — `spliceAttributes` verifies every write whatever
+  // the id holds. An id with `"` or `&` is one whose page text carries it as an entity (`&quot;`,
+  // `&amp;`), so the literal `data-id="${id}"` a splice starts from is not in the file at all; saying
+  // so here names the real reason, where the splice could only say it found no safe tag. `<` and `>`
+  // are not refused: inside a quoted value they are literal text, and such an id stamps like any other.
+  if (/["&]/.test(id)) {
+    return { ok: false, kind: 'invalid', message: 'an id containing " or & cannot be located safely' };
+  }
+  const matches: { path: string; html: string; element: Element }[] = [];
   for (const path of sheetFiles(root)) {
     const html = readFileSync(path, 'utf8');
-    if (html.includes(`data-id="${id}"`)) return { path, html };
+    for (const element of blocksNamed(parseHTML(html).document, id)) matches.push({ path, html, element });
+  }
+  if (matches.length === 0) return { ok: false, kind: 'not-found', message: 'not found' };
+  if (matches.length > 1) {
+    return { ok: false, kind: 'multiple', message: `${matches.length} blocks carry this id` };
+  }
+  return { ok: true, ...matches[0] };
+}
+
+/** Every `main [data-id]` element already parsed, in document order. */
+function mainBlocks(document: { querySelectorAll(selector: string): Iterable<Element> }): Element[] {
+  return [...document.querySelectorAll('main [data-id]')];
+}
+
+/** The blocks of one parsed page whose id is exactly `id` — the one resolution every writer uses. */
+function blocksNamed(document: { querySelectorAll(selector: string): Iterable<Element> }, id: string): Element[] {
+  return mainBlocks(document).filter((el) => el.getAttribute('data-id') === id);
+}
+
+/** One attribute to write, as the text spliced between its quotes (see `attributeText`). */
+export interface Stamp { attr: string; value: string }
+
+/**
+ * `value` as the text to write between an attribute's double quotes: `&` first, then `"`. Escaping
+ * only `"` left a `&` that happened to start an entity for the parser to decode — a dependency id
+ * holding a literal `&quot;` or `&lt;` read back as `"` or `<`, a map naming a block that does not
+ * exist. `&` has to go first, or the `&` of every `&quot;` just written would be escaped again.
+ */
+export function attributeText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
+
+/** What a reader's `getAttribute` returns for text `attributeText` wrote: the two steps undone in reverse. */
+function readBack(text: string): string {
+  return text.replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+}
+
+export interface MarkPlan {
+  /** `data-validated="value"`, right after the needle — only `mark` sets this; `restamp` never touches it. */
+  validatedAt?: string;
+  attributes: Stamp[];
+}
+
+/**
+ * The index of the `>` that closes a tag opened before `from`, skipping one sitting inside a quoted
+ * attribute value — `title="a>b"` must not end the tag one character early. `null` when the tag
+ * never closes.
+ */
+function tagEndFrom(html: string, from: number): number | null {
+  let quote: string | null = null;
+  for (let i = from; i < html.length; i++) {
+    const c = html[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '>') {
+      return i;
+    }
   }
   return null;
+}
+
+/**
+ * Whether the needle at `start` looks like an attribute of a start tag, judged from the raw text
+ * alone: whitespace right before it, and a `<` nearer than any `>`. Only an ORDER, never a verdict:
+ * the occurrences that pass are tried first, so the real tag is usually reached before a single
+ * re-parse is spent on a mention of the needle in prose — without that, a page with a thousand such
+ * mentions took seconds. It can be wrong both ways — a `>` inside a quoted value before `data-id`
+ * (`title="a -> b" data-id="y"`), or no space before it (`title="x"data-id="y"`), fails it on the
+ * real tag — so the occurrences that fail are still tried afterwards, and no block is refused on
+ * its word.
+ */
+function mayBeAttribute(html: string, start: number): boolean {
+  if (!/\s/.test(html[start - 1] ?? '')) return false;
+  return html.lastIndexOf('<', start) > html.lastIndexOf('>', start);
+}
+
+/**
+ * Writes `plan` onto the ONE `main [data-id]` element named `id` in `html`, and nowhere else — or
+ * says why it could not.
+ *
+ * What to insert is decided from that element's own parsed attributes, never from the raw text
+ * around a needle: an attribute the element already carries is never inserted again, `data-validated`
+ * included — the first date stands, and a second copy the parser would read ahead of it cannot
+ * appear (a raw-text test for "already there" is fooled by a `title` that merely mentions the name,
+ * or by the attribute sitting later in the tag). Nothing left to insert returns `html` untouched,
+ * without trying a splice at all.
+ *
+ * Where to insert is found by trying each raw occurrence of `data-id="${id}"` — it can also sit in
+ * prose, a comment, a `<script>` or another element's value — the likely ones first (`mayBeAttribute`),
+ * each group in document order, and accepting the first candidate that
+ * (a) resolves `id` to exactly one element carrying every inserted attribute with exactly the value
+ * planned, and (b) once those attributes are taken off that element again, serialises exactly like
+ * the original page. Each catches what the other cannot. (a) refuses a write the parser silently
+ * drops — one spliced into an end tag leaves the page serialising as before. (b) refuses a write
+ * that changed anything besides those attributes: another element's attribute, a comment, a script,
+ * the head, an element outside main, or the rest of the target's own tag re-tokenised around the
+ * insertion — none of which comparing only the blocks' ids and texts would see.
+ * The comparison is meaningful because both sides go through the same linkedom serialiser, which
+ * keeps attributes in source order and re-encodes entities and whitespace identically on each side.
+ * (It leaves `&` unescaped inside attribute values, so a value holding `"` and one holding a literal
+ * `&quot;` serialise alike; text that is only ever inserted, never removed, cannot turn one into the
+ * other.) None accepted → an error, and the caller writes nothing: no partial write.
+ */
+export function spliceAttributes(html: string, id: string, plan: MarkPlan): { html: string } | { error: string } {
+  const { document } = parseHTML(html);
+  const targets = blocksNamed(document, id);
+  if (targets.length !== 1) return { error: `${targets.length} blocks carry this id in this file` };
+  const target = targets[0];
+
+  const validated = plan.validatedAt !== undefined && !target.hasAttribute('data-validated')
+    ? { attr: 'data-validated', value: plan.validatedAt } : null;
+  const rest = plan.attributes.filter(({ attr }) => !target.hasAttribute(attr));
+  if (!validated && !rest.length) return { html };
+  const inserted = validated ? [validated, ...rest] : rest;
+
+  const afterNeedle = validated ? ` ${validated.attr}="${validated.value}"` : '';
+  const beforeTagEnd = rest.map(({ attr, value }) => ` ${attr}="${value}"`).join('');
+  const original = document.toString();
+  const needle = `data-id="${id}"`;
+
+  const likely: number[] = [];
+  const unlikely: number[] = [];
+  for (let start = html.indexOf(needle); start !== -1; start = html.indexOf(needle, start + 1)) {
+    (mayBeAttribute(html, start) ? likely : unlikely).push(start);
+  }
+
+  for (const start of [...likely, ...unlikely]) {
+    const needleEnd = start + needle.length;
+    const tagEnd = tagEndFrom(html, needleEnd);
+    if (tagEnd === null) continue;
+
+    const candidate = html.slice(0, needleEnd) + afterNeedle + html.slice(needleEnd, tagEnd)
+      + beforeTagEnd + html.slice(tagEnd);
+    if (writesOnlyThe(candidate, id, inserted, original)) return { html: candidate };
+  }
+  return { error: 'could not locate its tag without risking another block' };
+}
+
+/**
+ * The acceptance test of one candidate, (a) and (b) in `spliceAttributes`. `getAttribute` hands
+ * back the DECODED value, so each planned value is compared as `readBack` decodes it — the string a
+ * reader of the page will actually get, not the escaped text that was spliced in.
+ *
+ * Every value on every write path today is either already safe (a date, a hex fingerprint) or goes
+ * through `attributeText` first, so this comparison agrees with a bare presence check on all of them
+ * — it stays a value check anyway, as the guard for a future writer that forgets to escape.
+ */
+function writesOnlyThe(candidate: string, id: string, inserted: Stamp[], original: string): boolean {
+  const { document } = parseHTML(candidate);
+  const targets = blocksNamed(document, id);
+  if (targets.length !== 1) return false;
+  const el = targets[0];
+  for (const { attr, value } of inserted) {
+    if (el.getAttribute(attr) !== readBack(value)) return false;
+  }
+  for (const { attr } of inserted) el.removeAttribute(attr);
+  return document.toString() === original;
 }
 
 /**

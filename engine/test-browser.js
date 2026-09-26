@@ -16,7 +16,9 @@ import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { chromium } from 'playwright-core';
+import { hashText, newSalt } from './api/texts.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const PORT = Number(process.env.PORT ?? 18096);
@@ -60,6 +62,15 @@ if (await fetch(`${SIGN_IN}/api/health`).then(() => true, () => false)) {
 const TOGGLES_OFF = `http://127.0.0.1:${PORT + 2}`;
 if (await fetch(`${TOGGLES_OFF}/api/health`).then(() => true, () => false)) {
   console.log(`port ${PORT + 2} is already in use — the test would run against ANOTHER server.`);
+  process.exit(1);
+}
+
+// A fourth, on SQLite, for the tampered-text banner (issue #107): a text is only ever tampered with
+// by writing to the store outside the product, and a file is the store a test can write to. The
+// same guard, the same reason.
+const TAMPERED = `http://127.0.0.1:${PORT + 3}`;
+if (await fetch(`${TAMPERED}/api/health`).then(() => true, () => false)) {
+  console.log(`port ${PORT + 3} is already in use — the test would run against ANOTHER server.`);
   process.exit(1);
 }
 
@@ -249,13 +260,28 @@ const toggleServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'serve
   stdio: ['ignore', 'ignore', 'inherit'],
 });
 
+const tamperedData = mkdtempSync(join(tmpdir(), 'holdrim-browser-tampered-'));
+const tamperedEvents = join(tamperedData, 'events.db');
+const tamperedServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
+  env: {
+    ...process.env, PORT: String(PORT + 3), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
+    HOLDRIM_OWNER: OWNER, HOLDRIM_ADMINS: LEAD, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'sqlite',
+    HOLDRIM_EVENTS_PATH: tamperedEvents, HOLDRIM_SITE: site,
+  },
+  // stderr ignored as well: every read of a tampered text logs a CRITICAL line there, on purpose,
+  // and this run reads one many times.
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+
 let browser;
 const cleanUp = async () => {
   await browser?.close();
   server.kill();
   signInServer.kill();
   toggleServer.kill();
+  tamperedServer.kill();
   rmSync(site, { recursive: true, force: true });
+  rmSync(tamperedData, { recursive: true, force: true });
   rmSync(offSite, { recursive: true, force: true });
 };
 
@@ -863,6 +889,93 @@ try {
     expect('and every category is offered, bug and page included',
       'Adjust the text,Replace a term,Remove,Doubt,Report a bug,Ask for a new page', onCategories.join(','));
     expect('and nothing failed', '', onReader.problems.join(' | '));
+  }
+
+  console.log('a text that reads as tampered: the banner (issue #107):');
+  {
+    for (let i = 0; i < 40 && !(await fetch(`${TAMPERED}/api/health`).then((r) => r.ok, () => false)); i++) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    /** A direct writer, on the file the server has open: what tampering is. */
+    const directly = (sql, ...values) => { const db = new DatabaseSync(tamperedEvents); db.prepare(sql).run(...values); db.close(); };
+    const url = `${TAMPERED}/pages/A01.html`;
+    const reader = await person(READER);
+    await reader.page.goto(url);
+    await must('the panel builds its buttons', () => reader.page.locator('.rv-num').first().waitFor());
+    await settled(reader.page);
+    expect('nothing tampered: no banner', 0, await reader.page.locator('.rv-tamper').count());
+
+    // A hash with no row, and nothing that says it was let go.
+    directly("INSERT INTO events (id, type, page, block, author, happened_at, text_hash) VALUES " +
+      "('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?)", new Date().toISOString(), hashText('the real text', newSalt()));
+    await reader.page.reload();
+    await must('a tampered text puts a banner on the page', () => reader.page.locator('.rv-tamper .rv-tamper-line').waitFor());
+    expect('one line, naming the page and the event', true,
+      (await reader.page.locator('.rv-tamper-line').textContent()).includes('A01') &&
+      (await reader.page.locator('.rv-tamper-line code').allTextContents()).includes('forged1'));
+    expect('with no control a reader could close it with', 0, await reader.page.locator('.rv-tamper button, .rv-tamper a').count());
+    await reader.page.keyboard.press('Escape');
+    await reader.page.locator('.rv-tamper').click({ position: { x: 5, y: 5 } });
+    expect('and it is still there after Escape and a click', 1, await reader.page.locator('.rv-tamper').count());
+    const firstFinding = await reader.page.locator('.rv-tamper-line').getAttribute('data-finding');
+
+    const admin = await person(LEAD);
+    await admin.page.goto(url);
+    await must('an admin sees it too', () => admin.page.locator('.rv-tamper .rv-tamper-line').waitFor());
+    expect('and is offered nothing to quiet it with', 0, await admin.page.locator('.rv-tamper button').count());
+
+    const en = JSON.parse(readFileSync(join(ROOT, 'engine', 'locales', 'en.json'), 'utf8'));
+
+    // An acknowledgement the server refuses: the reason is shown on the line, and the line stays.
+    // Its own context, since the refusal it provokes is on purpose and not a problem of the page.
+    const refused = await person(OWNER);
+    await refused.page.route('**/api/tampered/acknowledge', (r) => r.fulfill({ status: 409, contentType: 'application/json',
+      body: JSON.stringify({ error: 'refused on purpose' }) }));
+    await refused.page.goto(url);
+    await refused.page.locator('.rv-tamper-ack').click();
+    await must('a refused acknowledgement says why', () => refused.page.locator('.rv-tamper-error', { hasText: 'refused on purpose' }).waitFor());
+    expect('and the line is still there', 1, await refused.page.locator('.rv-tamper-line').count());
+
+    const owner = await person(OWNER);
+    await owner.page.goto(url);
+    await must('the owner sees it', () => owner.page.locator('.rv-tamper .rv-tamper-line').waitFor());
+    expect('and the one control is Acknowledge', 'Acknowledge', (await owner.page.locator('.rv-tamper button').allTextContents()).join(' | '));
+    await owner.page.locator('.rv-tamper-ack').click();
+    await must('acknowledged, the line leaves the owner\'s banner', () => owner.page.locator('.rv-tamper').waitFor({ state: 'detached' }));
+    await reader.page.reload();
+    await settled(reader.page);
+    expect('and every reader\'s', 0, await reader.page.locator('.rv-tamper').count());
+    const events = await fetch(`${TAMPERED}/api/events?page=A01`, { headers: { 'X-Dev-Email': OWNER } }).then((r) => r.json());
+    // The acknowledgement lands in the block's own history, as a sentence rather than its type.
+    await owner.page.reload();
+    await block(owner.page, 'A01.1.1').click();
+    await must('the block\'s history names the acknowledgement',
+      () => owner.page.locator('.rv-history', { hasText: en['panel.did.tamperAcknowledged'] }).waitFor());
+    await owner.page.keyboard.press('Escape');
+    expect('the acknowledgement is an event, by the owner, and the text still reads as tampered',
+      `${OWNER} true`, `${events.find((e) => e.type === 'tamper_acknowledged')?.author} ${events.find((e) => e.id === 'forged1')?.textTampered}`);
+
+    // The same field again: a row put back that does not hold the recorded text.
+    directly("INSERT INTO texts (event, field, value, salt) VALUES ('forged1', 'text', 'a forged text', ?)", newSalt());
+    await reader.page.reload();
+    await must('a new tampering of the same field brings the banner back', () => reader.page.locator('.rv-tamper .rv-tamper-line').waitFor());
+    expect('as a finding of its own', true, (await reader.page.locator('.rv-tamper-line').getAttribute('data-finding')) !== firstFinding);
+    expect('and nothing failed on the way', '', [...reader.problems, ...admin.problems, ...owner.problems].join(' | '));
+
+    // A check that could not run says so, rather than reading as "nothing is tampered".
+    const unchecked = await person(READER);
+    await unchecked.page.route('**/api/tampered', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{}' }));
+    await unchecked.page.goto(url);
+    await must('a tamper check that fails says it could not check',
+      () => unchecked.page.locator('.rv-alert', { hasText: en['panel.tamper.unavailable'] }).waitFor());
+
+    // The rest of the panel falls back to a static page when a page's events cannot load; the banner
+    // must not go with it — only the owner's acknowledgement takes a line of it down.
+    const stranded = await person(READER);
+    await stranded.page.route('**/api/events?page=*', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{}' }));
+    await stranded.page.goto(url);
+    await must('a page whose events cannot load says so', () => stranded.page.locator('.rv-alert').waitFor());
+    expect('and the banner stays up while the rest of the panel switches off', 1, await stranded.page.locator('.rv-tamper').count());
   }
 
   console.log('the sign-in screen, under its own policy:');
