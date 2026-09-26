@@ -267,6 +267,32 @@ export function digestOf(html: string): string {
   return createHash('sha256').update(html).digest('hex');
 }
 
+/**
+ * Every block's id and fingerprint, computed one page at a time — `sync`'s `fingerprintsNow`, which
+ * checks a dependency's ground and an approved id's own text, and needs nothing more than that pair
+ * to do either. `readBlocks` answers a richer question — a block's kind, text, seal, what it is
+ * missing — kept in the `parsed` cache for the life of the process, because the server asks it that
+ * question on every request; calling it here would hold every page's full text and parsed document
+ * for as long as `sync` runs, on top of whatever `markAll` holds one page of at a time (holdrim#144,
+ * round 3). This bypasses that cache entirely: each page is read, parsed for its ids and fingerprints,
+ * and let go before the next, so what outlives the loop is an id and a 16-character hash per block —
+ * not the page it came from.
+ */
+export async function fingerprintsByPage(root: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const path of sheetFiles(root)) {
+    const html = readFileSync(path, 'utf8');
+    const { document } = parseHTML(html);
+    for (const el of document.querySelectorAll('main [data-id]')) {
+      // `blocksOf` reads the same selector with the same `!` — the selector already guarantees the
+      // attribute is there, even when its value is `''`, and `readBlocks` keeps that block under id
+      // `''` too. `if (id)` here would silently drop it instead of matching that.
+      out.set(el.getAttribute('data-id')!, await fingerprintOfText(textOf(el)));
+    }
+  }
+  return out;
+}
+
 /** A page read afresh, parsed once, with its blocks by id — what `markAll` plans and splices from. */
 export function parsePage(html: string): { document: Parsed; byId: Map<string, Element[]> } {
   const { document } = parseHTML(html);

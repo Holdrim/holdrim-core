@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, resolveBlock, locateBlocks, digestOf, parsePage, spliceAttributes, spliceAll, attributeText, textOf, shortName, ofProject, projectRoles,
+import { readBlocks, sheetFiles, resolveBlock, locateBlocks, digestOf, fingerprintsByPage, parsePage, spliceAttributes, spliceAll, attributeText, textOf, shortName, ofProject, projectRoles,
   namesNotLowerCase, browserIdOf, browserBlocks, type Block, type Stamp, type MarkPlan } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
@@ -435,7 +435,20 @@ interface SiteStamp { id: string; when: string; event: string; expected: string;
  * everything else locating decided about the page. Without it, a `DATA-ID` written onto the page
  * while the run is under way is stamped past, where `mark` refuses the whole page, and a block moved
  * off the page is looked for where it no longer is. The whole text is compared, through its digest:
- * an edit that keeps the page's length is an edit all the same.
+ * an edit that keeps the page's length is an edit all the same. A page that cannot be read at all —
+ * deleted, or turned into a folder, since it was located — is treated the same way, rather than
+ * letting the read throw and abort the run before the pages already written are recorded: `mark`'s
+ * own path re-lists the sheet files and resolves the id fresh, so a page genuinely gone is refused as
+ * "not found", exactly as it always was.
+ *
+ * ⚠️ The digest only re-checks the page THIS id was located on, once, at the moment its turn comes —
+ * not every other page, and not again afterwards. A second block gaining this id, or a `DATA-ID`
+ * written in upper case, on a DIFFERENT page while this run is under way is not caught here: `mark`'s
+ * own per-block path re-scans every page before each write and would see it within that one stamp,
+ * where this only sees it on the next `sync`. That is a longer window than main's per-stamp one, and
+ * it fails safe rather than silently: the seal that lands here is still checked against this id's own
+ * fingerprint, so it lands on text that really was approved; the twin element then shows its seal as
+ * stale to the next `check` (`sealMismatches`) or is named outright by `duplicateIds`.
  */
 async function markAll(root: string, registry: Registry, stamps: readonly SiteStamp[],
                        fingerprintsNow: Map<string, string>,
@@ -451,8 +464,18 @@ async function markAll(root: string, registry: Registry, stamps: readonly SiteSt
   }
 
   for (const [path, { digest, entries }] of pages) {
-    const html = readFileSync(path, 'utf8');
-    if (digestOf(html) !== digest) {
+    let html: string | null;
+    try {
+      html = readFileSync(path, 'utf8');
+    } catch (e) {
+      // ENOENT for a page deleted since `locateBlocks` ran, EISDIR for one replaced by a folder — the
+      // two shapes a vanished page takes. Anything else is not a case this loop has seen and is left
+      // to propagate rather than silently folded into "try again below".
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'EISDIR') throw e;
+      html = null;
+    }
+    if (html === null || digestOf(html) !== digest) {
       for (const index of entries) {
         const { id, when, event, expected, say } = stamps[index];
         settled(index, await markWith(say, root, registry, id, when, 'site', event, fingerprintsNow, expected, true));
@@ -547,8 +570,12 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
   }
 
   const registry = loadRegistry(root);
-  const blocks = await readBlocks(root);
-  const fingerprintsNow = new Map([...blocks].map(([id, b]) => [id, b.fingerprint]));
+  // Not `readBlocks`: its `parsed` cache keeps every page's full text and parsed document for the
+  // life of the process, which the server needs and a sync does not — a whole sync would then hold
+  // the whole site, on top of whatever `markAll` holds one page of at a time (holdrim#144, round 3).
+  // `fingerprintsByPage` reads and lets go of one page at a time and keeps only the id and
+  // fingerprint pairs below, which is all this loop and `markAll` ask of it.
+  const fingerprintsNow = await fingerprintsByPage(root);
   let added = 0, unchanged = 0, expired = 0, refused = 0;
 
   // Every ✓ still goes through the checks below in the order it was given, and its lines come out in
@@ -579,22 +606,22 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
         settled[slot] = true;
         if (!id) continue;
         const when = (e.when || '').slice(0, 10);
-        const block = blocks.get(id);
-        if (!block) { say(`  ✗ ${id}: approved on the site, and does not exist in the repository`); continue; }
-        if (e.fingerprint !== block.fingerprint) {
+        const fingerprint = fingerprintsNow.get(id);
+        if (fingerprint === undefined) { say(`  ✗ ${id}: approved on the site, and does not exist in the repository`); continue; }
+        if (e.fingerprint !== fingerprint) {
           say(`  ⚠ ${id}: the ✓ from ${when} is for an earlier version of the text — it does not hold any more`);
           expired++; continue;
         }
-        if (registry[id]?.fingerprint === block.fingerprint) { unchanged++; continue; }
-        // block.fingerprint is what was just verified against e.fingerprint above (the two are equal at
+        if (registry[id]?.fingerprint === fingerprint) { unchanged++; continue; }
+        // fingerprint is what was just verified against e.fingerprint above (the two are equal at
         // this point) — passed on so `markAll` refuses instead of writing if the block IT resolves ever
-        // disagrees with the one `readBlocks` saw here.
+        // disagrees with the one `fingerprintsByPage` saw here.
         // Every seal `markAll` writes replaces the one on the page: this ✓ is newer than whatever seal
         // the page carries — a registry that already held this fingerprint was skipped just above — so
         // the page takes its date, fingerprint and dependencies, and never keeps an older ✓'s (holdrim#140).
         settled[slot] = false;
         taken.add(id);
-        stamps.push({ slot, id, when, event: e.id, expected: block.fingerprint, say });
+        stamps.push({ slot, id, when, event: e.id, expected: fingerprint, say });
       }
       flush();
       await markAll(root, registry, stamps, fingerprintsNow, (k, fingerprint) => {

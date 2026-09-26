@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
@@ -276,6 +276,39 @@ test('sync prints each ✓ in the order it was given, not the order its page was
   assert.deepEqual(out.split('\n').filter((l) => l.includes('✓') && l.includes('validated by you')),
     ['X01.a', 'X02.a', 'X01.b', 'X02.b'].map((id) => `  ✓ ${id} validated by you on the site on 2026-09-22`));
 });
+
+/**
+ * A page can vanish between `locateBlocks` reading it and its own turn in `markAll`'s per-page loop
+ * (holdrim#144, round 3): here `X02.html` is deleted right after `X01`'s page settles, so `markAll`'s
+ * own read of it throws ENOENT. The run has to finish rather than abort mid-page — `a` sealed on disk
+ * AND recorded, `b` refused cleanly as "not found" through `mark`'s own path, which re-lists the
+ * sheet files and sees it is really gone — where a plain `readFileSync` failing here would leave `a`
+ * sealed on disk with nothing in the registry, because `saveRegistry` never runs.
+ */
+test('sync completes when a page is deleted mid-run, sealing and recording the others and refusing the missing one',
+  async (t) => {
+    const tmp = pages(t, {
+      'X01.html': '<main><p data-id="a">approved a</p></main>',
+      'X02.html': '<main><p data-id="b">approved b</p></main>',
+    });
+    const events = await approvedInOrder(tmp, ['a', 'b']);
+    const lines = [];
+    const log = t.mock.method(console, 'log', (...args) => {
+      lines.push(args.join(' '));
+      if (String(args[0]).includes('✓ a validated')) unlinkSync(join(tmp, 'p', 'X02.html'));
+    });
+    let r;
+    try {
+      r = await sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER });
+    } finally {
+      log.mock.restore();
+    }
+
+    assert.equal(r.added, 1, lines.join('\n'));
+    assert.equal(r.refused, 1, lines.join('\n'));
+    assert.ok(lines.some((l) => l.includes('✗ b: not found; nothing written')), lines.join('\n'));
+    assert.deepEqual(Object.keys(loadRegistry(tmp)), ['a']);
+  });
 
 /**
  * The halving verifies each stamp inside its own half only. Here a verifier accepts every stamp alone
