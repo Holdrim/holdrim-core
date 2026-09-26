@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, cpSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, cpSync, mkdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
@@ -105,7 +105,7 @@ function recordedPage(n) {
  * A first restamp of every recorded block on a page, then a second that finds every mark already
  * there, timed for 200 blocks and for 800 (holdrim#147). Resolved and spliced entry by entry, each
  * one re-read, re-parsed and re-verified the whole page, so four times the blocks cost sixteen times as
- * long — 800 took about 30 s; per page, about four. The bound is 8×, halfway, and each size is timed
+ * long; per page, about four. The bound is 8×, halfway, and each size is timed
  * twice with its faster run kept, so a busy runner that slows both sizes alike does not move the ratio.
  */
 test('restamp is linear in the blocks of a page: 800 blocks, first and second run, well under 8× what 200 take',
@@ -151,3 +151,84 @@ test('restamp keeps a fingerprint the page already carries, even one the registr
   assert.equal(readFileSync(join(dir, 'p', 'X01.html'), 'utf8'),
     `<main>${kept}<p data-id="z" data-validated-fingerprint="eeeeeeeeeeeeeeee">other</p></main>`);
 });
+
+/** A throwaway project with the pages in `files` (`X01.html` → its html) and `registry` as its record. */
+function pages(t, files, registry) {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-restamp-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'p'));
+  writeFileSync(join(dir, 'holdrim.json'), JSON.stringify({ content: { folders: ['p'], registry: 'r.json' } }));
+  writeFileSync(join(dir, 'r.json'), JSON.stringify(registry));
+  for (const [name, html] of Object.entries(files)) writeFileSync(join(dir, 'p', name), html);
+  return dir;
+}
+
+/** `restamp` on `dir`, running `meanwhile` on `X02.html` right before that page is read. */
+async function restampingWhile(t, dir, meanwhile) {
+  const lines = [];
+  const log = t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
+  try {
+    const value = await restamp(dir, { beforeRead: (path) => { if (path.endsWith('X02.html')) meanwhile(path); } });
+    return { value, out: lines.join('\n') };
+  } finally {
+    log.mock.restore();
+  }
+}
+
+const RECORDED = {
+  a: { file: 'X01.html', date: '2026-09-22', fingerprint: 'aaaaaaaaaaaaaaaa' },
+  b: { file: 'X02.html', date: '2026-09-22', fingerprint: 'bbbbbbbbbbbbbbbb' },
+};
+
+/**
+ * A page is located at the start of the run and stamped when its turn comes, so the page read then
+ * has to be the page located. An edit that keeps the length is an edit: moving `b`'s id off its block,
+ * which stamped from what locating decided lands nowhere, and a name elsewhere on the page — `DATA-ID`,
+ * which a browser reads as `data-id` and this engine does not, so the page takes no seal at all — which
+ * only comparing the whole page's text sees. Either way `b` is resolved afresh, entry by entry, and `a`,
+ * on the page that did not change, is stamped as usual.
+ */
+test('restamp resolves afresh an entry whose page changed, keeping its length, between locating and writing',
+  async (t) => {
+    const edits = [
+      ['<main><p data-id="b">recorded b</p></main>', '<main><p data-id="c">recorded b</p></main>',
+        { written: 1, alreadyHad: 0, noSuchBlock: 1, refused: 0 }, null],
+      ['<main><p data-id="b">recorded b</p><i data-xy="1">z</i></main>',
+        '<main><p data-id="b">recorded b</p><i DATA-ID="1">z</i></main>',
+        { written: 1, alreadyHad: 0, noSuchBlock: 0, refused: 1 },
+        /✗ b: p\/X02\.html carries DATA-ID, which a browser reads as data-id and this engine does not, so no seal is written on that page; nothing written/],
+    ];
+    for (const [was, now, counted, why] of edits) {
+      assert.equal(now.length, was.length);
+      const dir = pages(t, { 'X01.html': '<main><p data-id="a">recorded a</p></main>', 'X02.html': was }, RECORDED);
+
+      const { value, out } = await restampingWhile(t, dir, (path) => writeFileSync(path, now));
+
+      assert.deepEqual(value, counted, out);
+      if (why) assert.match(out, why);
+      assert.equal(readFileSync(join(dir, 'p', 'X02.html'), 'utf8'), now, 'and nothing is stamped on the edited page');
+      assert.equal(readFileSync(join(dir, 'p', 'X01.html'), 'utf8'),
+        '<main><p data-id="a" data-validated-fingerprint="aaaaaaaaaaaaaaaa">recorded a</p></main>');
+    }
+  });
+
+/**
+ * A page can vanish between locating its blocks and its own turn to be read. The run has to finish
+ * rather than abort: `a` stamped, and `b` counted as gone through the per-block path, which re-lists
+ * the sheet files and sees it is really gone — where the read failing here would throw, and every
+ * later page would go unstamped with nothing said about them.
+ */
+test('restamp completes when a page is deleted mid-run, stamping the others and counting the missing one as gone',
+  async (t) => {
+    const dir = pages(t, {
+      'X01.html': '<main><p data-id="a">recorded a</p></main>',
+      'X02.html': '<main><p data-id="b">recorded b</p></main>',
+    }, RECORDED);
+
+    const { value, out } = await restampingWhile(t, dir, (path) => unlinkSync(path));
+
+    assert.deepEqual(value, { written: 1, alreadyHad: 0, noSuchBlock: 1, refused: 0 }, out);
+    assert.match(out, /⚠ 1 entries in the registry no longer exist in the pages/);
+    assert.equal(readFileSync(join(dir, 'p', 'X01.html'), 'utf8'),
+      '<main><p data-id="a" data-validated-fingerprint="aaaaaaaaaaaaaaaa">recorded a</p></main>');
+  });
