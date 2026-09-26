@@ -7,15 +7,21 @@
  * Round 2 (correctness lens): the rename must not silently drop the target's mode or overwrite a
  * registry this process cannot write to, a directory-fsync failure after a successful rename must
  * not be read as a failed save, and a registry that is a symlink must be refused rather than replaced.
+ *
+ * Round 3: `existsSync` FOLLOWS a link, so a DANGLING one (its target gone — an unmounted shared
+ * volume, say) used to slip past both the save's and the load's guard — the save's rename replaced
+ * the link with a plain file, and `loadRegistry` read it as "no registry", the same as a project never
+ * synced before. `saveRegistry` must also keep the registry's owner and group, not only its mode.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { mkdtempSync, writeFileSync, rmSync, readdirSync, chmodSync, statSync, symlinkSync,
-  readFileSync, lstatSync } from 'node:fs';
+import fs, { mkdtempSync, writeFileSync, rmSync, readdirSync, mkdirSync, chmodSync, statSync, symlinkSync,
+  readFileSync, lstatSync, constants } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { saveRegistry, loadRegistry } from '../cli/validation.ts';
+import { saveRegistry, loadRegistry, sync } from '../cli/validation.ts';
+import { readBlocks } from '../cli/pages.ts';
 
 /** A throwaway project whose registry (`r.json`) already holds `previous`. */
 function project(t, previous) {
@@ -76,14 +82,26 @@ test('a registry this process cannot write to is refused with EACCES, and nothin
   // The suite may run as root, for whom a real chmod 0444 refuses nothing — `accessSync` is stubbed
   // instead, exactly as `failingWrites` in sync-linear.test.js stubs `writeFileSync` for the same
   // reason: to drive the refusal branch on its own terms, not on whichever uid happens to run this.
+  //
+  // `mode` is only RECORDED here, not asserted on: `saveRegistry`'s own `catch` around this call
+  // swallows whatever it throws and replaces it with a fresh EACCES, so an assertion thrown from
+  // inside the spy would never reach the test as a failure — it would be caught there instead, same
+  // as any other error the check raises.
+  let calledWithMode;
   spy(t, 'accessSync', (real, p, mode) => {
-    if (p === path) throw Object.assign(new Error(`EACCES: permission denied, access '${p}'`), { code: 'EACCES' });
+    if (p === path) {
+      calledWithMode = mode;
+      throw Object.assign(new Error(`EACCES: permission denied, access '${p}'`), { code: 'EACCES' });
+    }
     return real(p, mode);
   });
 
   assert.throws(() => saveRegistry(tmp, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' },
     b: { file: 'p/X02.html', date: '2026-02-02', fingerprint: 'new' } }), { code: 'EACCES' });
 
+  // Checking readability (R_OK) here would pass on a file this process can read but not write — a
+  // registry chmod 0444 for anyone but its owner, say — and the save would go on to overwrite it.
+  assert.equal(calledWithMode, constants.W_OK, 'the refusal must check the WRITE bit, not merely readability');
   assert.deepEqual(loadRegistry(tmp), { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } },
     'the old registry, unwritten');
   assert.deepEqual(leftovers(tmp), [], `left files behind: ${leftovers(tmp).join(', ')}`);
@@ -165,4 +183,94 @@ test('the temp file is fsynced before it is renamed over the registry', (t) => {
   const fsyncedTemp = order.findIndex((e) => e.op === 'fsync' && e.path === renamed.from);
   assert.ok(fsyncedTemp !== -1 && fsyncedTemp < order.indexOf(renamed),
     `expected the temp file (${renamed.from}) fsynced before the rename; saw: ${JSON.stringify(order)}`);
+});
+
+/** A throwaway project whose registry (`link.json`) is a symlink to `target`, created or not. */
+function linkedProject(t) {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-atomic-registry-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['p'], registry: 'link.json' } }));
+  const link = join(tmp, 'link.json');
+  const target = join(tmp, 'nowhere.json'); // never created — the link dangles
+  symlinkSync(target, link);
+  return { tmp, link, target };
+}
+
+test('a dangling registry link (its target absent) is refused on save, not replaced by a plain file', (t) => {
+  const { tmp, link } = linkedProject(t);
+  assert.throws(() => saveRegistry(tmp, { z: { file: 'p/X01.html', date: '2026-09-09', fingerprint: 'zzz' } }),
+    /it is a link/);
+  // `existsSync` would have read the dangling link as "no registry" and let the rename through,
+  // silently replacing the link with a fresh file holding only what this one call wrote.
+  assert.ok(lstatSync(link).isSymbolicLink(), 'the dangling link must not be replaced by a plain file');
+});
+
+test('a dangling registry link is refused on load, not silently read as an empty registry', (t) => {
+  const { tmp } = linkedProject(t);
+  assert.throws(() => loadRegistry(tmp), /link pointing at nothing/);
+});
+
+test('a working registry link is read straight through on load, never refused', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-atomic-registry-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: [], registry: 'link.json' } }));
+  const real = join(tmp, 'real.json');
+  writeFileSync(real, JSON.stringify({ a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } }, null, 1) + '\n');
+  symlinkSync(real, join(tmp, 'link.json'));
+  assert.deepEqual(loadRegistry(tmp), { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } });
+});
+
+test('a dangling registry link makes sync refuse before it writes a single page', async (t) => {
+  const { tmp } = linkedProject(t);
+  mkdirSync(join(tmp, 'p'));
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<html><head><title>x</title></head><body><main>\n<p data-id="X01.1">some text</p>\n</main></body></html>';
+  writeFileSync(sheet, html);
+  const OWNER = 'owner@example.org';
+  const blocks = await readBlocks(tmp);
+  const block = blocks.get('X01.1');
+  const events = [
+    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER, when: '2026-01-01T09:00:00Z', data: null },
+    { id: 'a1', type: 'approval', page: 'X01', block: block.id, fingerprint: block.fingerprint, author: OWNER,
+      when: '2026-09-09T10:00:00Z', data: { locks: 'true' } },
+  ];
+
+  await assert.rejects(() => sync(tmp, { events: async () => events }, { owner: OWNER }), /link pointing at nothing/);
+  // The refusal must land before `markAll` ever touches the page — a seal written, then a run that
+  // cannot record it, is exactly the "stamped but unrecorded" case holdrim#148 already fixed once.
+  assert.equal(readFileSync(sheet, 'utf8'), html, 'no page may be stamped once the registry cannot be read');
+});
+
+test('a save keeps the registry\'s owner and group on the temp file, before the rename', (t) => {
+  const tmp = project(t, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } });
+  const path = join(tmp, 'r.json');
+  const original = statSync(path);
+  let calledWith = null;
+  spy(t, 'chownSync', (real, p, uid, gid) => { calledWith = { p: String(p), uid, gid }; return real(p, uid, gid); });
+
+  saveRegistry(tmp, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' },
+    b: { file: 'p/X02.html', date: '2026-02-02', fingerprint: 'new' } });
+
+  assert.ok(calledWith, 'chownSync was never called');
+  assert.equal(calledWith.uid, original.uid);
+  assert.equal(calledWith.gid, original.gid);
+  assert.notEqual(calledWith.p, path, 'the owner must be copied onto the TEMP file, before the rename, never the real name');
+});
+
+test('a process that cannot give the registry away prints a warning, and the save still lands', (t) => {
+  const tmp = project(t, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } });
+  spy(t, 'chownSync', (real, p) => {
+    throw Object.assign(new Error(`EPERM: operation not permitted, chown '${p}'`), { code: 'EPERM' });
+  });
+  const errors = [];
+  const error = t.mock.method(console, 'error', (...args) => { errors.push(args.join(' ')); });
+  try {
+    saveRegistry(tmp, { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' },
+      b: { file: 'p/X02.html', date: '2026-02-02', fingerprint: 'new' } });
+  } finally {
+    error.mock.restore();
+  }
+  assert.deepEqual(loadRegistry(tmp), { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' },
+    b: { file: 'p/X02.html', date: '2026-02-02', fingerprint: 'new' } }, 'an EPERM on chown must not fail the save');
+  assert.ok(errors.some((l) => l.includes('owner could not be kept')), errors.join('\n'));
 });

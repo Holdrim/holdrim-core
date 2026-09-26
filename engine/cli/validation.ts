@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync,
-  lstatSync, statSync, chmodSync, accessSync, constants } from 'node:fs';
+  lstatSync, statSync, chmodSync, chownSync, accessSync, constants } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseHTML } from 'linkedom';
@@ -13,6 +13,7 @@ import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
 import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
+import { refuseLink } from './export.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -51,8 +52,29 @@ const registryPath = (root: string) =>
   join(root, ...ofProject(root)
     .registry.split('/'));
 
+/**
+ * True when `path` is a link pointing at nothing — its target gone, an unmounted shared volume,
+ * say. `existsSync` FOLLOWS a link, so it reads a dangling one as "nothing here", the same as a
+ * registry that was simply never written yet; without this, `loadRegistry` cannot tell the two
+ * apart, and a `sync` that hits the first would start from `{}` and save a registry silently
+ * missing every ✓ recorded at the far end — no error, exit 0. A WORKING link is not this: it
+ * resolves to real content and reads through it exactly as a plain file would.
+ */
+function danglingLink(path: string): boolean {
+  if (existsSync(path)) return false; // resolves to something real, whatever it is
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false; // truly nothing there — the ordinary "not synced yet" case
+  }
+}
+
 export function loadRegistry(root: string): Registry {
   const p = registryPath(root);
+  if (danglingLink(p)) {
+    throw new Error(`refusing to load ${p}: it is a link pointing at nothing, so reading it as `
+      + `"no registry" would silently lose every ✓ already recorded at the far end`);
+  }
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
 }
 
@@ -95,16 +117,20 @@ export function saveRegistry(root: string, registry: Registry, interrupt: () => 
   for (const k of Object.keys(registry).sort()) sorted[k] = registry[k];
   const path = registryPath(root);
   const dir = dirname(path);
+
+  // A link is not followed: the rename below would replace the LINK ITSELF with a plain file, and
+  // whatever it used to point at — a registry shared between two checkouts, say — would keep
+  // whatever it last held forever. Refused whether the link resolves or is dangling: `refuseLink`
+  // uses `lstatSync`, never `existsSync`, so a dangling one (which `existsSync` reads as "nothing
+  // here", the same bug `loadRegistry`'s own `danglingLink` guards against above) is caught too,
+  // rather than silently replaced by the rename. Shared with `exportSite`'s own symlink refusal on
+  // `out` (engine/cli/export.ts) — same message, same reason, one check.
+  refuseLink(path, `save ${path}`);
+  // Safe now: `refuseLink` just ruled out a symlink, so whatever `existsSync` finds here (or
+  // doesn't) is an ordinary file, never a link whose target existing or not would say something else.
   const existing = existsSync(path);
 
   if (existing) {
-    // A link is not followed: the rename below would replace the LINK ITSELF with a plain file, and
-    // whatever it used to point at — a registry shared between two checkouts, say — would keep
-    // whatever it last held forever. The same reason `exportSite` refuses a symlinked `out` rather
-    // than write through it.
-    if (lstatSync(path).isSymbolicLink()) {
-      throw new Error(`refusing to save ${path}: it is a link, and a link is not followed`);
-    }
     // A registry made read-only on purpose (0444, to mark "do not touch by hand") used to refuse
     // with EACCES the instant the old in-place write tried to open it. A rename only needs the
     // DIRECTORY to be writable, never its target, so that refusal has to be made explicit here or
@@ -125,10 +151,23 @@ export function saveRegistry(root: string, registry: Registry, interrupt: () => 
   try {
     writeFileSync(tmp, JSON.stringify(sorted, null, 1) + '\n', 'utf8');
     fsyncFile(tmp);
-    // A fresh file gets a fresh mode; copying the target's over the temp file before the rename is
-    // what keeps whatever an operator set on approvals.json ITSELF, instead of quietly loosening or
-    // tightening it to a new file's default every time a sync writes it.
-    if (existing) chmodSync(tmp, statSync(path).mode);
+    // A fresh file gets a fresh mode AND a fresh owner — whoever runs this `sync`, never necessarily
+    // who owns approvals.json today. Copying the target's own mode and, where this process is allowed
+    // to give a file away, its uid and gid onto the temp file before the rename is what keeps BOTH
+    // exactly as an operator set them, instead of quietly resetting either to a new file's default
+    // every time a sync writes it. A non-root process cannot `chown` at all (EPERM) — that limit is
+    // not this save's to fail over, so it is a warning naming the change, and the save still lands.
+    if (existing) {
+      const target = statSync(path);
+      chmodSync(tmp, target.mode);
+      try {
+        chownSync(tmp, target.uid, target.gid);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EPERM') throw e;
+        console.error(`⚠ ${path}'s owner could not be kept: it changed from ${target.uid}:${target.gid} `
+          + `to ${process.getuid?.()}:${process.getgid?.()}`);
+      }
+    }
     interrupt();
     renameSync(tmp, path);
   } catch (e) {

@@ -32,6 +32,27 @@ export const PUBLISHED = new Set(['.html', '.css', '.svg', '.png', '.jpg', '.jpe
 /** Folders never walked: they hold tooling or data, never something a reader opens. */
 const SKIPPED = new Set(['node_modules', '.git', 'data']);
 
+/**
+ * Refuses `path` when it is a link, wherever it points — `what` names the action for the message
+ * (`export into ${out}`, `save ${path}`). `lstatSync`, never `existsSync`: `existsSync` follows the
+ * link, so a DANGLING one (its target gone — an unmounted shared volume, say) reads as "nothing
+ * here" and slips through. Caught here instead of by whichever write follows, because a rename or a
+ * write through a link never touches the link itself — it replaces or fills whatever the link points
+ * at, silently, while the link's own name goes on meaning something else to the next reader. Shared
+ * with `saveRegistry` (engine/cli/validation.ts), which used to carry its own copy of exactly this
+ * check, gated on `existsSync` and so blind to the same dangling case.
+ */
+export function refuseLink(path: string, what: string): void {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; // nothing at all there — not a link either
+    throw e;
+  }
+  if (st.isSymbolicLink()) throw new Error(`refusing to ${what}: it is a link, and a link is not followed`);
+}
+
 /** A page without the engine's tags: the panel's scripts and stylesheet, and only those. */
 export function withoutPanel(html: string): string {
   return html
@@ -48,9 +69,7 @@ export function withoutPanel(html: string): string {
 export function exportSite(root: string, out: string): { pages: number; files: number } {
   // A link where the output goes would take every file somewhere else, wherever it points; the
   // emptiness check below reads through it and would pass. Refused like a link inside the project.
-  if (existsSync(out) && lstatSync(out).isSymbolicLink()) {
-    throw new Error(`refusing to export into ${out}: it is a link, and a link is not followed`);
-  }
+  refuseLink(out, `export into ${out}`);
   if (existsSync(out) && readdirSync(out).length) {
     throw new Error(`refusing to export into ${out}: it is not empty, and nothing is deleted to make room`);
   }
