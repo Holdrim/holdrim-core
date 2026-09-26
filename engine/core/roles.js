@@ -206,7 +206,11 @@ export function scopeCovers(scope, where) {
   // No guard for `EVERYWHERE`, on purpose: it names no page and no block, so every branch below
   // compares a scope against nothing and answers false — a guard here would be one no test could
   // tell from its absence. `typeof onPage` below is the one check `EVERYWHERE` does lean on: without
-  // it a family would read the length of a page that is not there, and throw.
+  // it a family would read the length of a page that is not there, and throw. The dropped
+  // `typeof scope !== 'string'` needs no replacement either: every caller hands `scopeCovers` either
+  // `null` or a scope `isValidScope` already accepted — `parseLocks` throws on anything else before a
+  // scope reaches here, and `grantsOf`'s scope is `null` today — so a scope of the wrong type never
+  // arrives to be guarded against.
   const { page, block } = /** @type {{page?: string, block?: string}} */ (where);
   // The block's own page, never the `page` a caller put beside it: see `pageOfBlock`.
   const onPage = block ? pageOfBlock(block) : page;

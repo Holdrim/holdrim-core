@@ -371,6 +371,14 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **`engine/tests`, including the `--import` hook that grants one fixed address triage and approve
+  on chosen pages for the contract test, no longer ships in the image (#33).** `Dockerfile`'s `COPY
+  engine ./engine` copied all of `engine/`, and `.dockerignore` excluded none of it, so the hook
+  reached a running container; `node --import` reads `NODE_OPTIONS`, so a single environment
+  variable could have activated it there. `.dockerignore` now excludes `engine/tests`; nothing in
+  the image reads from it — `CMD` runs `engine/api/server.ts` directly, and the healthcheck is a
+  plain `fetch`. Nothing to change: an adopter's deployment sets no such variable, and now could not
+  reach the hook if it did.
 - **A text edited straight in the store now raises its CRITICAL alert even when a forged removal
   claims it (#133).** Before, a direct writer who edited a text's row and then added one
   `text_removed` event for it, dated and placed after its target, made the field read as a clean

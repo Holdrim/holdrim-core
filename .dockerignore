@@ -9,3 +9,10 @@ data
 .env
 .env.*
 *.md
+# Test-only code, including engine/tests/hooks/scoped-roles.js, which wraps rolesOf so one fixed
+# address holds triage and approve on chosen pages. `node --import` reads NODE_OPTIONS, so a hook of
+# that shape reachable inside a running container is one environment variable away from a backdoor.
+# `Dockerfile`'s `COPY engine ./engine` ships everything under `engine/` unless this line excludes
+# it. Nothing in the image needs it: `CMD` runs `engine/api/server.ts` directly, and the HEALTHCHECK
+# is a plain fetch — see workflows.test.js's "the image ships no test hooks".
+engine/tests

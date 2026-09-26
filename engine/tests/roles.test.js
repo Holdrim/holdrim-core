@@ -520,6 +520,9 @@ test('a scoped grant never answers a question asked about everywhere; an unscope
   assert.equal(scopeCovers(null, EVERYWHERE), true);
   assert.equal(scopeCovers(null, { block: 'Z99.1' }), true);
   assert.equal(scopeCovers('not a scope!', { page: 'P03' }), false, 'a shape none of the three: nothing');
+  // No caller ever hands scopeCovers a non-string scope (parseLocks and isValidScope see to that),
+  // but the fallback below still fails closed rather than throwing if one ever did.
+  assert.equal(scopeCovers({ not: 'a string' }, { page: 'P03' }), false, 'a non-string scope: nothing, not a throw');
 });
 
 test('can refuses an agent triage and approve on the very page and block a grant would cover', () => {

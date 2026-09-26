@@ -10,8 +10,11 @@
  * `engine/api/here.ts` alone, not what `server.ts` hands it. Booting the real server with this hook is
  * the only way to drive the server's own event path with roles where the place changes the answer.
  *
- * Test-only by construction: nothing in configuration, the environment or a route reaches it — only
- * a process started with `--import` of this file, which the contract test does once, for this.
+ * Test-only by construction, and test-only by where it lives: `.dockerignore` keeps engine/tests out
+ * of the image (`workflows.test.js`'s "the image ships no test hooks"), so this file exists only in
+ * the repository. Nothing in configuration or a route reaches it either way — the one thing that
+ * could is a process started with `--import` of this file, and `NODE_OPTIONS` in the environment can
+ * name one; the contract test does exactly that, once, for this, from a checkout that has the file.
  * Everything else about the roles is the real code: the wrapper answers `can` for the one address and
  * hands every other question, and every other person, to the roles `rolesOf` really built.
  *

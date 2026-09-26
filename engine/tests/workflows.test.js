@@ -113,6 +113,19 @@ test('contributors, CI and the image run the same Node major', () => {
   assert.match(testJob, /node-version-file:\s*\.nvmrc/, 'the test job does not read .nvmrc');
 });
 
+test('the image ships no test hooks: COPY engine and .dockerignore agree on that', () => {
+  // engine/tests/hooks/scoped-roles.js wraps rolesOf so one fixed address holds triage and approve
+  // on chosen pages. `node --import` reads it out of NODE_OPTIONS, so this hook — or any other under
+  // engine/tests — reachable inside a running container is one environment variable away from a
+  // backdoor. The Dockerfile's `COPY engine ./engine` ships everything under engine/ that
+  // .dockerignore does not name, so the guard is .dockerignore, not a choice server.ts makes.
+  const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /^COPY engine \.\/engine$/m, 'the Dockerfile no longer copies all of engine/ — re-check this test');
+  const dockerignore = readFileSync(join(ROOT, '.dockerignore'), 'utf8');
+  const excluded = dockerignore.split('\n').map((l) => l.trim()).filter(Boolean).filter((l) => !l.startsWith('#'));
+  assert.ok(excluded.includes('engine/tests'), '.dockerignore does not exclude engine/tests');
+});
+
 test('CI runs the store suites against real Postgres and Firestore, and a skip there fails', () => {
   const tests = WORKFLOWS.find((w) => w.name === 'tests.yml').text;
   const job = /^ {2}stores:\n([\s\S]*?)(?=^ {2}\S|(?![\s\S]))/m.exec(tests)?.[1] ?? '';
