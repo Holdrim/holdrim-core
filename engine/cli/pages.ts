@@ -34,6 +34,70 @@ export interface Block {
    *  and have to be checked. Filtering them out would make `check` report "the block is gone" for
    *  the ones the owner has already validated. */
   numbered: boolean;
+  /** Every seal attribute the block carries, whatever the case of its name, in source order (see
+   *  `sealOf`). `check` compares it with the registry; `validated` alone cannot, because it is read
+   *  case-sensitively and a browser is not. */
+  seal: readonly SealAttribute[];
+}
+
+/**
+ * The three attributes a ✓ writes onto its block — the copy of the registry the browser paints the
+ * traffic light from. `data-depends` is not one of them: the author writes it, not the ✓.
+ */
+export const SEAL_NAMES = ['data-validated', 'data-validated-fingerprint', 'data-depended-on'] as const;
+
+export interface SealAttribute { name: string; value: string }
+
+/**
+ * The seal attributes on `el` as the parser kept them, names as written. A browser lowercases every
+ * attribute name and keeps the FIRST of two that then collide; linkedom keeps the case, so its
+ * `getAttribute('data-validated-fingerprint')` misses a `DATA-VALIDATED-FINGERPRINT` sitting ahead
+ * of it — which is the copy the browser shows. Reading them all, case-folded, is the only way a
+ * writer or `check` sees what the panel will.
+ */
+export function sealOf(el: Element): SealAttribute[] {
+  const names: readonly string[] = SEAL_NAMES;
+  return Array.from(el.attributes ?? [])
+    .filter((a) => names.includes((a as Attr).name.toLowerCase()))
+    .map((a) => ({ name: (a as Attr).name, value: (a as Attr).value }));
+}
+
+/**
+ * Every attribute name the engine reads a block by: what it is, what it depends on, and its seal.
+ * Each is read here in lower case only, and a browser reads each in ANY case — so one written
+ * otherwise is an attribute the page shows and every read in this engine walks past.
+ */
+export const BLOCK_NAMES: readonly string[] = ['data-id', 'data-code', 'data-depends', ...SEAL_NAMES];
+
+/** The names in `BLOCK_NAMES` that `el` carries in some case other than lower, as written. */
+export function namesNotLowerCase(el: Element): string[] {
+  return Array.from(el.attributes ?? []).map((a) => (a as Attr).name)
+    .filter((name) => name !== name.toLowerCase() && BLOCK_NAMES.includes(name.toLowerCase()));
+}
+
+/**
+ * The id a browser gives `el`: the value of its first attribute named `data-id` in any case, which
+ * is the copy a browser keeps. `null` when it carries none. linkedom's `getAttribute('data-id')`
+ * sees only the lower-case spelling, so `<p Data-Id="q" data-id="y">` is `y` to it and `q` to a reader.
+ */
+export function browserIdOf(el: Element): string | null {
+  const first = Array.from(el.attributes ?? []).find((a) => (a as Attr).name.toLowerCase() === 'data-id');
+  return first ? (first as Attr).value : null;
+}
+
+/**
+ * Every element under `main` a browser selects as a block, with the id it reads there. A browser
+ * matches `main [data-id]` case-insensitively on the name, so this is the list the panel paints;
+ * linkedom's own `main [data-id]` is not, because it matches the name case-sensitively.
+ */
+export function browserBlocks(document: { querySelectorAll(selector: string): Iterable<Element> }):
+  { element: Element; id: string }[] {
+  const out: { element: Element; id: string }[] = [];
+  for (const element of document.querySelectorAll('main *')) {
+    const id = browserIdOf(element);
+    if (id !== null) out.push({ element, id });
+  }
+  return out;
 }
 
 /**
@@ -154,6 +218,7 @@ async function blocksOf(file: string, path: string, html: string): Promise<reado
       validated: el.getAttribute('data-validated'),
       dependsOn: Object.freeze((el.getAttribute('data-depends') ?? '').split(/\s+/).filter(Boolean)) as string[],
       numbered: /^\d+\.\d/.test(code),
+      seal: Object.freeze(sealOf(el).map((a) => Object.freeze(a))),
     }));
   }
   return blocks;
@@ -182,7 +247,25 @@ export function resolveBlock(root: string, id: string): BlockLookup {
   const matches: { path: string; html: string; element: Element }[] = [];
   for (const path of sheetFiles(root)) {
     const html = readFileSync(path, 'utf8');
-    for (const element of blocksNamed(parseHTML(html).document, id)) matches.push({ path, html, element });
+    const { document } = parseHTML(html);
+    const named = blocksNamed(document, id);
+    // A page where a browser finds a block linkedom does not — `DATA-ID`, or a `Data-Id` ahead of the
+    // `data-id` read here — or reads its code or dependencies from a name linkedom skips, is a page the
+    // seal would be written onto blind: the id resolved here may not be the block the browser paints
+    // under it, and a twin in any case is a second seal nothing here sees. So such a page refuses, as a
+    // whole, and says which name to fix. The seal names are left to `spliceAttributes`, which refuses
+    // them on the block itself or, for a new ✓, replaces them.
+    if (named.length || browserBlocks(document).some((b) => b.id === id)) {
+      const identity = BLOCK_NAMES.filter((name) => !(SEAL_NAMES as readonly string[]).includes(name));
+      for (const el of document.querySelectorAll('*')) {
+        const odd = namesNotLowerCase(el).find((name) => identity.includes(name.toLowerCase()));
+        if (odd) {
+          return { ok: false, kind: 'invalid', message: `${shortName(root, path)} carries ${odd}, which a browser `
+            + `reads as ${odd.toLowerCase()} and this engine does not, so no seal is written on that page` };
+        }
+      }
+    }
+    for (const element of named) matches.push({ path, html, element });
   }
   if (matches.length === 0) return { ok: false, kind: 'not-found', message: 'not found' };
   if (matches.length > 1) {
@@ -223,12 +306,29 @@ export interface MarkPlan {
   /** `data-validated="value"`, right after the needle — only `mark` sets this; `restamp` never touches it. */
   validatedAt?: string;
   attributes: Stamp[];
+  /**
+   * Replace the seal the block already carries, rather than keep it. `sync` sets this: the ✓ it
+   * records is newer than any seal on the page, and a kept seal leaves the registry holding the new
+   * fingerprint and date while the page shows the old ones — 🟡 on a block just approved, and `check`
+   * failing on the date (holdrim#140). `restamp` never sets it: it fills in only what is missing, so a
+   * page value that disagrees with the registry stays there for `check` to report, instead of being
+   * settled in the registry's favour by a command nobody reviews the output of.
+   */
+  replace?: boolean;
 }
 
 /**
  * The index of the `>` that closes a tag opened before `from`, skipping one sitting inside a quoted
  * attribute value — `title="a>b"` must not end the tag one character early. `null` when the tag
  * never closes.
+ *
+ * A second scanner beside `startTagAt`, on purpose. This one opens a quote at ANY `'` or `"`, where
+ * the standard opens one only right after `=`: on a tag like `<p data-id="y" it's>`, whose `it's` is
+ * one attribute name to a browser, it runs past the real `>` and every candidate it offers is refused
+ * by `writesOnlyThe`. `startTagAt` finds the real `>` there and the write it offers is accepted — so
+ * swapping it in here changes what a first ✓ does on those tags from a refusal to a stamp, which the
+ * #141 tests pin as refusals. Where the two disagree is only on such malformed tags, and both only
+ * PROPOSE a place: `writesOnlyThe` decides for either. Making the first ✓ stamp there is its own change.
  */
 function tagEndFrom(html: string, from: number): number | null {
   let quote: string | null = null;
@@ -266,10 +366,10 @@ function mayBeAttribute(html: string, start: number): boolean {
  *
  * What to insert is decided from that element's own parsed attributes, never from the raw text
  * around a needle: an attribute the element already carries is never inserted again, `data-validated`
- * included — the first date stands, and a second copy the parser would read ahead of it cannot
- * appear (a raw-text test for "already there" is fooled by a `title` that merely mentions the name,
- * or by the attribute sitting later in the tag). Nothing left to insert returns `html` untouched,
- * without trying a splice at all.
+ * included — unless `plan.replace` hands the whole seal to `reseal` — so a second copy the parser
+ * would read ahead of it cannot appear (a raw-text test for "already there" is fooled by a `title`
+ * that merely mentions the name, or by the attribute sitting later in the tag). Nothing left to
+ * insert returns `html` untouched, without trying a splice at all.
  *
  * Where to insert is found by trying each raw occurrence of `data-id="${id}"` — it can also sit in
  * prose, a comment, a `<script>` or another element's value — the likely ones first (`mayBeAttribute`),
@@ -286,12 +386,27 @@ function mayBeAttribute(html: string, start: number): boolean {
  * (It leaves `&` unescaped inside attribute values, so a value holding `"` and one holding a literal
  * `&quot;` serialise alike; text that is only ever inserted, never removed, cannot turn one into the
  * other.) None accepted → an error, and the caller writes nothing: no partial write.
+ *
+ * A seal attribute whose name is not lower case is refused here, before "nothing left to insert" is
+ * even asked: `hasAttribute` does not see it, so it would be stamped around — a lower-case copy
+ * added after it, which the browser ignores because it keeps the first — or counted as "already
+ * there" while the browser shows its value. Only `plan.replace` removes it (`reseal`), because only
+ * a new ✓ knows what the seal should say instead.
  */
 export function spliceAttributes(html: string, id: string, plan: MarkPlan): { html: string } | { error: string } {
   const { document } = parseHTML(html);
   const targets = blocksNamed(document, id);
   if (targets.length !== 1) return { error: `${targets.length} blocks carry this id in this file` };
   const target = targets[0];
+  const carried = sealOf(target);
+
+  if (plan.replace && carried.length) return reseal(html, document, target, id, carried, plan);
+
+  const upper = carried.find(({ name }) => name !== name.toLowerCase());
+  if (upper) {
+    return { error: `it carries ${upper.name}, which a browser reads as ${upper.name.toLowerCase()} ahead of `
+      + 'any copy after it, so no seal is written beside it' };
+  }
 
   const validated = plan.validatedAt !== undefined && !target.hasAttribute('data-validated')
     ? { attr: 'data-validated', value: plan.validatedAt } : null;
@@ -301,25 +416,181 @@ export function spliceAttributes(html: string, id: string, plan: MarkPlan): { ht
 
   const afterNeedle = validated ? ` ${validated.attr}="${validated.value}"` : '';
   const beforeTagEnd = rest.map(({ attr, value }) => ` ${attr}="${value}"`).join('');
-  const original = document.toString();
+  const cleared = inserted.map(({ attr }) => attr);
+  const original = withoutSeal(document, target, cleared);
   const needle = `data-id="${id}"`;
 
-  const likely: number[] = [];
-  const unlikely: number[] = [];
-  for (let start = html.indexOf(needle); start !== -1; start = html.indexOf(needle, start + 1)) {
-    (mayBeAttribute(html, start) ? likely : unlikely).push(start);
-  }
-
-  for (const start of [...likely, ...unlikely]) {
+  for (const start of occurrences(html, needle)) {
     const needleEnd = start + needle.length;
     const tagEnd = tagEndFrom(html, needleEnd);
     if (tagEnd === null) continue;
 
     const candidate = html.slice(0, needleEnd) + afterNeedle + html.slice(needleEnd, tagEnd)
       + beforeTagEnd + html.slice(tagEnd);
-    if (writesOnlyThe(candidate, id, inserted, original)) return { html: candidate };
+    if (writesOnlyThe(candidate, id, inserted, original, cleared)) return { html: candidate };
   }
   return { error: 'could not locate its tag without risking another block' };
+}
+
+/** Every raw occurrence of `needle`, the likely attributes first (`mayBeAttribute`), each group in document order. */
+function occurrences(html: string, needle: string): number[] {
+  const likely: number[] = [];
+  const unlikely: number[] = [];
+  for (let start = html.indexOf(needle); start !== -1; start = html.indexOf(needle, start + 1)) {
+    (mayBeAttribute(html, start) ? likely : unlikely).push(start);
+  }
+  return [...likely, ...unlikely];
+}
+
+/**
+ * The whole seal a new ✓ gives, in `SEAL_NAMES` order: every name in it ends up carrying exactly this
+ * value, and a name left out — `data-depended-on` for a block that now depends on nothing — ends up
+ * absent. A snapshot of dependencies the block no longer declares, kept, paints 🔴 over ground
+ * nobody approved against.
+ */
+function sealPlanned(plan: MarkPlan): Stamp[] {
+  const all = plan.validatedAt === undefined ? plan.attributes
+    : [{ attr: 'data-validated', value: plan.validatedAt }, ...plan.attributes];
+  return SEAL_NAMES.flatMap((name) => all.filter(({ attr }) => attr === name));
+}
+
+/**
+ * `spliceAttributes` for a block that already carries a seal and a ✓ that replaces it. In the one
+ * start tag the needle opens, the first copy of each seal name — any case, any quoting, no value at
+ * all — is rewritten in place to the planned name and value, every later copy is removed, a name the
+ * plan leaves out is removed entirely, and a name the tag lacks is inserted where a first ✓ would
+ * put it. In place, rather than removed and appended, so a re-approval's diff shows the values that
+ * changed and nothing moving around them.
+ *
+ * Accepted on the same two tests, with the seal taken as a whole: (a) the block carries each seal
+ * name exactly once, case-insensitively, lower case, with exactly the planned value — or not at all,
+ * where the plan leaves it out; (b) the page with every seal attribute taken off THAT block, on both
+ * sides, serialises exactly like the original taken apart the same way. Only that block: a
+ * whole-page removal would accept a candidate that rewrote a neighbour's seal.
+ * A block already carrying exactly the planned seal, once and in lower case, is returned untouched
+ * before any splice — the same "nothing to write" the first ✓ answers from the element.
+ */
+function reseal(html: string, document: Parsed, target: Element, id: string,
+                carried: SealAttribute[], plan: MarkPlan): { html: string } | { error: string } {
+  const planned = sealPlanned(plan);
+  const already = carried.length === planned.length
+    && planned.every(({ attr, value }) => carried.some((a) => a.name === attr && a.value === readBack(value)));
+  if (already) return { html };
+
+  // Taken before `withoutSeal`, which strips the seal off `target` itself.
+  const parsedNames = Array.from(target.attributes ?? []).map((a) => (a as Attr).name);
+  const original = withoutSeal(document, target, SEAL_NAMES);
+  const needle = `data-id="${id}"`;
+  let hidden = false;
+
+  for (const start of occurrences(html, needle)) {
+    const needleEnd = start + needle.length;
+    const tag = startTagAt(html, html.lastIndexOf('<', start));
+    // The needle has to BE the tag's `data-id` attribute, not text inside another attribute's value:
+    // tokens found around a needle in a value belong to some other element's tag.
+    if (!tag?.tokens.some((t) => t.nameAt === start && t.to === needleEnd)) continue;
+    // And the `<` has to be where the element's tag really starts. One inside an earlier quoted value
+    // (`title="a<b"`) still reads the needle as an attribute, but whatever sits before it — a seal copy
+    // included — is out of sight: rewritten or not, it stays, and (a) cannot count it, because the
+    // parser keeps only the first of two copies spelt alike and (a) reads the parser. So the names read
+    // from this `<` must be the parser's own, in order, each first copy only, as the parser keeps them:
+    // the attribute holding the `<`, and any before it, is one the parser lists and this reading does
+    // not. A value that spells those names out itself can still line the lists up; then every copy the
+    // parser keeps is out of reach of the edits, and (a) accepts only where it already reads the
+    // planned seal. Finding the real `<` further back instead would mean trusting a backwards guess the
+    // raw text cannot settle — every `<` inside a value looks like a tag start — so this is a refusal.
+    const tokenNames = [...new Set(tag.tokens.map((t) => t.name))];
+    if (tokenNames.join('\0') !== parsedNames.join('\0')) { hidden = true; continue; }
+
+    const edits: Edit[] = [];
+    for (const name of SEAL_NAMES) {
+      const stamp = planned.find(({ attr }) => attr === name);
+      const copies = tag.tokens.filter((t) => t.name.toLowerCase() === name);
+      copies.forEach((t, i) => {
+        if (i === 0 && stamp) {
+          edits.push({ at: t.nameAt, to: t.to, text: `${name}="${stamp.value}"` });
+        } else {
+          // Its leading separator goes with it, unless the next attribute starts right after it and
+          // would then run into whatever precedes — the tag name itself, for the first attribute.
+          edits.push({ at: t.from, to: t.to, text: SEPARATOR_OR_END.test(html[t.to] ?? '') ? '' : ' ' });
+        }
+      });
+      if (!copies.length && stamp) {
+        const at = name === 'data-validated' ? needleEnd : tag.end;
+        edits.push({ at, to: at, text: ` ${name}="${stamp.value}"` });
+      }
+    }
+    const candidate = applyEdits(html, edits);
+    if (writesOnlyThe(candidate, id, planned, original, SEAL_NAMES)) return { html: candidate };
+  }
+  if (hidden) {
+    return { error: 'a "<" inside one of its attribute values hides where its start tag begins, so its whole '
+      + 'seal cannot be seen to be replaced — write that "<" as &lt;' };
+  }
+  return { error: 'could not locate its tag without risking another block' };
+}
+
+/** One change to the raw text: `[at, to)` replaced by `text`; `at === to` is an insertion. */
+interface Edit { at: number; to: number; text: string }
+
+function applyEdits(html: string, edits: Edit[]): string {
+  // An insertion at the same index as a removal goes first, so it lands before the removed text
+  // rather than being cut out with it.
+  const sorted = [...edits].sort((a, b) => a.at - b.at || a.to - b.to);
+  let out = '';
+  let from = 0;
+  for (const { at, to, text } of sorted) {
+    out += html.slice(from, at) + text;
+    from = to;
+  }
+  return out + html.slice(from);
+}
+
+/** HTML's own whitespace — not `\s`, which also takes characters a browser keeps inside a name. */
+const SPACE = /[\t\n\f\r ]/;
+const SEPARATOR_OR_END = /[\t\n\f\r />]/;
+
+/** One attribute in a raw start tag: its separator starts at `from`, its name at `nameAt`, it ends before `to`. */
+interface Token { name: string; from: number; nameAt: number; to: number }
+
+/**
+ * The attributes of the start tag opening at `open`, tokenised the way the HTML standard does — a
+ * name runs to whitespace, `/`, `>` or `=`; a value is double-quoted, single-quoted, unquoted up to
+ * whitespace or `>`, or absent — and the index of the `>` that ends it. `null` when `open` does not
+ * start a tag, or the tag never closes. It only proposes where the seal's copies sit: whatever it gets
+ * wrong on a malformed tag, `writesOnlyThe` refuses.
+ */
+function startTagAt(html: string, open: number): { tokens: Token[]; end: number } | null {
+  if (open < 0 || html[open] !== '<' || !/[A-Za-z]/.test(html[open + 1] ?? '')) return null;
+  let i = open + 1;
+  while (i < html.length && !SEPARATOR_OR_END.test(html[i])) i++;
+  const tokens: Token[] = [];
+  for (;;) {
+    const from = i;
+    while (i < html.length && (SPACE.test(html[i]) || html[i] === '/')) i++;
+    if (i >= html.length) return null;
+    if (html[i] === '>') return { tokens, end: i };
+    const nameAt = i;
+    i++; // the first character is the name's even when it is `=`, as the standard reads it
+    while (i < html.length && !/[\t\n\f\r />=]/.test(html[i])) i++;
+    const name = html.slice(nameAt, i);
+    let j = i;
+    while (j < html.length && SPACE.test(html[j])) j++;
+    if (html[j] === '=') {
+      j++;
+      while (j < html.length && SPACE.test(html[j])) j++;
+      const quote = html[j];
+      if (quote === '"' || quote === "'") {
+        const close = html.indexOf(quote, j + 1);
+        if (close === -1) return null;
+        i = close + 1;
+      } else {
+        while (j < html.length && !/[\t\n\f\r >]/.test(html[j])) j++;
+        i = j;
+      }
+    }
+    tokens.push({ name, from, nameAt, to: i });
+  }
 }
 
 /**
@@ -327,20 +598,42 @@ export function spliceAttributes(html: string, id: string, plan: MarkPlan): { ht
  * back the DECODED value, so each planned value is compared as `readBack` decodes it — the string a
  * reader of the page will actually get, not the escaped text that was spliced in.
  *
+ * `cleared` names the seal attributes whose final state the write decides: each must be on the block
+ * once — counted case-insensitively, because a browser folds `DATA-VALIDATED` into `data-validated`
+ * and shows the first — in lower case, with its planned value, or be absent when `written` has no
+ * value for it. Those, and only on the block, are what (b) takes off before comparing; `original`
+ * has already had them taken off the same way.
+ *
  * Every value on every write path today is either already safe (a date, a hex fingerprint) or goes
  * through `attributeText` first, so this comparison agrees with a bare presence check on all of them
  * — it stays a value check anyway, as the guard for a future writer that forgets to escape.
  */
-function writesOnlyThe(candidate: string, id: string, inserted: Stamp[], original: string): boolean {
+function writesOnlyThe(candidate: string, id: string, written: Stamp[], original: string,
+                       cleared: readonly string[]): boolean {
   const { document } = parseHTML(candidate);
   const targets = blocksNamed(document, id);
   if (targets.length !== 1) return false;
   const el = targets[0];
-  for (const { attr, value } of inserted) {
-    if (el.getAttribute(attr) !== readBack(value)) return false;
+  const seal = sealOf(el);
+  for (const name of cleared) {
+    const stamp = written.find(({ attr }) => attr === name);
+    const copies = seal.filter((a) => a.name.toLowerCase() === name);
+    if (copies.length !== (stamp ? 1 : 0)) return false;
+    if (stamp && (copies[0].name !== name || copies[0].value !== readBack(stamp.value))) return false;
   }
-  for (const { attr } of inserted) el.removeAttribute(attr);
-  return document.toString() === original;
+  return withoutSeal(document, el, cleared) === original;
+}
+
+type Parsed = ReturnType<typeof parseHTML>['document'];
+
+/**
+ * `document` serialised with every `cleared` seal name, in any case, taken off `el` — and off `el`
+ * alone. It is both sides of (b): taken off every element instead, a candidate that rewrote a
+ * neighbour's seal would compare equal to the original.
+ */
+function withoutSeal(document: Parsed, el: Element, cleared: readonly string[]): string {
+  for (const { name } of sealOf(el)) if (cleared.includes(name.toLowerCase())) el.removeAttribute(name);
+  return document.toString();
 }
 
 /**
