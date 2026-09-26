@@ -27,7 +27,7 @@ deployment itself names as holding `lock`.**
 
 ### 1. Capabilities are the engine's, roles are the project's
 
-The engine already speaks in capabilities (`can(capability, email)`) and never in a role's name.
+The engine already speaks in capabilities (`can(capability, who, where)`) and never in a role's name.
 This makes the list explicit and closed — one list, in `engine/core/roles.js`, and a project cannot
 invent a capability, only combine them:
 
@@ -315,7 +315,7 @@ loses the file fallback for the owner and the admins, and the templates, which s
 
 | Piece | State |
 |---|---|
-| Capabilities instead of role names (`can(capability, email)`) | built |
+| Capabilities instead of role names (`can(capability, who, where)`) | built |
 | Owner and admins, from configuration | built |
 | The closed capability list, and roles as sets of it | built — `engine/core/roles.js`, `CAPABILITIES` and `capabilitiesOf` |
 | The scope grammar a grant, and `HOLDRIM_LOCKS`, will be checked against | built (#29) — `isValidScope`, `engine/core/roles.js`, proved both by `HOLDRIM_LOCKS`'s own real use and by its tests. A project role's own NAME grammar is not built ahead of its first caller any more: a format nothing calls is untested by construction, so it waits for the settings screen below |
@@ -325,7 +325,7 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | `can('lock', …)` actually trusting a `HOLDRIM_LOCKS` entry | not built — stays owner-only until the rule below exists; see the comment on `can` |
 | The session-and-credential-history rule (a lock only from a session opened with a credential the person set after the owner's latest issuance) | not built |
 | Roles and grants as events, from a settings screen, by the owner | not built |
-| Scopes actually consulted by `can`, with a page or block in hand | not built — the grammar is validated (`isValidScope`), nothing reads it yet |
+| Scopes actually consulted by `can`, with a page or block in hand | built (#33) — `can(capability, who, where)` refuses to answer without `where` (a page, a block, or `EVERYWHERE`), and reads grants through `scopeCovers` (`engine/core/roles.js`): a page covers its blocks by each block's own page, a family `P0*` the prefix and exactly one character more, a block id that block alone, and a scoped grant never answers `EVERYWHERE`. Every check in `engine/api/server.ts` asks with the place (`engine/api/here.ts`): a ✓ by its block, triage and adding details by the stored request's. `POST /api/here` answers per page and for each block the panel names on it (`blocksAsked`), and the panel draws its ✓, its triage and its "Add details" from it. Every grant is still unscoped today — owner, admins and members name no pages — until the settings screen grants a project's own roles; `HOLDRIM_LOCKS` scopes are logged at start and refused when they match no page, and `lock` stays owner-only |
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | Agents marked by the deployment (`HOLDRIM_AGENTS`), refused `triage`, `approve`, `lock` and `people` before any grant is read | built (#30) — `engine/core/roles.js`'s `parseAgents`, `isAgent`, `AGENT_NEVER` and `can` |
 | A grant naming an agent refusing to start, on the server and in the CLI | built (#30) — `refuseGrantsToAgents`, called by `rolesOf`; `holdrim.json` refuses `agents` too |

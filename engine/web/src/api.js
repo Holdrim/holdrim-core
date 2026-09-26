@@ -21,6 +21,15 @@ async function call(path, body) {
 }
 
 export const whoAmI = () => call('/me');
+
+/**
+ * What the reader may do on `page` and on each block in `ids` — the server answers per page and per
+ * block, since a grant may be limited to some (docs/ROLES.md, section 2). The panel names the blocks
+ * it draws, because the page in the browser is what the buttons go on: the server's own reading of
+ * the site need not include it. In a body, never a query string: a long page's ids would pass the
+ * header limit, and a refused answer switches the whole panel off.
+ */
+export const hereOn = (page, ids) => call('/here', { page, blocks: ids });
 export const eventsOfPage = (page) => call(`/events?page=${encodeURIComponent(page)}`);
 export const record = (event) => call('/events', event);
 export const fingerprintsOf = (ids) => call(`/fingerprints?ids=${ids.map(encodeURIComponent).join(',')}`);

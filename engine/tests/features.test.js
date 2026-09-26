@@ -469,7 +469,7 @@ const ALLOWED = [
     text: ".filter((key) => (key !== 'bug' || features.bugCategory !== false) && (key !== 'page' || features.pageRequests !== false))",
     why: 'the filter itself, reading the two toggles the panel draws a category for' },
   { file: 'engine/web/src/Panel.jsx',
-    text: 'export default function Panel({ block, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {',
+    text: 'export default function Panel({ block, here, features = {}, events, radiusElsewhere, onRecord, onClose }) {',
     why: 'the prop `entry.jsx` passes down; missing reads as on, so an older caller sees every control ' +
       '— radiusElsewhere (#111) is a sibling prop on the same line, not a feature read of its own' },
   { file: 'engine/web/src/Panel.jsx', text: '{features.comments !== false ? (',
@@ -613,7 +613,7 @@ test('every scanned file survives the esbuild cross-check: the regex/division gu
 
 test('N2: a regex misguessed as division after a block\'s closing `}` swallows the guard right after it', () => {
   const real = read('engine/api/server.ts');
-  const marker = "const manages = () => roles.can('people', who);";
+  const marker = "const manages = () => roles.can('people', who, EVERYWHERE);";
   assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
   // The demonstrated mutant, verbatim: `/` right after the `}` that closes `if (email) { … }` starts
   // a fresh statement — the regex `/\/*/ ` (matching a literal "/*") — but `CloseBraceToken` is in
@@ -788,7 +788,7 @@ test('S12: rewriting forbidden() to read a toggle is caught, by name', () => {
 
 test('S13: a brand-new condition reading a toggle next to a guard is caught, by name', () => {
   const real = read('engine/api/server.ts');
-  const marker = "const manages = () => roles.can('people', who);";
+  const marker = "const manages = () => roles.can('people', who, EVERYWHERE);";
   assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
   const planted = real.replace(marker,
     `${marker}\n  if (!manages() && project.features.peopleScreen) return forbidden();`);
@@ -799,7 +799,7 @@ test('S13: a brand-new condition reading a toggle next to a guard is caught, by 
 
 test('S14 (D2b): a regex literal containing /* does not blind the scan to the guard right after it', () => {
   const real = read('engine/api/server.ts');
-  const marker = "const manages = () => roles.can('people', who);";
+  const marker = "const manages = () => roles.can('people', who, EVERYWHERE);";
   assert.ok(real.includes(marker), 'the line this test plants a mutant next to moved or was reworded');
   // The demonstrated mutant, verbatim: `/\/*/ ` is a real regex (it matches a literal "/*"), and the
   // old hand-rolled stripper read its embedded `/*` as an OPENING block comment instead, blanking

@@ -158,18 +158,26 @@ function AddDetails({ request, onRecord }) {
 }
 
 /**
- * One request on this block, for whoever is looking: its state, always — the person who filed it is
- * the one who most needs to know where it stands — then what that person may do about it.
+ * What the server said this reader may do on `block` — `POST /api/here`'s answer, for this page.
+ * A block it does not name reads as "nothing": a button the server did not say yes to is not drawn.
  */
-function Request({ request, canApprove, onRecord }) {
+const mayOn = (here, block) => here?.blocks?.[block] ?? {};
+
+/**
+ * One request on this block, for whoever is looking: its state, always — the person who filed it is
+ * the one who most needs to know where it stands — then what that person may do about it. Triage is
+ * drawn from `status.triage` alone, which the server sends empty to anyone who may not triage this
+ * request; adding details, from `here`, for the one block the request is on.
+ */
+function Request({ request, here, onRecord }) {
   const s = request.status ?? {};
   return (
     <div className="rv-request" data-request={request.id}>
       <p>
         {t('panel.request.from', { who: who(request.own, request.author) })} <em className={`rv-state rv-state--${s.state}`}>{labelOf(s.state)}</em>
       </p>
-      {canApprove ? <Triage request={request} onDecide={onRecord} /> : null}
-      {(request.own || canApprove) && s.acceptsSupplement
+      <Triage request={request} onDecide={onRecord} />
+      {(request.own || mayOn(here, request.block).approve) && s.acceptsSupplement
         ? <AddDetails request={request} onRecord={onRecord} />
         : null}
     </div>
@@ -213,7 +221,7 @@ function History({ events }) {
   );
 }
 
-export default function Panel({ block, canApprove, features = {}, events, radiusElsewhere, onRecord, onClose }) {
+export default function Panel({ block, here, features = {}, events, radiusElsewhere, onRecord, onClose }) {
   const dlg = useRef(null);
   const [tab, setTab] = useState(null);
   const [text, setText] = useState('');
@@ -286,7 +294,7 @@ export default function Panel({ block, canApprove, features = {}, events, radius
       <div className="rv-actions">
         {/* Not twice by the same person: an admin's ✓ does not turn the block green, and a button still
             on offer after it reads as "it did not take". */}
-        {canApprove && !situation.approved && !situation.seconded.some((e) => e.own) ? (
+        {mayOn(here, block.id).approve && !situation.approved && !situation.seconded.some((e) => e.own) ? (
           <button type="button" onClick={() => send('approval')} disabled={sending}>
             {t('panel.approve')}
           </button>
@@ -339,7 +347,7 @@ export default function Panel({ block, canApprove, features = {}, events, radius
       {/* Every request's state for everyone; triage only for whoever can triage, and only while the
           request still has a destination. */}
       {situation.requests.map((r) => (
-        <Request key={r.id} request={r} canApprove={canApprove} onRecord={onRecord} />
+        <Request key={r.id} request={r} here={here} onRecord={onRecord} />
       ))}
 
       <History events={situation.history} />

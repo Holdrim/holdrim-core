@@ -46,13 +46,32 @@ who ran the engine from `main` before it.
   sign-in screen is the gate), or have the gateway strip `Authorization` before it forwards. And an agent — named in `HOLDRIM_AGENTS` or come in with
   a token — may now move an approved request through `applying`, `waiting` and `applied` through the
   API, as `docs/ROLES.md` section 4 already said it keeps; before, only the local runner let it.
+- **`/api/me` no longer answers `canApprove` or `canTriage`; what a person may do is asked of one
+  page, with `POST /api/here` and a body `{ "page": "P03", "blocks": ["P03.1.1", …] }` (#33,
+  `docs/ROLES.md` section 2).** A grant may be limited to some pages or blocks, so "may this person
+  approve?" has no answer without a place. The answer is `{ page, may: { comment, request, triage,
+  approve }, blocks: { "<block id>": { triage, approve } } }`, booleans only, for the page and for
+  each id in `blocks` that is a block id and lives on that page — any other id is left out, never
+  echoed. A `page` that is not a page code, a `blocks` that is not a list, or more than 2000 ids
+  answers 400. A POST because a long page's ids do not fit in a query string; it writes nothing, and
+  an agent token does not reach it. New on the surface: `POST /api/here`. A request's
+  `status.triage`, in `/api/events` and `/api/events/:id`, now lists destinations only for a reader
+  who may triage that request, and is empty for everyone else. What to change: anything reading
+  `canApprove`/`canTriage` asks `POST /api/here` for the page and the blocks it draws. Every check the server makes is
+  now asked with the place: a ✓ by its block (the block's own page, never the `page` sent beside
+  it), triage and "add details" by where the STORED request was filed, never by the page or block
+  the triage event names. Who may do what does not change for the three shipped roles, which are
+  unscoped. **A `HOLDRIM_LOCKS` scope that matches no page and no block of the site now refuses to
+  start**, and each scope's reach is logged at start (`lock_scope_coverage`, the scope and the pages
+  it reaches, never the address): a scope granted over nothing is a typo, or a page that moved away.
+  What to change: fix or remove such an entry.
 - **`/api/me`'s `role` answers `member` where it used to answer `other`.** The engine now speaks of
   three shipped roles — `owner`, `admin`, `member` — as sets of a closed capability list
   (`engine/core/roles.js`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`), and
   a role display name that only ever meant "one of the two above" now says so. What to change:
   anything matching `/api/me`'s `role` against `'other'`, and the people screen's `people.role.other`
-  translation key, now `people.role.member`. `canApprove`, `canTriage` and every other field of
-  `/api/me` are unchanged.
+  translation key, now `people.role.member`. Every other field of `/api/me` keeps its meaning under
+  this rename; `canApprove` and `canTriage` are then removed by the per-page answer below (#33).
 - **`owner` and `admins` are no longer read from `holdrim.json`, and a `holdrim.json` that names
   `owner`, `admins` or `locks` now refuses to start the service and to run the CLI.** Authority is
   set by the deployment: whoever can commit to the file — or the agent applying an approved
@@ -352,6 +371,15 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
+  `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
+  chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY
+  engine ./engine` copied all of `engine/`, and `.dockerignore` excluded none of it, so the hook
+  reached a running container; `node --import` reads `NODE_OPTIONS`, so a single environment
+  variable could have activated it there. `.dockerignore` now excludes all three; nothing in the
+  image reads from any of them — `CMD` runs `engine/api/server.ts` directly, and the healthcheck is a
+  plain `fetch`. Nothing to change: an adopter's deployment sets no such variable, and now could not
+  reach the hook if it did.
 - **A text edited straight in the store now raises its CRITICAL alert even when a forged removal
   claims it (#133).** Before, a direct writer who edited a text's row and then added one
   `text_removed` event for it, dated and placed after its target, made the field read as a clean
