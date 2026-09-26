@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { CLI_COMMANDS, CLI_FLAGS } from './helpers/cli-source.js';
 import { EVENT_TYPES, stored, LOCK_BASELINE_TYPE, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD } from '../api/types.ts';
 import { AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED } from '../api/agent-tokens.ts';
+import { TAMPER_ACKNOWLEDGED } from '../api/tamper.ts';
 import { queue } from '../cli/requests.ts';
 import * as screens from '../core/screens.js';
 import * as language from '../api/language.ts';
@@ -144,7 +145,11 @@ test('the event types are the ones engine/surface.json lists', () => {
   // (`lock_baseline via POST /events → 400, even from a member`) proves it stays refused.
   // The two agent-token events the same way, for the same reason: only the owner's own routes write
   // them (agent-tokens.ts), and the guard that keeps them out of `POST /events` is the contract test's.
-  sameAs('event types', [...EVENT_TYPES, LOCK_BASELINE_TYPE, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED], SURFACE['event-types']);
+  // `TAMPER_ACKNOWLEDGED` the same way too: only its own route writes it (tamper.ts), and the guard
+  // that keeps it out of `POST /events` is the contract test's, not this one.
+  sameAs('event types',
+    [...EVENT_TYPES, LOCK_BASELINE_TYPE, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED, TAMPER_ACKNOWLEDGED],
+    SURFACE['event-types']);
 });
 
 test('the fields of an event are the ones engine/surface.json lists', () => {

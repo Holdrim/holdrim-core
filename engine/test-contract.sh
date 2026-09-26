@@ -1879,6 +1879,78 @@ expect "and none of the three lines carries an e-mail"     0 \
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 rm -rf "$FAIL_DIR"
 
+echo "tampered texts: the banner's findings, and the owner's acknowledgement (issue #107):"
+# SQLite, so a direct writer can reach the file the server has open — the only way a text is ever
+# tampered with. The admin ($LEAD), the member ($REVIEWER) and the agent ($AGENT) are each refused.
+TAMPER_DIR=$(mktemp -d)
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$TAMPER_DIR/events.db HOLDRIM_SITE="$SITE" HOLDRIM_AGENTS=$AGENT \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/tamper.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+tampered() { curl -s -H "X-Dev-Email: $1" $B/api/tampered; }
+# `findings.length`, then each finding's kind, then its id, then canAcknowledge — one line to compare.
+findings_of() { tampered "$1" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log([r.findings.length,...r.findings.map(f=>f.kind+'@'+f.page)].join(' '))})"; }
+finding_id() { tampered $OWNER | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).findings[0]?.finding ?? ''))"; }
+acknowledge() { curl -s -o /dev/null -w '%{http_code}' ${1:+-H "X-Dev-Email: $1"} -H 'Content-Type: application/json' -d "$2" $B/api/tampered/acknowledge; }
+direct_write() { node --no-warnings --input-type=module -e "
+  import { DatabaseSync } from 'node:sqlite'; import { hashText, newSalt } from './engine/api/texts.ts';
+  const db = new DatabaseSync(process.argv[1]);
+  if (process.argv[2] === 'event') db.prepare(\"INSERT INTO events (id, type, page, block, author, happened_at, text_hash) VALUES ('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?)\").run(new Date().toISOString(), hashText('the real text', newSalt()));
+  else db.prepare(\"INSERT INTO texts (event, field, value, salt) VALUES ('forged1', 'text', 'a forged text', ?)\").run(newSalt());
+  db.close();" "$TAMPER_DIR/events.db" "$1"; }
+criticals() { grep -c '"event":"text_tampered"' $WORK/tamper.log; }
+
+expect "nothing tampered: the banner has nothing to show"   0 "$(findings_of $REVIEWER)"
+# A hash with no row, and nothing that says it was let go: unaccounted.
+direct_write event
+expect "a text a direct writer left with no row: every reader is told" "1 unaccounted@A01" "$(findings_of $REVIEWER)"
+expect "and only the owner is offered to acknowledge it"   "true false false false" \
+  "$(for who in $OWNER $LEAD $REVIEWER $AGENT; do tampered $who | jfield canAcknowledge; done | tr '\n' ' ' | sed 's/ $//')"
+FINDING=$(finding_id); require_id "$FINDING" "the finding id from GET /api/tampered"
+expect "an admin cannot acknowledge it → 403"              403 "$(acknowledge $LEAD "{\"finding\":\"$FINDING\"}")"
+expect "a member cannot → 403"                             403 "$(acknowledge $REVIEWER "{\"finding\":\"$FINDING\"}")"
+expect "an agent cannot → 403"                             403 "$(acknowledge $AGENT "{\"finding\":\"$FINDING\"}")"
+expect "nobody signed in cannot → 401"                     401 "$(acknowledge '' "{\"finding\":\"$FINDING\"}")"
+expect "an admin sending forged owner fields still cannot → 403" 403 \
+  "$(acknowledge $LEAD "{\"finding\":\"$FINDING\",\"owner\":true,\"author\":\"$OWNER\",\"asAgent\":\"false\",\"data\":{\"asAgent\":\"false\"}}")"
+expect "nor through POST /events, even as the owner → 400" 400 \
+  "$(post $OWNER "{\"type\":\"tamper_acknowledged\",\"page\":\"A01\",\"data\":{\"finding\":\"$FINDING\",\"event\":\"forged1\",\"field\":\"text\"}}")"
+# `data` on an ordinary event is the client's to write: a comment naming the finding must quiet
+# nothing, or any member — or the agent — walks round the owner-only route.
+expect "a member may still comment with the finding's id in its data → 201" 201 \
+  "$(post $REVIEWER "{\"type\":\"comment\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"text\":\"hi\",\"data\":{\"finding\":\"$FINDING\"}}")"
+expect "and so may the agent → 201"                        201 \
+  "$(post $AGENT "{\"type\":\"comment\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"text\":\"hi\",\"data\":{\"finding\":\"$FINDING\",\"asAgent\":\"false\"}}")"
+# Identity before the body: a non-owner is told "not yours", never what their body got wrong.
+expect "an admin naming no finding → 403, not 400"         403 "$(acknowledge $LEAD '{}')"
+expect "an admin sending a body that is not JSON → 403, not 400" 403 "$(acknowledge $LEAD 'not json')"
+expect "and none of that quieted it"                       "1 unaccounted@A01" "$(findings_of $REVIEWER)"
+expect "the owner naming no finding → 400"                 400 "$(acknowledge $OWNER '{}')"
+expect "the owner naming one nobody found → 409"           409 "$(acknowledge $OWNER "{\"finding\":\"$(printf 'a%.0s' $(seq 64))\"}")"
+ACK=$(curl -s -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d "{\"finding\":\"$FINDING\",\"asAgent\":\"true\"}" $B/api/tampered/acknowledge)
+expect "the owner acknowledges it: an event, by the owner"  "tamper_acknowledged $OWNER" "$(echo "$ACK" | jfield type) $(echo "$ACK" | jfield author)"
+expect "naming what the server found, not what was sent"   "forged1 text unaccounted $FINDING false" \
+  "$(for k in event field kind finding asAgent; do echo "$ACK" | jfield data.$k; done | tr '\n' ' ' | sed 's/ $//')"
+expect "and the banner has nothing left to show"           0 "$(findings_of $REVIEWER)"
+expect "a finding already acknowledged → 409"              409 "$(acknowledge $OWNER "{\"finding\":\"$FINDING\"}")"
+expect "the text still reads as tampered: nothing was repaired" true \
+  "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.id==='forged1').textTampered))")"
+# Counted AFTER the acknowledgement and the reads above it, then one read more: the route's own read
+# logs the line too, so a count taken before the POST would grow even if acknowledging silenced it.
+AFTER_ACK=$(criticals)
+curl -s -o /dev/null -H "X-Dev-Email: $REVIEWER" $B/api/tampered
+expect "and the CRITICAL line still fires on the next read" 0 "$([ "$(criticals)" -gt "$AFTER_ACK" ]; echo $?)"
+ACK_AUTHOR_ID=$(echo "$ACK" | jfield authorId); require_id "$ACK_AUTHOR_ID" "the acknowledgement's authorId"
+expect "the log records the acknowledgement, once"         1 "$(grep -c '"event":"tamper_acknowledged"' $WORK/tamper.log)"
+expect "naming its author by id"                           "$ACK_AUTHOR_ID" "$(log_field $WORK/tamper.log tamper_acknowledged author)"
+expect "and never by address"                              0 "$(grep '"event":"tamper_acknowledged"' $WORK/tamper.log | grep -c -F "$OWNER")"
+# The same field, tampered again — a row put back that does not hold the recorded text.
+direct_write row
+expect "a new tampering of the same field raises it again" "1 overwritten@A01" "$(findings_of $REVIEWER)"
+expect "as a finding of its own, not the one acknowledged" 1 "$([ "$(finding_id)" = "$FINDING" ]; echo $?)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+rm -rf "$TAMPER_DIR"
+
 echo "a grant that names an agent refuses to start (docs/ROLES.md, section 4):"
 # The louder of the two layers: `can` would deny the agent anyway (engine/tests/roles.test.js proves
 # that one alone), but a deployment that contradicts itself is told so before it serves anything.
@@ -2024,6 +2096,11 @@ expect "the token cannot triage a request → 403" 403 "$(t_state as_bot)"
 expect "it cannot reach the people → 403"        403 "$(bot_code $B/api/users)"
 expect "nor the token list → 403"                403 "$(bot_code $B/api/agent-tokens)"
 expect "nor issue a token → 403"                 403 "$(bot_code -d '{"email":"another@example.org"}' $B/api/agent-tokens)"
+# The tamper banner (issue #107) is not in TOKEN_READS, and its acknowledgement is not in
+# TOKEN_WRITES: neither route existed when TOKEN_READS was written, and an allowlist stays closed
+# to a route it never named — the acknowledgement stays refused before `mayAcknowledge` is even asked.
+expect "nor read the tamper banner → 403"         403 "$(bot_code $B/api/tampered)"
+expect "nor acknowledge a finding → 403"          403 "$(bot_code -d '{"finding":"x","asAgent":"true"}' $B/api/tampered/acknowledge)"
 expect "nor change a password → 403"             403 "$(bot_code -d '{"current":"x","next":"y"}' $B/api/change-password)"
 expect "nor sign out → 403"                      403 "$(bot_code -X POST $B/api/sign-out)"
 expect "and it opens no screen: the people screen still wants a session" 0 \

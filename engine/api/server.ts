@@ -33,8 +33,9 @@ import {
 } from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
 import { personAs } from '../core/people-show.js';
-import { resolveRemovedBy, type Removed } from './texts.ts';
+import { resolveRemovedBy, type Removed, type TamperReport } from './texts.ts';
 import { issuedEvent, revokedEvent } from './agent-tokens.ts';
+import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -805,6 +806,46 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     const toTriage = all.filter((e) => e.type === 'request')
       .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)) === 'open').length;
     return json(res, 200, { toTriage });
+  }
+
+  // ---------------------------------------------------------------- tampered texts (issue #107)
+  //
+  // What the panel's banner shows: every finding a read of the whole store resolves to tampered, less
+  // the ones the owner acknowledged — as ids and locale keys, never prose. Any signed-in reader gets
+  // it: a text nobody can vouch for is everybody's to know about, not only the owner's. There is no
+  // `holdrim.json` toggle for it and there must never be one (issue #107's decision): an alert the
+  // repository can switch off is an alert whoever commits to it can hide.
+  if (req.method === 'GET' && route === '/tampered') {
+    const found: TamperReport[] = [];
+    const all = await events.list(null, found);
+    return json(res, 200, { findings: openFindings(found, all), canAcknowledge: mayAcknowledge(roles, email) });
+  }
+
+  // The owner's acknowledgement of ONE finding. Its own route, not `POST /events`: that path takes
+  // `data` from the client, and this event's `data` has to be what the server itself found, on a
+  // read made here — see `TAMPER_ACKNOWLEDGED` (tamper.ts). `POST /events` refuses the type as
+  // unknown. Nothing here repairs the text: it appends one event, and the field goes on reading as
+  // tampered, with its CRITICAL line on every read.
+  if (req.method === 'POST' && route === '/tampered/acknowledge') {
+    const say = (key: string, params?: Record<string, string | number>) => i18n.t(languageOf(req), key, params);
+    // Identity before the body is read: a refusal must not depend on, or reveal, what was sent.
+    if (!mayAcknowledge(roles, email)) return json(res, 403, { error: say('api.tamper.ownerOnly') });
+    const body = await jsonBody(req);
+    const found: TamperReport[] = [];
+    const all = await events.list(null, found);
+    const verdict = acknowledgementRefusal(roles, email, body, openFindings(found, all));
+    if ('refused' in verdict) return json(res, verdict.refused.status, { error: say(verdict.refused.key) });
+    const incoming = acknowledgementOf(verdict.found);
+    // `asAgent` from the identity the server saw, as `recordEvent` writes it on every other event
+    // (docs/ROLES.md, section 4) — never from the client, whose body this never spreads.
+    incoming.data = { ...incoming.data, [AS_AGENT_FIELD]: String(roles.isAgent(email)) };
+    const { author, event: e } = await recordAuthored(events, incoming, email);
+    log('INFO', 'tamper_acknowledged', {
+      id: e.id, eventId: verdict.found.event, field: verdict.found.field, kind: verdict.found.kind,
+      finding: verdict.found.finding, author,
+    });
+    res.setHeader('location', `/api/events/${e.id}`);
+    return json(res, 201, e);
   }
 
   if (req.method === 'POST' && route === '/events') {

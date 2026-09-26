@@ -73,6 +73,7 @@
     "data-depended-on",
     "data-depends",
     "data-email",
+    "data-finding",
     "data-graph-i18n",
     "data-graph-status",
     "data-id",
@@ -94,7 +95,8 @@
     "lock_baseline",
     "request",
     "request_state",
-    "supplement"
+    "supplement",
+    "tamper_acknowledged"
   ],
   "event-fields": [
     "author",
@@ -120,7 +122,9 @@
     "commit",
     "event",
     "field",
+    "finding",
     "from",
+    "kind",
     "locks",
     "replacedTokenId",
     "request",
@@ -221,6 +225,7 @@
     "GET /api/impact-radius",
     "GET /api/me",
     "GET /api/requests/open",
+    "GET /api/tampered",
     "GET /api/users",
     "POST /api/agent-tokens",
     "POST /api/agent-tokens/:param/revoke",
@@ -228,6 +233,7 @@
     "POST /api/events",
     "POST /api/sign-in",
     "POST /api/sign-out",
+    "POST /api/tampered/acknowledge",
     "POST /api/users",
     "POST /api/users/:param/enabled",
     "POST /api/users/:param/password",
