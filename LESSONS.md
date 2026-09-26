@@ -81,6 +81,15 @@ Locks, tamper detection, the stores, and who holds authority.
 - **A merge of main into a branch that touches a security route gets a locks read of the
   resolution.** Taught by #117. Lives in: not yet.
 
+- **Before fixing how something is written, read how it is read, and make both find it the same
+  way.** Taught by #135: the fix asked for was "escape the id better", and the defect was that the
+  writer (the first raw match, anywhere) and the reader (`main [data-id]`) could pick different
+  elements, so a ✓'s fingerprint could come from one the owner never saw. Lives in:
+  `engine/cli/pages.ts` (`resolveBlock` resolves as `readBlocks` does); not yet in `review-locks`.
+- **A write that must touch one element is verified by re-parsing the whole result, not by checking
+  that the target changed.** Taught by #135: a check satisfied by what the target already carried
+  let a repeat stamp land on another element. Lives in: `engine/cli/pages.ts` (`writesOnlyThe`).
+
 ## Proof
 
 - **A test whose expected value is computed by the function under test proves nothing.** Taught by
@@ -156,7 +165,14 @@ The crew, and the review.
   #128. Lives in: `.claude/settings.json`, which denies a force push. The check before pushing: not
   yet.
 - **A worktree for new work is created from `origin/main` by name, because `scripts/worktree.sh`
-  branches from the local HEAD.** Taught by #104. Lives in: not yet.
+  branches from the local HEAD.** Taught by #104, #135: #135's branch came from a local `main` one
+  merge behind, and four clean review rounds ended in a conflict with #131 in the very functions
+  they reviewed. Lives in: not yet — twice now, so it belongs in the script.
+- **A lens gets a time box in its prompt, and a long experiment is cut short and reported.** Taught
+  by #135: a correctness lens ran over two hours, a container restart lost it with nothing
+  reported, and the round waited for a second run that took six minutes. Lives in: not yet.
+- **The stopping rule — a new evasion outside the diff is MINOR and a new issue — goes into the
+  round-2 prompt, not the round-5 one.** Taught by #109, #135. Lives in: not yet.
 - **`Closes #N` is written plainly, because bold hides the keyword from GitHub.** Taught by #123.
   Lives in: `.github/PULL_REQUEST_TEMPLATE.md`.
 - **A `CHANGELOG.md` entry is part of "Done when" for anything an adopter will notice.** Taught by
@@ -173,3 +189,4 @@ against these, and a cost that repeats becomes a Process lesson.
 |---|---|---|---|
 | #28 | 3.5–4M in sub-agents, against a 0.7–1.5M budget | 4 | most of it was one developer resumed across four rounds; a fresh one did round 4 for about 140k |
 | #107 | about 2.4M: developers about 0.75M, lenses about 1.6M | 3 | a fresh round-3 developer took 115k, against about 340k of context for the resumed one |
+| #135 | about 2.5M: developers about 1.05M, lenses about 1.45M | 4 | the round-1 redesign would have come from reading `readBlocks` next to `mark` before any code; round 2 resumed round 1's developer to 340k, against 71k for a fresh one in round 4 |
