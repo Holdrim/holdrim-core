@@ -84,6 +84,15 @@ const ROLE_CAPABILITIES = Object.freeze({
 });
 
 /**
+ * The three shipped roles' names, in `ROLE_CAPABILITIES`'s own order — for a screen that shows the
+ * table (engine/api/settings-page.ts), so it lists the roles this file ships rather than a copy of
+ * their names that the day a role is added would leave one short. Names only: what each holds is
+ * still asked of `capabilitiesOf`, which hands back a copy, and nothing here reaches `can`.
+ * @type {readonly ('owner'|'admin'|'member')[]}
+ */
+export const SHIPPED_ROLES = Object.freeze(/** @type {('owner'|'admin'|'member')[]} */ (Object.keys(ROLE_CAPABILITIES)));
+
+/**
  * The capabilities a shipped role holds, as a FRESH `Set` — a new one on every call, copied from the
  * frozen array above, so nothing a caller does to what it gets back can reach the table itself (see
  * the comment on `ROLE_CAPABILITIES`). Exported so the mapping test can read the very table `can`

@@ -257,5 +257,18 @@ export function readConfig(root, io, env = {}) {
      * file the same way, and `AUTHORITY_KEYS` above does not, and must not, ever name `people`.
      */
     peopleShow: readPeopleShow(file.people?.show, root),
+
+    /**
+     * Which of the two settings just above the FILE named, as opposed to a default — read by the
+     * settings screen alone (engine/api/settings-page.ts), which says where each value comes from.
+     * Without it the screen could only compare a value with its default, and a toggle a project
+     * wrote down at its default value would read as "not set", sending the owner to look for a line
+     * that is there. After `features` and `peopleShow` on purpose: both have refused a bad value by
+     * the time this runs, so every key listed here is a known one.
+     */
+    namedInFile: {
+      features: file.features === undefined ? [] : Object.keys(file.features),
+      peopleShow: file.people?.show !== undefined,
+    },
   };
 }

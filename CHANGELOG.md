@@ -217,6 +217,14 @@ who ran the engine from `main` before it.
 - **People, from the browser**, `/engine/people`, for the owner and admins with password sign-in:
   create an access, hand out a new password (shown once), take an access away and give it back.
   Nobody is ever deleted.
+- **Settings, read-only, for the owner**, `/engine/settings` (#36): the roles this version ships
+  and what each holds; who holds what and the variable it comes from — `HOLDRIM_OWNER`,
+  `HOLDRIM_ADMINS`, `HOLDRIM_AGENTS`, and `HOLDRIM_LOCKS` with the pages each scope reaches; and
+  `features` and `people.show`, with whether each value comes from `holdrim.json` or the default,
+  and the snippet to commit to change them. A form composes a lock grant: it checks an address and a
+  scope the way start checks `HOLDRIM_LOCKS`, and answers with the full `HOLDRIM_LOCKS="…"` line to
+  set where Holdrim runs, then restart. The screen writes nothing, and no event; granting from it is
+  the next step. Anybody but the owner is sent home.
 - **Ask for a new page, in plain words**, from the home (a form that needs no script) or from any
   block (the new `page` category). `holdrim apply` tells the agent to write one new page shaped like
   the one it was asked near, and to mark nothing as validated.

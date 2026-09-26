@@ -226,6 +226,9 @@ export function renderHomePage(
      *  existing unit test included, keeps seeing the home exactly as it read before #38: no
      *  section, no script, nothing for a bare `script-src`-free policy to contradict. */
     graphEnabled?: boolean;
+    /** Whether the viewer is the owner, the one person the settings screen opens for — its link in
+     *  the nav, and nothing else. Defaults to false, so a caller that does not say offers no link. */
+    isOwner?: boolean;
     ask?: HomeOutcome;
   },
   theme: Theme, nonce: string,
@@ -439,7 +442,7 @@ ${themeCss(theme)}
 <main class="holdrim-screen__main">
   <header class="holdrim-screen__head">
     <div class="holdrim-brandmark">${brandmark(theme)}</div>
-    ${engineNav(i18n, lang, 'home', data.canManagePeople)}
+    ${engineNav(i18n, lang, 'home', data.canManagePeople, data.isOwner)}
   </header>
   <h1 class="holdrim-title">${t('home.title')}</h1>
   <p class="holdrim-lede">${t('home.lede')}</p>
