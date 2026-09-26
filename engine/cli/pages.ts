@@ -243,9 +243,9 @@ export function resolveBlock(root: string, id: string): BlockLookup {
 }
 
 /**
- * Where each id lives, for `markAll`: the page, and a digest of the text it was found in — the same
- * answer `resolveBlock` gives each id alone, the same pages in the same order, the same refusals,
- * from one read and parse per page for all of them. Only the path and the digest outlive the page's
+ * Where each id lives, for `markAll` and `restamp`: the page, and a digest of the text it was found
+ * in — the same answer `resolveBlock` gives each id alone, the same pages in the same order, the same
+ * refusals, from one read and parse per page for all of them. Only the path and the digest outlive the page's
  * parse. Every touched page's text and parsed document, held until the last page is stamped, make a
  * sync's memory grow with the whole site — about 100 MB for 500 pages of 100 KB — where stamping needs
  * one page at a time; the page is read again when its turn comes, and the digest says whether it is
@@ -294,7 +294,7 @@ export async function fingerprintsByPage(root: string): Promise<Map<string, stri
   return out;
 }
 
-/** A page read afresh, parsed once, with its blocks by id — what `markAll` plans and splices from. */
+/** A page read afresh, parsed once, with its blocks by id — what `markAll` and `restamp` plan and splice from. */
 export function parsePage(html: string): { document: Parsed; byId: Map<string, Element[]> } {
   const { document } = parseHTML(html);
   return { document, byId: blocksById(document) };
@@ -586,7 +586,9 @@ export interface PageStamp { id: string; plan: MarkPlan }
  * — every stamp goes through `spliceAttributes` one after another, exactly the per-block path. Without
  * that last verification, a page whose halves each passed is written as a whole nobody verified. Each
  * result is `{ ok: true }` or the error `spliceAttributes` would give; the returned `html` carries only
- * the accepted ones.
+ * the accepted ones. A stamp with nothing left to write — the block already carries all of it — is
+ * `{ ok: true, unchanged: true }`: `restamp` counts it as "already had it", and cannot tell it from a
+ * written one by comparing pages, because the page as a whole changed for the other stamps on it.
  *
  * Two paths here are safety nets that no page found so far needs. The per-block fallback: linkedom
  * reads each tag on its own, and no page is known whose writes are safe apart and refused together.
@@ -598,8 +600,8 @@ export interface PageStamp { id: string; plan: MarkPlan }
  * composed, the page they make is verified before it is written.
  */
 export function spliceAll(html: string, document: Parsed, stamps: readonly PageStamp[], verify: Verifier = verifyAll):
-  { html: string; results: ({ ok: true } | { error: string })[] } {
-  const results: ({ ok: true } | { error: string })[] = stamps.map(() => ({ ok: true }));
+  { html: string; results: Spliced[] } {
+  const results: Spliced[] = stamps.map(() => ({ ok: true }));
   const byId = blocksById(document);
   const batch: Batched[] = [];
   const alone: number[] = [];
@@ -608,7 +610,7 @@ export function spliceAll(html: string, document: Parsed, stamps: readonly PageS
     if (targets.length !== 1) { results[i] = { error: `${targets.length} blocks carry this id in this file` }; continue; }
     const prepared = prepare(html, targets[0], id, plan);
     if ('error' in prepared) { results[i] = prepared; continue; }
-    if ('unchanged' in prepared) continue;
+    if ('unchanged' in prepared) { results[i] = { ok: true, unchanged: true }; continue; }
     const first = prepared.candidates[Symbol.iterator]().next();
     if (first.done) { alone.push(i); continue; }
     batch.push({ index: i, id, written: prepared.written, cleared: prepared.cleared, edits: first.value });
@@ -629,11 +631,19 @@ export function spliceAll(html: string, document: Parsed, stamps: readonly PageS
   if (!accepted.whole && verify(html, accepted.good) === null) return spliceOneByOne(html, stamps, results);
   let out = accepted.good.length ? applyEdits(html, accepted.good.flatMap((e) => e.edits)) : html;
   for (const i of [...alone, ...accepted.bad.map((e) => e.index)].sort((a, b) => a - b)) {
-    const result = spliceAttributes(out, stamps[i].id, stamps[i].plan);
-    if ('error' in result) results[i] = result;
-    else out = result.html;
+    [out, results[i]] = spliceOne(out, stamps[i]);
   }
   return { html: out, results };
+}
+
+/** What `spliceAll` says of one stamp: written, already there (`unchanged`), or refused with the reason. */
+export type Spliced = { ok: true; unchanged?: true } | { error: string };
+
+/** `spliceAttributes` for one stamp on `html`, as the page it leaves and its `Spliced` result. */
+function spliceOne(html: string, { id, plan }: PageStamp): [string, Spliced] {
+  const result = spliceAttributes(html, id, plan);
+  if ('error' in result) return [html, result];
+  return [result.html, result.html === html ? { ok: true, unchanged: true } : { ok: true }];
 }
 
 /** One stamp inside `spliceAll`: where it sits in the caller's list, and its first candidate. */
@@ -684,14 +694,12 @@ function verifyAll(html: string, entries: readonly Batched[]): string | null {
 }
 
 /** Every stamp through `spliceAttributes`, one after another on the page each leaves — the per-block path. */
-function spliceOneByOne(html: string, stamps: readonly PageStamp[], results: ({ ok: true } | { error: string })[]):
-  { html: string; results: ({ ok: true } | { error: string })[] } {
+function spliceOneByOne(html: string, stamps: readonly PageStamp[], results: Spliced[]):
+  { html: string; results: Spliced[] } {
   let out = html;
-  for (const [i, { id, plan }] of stamps.entries()) {
+  for (const [i, stamp] of stamps.entries()) {
     if ('error' in results[i]) continue;
-    const result = spliceAttributes(out, id, plan);
-    if ('error' in result) results[i] = result;
-    else out = result.html;
+    [out, results[i]] = spliceOne(out, stamp);
   }
   return { html: out, results };
 }
