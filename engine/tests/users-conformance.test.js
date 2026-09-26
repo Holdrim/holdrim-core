@@ -28,7 +28,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { UsersSqlite } from '../api/users-sqlite.ts';
-import { AGENT_TOKEN_FORMAT } from '../api/users.ts';
+import { AGENT_TOKEN_FORMAT, AddressInUse } from '../api/users.ts';
+import { randomBytes, createHash } from 'node:crypto';
 import { freshFirestoreProject } from './helpers/firestore.js';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
@@ -794,4 +795,81 @@ forEachStore('the list of agent tokens carries no secret, no hash and no id, ord
   for (const { token, tokenId } of issued) {
     assert.ok(!said.includes(partsOf(token).secret) && !said.includes(tokenId), 'a token\'s secret or id is in the list');
   }
+});
+
+forEachStore('re-issuing under concurrency leaves one live token, and the trail names every token it stopped', async (s) => {
+  // Twelve issues for one address at once, as a double click, a retry and a second tab can make them.
+  // The chain the trail keeps (`replacedTokenId`, agent-tokens.ts) is right only when each issue saw
+  // the row the one before it wrote: exactly one issue replaced nothing, no token is named as replaced
+  // twice, and every token that no longer works is named by the issue that stopped it. An issue that
+  // reads the row outside its own write's turn breaks all three while still leaving one row.
+  for (let round = 0; round < 3; round++) {
+    const address = `race${round}@example.org`;
+    const issued = await Promise.all(Array.from({ length: 12 }, () => s.issueAgentToken(address)));
+    const live = [];
+    for (const i of issued) if (await s.fromAgentToken(i.token)) live.push(i.tokenId);
+    const named = issued.map((i) => i.replaced).filter((r) => r !== null);
+    assert.equal(live.length, 1, `round ${round}: live tokens ${live.length}`);
+    assert.equal(issued.filter((i) => i.replaced === null).length, 1, `round ${round}: issues that replaced nothing`);
+    assert.equal(new Set(named).size, named.length, `round ${round}: a token named as replaced twice`);
+    const unnamed = issued.filter((i) => !live.includes(i.tokenId) && !named.includes(i.tokenId));
+    assert.deepEqual(unnamed.map((i) => i.tokenId), [], `round ${round}: stopped tokens no issue names`);
+  }
+});
+
+/** A user row as `insertUser` takes it; the hash is never checked here, so any bytes do. */
+const userRow = (email) => ({
+  email, name: 'Someone', salt: Buffer.alloc(16, 1), hash: Buffer.alloc(64, 2),
+  mustChangePassword: true, createdAt: new Date().toISOString(), enabled: true,
+});
+
+forEachStore('an address is a person\'s or an agent\'s, never both: each refuses the other, whichever came first', async (s) => {
+  // The owner's decision on issue #122: a token is never issued for an address with an account —
+  // disabled or not, since disabling one must not leave a token writing as that person — and no
+  // account is ever created for an address holding a token.
+  await s.create('person@example.org', 'A Person', 'a long enough password', false);
+  await s.setEnabled('person@example.org', false);
+  await assert.rejects(s.issueAgentToken('Person@Example.org'), (e) => e instanceof AddressInUse && e.heldBy === 'account');
+  assert.deepEqual(await s.listAgentTokens(), [], 'a token was written for an address with an account');
+
+  await s.issueAgentToken('bot@example.org');
+  await assert.rejects(s.create(' BOT@example.org ', 'A Bot'), (e) => e instanceof AddressInUse && e.heldBy === 'agentToken');
+  assert.equal(await s.find('bot@example.org'), null, 'an account was written for an address holding a token');
+
+  // Revoked, the address is free again: disjoint is about what an address IS now, not what it was.
+  await s.revokeAgentToken('bot@example.org');
+  await s.create('bot@example.org', 'Now A Person', 'a long enough password', false);
+  assert.equal((await s.find('bot@example.org'))?.name, 'Now A Person');
+});
+
+forEachStore('an account and a token written for one address at the same moment: exactly one of them lands', async (s) => {
+  // The row writes, not `create` and `issueAgentToken`: `create` spends a password hash first, so the
+  // two public calls would reach the store one after the other and never race. At the row writes they
+  // do, and a check made outside the write's own turn lets both through here.
+  const addresses = Array.from({ length: 16 }, (_, i) => `both${i}@example.org`);
+  const outcomes = await Promise.all(addresses.map(async (email) => {
+    const token = { email, kind: 'agent', tokenId: randomBytes(12).toString('hex'), hash: Buffer.alloc(32, 3), issuedAt: new Date().toISOString() };
+    return Promise.allSettled([s.insertUser(userRow(email)), s.writeAgentToken(token)]);
+  }));
+  const tokens = new Set((await s.listAgentTokens()).map((a) => a.email));
+  for (const [i, email] of addresses.entries()) {
+    const [account, token] = outcomes[i];
+    assert.equal([account, token].filter((o) => o.status === 'fulfilled').length, 1,
+      `${email}: ${account.status} account, ${token.status} token`);
+    const refused = account.status === 'rejected' ? account.reason : token.reason;
+    assert.ok(refused instanceof AddressInUse, `${email}: refused by something else: ${refused}`);
+    assert.equal(Boolean(await s.find(email)) !== tokens.has(email), true, `${email} is both, or neither`);
+  }
+});
+
+forEachStore('a token row of another kind opens nothing, on a store with no constraint to refuse writing it', async (s) => {
+  // SQLite and Postgres refuse the row itself (CHECK kind = 'agent'); Firestore has no constraint, so
+  // there `fromAgentToken`'s own check on the kind it reads back is all that stands.
+  const tokenId = randomBytes(12).toString('hex');
+  const secret = randomBytes(32).toString('hex');
+  const hash = createHash('sha256').update(secret, 'utf8').digest();
+  const written = await s.writeAgentToken({ email: 'other@example.org', kind: 'session', tokenId, hash, issuedAt: new Date().toISOString() })
+    .then(() => true, () => false);
+  assert.equal(await s.fromAgentToken(`holdrim_agent_${tokenId}_${secret}`), null,
+    `a row of kind session opened as an agent's (written: ${written})`);
 });

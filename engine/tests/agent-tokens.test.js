@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import { rmSync, readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
+import { once } from 'node:events';
 import { UsersSqlite } from '../api/users-sqlite.ts';
 import { AGENT_TOKEN_FORMAT } from '../api/users.ts';
 
@@ -48,4 +50,34 @@ test('an agent token\'s hash is compared in constant time, never with equals or 
   assert.match(body, /timingSafeEqual\(presented, row\.hash\)/, 'the hash is not compared with timingSafeEqual');
   assert.doesNotMatch(body, /\.equals\(|===\s*row\.hash|row\.hash\s*===|\.compare\(/,
     'the hash is compared by something that stops at the first byte that differs');
+});
+
+/**
+ * A second connection mid-write — another process on the same file, as two instances or a CLI next
+ * to the server make it — has to be waited for, not answered with "database is locked": the store's
+ * `BEGIN IMMEDIATE` fails at once otherwise. The lock is held from a worker thread, since
+ * `node:sqlite` waits synchronously and a lock held on this thread could never be released meanwhile.
+ */
+test('an issue waits for another connection\'s write on the same SQLite file instead of failing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-tokens-'));
+  const path = join(dir, 'users.db');
+  const store = new UsersSqlite(path);
+  const holder = new Worker(`
+    const { DatabaseSync } = require('node:sqlite');
+    const { parentPort, workerData } = require('node:worker_threads');
+    const db = new DatabaseSync(workerData);
+    db.exec('BEGIN IMMEDIATE');
+    parentPort.postMessage('locked');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    db.exec('COMMIT');
+    db.close();`, { eval: true, workerData: path });
+  try {
+    await once(holder, 'message');
+    const { agent } = await store.issueAgentToken('bot@example.org');
+    assert.equal(agent.email, 'bot@example.org');
+  } finally {
+    await once(holder, 'exit');
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

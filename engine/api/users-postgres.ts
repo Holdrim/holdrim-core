@@ -1,4 +1,4 @@
-import { UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
+import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
  * People and sessions in Postgres: tables `users` and `sessions`.
@@ -23,8 +23,13 @@ import { UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUs
 const PG_MODULE = 'pg';
 
 /** The slice of `pg` this file touches. Everything else about the driver is none of our business. */
+interface PgClient {
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  release(): void;
+}
 interface PgPool {
   query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  connect(): Promise<PgClient>;
   end(): Promise<void>;
 }
 interface PgModule {
@@ -94,11 +99,43 @@ export class UsersPostgres extends UserStoreBase {
     return (await pool.query(text, values)).rows;
   }
 
+  /**
+   * `body` in one transaction holding the address's own advisory lock, released at its end: every
+   * write that decides what an address is — a token issued, an account created — waits its turn
+   * behind any other for the same address (`writeAgentToken`, users.ts).
+   *
+   * An advisory lock and not `SELECT … FOR UPDATE`: a first issue, or an account next to no token,
+   * has no row to lock yet, and two such writes would both lock nothing and both go ahead. Read
+   * committed is enough under the lock: each statement after it sees what the previous holder
+   * committed. The key is prefixed so it cannot collide with another lock taken on the same database.
+   */
+  async #inAddressTurn<T>(email: string, body: (q: PgClient['query']) => Promise<T>): Promise<T> {
+    const pool = this.#pool ?? await this.#ready;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`holdrim:address:${email}`]);
+      const result = await body((text, values) => client.query(text, values));
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   protected async insertUser(row: StoredUser): Promise<void> {
-    await this.#query(
-      'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
-      + 'VALUES ($1, $2, $3, $4, $5, $6, $7)',
-      [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled]);
+    await this.#inAddressTurn(row.email, async (q) => {
+      if ((await q('SELECT 1 FROM agent_tokens WHERE email = $1', [row.email])).rows.length > 0) {
+        throw new AddressInUse(row.email, 'agentToken');
+      }
+      await q(
+        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
+        + 'VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled]);
+    });
   }
 
   protected async readUser(email: string): Promise<StoredUser | null> {
@@ -167,17 +204,21 @@ export class UsersPostgres extends UserStoreBase {
   }
 
   protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
-    // One statement: the CTE reads the row as it stood before this statement, and the upsert
-    // replaces it, with no moment in between where the address holds two tokens or none. Two issues
-    // racing may both name the same predecessor in the trail; they still leave exactly one row.
-    const [r] = await this.#query(
-      'WITH before AS (SELECT token_id FROM agent_tokens WHERE email = $1) '
-      + 'INSERT INTO agent_tokens (email, kind, token_id, hash, issued_at) VALUES ($1, $2, $3, $4, $5) '
-      + 'ON CONFLICT (email) DO UPDATE SET kind = EXCLUDED.kind, token_id = EXCLUDED.token_id, '
-      + 'hash = EXCLUDED.hash, issued_at = EXCLUDED.issued_at '
-      + 'RETURNING (SELECT token_id FROM before) AS replaced',
-      [row.email, row.kind, row.tokenId, row.hash, row.issuedAt]);
-    return (r?.replaced as string | null | undefined) ?? null;
+    // In the address's turn: a CTE reading the old row inside the upsert is one statement, but not one
+    // turn — two issues racing both read the row as it stood before either, both name the same
+    // predecessor, and a concurrent first issue reads nothing at all and names none.
+    return this.#inAddressTurn(row.email, async (q) => {
+      if ((await q('SELECT 1 FROM users WHERE email = $1', [row.email])).rows.length > 0) {
+        throw new AddressInUse(row.email, 'account');
+      }
+      const [before] = (await q('SELECT token_id FROM agent_tokens WHERE email = $1', [row.email])).rows;
+      await q(
+        'INSERT INTO agent_tokens (email, kind, token_id, hash, issued_at) VALUES ($1, $2, $3, $4, $5) '
+        + 'ON CONFLICT (email) DO UPDATE SET kind = EXCLUDED.kind, token_id = EXCLUDED.token_id, '
+        + 'hash = EXCLUDED.hash, issued_at = EXCLUDED.issued_at',
+        [row.email, row.kind, row.tokenId, row.hash, row.issuedAt]);
+      return (before?.token_id as string | undefined) ?? null;
+    });
   }
 
   protected async readAgentTokenById(tokenId: string): Promise<StoredAgentToken | null> {

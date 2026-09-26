@@ -95,6 +95,27 @@ export class UserInputError extends Error {
   }
 }
 
+/**
+ * An address is a person's or an agent's, never both (issue #122, the owner's decision): no token is
+ * issued for an address with an account, and no account is created for an address holding a token.
+ * `heldBy` names what the address already is.
+ *
+ * Thrown by the store from inside the transaction that would have written the second one, never
+ * decided by a route reading first: a read in the route and a write in the store are two moments, and
+ * an issue and an account creation landing between them would leave the address both. With both, a
+ * disabled person's token keeps writing as them, and an admin can hand a password to the agent's
+ * address and act under its person id in a session nobody marked as an agent.
+ */
+export class AddressInUse extends Error {
+  readonly heldBy: 'account' | 'agentToken';
+
+  constructor(email: string, heldBy: 'account' | 'agentToken') {
+    super(`${email} already ${heldBy === 'account' ? 'has an account' : 'holds an agent token'}`);
+    this.name = 'AddressInUse';
+    this.heldBy = heldBy;
+  }
+}
+
 /** A person, as the rest of the service sees them. No secret in here. */
 export interface User {
   email: string;
@@ -125,7 +146,10 @@ export interface User {
  * know whether the store is local is a caller that breaks when the store changes.
  */
 export interface UserStore {
-  /** Creates the person. Returns the password — the generated one when none is given. */
+  /**
+   * Creates the person. Returns the password — the generated one when none is given. Throws
+   * `AddressInUse` for an address holding an agent token.
+   */
   create(email: string, name: string, password?: string, mustChange?: boolean): Promise<string>;
   /**
    * Checks the password. Returns the person, or null — without saying whether the e-mail exists,
@@ -195,7 +219,8 @@ export interface UserStore {
    * A new agent token for `email` (docs/ROLES.md, section 4), returned to be shown ONCE. One per
    * address: whatever token the address held before stops working the moment this one is written,
    * because it is the same row, overwritten. `replaced` is the previous token's public id, for the
-   * trail, or null when there was none — never its secret, which nothing here can give back.
+   * trail, or null when there was none — never its secret, which nothing here can give back. Throws
+   * `AddressInUse` for an address with an account, enabled or not.
    */
   issueAgentToken(email: string): Promise<{ token: string; agent: AgentToken; tokenId: string; replaced: string | null }>;
   /** Removes the address's token; the public id of the one removed, or null when it held none. */
@@ -254,6 +279,10 @@ export interface StoredSession {
  */
 export abstract class UserStoreBase implements UserStore {
   // ------------------------------------------------------------- rows: one per database
+  /**
+   * Inserts the person, refusing an address already taken. Throws `AddressInUse` when the address
+   * holds an agent token, checked in the same per-address turn `writeAgentToken` takes (see there).
+   */
   protected abstract insertUser(row: StoredUser): Promise<void>;
   protected abstract readUser(email: string): Promise<StoredUser | null>;
   /**
@@ -297,9 +326,14 @@ export abstract class UserStoreBase implements UserStore {
    */
   protected abstract deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void>;
   /**
-   * Writes the address's token row, REPLACING any row the address already had, in one statement.
-   * Returns the public id of the row it replaced, or null. One statement and not delete-then-insert:
-   * between the two, a second issue for the same address could land and leave two live tokens.
+   * Writes the address's token row, REPLACING any row the address already had, and returns the public
+   * id of the row it replaced, or null. Throws `AddressInUse` when the address has an account.
+   *
+   * One transaction, serialized per address, holding the check, the read and the write: never
+   * delete-then-insert, or a second issue between the two leaves two live tokens; and never a read
+   * outside the write's turn, or two issues racing both name the same predecessor and no issue in the
+   * trail names the token the other one stopped. `insertUser` takes the same per-address turn, so an
+   * account and a token cannot both be written for one address, whichever comes first.
    */
   protected abstract writeAgentToken(row: StoredAgentToken): Promise<string | null>;
   protected abstract readAgentTokenById(tokenId: string): Promise<StoredAgentToken | null>;

@@ -1,5 +1,5 @@
 import { Firestore, type DocumentData, type WhereFilterOp } from '@google-cloud/firestore';
-import { UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
+import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
  * People and sessions in Firestore: collections `users` and `sessions`.
@@ -33,10 +33,17 @@ export class UsersFirestore extends UserStoreBase {
   }
 
   protected async insertUser(row: StoredUser): Promise<void> {
-    await this.#db.collection('users').doc(row.email).create({
-      email: row.email, name: row.name, salt: row.salt, hash: row.hash,
-      must_change: row.mustChangePassword, created_at: row.createdAt,
-      enabled: row.enabled,
+    // A transaction that reads the address's token document, so a token issued between that read
+    // and this create aborts one of the two, and the retry sees the other (`writeAgentToken`,
+    // users.ts). `create`, still, so an existing account refuses the write as it always did.
+    const token = this.#db.collection('agent_tokens').doc(row.email);
+    await this.#db.runTransaction(async (tx) => {
+      if ((await tx.get(token)).exists) throw new AddressInUse(row.email, 'agentToken');
+      tx.create(this.#db.collection('users').doc(row.email), {
+        email: row.email, name: row.name, salt: row.salt, hash: row.hash,
+        must_change: row.mustChangePassword, created_at: row.createdAt,
+        enabled: row.enabled,
+      });
     });
   }
 
@@ -149,11 +156,14 @@ export class UsersFirestore extends UserStoreBase {
   /**
    * The document id is the address, as in `users`: one document per agent, so a second issue
    * OVERWRITES the first and the old token has no document left to be found by. Read and written in
-   * one transaction so the id it reports as replaced is the one it actually replaced.
+   * one transaction so the id it reports as replaced is the one it actually replaced, and so an
+   * account created for the address after the read aborts it (`insertUser` reads this document).
    */
   protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
     const ref = this.#db.collection('agent_tokens').doc(row.email);
+    const account = this.#db.collection('users').doc(row.email);
     return this.#db.runTransaction(async (tx) => {
+      if ((await tx.get(account)).exists) throw new AddressInUse(row.email, 'account');
       const before = (await tx.get(ref)).data();
       tx.set(ref, { email: row.email, kind: row.kind, token_id: row.tokenId, hash: row.hash, issued_at: row.issuedAt });
       return (before?.token_id as string | undefined) ?? null;

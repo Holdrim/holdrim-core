@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
+import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
  * People and sessions in SQLite, on the built-in `node:sqlite` — **no external dependency**.
@@ -24,6 +24,11 @@ export class UsersSqlite extends UserStoreBase {
     this.#db = new DatabaseSync(path);
     // WAL: a read does not block a write. Every page load checks a session.
     this.#db.exec('PRAGMA journal_mode = WAL');
+    // Wait for another connection's write instead of failing at once, as the event store does
+    // (store-sqlite.ts). Without it, the `BEGIN IMMEDIATE` below answers "database is locked" the
+    // moment a second process on this file is mid-write, and an issue or an account creation fails
+    // for nothing but timing.
+    this.#db.exec('PRAGMA busy_timeout = 5000');
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS users (
         email       TEXT PRIMARY KEY,
@@ -56,11 +61,10 @@ export class UsersSqlite extends UserStoreBase {
   }
 
   protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
-    // IMMEDIATE, so the read of the row being replaced and the write that replaces it see the same
-    // file: another process on it could otherwise slip its own issue between the two, and the trail
-    // would name the wrong predecessor. The upsert alone already guarantees one row per address.
-    this.#db.exec('BEGIN IMMEDIATE');
-    try {
+    return this.#immediate(() => {
+      if (this.#db.prepare('SELECT 1 FROM users WHERE email = ?').get(row.email)) {
+        throw new AddressInUse(row.email, 'account');
+      }
       const before = this.#db.prepare('SELECT token_id FROM agent_tokens WHERE email = ?').get(row.email) as
         { token_id: string } | undefined;
       this.#db.prepare(
@@ -68,8 +72,22 @@ export class UsersSqlite extends UserStoreBase {
         + 'ON CONFLICT(email) DO UPDATE SET kind = excluded.kind, token_id = excluded.token_id, '
         + 'hash = excluded.hash, issued_at = excluded.issued_at',
       ).run(row.email, row.kind, row.tokenId, row.hash, row.issuedAt);
-      this.#db.exec('COMMIT');
       return before?.token_id ?? null;
+    });
+  }
+
+  /**
+   * `body` inside `BEGIN IMMEDIATE`, so its reads and its write see the same file: another process on
+   * it could otherwise slip an issue or an account in between, and the trail would name the wrong
+   * predecessor, or one address would end up both a person and an agent (`writeAgentToken`, users.ts).
+   * Within this process nothing interleaves anyway: `body` is synchronous, with no await to yield at.
+   */
+  #immediate<T>(body: () => T): T {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = body();
+      this.#db.exec('COMMIT');
+      return result;
     } catch (error) {
       this.#db.exec('ROLLBACK');
       throw error;
@@ -95,11 +113,16 @@ export class UsersSqlite extends UserStoreBase {
   }
 
   protected async insertUser(row: StoredUser): Promise<void> {
-    this.#db.prepare(
-      'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
-      + 'VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(row.email, row.name, row.salt, row.hash, row.mustChangePassword ? 1 : 0, row.createdAt,
-      row.enabled ? 1 : 0);
+    this.#immediate(() => {
+      if (this.#db.prepare('SELECT 1 FROM agent_tokens WHERE email = ?').get(row.email)) {
+        throw new AddressInUse(row.email, 'agentToken');
+      }
+      this.#db.prepare(
+        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(row.email, row.name, row.salt, row.hash, row.mustChangePassword ? 1 : 0, row.createdAt,
+        row.enabled ? 1 : 0);
+    });
   }
 
   protected async readUser(email: string): Promise<StoredUser | null> {
