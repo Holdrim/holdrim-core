@@ -80,6 +80,36 @@ export const GUARDS: Record<string, string> = {
   events_no_low_rowid: `AFTER INSERT ON events
     WHEN NEW.rowid < (SELECT MAX(rowid) FROM events)
     BEGIN SELECT RAISE(ABORT, 'an event is not inserted below one already held: the trail is the product'); END`,
+  // holdrim#109: `events_no_low_rowid` above lets an insert land anywhere ABOVE the highest rowid
+  // held, and one place up there is a trap. A rowid tops out at 9223372036854775807, and once a row
+  // holds that, SQLite picks a random free rowid for every later insert that names none — always
+  // below that row — so `events_no_low_rowid` refuses every append after it, the owner's ✓ included,
+  // and tells the operator each genuine write is a forgery. The row cannot be deleted, so the only
+  // way out would be dropping a guard. So an insert may name no rowid above the one SQLite would
+  // have picked itself, MAX(rowid) + 1: with `events_no_low_rowid` beside it, every insert takes
+  // exactly that one, and nobody can park an event at the ceiling.
+  //
+  // AFTER, for the reason `events_no_low_rowid` is: in a BEFORE trigger NEW.rowid is still -1 for an
+  // insert that leaves the rowid to SQLite, and a BEFORE version of this would refuse every normal
+  // append. By AFTER, the row is already in the table, so the maximum it is compared with leaves
+  // it out (`rowid <> NEW.rowid`): that is the table's maximum before this insert wherever the row
+  // landed, so an insert below it trips `events_no_low_rowid` alone, with that guard's own words,
+  // and never this one as well. SQLite still reads it as one step in from the end of the rowid
+  // tree, not a scan of the table.
+  //
+  // On an empty table the bound is 1, not none: 1 is the rowid SQLite gives the first insert that
+  // names none, so a genuine first append always passes, and an empty `events` is not a fresh file
+  // — `people` can already hold rows, and one event parked at the ceiling before the first real one
+  // traps every append after it just the same. A first rowid of 1 or below passes: nothing is held
+  // yet for it to sort under, and the rowids above it are all still free.
+  //
+  // MAX + 1 on a table already parked at the ceiling is a REAL in SQLite, not an overflow error, so
+  // this guard neither refuses nor excuses anything there: a file parked before it existed still
+  // refuses every append, through `events_no_low_rowid`. This stops the parking, and does not undo
+  // one that already happened.
+  events_no_high_rowid: `AFTER INSERT ON events
+    WHEN NEW.rowid > IFNULL((SELECT MAX(rowid) FROM events WHERE rowid <> NEW.rowid), 0) + 1
+    BEGIN SELECT RAISE(ABORT, 'an event is not inserted past the next rowid: the trail is the product'); END`,
   // A row may only lose its e-mail, as an event may not change at all: an UPDATE that does anything
   // but empty the address is refused, and so is every DELETE. A re-pointed row would hand every
   // event behind its id to somebody else (docs/PRIVACY.md, sections 1 and 3). The rowid may not move
@@ -146,7 +176,7 @@ export const GUARDS: Record<string, string> = {
  *
  * A guard from `guards` that is not held at all is put back the same way — but only said out loud
  * once the database is not a first install. That is NOT "at least one guard is already held": a
- * fresh file with one foreign trigger and none of ours would then report all nine of ours as
+ * fresh file with one foreign trigger and none of ours would then report every one of ours as
  * missing on its very first boot, and — the sharper failure — someone who drops every guard of a
  * database that already holds an approval, deletes it, and reopens would read as a first install
  * too, since zero of our guards being held is exactly what a first install also looks like. So

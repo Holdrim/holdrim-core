@@ -166,7 +166,7 @@ test('a fresh file with a foreign trigger already on it is still a first install
   // Round 1, finding 1(b): a database can hold a trigger that is not one of GUARDS before this
   // store ever opens it — nothing stops a name colliding by accident, or another tool writing to
   // the same file first. Counting every held trigger, ours or not, as evidence this is not a first
-  // install would report all nine of ours "missing" on a boot that never installed anything yet;
+  // install would report every one of ours "missing" on a boot that never installed anything yet;
   // only a trigger BY ONE OF OUR NAMES may say that. The schema here is exactly what the real
   // constructor would create — `CREATE TABLE IF NOT EXISTS` is a no-op on it — so the only thing
   // this file has that a truly brand-new one would not is the one foreign trigger.
@@ -234,7 +234,7 @@ test('events and people emptied but a text left behind is not a first install ei
     'and each is a structured WARNING too, one line per guard');
 }));
 
-test('all but one guard dropped: the other eight are named, the one left alone is not', withFile(async (path, said) => {
+test('all but one guard dropped: every other one is named, the one left alone is not', withFile(async (path, said) => {
   const store = new SqliteEventStore(path);
   await store.append(approval, 'owner@example.org');
   await store.close();
@@ -272,9 +272,10 @@ test('a database the previous version made: the changed guards are replaced, the
   // The schema and the triggers exactly as the version before this one wrote them, spacing
   // included: SQLite keeps the text as written, so a comparison that minds spacing would replace
   // all five, and one that ignores the text would replace none. This fixture also predates
-  // events_no_replace, events_no_low_rowid and the whole texts table — the guard set an older
-  // release shipped with, not tampering — so those five are said as missing, the same as any other
-  // guard this open does not find, rather than staying the silent case (holdrim#89).
+  // events_no_replace, events_no_low_rowid, events_no_high_rowid and the whole texts table — the
+  // guard set an older release shipped with, not tampering — so those six are said as missing,
+  // the same as any other guard this open does not find, rather than staying the silent case
+  // (holdrim#89).
   outside(path, `
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, type TEXT NOT NULL, page TEXT NOT NULL, block TEXT, fingerprint TEXT,
@@ -296,7 +297,7 @@ test('a database the previous version made: the changed guards are replaced, the
   await reopen(path);
   const named = (line) => line.match(/guard "(\w+)"/)?.[1];
   assert.deepEqual(said.map(named).sort(),
-    ['events_no_low_rowid', 'events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
+    ['events_no_high_rowid', 'events_no_low_rowid', 'events_no_replace', 'people_no_replace', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_update'],
     'the guards whose text changed are replaced, the ones this fixture never had are installed, and each is said once');
   const store = new SqliteEventStore(path);
   const ana = await store.personFor('ana@example.org');
@@ -735,4 +736,127 @@ test('[sqlite] the --db reader compares the guards in the snapshot it reads the 
   assert.ok(!forgedRead || source.guardsTampered, 'a row written past a dropped guard is never read as guarded');
   assert.equal(forgedRead, false, 'the rows are from the snapshot the guards were compared in, not a later one');
   assert.equal(source.guardsTampered, false, 'and the guards are from the snapshot the rows were read in');
+}));
+
+// ===================================================================== holdrim#109: the rowid ceiling
+// One event at the largest rowid SQLite has, accepted, sends every later append to a random rowid
+// below it, where `events_no_low_rowid` refuses each one — the owner's ✓ included — as a forgery,
+// and the row cannot be deleted. `events_no_high_rowid` holds every insert to MAX(rowid) + 1.
+
+/** The largest rowid SQLite has, as SQL: a JavaScript number cannot hold it exactly. */
+const CEILING = '9223372036854775807';
+const PAST_NEXT = /not inserted past the next rowid/;
+/** An insert naming its own rowid, the way anyone holding the file could write one. */
+const insertAt = (rowid, id, verb = 'INSERT') => `${verb} INTO events (rowid, id, type, page, author, happened_at)
+  VALUES (${rowid}, '${id}', 'approval', 'A01', 'p_000000000000000000000000', '2026-01-01T00:00:00.000Z')`;
+const rowids = (path) => {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try { return db.prepare('SELECT rowid FROM events ORDER BY rowid').all().map((r) => Number(r.rowid)); } finally { db.close(); }
+};
+
+test('an event parked at the largest rowid is refused however it is inserted, and the appends after it still go through', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  await store.append(approval, 'owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  try {
+    // REPLACE conflicts with nothing here — the id and the rowid are both free, so
+    // `events_no_replace` lets it through — and OR IGNORE does not swallow a trigger's RAISE(ABORT):
+    // every spelling of the insert reaches this guard, and each is refused by it, by name.
+    for (const verb of ['INSERT', 'INSERT OR REPLACE', 'REPLACE', 'INSERT OR IGNORE']) {
+      assert.throws(() => db.exec(insertAt(CEILING, 'parked', verb)), PAST_NEXT, `${verb} at the largest rowid is refused`);
+    }
+    assert.equal(db.prepare("SELECT 1 FROM events WHERE id = 'parked'").get(), undefined, 'and nothing of it stays');
+  } finally {
+    db.close();
+  }
+  const again = new SqliteEventStore(path);
+  try {
+    await again.append({ ...approval, block: 'A01.1.2' }, 'owner@example.org');
+    await again.append({ ...approval, block: 'A01.1.3' }, 'owner@example.org');
+  } finally {
+    await again.close();
+  }
+  assert.deepEqual(rowids(path), [1, 2, 3], 'every append takes the next rowid, none a random one below a parked row');
+}));
+
+test('an explicit rowid of MAX + 2 is refused, MAX + 1 goes through, and a normal append takes the one after', withFile(async (path) => {
+  const store = new SqliteEventStore(path);
+  await store.append(approval, 'owner@example.org');
+  await store.append({ ...approval, block: 'A01.1.2' }, 'owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  try {
+    assert.throws(() => db.exec(insertAt(4, 'skips-one')), PAST_NEXT, 'one free rowid skipped is already past the next one');
+    assert.doesNotThrow(() => db.exec(insertAt(3, 'next')), 'MAX + 1 is exactly the rowid an append would have taken');
+  } finally {
+    db.close();
+  }
+  const again = new SqliteEventStore(path);
+  try {
+    await assert.doesNotReject(again.append({ ...approval, block: 'A01.1.3' }, 'owner@example.org'), 'a normal append still goes through');
+  } finally {
+    await again.close();
+  }
+  assert.deepEqual(rowids(path), [1, 2, 3, 4]);
+}));
+
+test('on an empty events table the bound is 1: rowid 2 and the ceiling are refused, rowid 1 goes through', withFile(async (path) => {
+  // No event yet, but not a fresh file: a person row is already there. An empty `events` is no
+  // reason to leave the ceiling open — one event parked there first traps every append after it.
+  const store = new SqliteEventStore(path);
+  await store.personFor('ana@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  try {
+    assert.throws(() => db.exec(insertAt(CEILING, 'parked-first')), PAST_NEXT, 'the ceiling is refused on an empty table too');
+    assert.throws(() => db.exec(insertAt(2, 'skips-one')), PAST_NEXT, 'rowid 2 skips the 1 SQLite itself would give');
+    assert.doesNotThrow(() => db.exec(insertAt(1, 'first')), 'rowid 1 is the one a first append takes');
+  } finally {
+    db.close();
+  }
+}));
+
+test('events_no_high_rowid missing from a file, as an older version left it or as someone dropped it: named by guardMismatches and the --db reader, then put back by the next boot, out loud once', withFile(async (path, said, logged) => {
+  const store = new SqliteEventStore(path);
+  await store.append(approval, 'owner@example.org');
+  await store.close();
+  // A file a version before this guard made, holding events, looks exactly like this one: every
+  // other guard in place and this one not. Neither reader can tell the two apart from the file.
+  outside(path, 'DROP TRIGGER events_no_high_rowid');
+  const ro = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(ro), [{ name: 'events_no_high_rowid', kind: 'missing' }]);
+  } finally {
+    ro.close();
+  }
+  const errors = [];
+  const error = console.error;
+  console.error = (line) => errors.push(line);
+  try {
+    const source = new Source({ db: path });
+    await source.events();
+    assert.equal(source.guardsTampered, true, 'the CLI flags it until a server of this version has opened the file');
+    assert.ok(errors.some((l) => /the database's guard "events_no_high_rowid" is missing; read as it is, nothing repaired/.test(l)),
+      'in the words an operator who upgraded reads first');
+  } finally {
+    console.error = error;
+  }
+  await reopen(path);
+  assert.deepEqual(said.map(classify).filter(Boolean), [{ name: 'events_no_high_rowid', kind: 'missing' }],
+    'the next boot names it as missing, the one guard it installs');
+  assert.deepEqual(logged.map((l) => ({ severity: l.severity, event: l.event, guard: l.guard })),
+    [{ severity: 'WARNING', event: 'sqlite_guard_missing', guard: 'events_no_high_rowid' }]);
+  const db = new DatabaseSync(path);
+  try {
+    assert.throws(() => db.exec(insertAt(CEILING, 'parked')), PAST_NEXT, 'and it is back in force');
+  } finally {
+    db.close();
+  }
+  said.length = 0;
+  await reopen(path);
+  assert.deepEqual(said, [], 'said once: the boot after that finds it in place');
+  const after = new Source({ db: path });
+  await after.events();
+  assert.equal(after.guardsTampered, false, 'and the CLI reads the file as guarded again');
 }));

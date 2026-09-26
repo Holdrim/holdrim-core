@@ -15,7 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { UsersSqlite } from '../api/users-sqlite.ts';
 import { ephemeralUserStoreWarning, looksEphemeral, isEmailAddress, maskCredentials } from '../api/users.ts';
 import { PasswordIdentity, SESSION_COOKIE } from '../api/identity-password.ts';
-import { SqliteEventStore } from '../api/store-sqlite.ts';
+import { SqliteEventStore, GUARDS } from '../api/store-sqlite.ts';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'holdrim-users-'));
 
@@ -198,12 +198,17 @@ test('the database REFUSES an insert whose rowid lands below one already held, e
       'rowid 0 is free too, and just as much below it');
     // A gap opened by an earlier explicit, higher rowid is free, and low, without being negative —
     // distinguishing this guard from `events_no_replace`, which only ever sees a HELD rowid as a
-    // conflict, never a free one that merely happens to be low.
+    // conflict, never a free one that merely happens to be low. This version never opens such a
+    // gap (`events_no_high_rowid` holds every insert to MAX + 1), but a file written before that
+    // guard existed can hold one, so it is opened here with that guard lifted, and put back by its
+    // exact text before the refusal this test is for.
+    db.exec('DROP TRIGGER events_no_high_rowid');
     insertAt(100, 'above-first');
+    db.exec(`CREATE TRIGGER events_no_high_rowid ${GUARDS.events_no_high_rowid}`);
     assert.throws(() => insertAt(50, 'forged-gap'), /not inserted below one already held/,
       'a free rowid below the current maximum is refused too, not only a negative one');
-    // Exactly what a real append with an explicit, larger rowid does: the new highest, allowed.
-    assert.doesNotThrow(() => insertAt(200, 'above-again'), 'an explicit rowid above the current maximum is allowed');
+    // Exactly the rowid a real append takes: the next one, the new highest, allowed.
+    assert.doesNotThrow(() => insertAt(101, 'above-again'), 'an explicit rowid of the current maximum plus one is allowed');
     assert.equal(db.prepare('SELECT COUNT(*) c FROM events').get().c, 3,
       'only the original row and the two genuinely-higher ones landed; every forged one was rolled back');
     db.close();

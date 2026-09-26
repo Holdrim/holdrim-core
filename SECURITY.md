@@ -71,7 +71,14 @@ Worth knowing before you run it:
     INTEGER PRIMARY KEY, so it is a plain rowid table SQLite's own docs allow `VACUUM` to renumber;
     today's SQLite keeps that renumbering in RELATIVE order, which is what the boundary and this
     guard both rest on, and neither this file nor the code that reads it can make a future SQLite
-    promise that. What no guard closes: an attacker who also drops and restores `events_no_delete`
+    promise that. Its counterpart, `events_no_high_rowid`
+    ([holdrim#109](https://github.com/Holdrim/holdrim-core/issues/109)), refuses an insert naming a
+    rowid above `MAX(rowid) + 1`, or above 1 on an empty table: without it, one event parked at the
+    largest rowid SQLite has sends every later append to a random rowid below it, where
+    `events_no_low_rowid` refuses each one — the owner's ✓ included — calling a genuine write a
+    forgery, and the parked row cannot be deleted. Between the two, an insert takes exactly the
+    next rowid. That stops the parking, not a file parked before the guard existed, which stays
+    unable to append until someone recovers it by hand. What no guard closes: an attacker who also drops and restores `events_no_delete`
     and `events_no_low_rowid` between two reads (the same gap `sqlite_guard_missing` already admits
     for every other one: the server on its next boot, and the CLI's `--db` reader on every read,
     name a guard still dropped, and neither names one put back) can delete every hashed row and
