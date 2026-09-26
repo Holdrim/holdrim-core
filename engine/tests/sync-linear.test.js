@@ -14,7 +14,7 @@ import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { readBlocks, spliceAll } from '../cli/pages.ts';
-import { loadRegistry, sync } from '../cli/validation.ts';
+import { check, loadRegistry, sync } from '../cli/validation.ts';
 
 const OWNER = 'owner@example.org';
 const BASELINE = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER,
@@ -282,8 +282,8 @@ test('sync prints each ✓ in the order it was given, not the order its page was
  * (holdrim#144, round 3): here `X02.html` is deleted right after `X01`'s page settles, so `markAll`'s
  * own read of it throws ENOENT. The run has to finish rather than abort mid-page — `a` sealed on disk
  * AND recorded, `b` refused cleanly as "not found" through `mark`'s own path, which re-lists the
- * sheet files and sees it is really gone — where a plain `readFileSync` failing here would leave `a`
- * sealed on disk with nothing in the registry, because `saveRegistry` never runs.
+ * sheet files and sees it is really gone — where a plain `readFileSync` failing here would abort the
+ * whole run over one page that is simply gone.
  */
 test('sync completes when a page is deleted mid-run, sealing and recording the others and refusing the missing one',
   async (t) => {
@@ -308,6 +308,60 @@ test('sync completes when a page is deleted mid-run, sealing and recording the o
     assert.equal(r.refused, 1, lines.join('\n'));
     assert.ok(lines.some((l) => l.includes('✗ b: not found; nothing written')), lines.join('\n'));
     assert.deepEqual(Object.keys(loadRegistry(tmp)), ['a']);
+  });
+
+/**
+ * A read error other than ENOENT aborts the run (holdrim#148): here `X02.html` becomes a folder right
+ * after `X01`'s page settles, so `markAll`'s read of it throws EISDIR and `sync` throws with it. By
+ * then `a`'s seal is on disk. The registry has to hold `a`, with the event its ✓ came from, and
+ * nothing for `b` or `c`, whose pages were never written — saved only at the end of a run that
+ * finishes, it holds nothing, and once the folder is gone `check` calls `a`'s genuine ✓ "marked
+ * without a registry entry".
+ */
+test('sync that aborts half-way records exactly the seals already written, and check finds no seal without an entry',
+  async (t) => {
+    const x02 = '<main><p data-id="b">approved b</p></main>';
+    const tmp = pages(t, {
+      'X01.html': '<main><p data-id="a">approved a</p></main>',
+      'X02.html': x02,
+      'X03.html': '<main><p data-id="c">approved c</p></main>',
+    });
+    const events = await approvedInOrder(tmp, ['a', 'b', 'c']);
+    const lines = [];
+    const log = t.mock.method(console, 'log', (...args) => {
+      lines.push(args.join(' '));
+      if (String(args[0]).includes('✓ a validated')) {
+        unlinkSync(join(tmp, 'p', 'X02.html'));
+        mkdirSync(join(tmp, 'p', 'X02.html'));
+      }
+    });
+    try {
+      await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+        { code: 'EISDIR' }, 'the run still fails loudly');
+    } finally {
+      log.mock.restore();
+    }
+
+    const registry = loadRegistry(tmp);
+    assert.deepEqual(Object.keys(registry), ['a'], lines.join('\n'));
+    assert.equal(registry.a.event, 'e0');
+    assert.equal(registry.a.fingerprint, events[0].fingerprint);
+    assert.match(readFileSync(join(tmp, 'p', 'X01.html'), 'utf8'), /data-validated="2026-09-22"/);
+    assert.doesNotMatch(readFileSync(join(tmp, 'p', 'X03.html'), 'utf8'), /data-validated/, 'c was never reached');
+
+    // The folder cleared away and the page put back, as a person would before running `check`.
+    rmSync(join(tmp, 'p', 'X02.html'), { recursive: true });
+    writeFileSync(join(tmp, 'p', 'X02.html'), x02);
+    const said = [];
+    const quiet = t.mock.method(console, 'log', (...args) => { said.push(args.join(' ')); });
+    let problems;
+    try {
+      problems = await check(tmp);
+    } finally {
+      quiet.mock.restore();
+    }
+    assert.ok(!said.some((l) => l.includes('NO registry entry')), said.join('\n'));
+    assert.equal(problems, 0, said.join('\n'));
   });
 
 /**

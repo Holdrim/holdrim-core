@@ -436,11 +436,12 @@ interface SiteStamp { id: string; when: string; event: string; expected: string;
  * while the run is under way is stamped past, where `mark` refuses the whole page, and a block moved
  * off the page is looked for where it no longer is. The whole text is compared, through its digest:
  * an edit that keeps the page's length is an edit all the same. A page deleted since it was located is
- * treated the same way, rather than letting the read throw and abort the run before the pages already
- * written are recorded: `mark`'s own path re-lists the sheet files and resolves the id fresh, so a
- * page genuinely gone is refused as "not found", exactly as it always was. Any other read error — a
- * page turned into a folder, say — still aborts: `mark`'s path would meet it too, and saying it
- * loudly beats claiming to handle it.
+ * treated the same way, rather than letting the read throw and abort the whole run over one ✓:
+ * `mark`'s own path re-lists the sheet files and resolves the id fresh, so a page genuinely gone is
+ * refused as "not found", exactly as it always was. Any other read error — a page turned into a
+ * folder, say — still aborts: `mark`'s path would meet it too, and saying it loudly beats claiming to
+ * handle it. `sync` saves the registry on the way out either way, so the pages already written keep
+ * their entries (holdrim#148).
  *
  * ⚠️ The digest only re-checks the page THIS id was located on, once, at the moment its turn comes —
  * not every other page, and not again afterwards. A second block gaining this id, or a `DATA-ID`
@@ -644,8 +645,20 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
   } finally {
     // A run that throws half-way still shows what it had to say about every ✓ it got to.
     for (const slot of sorted.keys()) if (slot >= printed) for (const line of lines[slot]) console.log(line);
+    // Saved whether the run finished or threw: saved only on success, an abort half-way — a page
+    // turned into a folder, which `markAll` lets propagate — leaves the seals of the pages already
+    // written on disk with no entry, and `check` calls each of those genuine ✓ "marked without a
+    // registry entry" for as long as whatever aborted the run is still there (holdrim#148). Nothing
+    // unwritten gets in: `markWith` and `markAll` add an entry only once its page's write has
+    // returned. The error still propagates, so the CLI still exits non-zero.
+    //
+    // Not the registry first and the page after: a process killed between the two would leave an
+    // entry for a seal no page carries — a lock recorded for text the ✓ never reached. This order,
+    // killed there, leaves the seal without the entry, which `check` flags and the next `sync`
+    // records again from the owner's ✓. Nor once per page: every page would rewrite the whole
+    // registry, and a sync would grow with pages times entries again (holdrim#144).
+    saveRegistry(root, registry);
   }
-  saveRegistry(root, registry);
   console.log(`${added} new · ${unchanged} already there · ${expired} ✓ expired · ${refused} refused · `
     + `${Object.keys(registry).length} validated in all`);
   if (refused) console.log(`⚠ ${refused} ✓ could not be stamped safely — see the messages above; this run exits non-zero`);
