@@ -334,8 +334,9 @@ test('list --json prints parseable JSON on stdout and the CRITICAL line on stder
   assert.equal(r.code, 1, r.stdout + r.stderr);
   const doc = JSON.parse(r.stdout); // throws if the CRITICAL line leaked onto stdout
   assert.equal(doc.tampered, true);
-  assert.match(r.stderr, /CRITICAL/);
-  assert.doesNotMatch(r.stdout, /CRITICAL/);
+  // `text_tampered`, not the bare word CRITICAL: `warnOfTampering` prints its own CRITICAL notice on
+  // stderr whenever `tampered` is true, so matching the word alone passes with this line gone.
+  assert.match(r.stderr, /"event":"text_tampered"/);
 });
 
 test('list exits 0 and carries `tampered: false` when nothing is tampered, on both paths', async (t) => {
