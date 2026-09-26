@@ -42,5 +42,19 @@ export type LogLevel = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
  */
 export function log(level: LogLevel, event: string, extra: Record<string, unknown> = {},
                     write: (line: string) => void = console.log) {
-  write(JSON.stringify({ severity: level, event, time: new Date().toISOString(), ...extra }));
+  write(jsonForTerminal({ severity: level, event, time: new Date().toISOString(), ...extra }));
+}
+
+/**
+ * `JSON.stringify`, with everything a terminal still acts on written as `\uXXXX`, so a value that
+ * came from outside — a trigger's name in the events file, say — is printed and never obeyed.
+ * `JSON.stringify` already escapes the quote, the backslash and the C0 controls (U+0000–U+001F).
+ * It leaves raw DEL and the C1 controls (U+007F–U+009F; U+009B alone starts a sequence, as ESC [
+ * does), the bidirectional marks, embeddings, overrides and isolates, which can make a name read as
+ * another, and the two Unicode line breaks — so those are escaped here too. The result is still the
+ * same JSON: parsed, it gives back exactly the value that went in.
+ */
+export function jsonForTerminal(value: unknown): string {
+  return JSON.stringify(value).replace(/[\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }

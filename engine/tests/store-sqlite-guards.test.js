@@ -637,74 +637,102 @@ test('guardMismatches names what installGuards would repair, foreign first, on a
   }
 }));
 
+/**
+ * `events_no_replace` recreated as `inert`, next to whatever `decoy` SQL makes that text parse, and
+ * then: the bypass is real — REPLACE onto the last approval's rowid, under a new id, erases it, which
+ * the real guard refuses — and all three readers of the comparison still catch it: `guardMismatches`
+ * calls it changed, the CLI's `--db` reader flags it, and the server replaces it, saying so. Each
+ * caller's `inert` is a text a wrong `flat()` would call the same as the real guard.
+ */
+async function assertNeuteredReplaceCaught(path, said, decoy, inert) {
+  assert.notEqual(inert, GUARDS.events_no_replace, 'the substitute has to differ for this to prove anything');
+  const store = new SqliteEventStore(path);
+  await store.append(approval, 'owner@example.org');
+  const last = await store.append({ ...approval, block: 'A01.1.2' }, 'owner@example.org');
+  await store.close();
+  outside(path, `${decoy}; DROP TRIGGER events_no_replace; CREATE TRIGGER events_no_replace ${inert};`);
+  const raw = new DatabaseSync(path);
+  try {
+    const { rowid } = raw.prepare('SELECT rowid FROM events WHERE id = ?').get(last.id);
+    raw.prepare(`INSERT OR REPLACE INTO events (rowid, id, type, page, author, happened_at)
+      VALUES (?, 'overwritten', 'comment', 'A01', 'x', '2026-01-01T00:00:00.000Z')`).run(rowid);
+    assert.equal(raw.prepare('SELECT 1 FROM events WHERE id = ?').get(last.id), undefined, 'the approval is gone');
+  } finally {
+    raw.close();
+  }
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(db), [{ name: 'events_no_replace', kind: 'changed' }]);
+  } finally {
+    db.close();
+  }
+  const source = new Source({ db: path });
+  await source.events();
+  assert.equal(source.guardsTampered, true, 'the CLI reader flags it');
+  await reopen(path);
+  assert.deepEqual(said.map(classify).filter(Boolean), [{ name: 'events_no_replace', kind: 'replaced' }],
+    'and the server replaces it, saying so');
+}
+
 test('a guard rewritten with U+00A0 for one space is changed, not the same text: named by guardMismatches, replaced by installGuards, flagged by the --db reader',
   withFile(async (path, said) => {
-    const store = new SqliteEventStore(path);
-    await store.append(approval, 'owner@example.org');
-    const last = await store.append({ ...approval, block: 'A01.1.2' }, 'owner@example.org');
-    await store.close();
     // SQLite reads U+00A0 as part of an identifier, so `rowid\u00A0` is a column — added, and
     // always NULL — and the rowid half of the guard compares NULL with everything: it holds nothing.
+    // A `flat()` built on `\s` reads the U+00A0 as a space.
     const nbsp = '\u00A0';
-    const inert = GUARDS.events_no_replace.replace('OR rowid = NEW.rowid', `OR rowid${nbsp}= NEW.rowid`);
-    assert.notEqual(inert, GUARDS.events_no_replace, 'the substitute has to differ for this to prove anything');
-    outside(path, `ALTER TABLE events ADD COLUMN "rowid${nbsp}";
-      DROP TRIGGER events_no_replace; CREATE TRIGGER events_no_replace ${inert};`);
-    // It is a real bypass, not only a different byte: REPLACE onto the last approval's rowid, under
-    // a new id, now erases that approval — the real guard refuses exactly this.
-    const raw = new DatabaseSync(path);
-    try {
-      const { rowid } = raw.prepare('SELECT rowid FROM events WHERE id = ?').get(last.id);
-      raw.prepare(`INSERT OR REPLACE INTO events (rowid, id, type, page, author, happened_at)
-        VALUES (?, 'overwritten', 'comment', 'A01', 'x', '2026-01-01T00:00:00.000Z')`).run(rowid);
-      assert.equal(raw.prepare('SELECT 1 FROM events WHERE id = ?').get(last.id), undefined, 'the approval is gone');
-    } finally {
-      raw.close();
-    }
+    await assertNeuteredReplaceCaught(path, said, `ALTER TABLE events ADD COLUMN "rowid${nbsp}"`,
+      GUARDS.events_no_replace.replace('OR rowid = NEW.rowid', `OR rowid${nbsp}= NEW.rowid`));
+  }));
 
-    const db = new DatabaseSync(path, { readOnly: true });
-    try {
-      assert.deepEqual(guardMismatches(db), [{ name: 'events_no_replace', kind: 'changed' }]);
-    } finally {
-      db.close();
-    }
-    const source = new Source({ db: path });
-    await source.events();
-    assert.equal(source.guardsTampered, true, 'the CLI reader flags it');
-    await reopen(path);
-    assert.deepEqual(said.map(classify).filter(Boolean), [{ name: 'events_no_replace', kind: 'replaced' }],
-      'and the server replaces it, saying so');
+test('a guard rewritten to read an empty decoy table, `FROM event s`, is changed, not the same text: named by guardMismatches, replaced by installGuards, flagged by the --db reader',
+  withFile(async (path, said) => {
+    // `event s` is the empty table `event` under the alias `s`: the guard's EXISTS asks a table
+    // that holds nothing, and refuses nothing. A `flat()` that dropped spacing instead of
+    // collapsing it to one space would read `event s` and `events` as the same word.
+    await assertNeuteredReplaceCaught(path, said, 'CREATE TABLE event (id TEXT)',
+      GUARDS.events_no_replace.replace('FROM events WHERE', 'FROM event s WHERE'));
   }));
 
 test('[sqlite] the --db reader compares the guards in the snapshot it reads the rows from', withFile(async (path) => {
   const store = new SqliteEventStore(path);
   await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
   await store.close();
-  // A second connection drops a guard the moment the reader asks for the event rows. Inside one
-  // read transaction, the rows and the comparison both predate the drop: the guard was there for
-  // every row this read returns, and saying otherwise would be a false alarm about rows it never
-  // read without one. A comparison made after the transaction, on a fresh snapshot, sees the drop.
+  // A second connection drops `events_no_low_rowid` and forges an approval below every real row the
+  // moment the reader asks for the event rows — after the comparison, before the rows. Both orders
+  // the reader could get wrong are caught: a comparison made BEFORE the read transaction opens
+  // passes the guards and then reads the forgery (the row, unflagged); one made AFTER it closes
+  // flags the drop, but the forgery is in hand too — the prepare hook fires before the rows
+  // statement's first step, so a snapshot opened only for the rows already starts past the forgery.
+  // In one snapshot, neither: the forgery is not read, and the guards it was compared against were
+  // there.
   const original = DatabaseSync.prototype.prepare;
-  let dropped = 0;
+  let forged = 0;
   DatabaseSync.prototype.prepare = function (sql, ...rest) {
-    if (!dropped && sql.startsWith('SELECT *, rowid FROM events')) {
-      dropped++;
-      outside(path, 'DROP TRIGGER events_no_delete');
+    if (!forged && sql.startsWith('SELECT *, rowid FROM events')) {
+      forged++;
+      outside(path, `DROP TRIGGER events_no_low_rowid;
+        INSERT INTO events (rowid, id, type, page, block, fingerprint, author, happened_at)
+          VALUES (-7, 'forged', 'approval', 'A01', 'A01.1.1', 'abc', 'owner@example.org', '2020-01-01T00:00:00.000Z');`);
     }
     return original.call(this, sql, ...rest);
   };
   const source = new Source({ db: path });
+  let events;
   try {
-    await source.events();
+    events = await source.events();
   } finally {
     DatabaseSync.prototype.prepare = original;
   }
-  assert.equal(dropped, 1, 'the drop has to have landed during the read for this to prove anything');
+  assert.equal(forged, 1, 'the forgery has to have landed during the read for this to prove anything');
   const after = new DatabaseSync(path, { readOnly: true });
   try {
-    assert.deepEqual(guardMismatches(after), [{ name: 'events_no_delete', kind: 'missing' }], 'and it really is gone now');
+    assert.deepEqual(guardMismatches(after), [{ name: 'events_no_low_rowid', kind: 'missing' }], 'the guard really is gone now');
+    assert.ok(after.prepare("SELECT 1 FROM events WHERE id = 'forged'").get(), 'and the forged row really is in the file');
   } finally {
     after.close();
   }
-  assert.equal(source.guardsTampered, false, 'compared in the same snapshot as the rows it read');
+  const forgedRead = events.some((e) => e.id === 'forged');
+  assert.ok(!forgedRead || source.guardsTampered, 'a row written past a dropped guard is never read as guarded');
+  assert.equal(forgedRead, false, 'the rows are from the snapshot the guards were compared in, not a later one');
+  assert.equal(source.guardsTampered, false, 'and the guards are from the snapshot the rows were read in');
 }));
