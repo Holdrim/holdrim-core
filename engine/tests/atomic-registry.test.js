@@ -12,6 +12,11 @@
  * volume, say) used to slip past both the save's and the load's guard — the save's rename replaced
  * the link with a plain file, and `loadRegistry` read it as "no registry", the same as a project never
  * synced before. `saveRegistry` must also keep the registry's owner and group, not only its mode.
+ *
+ * `loadRegistry` refuses a WORKING link too, not only a dangling one: reading through it looks safe
+ * on its own, but `sync` stamps seals onto pages between that read and `saveRegistry`'s own refusal
+ * of the same link, in its `finally` — a run that got that far would leave those seals on disk with
+ * no registry entry, exactly what holdrim#148 and holdrim#151 already exist to prevent.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -207,17 +212,28 @@ test('a dangling registry link (its target absent) is refused on save, not repla
 
 test('a dangling registry link is refused on load, not silently read as an empty registry', (t) => {
   const { tmp } = linkedProject(t);
-  assert.throws(() => loadRegistry(tmp), /link pointing at nothing/);
+  assert.throws(() => loadRegistry(tmp), /it is a link/);
 });
 
-test('a working registry link is read straight through on load, never refused', (t) => {
+/** A throwaway project whose registry (`link.json`) is a symlink to a real, readable `real.json`. */
+function workingLinkedProject(t) {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-atomic-registry-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: [], registry: 'link.json' } }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['p'], registry: 'link.json' } }));
   const real = join(tmp, 'real.json');
   writeFileSync(real, JSON.stringify({ a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } }, null, 1) + '\n');
   symlinkSync(real, join(tmp, 'link.json'));
-  assert.deepEqual(loadRegistry(tmp), { a: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'old' } });
+  return { tmp, real };
+}
+
+test('a working registry link is refused on load too, not read through', (t) => {
+  const { tmp } = workingLinkedProject(t);
+  // Reading through a WORKING link looks safe on its own, but `sync` stamps seals onto pages
+  // between this call and `saveRegistry`'s own refusal of the same link, in its `finally` — a run
+  // that got that far would leave those seals on disk with no registry entry to show for them,
+  // exactly what holdrim#148 and holdrim#151 already exist to prevent. So the refusal has to be
+  // here too, before a single page is written, not only at the save on the way out.
+  assert.throws(() => loadRegistry(tmp), /it is a link/);
 });
 
 test('a dangling registry link makes sync refuse before it writes a single page', async (t) => {
@@ -235,10 +251,32 @@ test('a dangling registry link makes sync refuse before it writes a single page'
       when: '2026-09-09T10:00:00Z', data: { locks: 'true' } },
   ];
 
-  await assert.rejects(() => sync(tmp, { events: async () => events }, { owner: OWNER }), /link pointing at nothing/);
+  await assert.rejects(() => sync(tmp, { events: async () => events }, { owner: OWNER }), /it is a link/);
   // The refusal must land before `markAll` ever touches the page — a seal written, then a run that
   // cannot record it, is exactly the "stamped but unrecorded" case holdrim#148 already fixed once.
   assert.equal(readFileSync(sheet, 'utf8'), html, 'no page may be stamped once the registry cannot be read');
+});
+
+test('sync on a WORKING registry link also writes no page — the save would refuse it on the way out', async (t) => {
+  const { tmp } = workingLinkedProject(t);
+  mkdirSync(join(tmp, 'p'));
+  const sheet = join(tmp, 'p', 'X01.html');
+  const html = '<html><head><title>x</title></head><body><main>\n<p data-id="X01.1">some text</p>\n</main></body></html>';
+  writeFileSync(sheet, html);
+  const OWNER = 'owner@example.org';
+  const blocks = await readBlocks(tmp);
+  const block = blocks.get('X01.1');
+  const events = [
+    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER, when: '2026-01-01T09:00:00Z', data: null },
+    { id: 'a1', type: 'approval', page: 'X01', block: block.id, fingerprint: block.fingerprint, author: OWNER,
+      when: '2026-09-09T10:00:00Z', data: { locks: 'true' } },
+  ];
+
+  // If `loadRegistry` read through this link instead of refusing it, `sync` would go on to stamp
+  // the page, then hit `saveRegistry`'s own refusal in its `finally` — a seal on disk with no
+  // registry entry, which is the exact failure this test exists to keep from ever landing.
+  await assert.rejects(() => sync(tmp, { events: async () => events }, { owner: OWNER }), /it is a link/);
+  assert.equal(readFileSync(sheet, 'utf8'), html, 'no page may be stamped when the registry cannot be saved either');
 });
 
 test('a save keeps the registry\'s owner and group on the temp file, before the rename', (t) => {

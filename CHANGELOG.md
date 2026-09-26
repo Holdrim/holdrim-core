@@ -462,11 +462,16 @@ who ran the engine from `main` before it.
   It now writes to a temp file beside it, fsyncs it, copies the target's own mode AND owner (uid and
   gid — a warning, not a failure, when this process cannot give the file away) onto it, and renames it
   over the real name — a reader sees the previous file or the new one, whole, owned exactly as before,
-  never a partial one. A registry that is a link — dangling (its target already gone) or not — is now
-  refused rather than replaced, the way `exportSite` already refuses a symlinked `out` (both now share
-  one check); `loadRegistry` refuses a dangling one too, before a sync can read it as "no registry"
-  and silently save one missing every ✓ recorded at the far end. A registry this process cannot write
-  to is refused with `EACCES` before anything is touched, where the old in-place write refused it too.
-  Fsyncing the containing directory afterwards, where the platform allows it, is a durability step on
-  top of an already successful save: a failure there is a warning, never a reason to report the save
-  itself as failed.
+  never a partial one. **A registry that is a symlink is now refused on both `sync`'s read and its
+  save, whether the link resolves or is dangling (its target already gone)** — the same refusal
+  `exportSite` already gave a symlinked `out` (all three now share one check, `refuseLink` in
+  `engine/cli/fs.ts`). This is a behaviour change for a project that shared one `approvals.json`
+  between checkouts through a symlink: that used to be read and written straight through, and now
+  refuses outright. It has to, on both ends — a `sync` that read a working link, stamped seals onto
+  every approved page, and only THEN hit the save's refusal in its `finally` would leave those seals
+  on disk with no registry entry to show for them, exactly the state holdrim#148 and holdrim#151
+  already exist to prevent. Point such a project's `content.registry` at a real file instead. A
+  registry this process cannot write to is refused with `EACCES` before anything is touched, where
+  the old in-place write refused it too. Fsyncing the containing directory afterwards, where the
+  platform allows it, is a durability step on top of an already successful save: a failure there is
+  a warning, never a reason to report the save itself as failed.

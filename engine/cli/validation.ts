@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync,
-  lstatSync, statSync, chmodSync, chownSync, accessSync, constants } from 'node:fs';
+  statSync, chmodSync, chownSync, accessSync, constants } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseHTML } from 'linkedom';
@@ -13,7 +13,7 @@ import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
 import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
-import { refuseLink } from './export.ts';
+import { refuseLink } from './fs.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -52,29 +52,17 @@ const registryPath = (root: string) =>
   join(root, ...ofProject(root)
     .registry.split('/'));
 
-/**
- * True when `path` is a link pointing at nothing — its target gone, an unmounted shared volume,
- * say. `existsSync` FOLLOWS a link, so it reads a dangling one as "nothing here", the same as a
- * registry that was simply never written yet; without this, `loadRegistry` cannot tell the two
- * apart, and a `sync` that hits the first would start from `{}` and save a registry silently
- * missing every ✓ recorded at the far end — no error, exit 0. A WORKING link is not this: it
- * resolves to real content and reads through it exactly as a plain file would.
- */
-function danglingLink(path: string): boolean {
-  if (existsSync(path)) return false; // resolves to something real, whatever it is
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false; // truly nothing there — the ordinary "not synced yet" case
-  }
-}
-
 export function loadRegistry(root: string): Registry {
   const p = registryPath(root);
-  if (danglingLink(p)) {
-    throw new Error(`refusing to load ${p}: it is a link pointing at nothing, so reading it as `
-      + `"no registry" would silently lose every ✓ already recorded at the far end`);
-  }
+  // ANY link, not only a dangling one: a WORKING symlinked registry looks safe to read through, but
+  // `sync` stamps seals onto pages between this call and `saveRegistry`'s own refusal of the same
+  // link, in its `finally`. A run that got that far would leave those seals on disk with no registry
+  // entry to show for them — exactly what holdrim#148 and holdrim#151 already exist to prevent — so
+  // the refusal has to happen here, before a single page is written, not only at the save on the way
+  // out. `refuseLink` uses `lstatSync`, never `existsSync`, so a DANGLING link (its target gone — an
+  // unmounted shared volume, say, which `existsSync` reads as "nothing here", the same as a registry
+  // simply never written yet) is refused too, rather than silently read as an empty registry.
+  refuseLink(p, `load ${p}`);
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
 }
 
@@ -120,11 +108,10 @@ export function saveRegistry(root: string, registry: Registry, interrupt: () => 
 
   // A link is not followed: the rename below would replace the LINK ITSELF with a plain file, and
   // whatever it used to point at — a registry shared between two checkouts, say — would keep
-  // whatever it last held forever. Refused whether the link resolves or is dangling: `refuseLink`
-  // uses `lstatSync`, never `existsSync`, so a dangling one (which `existsSync` reads as "nothing
-  // here", the same bug `loadRegistry`'s own `danglingLink` guards against above) is caught too,
-  // rather than silently replaced by the rename. Shared with `exportSite`'s own symlink refusal on
-  // `out` (engine/cli/export.ts) — same message, same reason, one check.
+  // whatever it last held forever. The same `refuseLink` (engine/cli/fs.ts) `loadRegistry` already
+  // ran on this path before `sync` wrote a single page — repeated here, at the very end of the run,
+  // because a page turning the registry file into a symlink mid-run is exactly the kind of surprise
+  // this refusal exists to catch, not assume away.
   refuseLink(path, `save ${path}`);
   // Safe now: `refuseLink` just ruled out a symlink, so whatever `existsSync` finds here (or
   // doesn't) is an ordinary file, never a link whose target existing or not would say something else.
