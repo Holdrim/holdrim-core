@@ -127,7 +127,12 @@ for a documentation change is the waste this rule exists to stop.
 
 Each agent file carries **only its own lens**: what it looks for, its severities, and what its
 `evidence` field must hold. Everything the six share is appended here, once, so it cannot drift
-into six copies that disagree. Give every agent the same prompt, built from these parts:
+into six copies that disagree. When the contract in part 7 travels as a file, write it once per
+session under a name nothing else would pick, make it read-only (`chmod a-w`), and confirm its
+first line before every launch: a test log written over it hands every later lens a prompt with no
+contract in it, and nothing says so.
+
+Give every agent the same prompt, built from these parts:
 
 1. **The worktree's absolute path**, first, because nothing else is safe until it lands. An agent
    starts in the person's own tree — its shell's working directory is the project root, not

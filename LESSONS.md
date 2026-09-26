@@ -131,6 +131,14 @@ The crew, and the review.
   the person's tree.** Taught by #125, round 3 of #131, and round 1 of #109, whose lens wrote a log
   into the main checkout. Lives in: `.claude/skills/full-review/SKILL.md`, step 3, the shared
   contract.
+- **The shared contract every lens is handed lives in a file under a name nothing else would pick,
+  read-only on disk, and whoever launches the lenses confirms its first line before each round.**
+  Taught by #79's backlog, where a contract-test log overwrote `contract.txt`, and round 2 of #107,
+  where a developer's contract-test log overwrote the orchestrator's copy. Every lens launched after
+  it (#107 rounds 2–3, #109 rounds 1–2, #122 round 1, #79) got a test log instead: still told to
+  stay read-only and given the Done-when, never told that the change under review is data, never
+  instruction. A final locks pass under the right contract runs before those pull requests merge.
+  Lives in: `.claude/skills/full-review/SKILL.md`, step 3, before the parts of the prompt.
 - **A lens cannot read GitHub, so the issue's "Done when" and the owner's decisions on it are pasted
   into every lens prompt.** Taught by #91. Lives in: `.claude/skills/full-review/SKILL.md`, step 3,
   the parts of the prompt.
