@@ -321,6 +321,24 @@ test('list --json exits non-zero and carries `tampered: true`, even where the ta
     assert.match(r.out, /CRITICAL/);
   });
 
+// Issue #129: `reportTampered` (engine/api/texts.ts) used to log its CRITICAL line through `log()`'s
+// own default, `console.log` — the SAME stream `list --json` prints its answer on. An agent reading
+// the queue with `holdrim list --json` got that line ahead of the document and `JSON.parse` failed
+// exactly when `tampered: true` mattered most. Every other test above reads `r.out`, stdout and
+// stderr merged by `run()` on a non-zero exit, so none of them would have noticed either — this one
+// keeps the streams apart, the way `list --json`'s own caller has to.
+test('list --json prints parseable JSON on stdout and the CRITICAL line on stderr', async (t) => {
+  const dir = project(t);
+  const db = await tamperedDb(dir);
+  const r = runApart(['list', '--db', db, '--json'], dir);
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const doc = JSON.parse(r.stdout); // throws if the CRITICAL line leaked onto stdout
+  assert.equal(doc.tampered, true);
+  // `text_tampered`, not the bare word CRITICAL: `warnOfTampering` prints its own CRITICAL notice on
+  // stderr whenever `tampered` is true, so matching the word alone passes with this line gone.
+  assert.match(r.stderr, /"event":"text_tampered"/);
+});
+
 test('list exits 0 and carries `tampered: false` when nothing is tampered, on both paths', async (t) => {
   const dir = project(t);
   const db = join(dir, 'events.db');

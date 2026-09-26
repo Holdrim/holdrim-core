@@ -15,6 +15,37 @@ who ran the engine from `main` before it.
 
 ### Breaking
 
+- **The CLI no longer writes to the cloud store directly: every write goes through the server's
+  `POST /api/events`, with an agent token the owner issues (#122).** Before this, `holdrim state` in
+  cloud mode wrote its event straight into Firestore as `agent via <gcloud account>`, skipping the
+  cycle, the roles, the limits and `data.asAgent`; that path, and the name, are gone. **What an
+  adopter in cloud mode changes:** (1) the server has to run with password sign-in
+  (`HOLDRIM_IDENTITY=password`, the default outside Development when `HOLDRIM_AUDIENCE` is unset),
+  since tokens live in its user store. **Behind an identity proxy there is no user store, so no
+  token, and `holdrim state` there cannot record a state at all** — a token for that mode is not
+  built yet; (2) the owner signs in, opens the people screen, and issues a token for the
+  agent's own address — never the owner's, an admin's or a lock-holder's, and never an address that
+  has an account here, disabled or not: an address is a person's or an agent's, and creating an
+  account for an address holding a token is refused too; (3) wherever `holdrim` runs, export
+  `HOLDRIM_AGENT_TOKEN` with that token and `HOLDRIM_URL` with the server's address (`https://…`;
+  the CLI refuses plain `http://` to any host but this machine, and sends no token with `--local`). Reading is unchanged:
+  `cloud.project`/`HOLDRIM_PROJECT` and gcloud are still what the CLI reads the cloud with, and
+  `--local` against `bash engine/run-local.sh` needs neither variable, writing as the runner's
+  development identity `agent@local`. Only the owner issues and revokes a token, one per address
+  (issuing again revokes the last), and it never expires until revoked; the people screen shows when
+  each was issued. A token reaches only the event routes, and a ✓ sent with one is refused whatever
+  its address. New on the surface: `GET /api/agent-tokens`, `POST /api/agent-tokens`, `POST
+  /api/agent-tokens/:email/revoke`; the event types `agent_token_issued` and `agent_token_revoked`
+  (page `_agent_tokens`, data `agent`, `tokenId`, `replacedTokenId`), which only those routes write;
+  and an `agent_tokens` table (SQLite, Postgres) or collection (Firestore) in the user store, created
+  on start. Two answers change: a request carrying both a session cookie and an `Authorization`
+  header is refused (401), and under password sign-in an `Authorization` that is not a live agent
+  token is refused (401) instead of ignored. **A password deployment behind an HTTP basic-auth
+  gateway stops working**: the browser attaches `Authorization: Basic …` to every request, and
+  every API call then answers 401 — the whole panel with it. Remove the gateway's basic auth (the
+  sign-in screen is the gate), or have the gateway strip `Authorization` before it forwards. And an agent — named in `HOLDRIM_AGENTS` or come in with
+  a token — may now move an approved request through `applying`, `waiting` and `applied` through the
+  API, as `docs/ROLES.md` section 4 already said it keeps; before, only the local runner let it.
 - **`/api/me`'s `role` answers `member` where it used to answer `other`.** The engine now speaks of
   three shipped roles — `owner`, `admin`, `member` — as sets of a closed capability list
   (`engine/core/roles.js`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`), and
@@ -36,9 +67,9 @@ who ran the engine from `main` before it.
   reader — the API, the panel, the home, and the CLI reading the events file or the cloud — gets the
   e-mail back, so nothing Holdrim shows changes. What reads the database directly, around Holdrim,
   now sees ids in `events.author`: join them to `people`. Events recorded before keep the e-mail they
-  hold and read as it. The CLI's direct write to the cloud names its `agent via <account>` by an id
-  too, and, like the server, now talks to the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is
-  set. The development identity (`X-Dev-Email`, `HOLDRIM_DEV_EMAIL`) is lowercased and trimmed, as
+  hold and read as it. The CLI's reader of the cloud, like the server, talks to the Firestore
+  emulator when `FIRESTORE_EMULATOR_HOST` is set; the CLI no longer writes there at all (the first
+  entry above). The development identity (`X-Dev-Email`, `HOLDRIM_DEV_EMAIL`) is lowercased and trimmed, as
   sign-in and the identity proxy already were.
 - **An event's `text` and `snapshot` move to a table of their own, one row per event and field; the
   event keeps only a salted hash of each.** Reading an event is unchanged — the API, the panel, the
@@ -92,6 +123,34 @@ who ran the engine from `main` before it.
   sign-in (`sign_in_refused`) still logs the address exactly as typed: it never became a person.
   `docs/PRIVACY.md`, section 5, documents the manual procedure for removing a person, until there is
   a screen for it.
+- **A SQLite events file refuses a row whose rowid skips past the next one or falls below 1,
+  names a file whose rowid its guards cannot see, and a file made before this reads, once, as
+  missing those guards.** Four new guards
+  ([holdrim#109](https://github.com/Holdrim/holdrim-core/issues/109)): `events_no_high_rowid`
+  refuses an insert naming a rowid above `MAX(rowid) + 1`, or above 1 on an empty table, and
+  `events_no_first_rowid_below_one` (on an empty `events`), `people_no_rowid_below_one` and
+  `texts_no_rowid_below_one` refuse one below 1. Without them, one row written straight into the
+  file at the largest rowid SQLite has sent every later append to a rowid below it, where
+  `events_no_low_rowid` refused each one — the owner's ✓ included — as a forgery; and one row at
+  rowid -1 made every later insert into its table read as a replace: no new person, and no ✓ or
+  comment, each of which carries a text. They make that harder, not impossible: a connection with
+  triggers turned off, or a guard dropped, a row written and the guard recreated by its exact text,
+  still leaves one. So the server on every boot, and the CLI's `--db` reader on every read, now
+  also name an `events` table whose highest rowid is the ceiling (`sqlite_guard_missing`,
+  `kind: "parked"`), a row below rowid 1 in `events`, `people` or `texts` (`kind: "sunk"`), and a
+  column named `rowid`, `oid` or `_rowid_` on any of the three, which hides the real rowid from
+  every guard (`kind: "shadowed"`); a write refused on such a file says that is why. None is
+  repaired by a boot: it is said on every one, and a person recovers the file by hand
+  (SECURITY.md). Holdrim's own writes never name a rowid, so nothing they write changes. What to
+  change, for a file an earlier build made: start the server of this version against it before
+  anything else. Its first boot says `the database's guard "…" is missing; installing it` for each
+  of the four and logs one `sqlite_guard_missing` WARNING for each. That is expected, once, on that
+  boot: the file cannot tell a guard never installed from one dropped, so it says both the same
+  way, and the same line on any later boot is not the upgrade. Until that boot, `holdrim … --db` of
+  this version names them missing on the same file: `list` exits non-zero, `list --json` carries
+  `guardsTampered: true` and an empty `requests` — an agent reading it sees an empty queue — and
+  `sync`, `apply` and `state` refuse. Moving a pin back below this version drops the four on the
+  next boot, each named as a trigger that version does not install.
 - **`holdrim sync` and `holdrim restamp` exit non-zero when a ✓ could not be stamped safely.** A ✓
   whose block cannot be written without risking another one (see the entry under **Fixed** about
   stamping only the block a ✓ was given to) is refused, and it used to be refused with exit 0 — the
@@ -316,6 +375,16 @@ who ran the engine from `main` before it.
   exact race issue #113's fix closed for a window nobody asked to reopen. Same failure reporting as
   above: a failed drop carries `sessionsDropped: false` and an `ERROR user_sessions_not_dropped` line,
   never a 500 for a credential that changed regardless.
+- **The CRITICAL line a tampered text raises now reaches the CLI's stderr, never its stdout.**
+  `reportTampered` (engine/api/texts.ts) used to log through `log()`'s own default destination,
+  `console.log` — the same stream `holdrim list --json` prints its answer on, so a store read back
+  as tampered put that JSON-formatted alert ahead of the document and `JSON.parse` failed on exactly
+  the read where `tampered: true` mattered most. The server's own logging is unchanged: it still
+  goes to stdout, as its service log. Only the CLI's two direct readers of a store (`Source#fromFile`
+  and the cloud read in `events()`, both in engine/cli/remote.ts) now pass `console.error` to
+  `reportTampered`, the same routing `sqlite_guard_missing` already used for the same reason. Nothing
+  to change for a caller of `holdrim list --json`: its stdout was never valid JSON on a tampered
+  store before this, and always is now.
 
 ### Fixed
 

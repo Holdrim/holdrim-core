@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
-import { withAuthors, personEmail, newPersonId, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
+import { withAuthors, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
 import { textKey, withTexts, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent as Raw, type TextField, type TextRow, type TamperReport } from '../api/texts.ts';
 import { log } from '../api/log.ts';
@@ -13,12 +13,12 @@ type RawEvent = Raw<Event>;
 const exec = promisify(execFile);
 
 /**
- * Where events come from for the agent's tool: the cloud (REST, with a gcloud token), a local
- * SQLite file, or a local server in memory.
+ * Where events come from for the agent's tool — the cloud (REST, with a gcloud token), a local
+ * SQLite file, or a local server in memory — and where they go: the server's API, always (`add`).
  *
- * ⚠️ Writing straight to the cloud store bypasses the API — and therefore the cycle, the roles and
- * the limits. The right path is for the agent to come in through the API with an identity of its
- * own. Until that exists, reading happens here.
+ * ⚠️ Reading may still go around the server; writing never does. A write that went straight to the
+ * store would skip the cycle, the roles, the limits and the `asAgent` the server records, which is
+ * why the agent writes with a token of its own instead (docs/ROLES.md, section 4).
  *
  * ⚠️ Every message thrown from here is English and hard-coded. These are the lines somebody pastes
  * into a chat when the tool refuses to start, and each one names the exact command that fixes it —
@@ -27,8 +27,8 @@ const exec = promisify(execFile);
  */
 /**
  * The Firestore emulator's address, when one is named — the variable Google's own client reads, so
- * the CLI's REST path and the server's store point at the same place. It is what lets the path
- * that writes the cloud directly be proved against a real Firestore instead of a stub.
+ * the CLI's REST read and the server's store point at the same place, and the read can be proved
+ * against a real Firestore instead of a stub.
  */
 const emulator = (): string | undefined => process.env.FIRESTORE_EMULATOR_HOST || undefined;
 
@@ -64,9 +64,9 @@ export function firestoreEventOf(d: Record<string, any>): RawEvent {
   return {
     id: String(d.name).split('/').pop()!,
     type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
-    // Absent on a document from before texts were extracted, or one the CLI's own `add` wrote —
-    // that path writes straight to the cloud with no hash, a gap docs/PRIVACY.md, section 3 already
-    // names — and `text`/`snapshot` there already hold their own plain value: read as such.
+    // Absent on a document from before texts were extracted, or one an older CLI's `add` wrote
+    // straight to the cloud with no hash, before it wrote through the API — and `text`/`snapshot`
+    // there already hold their own plain value: read as such.
     text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
     author: s('author')!,
     when: normalizeWhen(f.when?.timestampValue),
@@ -80,13 +80,14 @@ export class Source {
   #db?: string;
   #project: string;
   #localUrl: string;
+  #url?: string;
   #token?: string;
   #account?: string;
   #preferredAccount?: string;
   #pageSize: number;
   #guardsTampered = false;
 
-  constructor(options: { local?: boolean; project?: string; localUrl?: string; account?: string;
+  constructor(options: { local?: boolean; project?: string; localUrl?: string; url?: string; account?: string;
                         db?: string; pageSize?: number } = {}) {
     this.#local = options.local ?? false;
     // The events file, when the project runs without a cloud. This is what closes the loop
@@ -96,6 +97,9 @@ export class Source {
     // No hard-coded value: it comes from the project's holdrim.json, or from the environment.
     this.#project = options.project ?? process.env.HOLDRIM_PROJECT ?? '';
     this.#localUrl = options.localUrl ?? process.env.HOLDRIM_LOCAL_URL ?? 'http://localhost:8095';
+    // The deployed server every write goes through (`add`). Reading does not need it: it still reads
+    // the cloud, the file or the local server, as below.
+    this.#url = options.url ?? process.env.HOLDRIM_URL ?? undefined;
     // Not an adopter's setting — nothing here reads an environment variable for it. It exists so a
     // test can force more than one page without writing hundreds of documents to prove pagination
     // holds (round 2, finding D): the real cloud never sees anything but the default.
@@ -251,7 +255,7 @@ export class Source {
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
-    const { extractionBoundary, rollbackQuietly, guardMismatches, guardMismatchSaid } =
+    const { extractionBoundary, rollbackQuietly, guardMismatches, guardMismatchSaid, repairable } =
       await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
     let mismatches: ReturnType<typeof guardMismatches>;
@@ -280,11 +284,16 @@ export class Source {
         // ties back in rowid order, so dropping this changes nothing the suite below can see; naming
         // it turns that accident into a promise. `rowid DESC` does fail it. It is also what
         // `extractionBoundary` below is compared against, per row, for the downgrade check.
-        rows = db.prepare('SELECT *, rowid FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
+        // REAL, as the server's `list` reads it: a row parked at the ceiling read as an integer
+        // throws, and this reader would stop before it named the very thing it found.
+        rows = db.prepare('SELECT *, CAST(rowid AS REAL) AS rowid FROM events ORDER BY happened_at, rowid').all() as Record<string, any>[];
         // A file written before the people table existed has no such table, and every author in it
         // is an address: an empty table resolves none of them, which is what they need. The read
         // is the same rule the server's store applies, through the same resolver.
-        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'").get();
+        // NOCASE, as SQLite resolves the name the reads below use: a `people` renamed to `PEOPLE` is
+        // still the table the server reads, and a case-sensitive lookup here would read it as absent,
+        // no author resolved, where the server resolves them all.
+        const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people' COLLATE NOCASE").get();
         people = new Map(hasPeople
           ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
             .map((p) => [p.id, p.email ?? null])
@@ -292,7 +301,8 @@ export class Source {
         // A file written before texts were extracted has no `texts` table either, and every row's
         // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
         // an empty people map gives an author (docs/PRIVACY.md, section 4).
-        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts'").get();
+        // NOCASE for the same reason: read as absent, every hashed text would read as tampered.
+        const hasTexts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'texts' COLLATE NOCASE").get();
         texts = new Map(hasTexts
           ? (db.prepare('SELECT event, field, value, salt FROM texts').all() as
               { event: string; field: TextField; value: string; salt: string }[])
@@ -324,11 +334,15 @@ export class Source {
       // stderr, both lines, so `list --json` stays parseable with `guardsTampered` in it.
       this.#guardsTampered = mismatches.length > 0;
       for (const m of mismatches) {
+        // Only a trigger is the server's to put back: promising that of a column hiding the rowid,
+        // a row below rowid 1 or a row parked at the ceiling would send the operator to a boot that
+        // fixes nothing.
         console.error(`holdrim: WARNING — ${guardMismatchSaid(m)}; read as it is, nothing repaired. `
-          + 'Whatever was written while it was so may be forged; the server repairs it on its next start.');
-        // `kind`, which the server's line does not carry: the server logs only a guard gone missing,
-        // while this reader says all three, and an alert rule keyed on the one event name still
-        // has to tell a foreign trigger from a guard that is not there.
+          + 'Whatever was written while it was so may be forged; '
+          + (repairable(m) ? 'the server repairs it on its next start.' : 'no boot repairs this: a person has to (SECURITY.md).'));
+        // `kind`, which the server's line carries only for what it cannot repair: it logs a guard
+        // gone missing without one, while this reader says every kind, and an alert rule keyed on
+        // the one event name still has to tell a foreign trigger from a guard that is not there.
         log('WARNING', 'sqlite_guard_missing', { guard: m.name, kind: m.kind }, console.error);
       }
       const events = withAuthors(rows.map((row) => ({
@@ -346,7 +360,10 @@ export class Source {
       // for the alert to come from.
       const reports: TamperReport[] = [];
       const out = withTexts(events, texts, reports);
-      for (const r of reports) reportTampered(r);
+      // console.error, not `log()`'s default stdout (issue #129): this reader feeds `list --json`,
+      // whose stdout a caller `JSON.parse`s as the queue — the same reason `sqlite_guard_missing`
+      // above is logged through `console.error` rather than left at its default.
+      for (const r of reports) reportTampered(r, console.error);
       return out;
     } finally {
       db.close();
@@ -393,7 +410,9 @@ export class Source {
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
       return withAuthors(removed.map((d) => firestoreEventOf(d)), people);
     }, reports);
-    for (const r of reports) reportTampered(r);
+    // console.error, for the same reason as the file reader above: this is the CLI's answer, not
+    // the server's log, and `list --json` must stay parseable JSON on stdout.
+    for (const r of reports) reportTampered(r, console.error);
     return resolved;
   }
 
@@ -440,97 +459,90 @@ export class Source {
       + '/databases/(default)';
   }
 
-  /** A document's full name, as a write names it: `path` is `collection/id`. */
-  #documentName(path: string): string {
-    return `projects/${this.#requireProject()}/databases/(default)/documents/${path}`;
-  }
-
-  /** One atomic commit of `writes`: all of them land, or none. The response is the caller's to read. */
-  #commit(headers: Record<string, string>, writes: unknown[]): Promise<Response> {
-    return fetch(`${this.#database()}/documents:commit`, {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ writes }),
-    });
-  }
-
   /**
-   * The id of the person with this address in the cloud's people table, made on first sight —
-   * the same rows, under the same document ids, as the server's Firestore store makes, from the
-   * one layout both read (FIRESTORE_PEOPLE), so a person the CLI makes is the one the server finds,
-   * and the other way round. The pointer is created only if absent; when another writer made it
-   * first, theirs is the person.
-   */
-  async #cloudPersonFor(author: string, headers: Record<string, string>): Promise<string> {
-    const email = personEmail(author);
-    const key = LAYOUT.pointerId(email);
-    // Encoded again in the URL: `key` is the document's own id, and the path undoes one encoding —
-    // without the second, `%40` would arrive as `@`, another id.
-    const pointer = `${this.#database()}/documents/${LAYOUT.pointers}/${encodeURIComponent(key)}`;
-    const read = async (): Promise<string | null> => {
-      const r = await fetch(pointer, { headers });
-      if (r.status === 404) return null;
-      if (!r.ok) throw await this.#cloudError(r, 'reading');
-      return ((await r.json()) as Record<string, any>).fields?.[LAYOUT.id]?.stringValue ?? null;
-    };
-    const found = await read();
-    if (found) return found;
-    const id = newPersonId();
-    const r = await this.#commit(headers, [
-      { update: { name: this.#documentName(`${LAYOUT.rows}/${id}`), fields: { [LAYOUT.email]: { stringValue: email } } },
-        currentDocument: { exists: false } },
-      { update: { name: this.#documentName(`${LAYOUT.pointers}/${key}`), fields: { [LAYOUT.id]: { stringValue: id } } },
-        currentDocument: { exists: false } },
-    ]);
-    if (r.ok) return id;
-    // Refused with no winner to take: the event is not written, since it would name a person who
-    // does not exist.
-    const winner = await read();
-    if (winner) return winner;
-    throw await this.#cloudError(r, 'writing to');
-  }
-
-  /**
-   * Records an event. Locally it goes through the API (and therefore through the cycle, the roles
-   * and the limits); in the cloud, it writes to the store directly.
+   * Where a write goes: the Holdrim server's API, and nothing else (docs/ROLES.md, section 4). With
+   * `--local`, the local server; otherwise `HOLDRIM_URL`, the deployed one. Never the store: a write
+   * straight to Firestore skipped the cycle, the roles, the limits and `data.asAgent`, and named its
+   * author with whatever the CLI chose to write there.
    *
-   * ⚠️ Writing directly BYPASSES the API, and therefore every validation. The right path is for
-   * the agent to have an identity of its own and come in through the API. Until that exists, this
-   * is the path — and it is marked as such.
+   * `--local` wins over `HOLDRIM_URL`: an agent with the deployed address exported, asked to work
+   * against its local runner, must not write to the deployed server instead.
+   *
+   * ⚠️ A deployed server is reached over https, or over http only on this machine: the token goes in
+   * every write and never expires, so plain http to another host hands it to anyone on the path.
+   * Refused before anything is sent, naming the fix.
+   */
+  #serverUrl(): string {
+    if (this.#local) return this.#localUrl;
+    if (!this.#url) {
+      throw new Error(
+        'I do not know which Holdrim server to write through.\n' +
+        '  Export HOLDRIM_URL with its address (https://…), and HOLDRIM_AGENT_TOKEN with the token the owner\n' +
+        '  issued this agent on the people screen. The CLI no longer writes to the cloud store directly.');
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(this.#url);
+    } catch {
+      throw new Error(`HOLDRIM_URL is not an address: ${this.#url}. Export it as https://…`);
+    }
+    const onThisMachine = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && onThisMachine)) {
+      throw new Error(
+        `HOLDRIM_URL is ${this.#url}, and the agent token is sent only over https (or http to this machine).\n` +
+        '  Export HOLDRIM_URL with the server\'s https:// address.');
+    }
+    return this.#url.replace(/\/+$/, '');
+  }
+
+  /**
+   * Records an event, always through the server's `POST /api/events` — and therefore through the
+   * cycle, the roles, the limits, and the `asAgent` the server writes from who it saw.
+   *
+   * With `HOLDRIM_AGENT_TOKEN`, as the agent that token was issued to, at `HOLDRIM_URL`. With
+   * `--local`, as the local runner's development identity `agent@local` — the same one the local read
+   * uses — sent in `X-Dev-Email`, since without it the runner records the write as whoever it acts
+   * as, the owner by default — and never with the token: the runner has no tokens to check, and
+   * whatever holds the local port would receive one that never expires. A deployed server needs the
+   * token: without it, this refuses before sending anything.
    */
   async add(event: Record<string, unknown>): Promise<string> {
-    // The project before the author: naming the author asks gcloud for an account, and with no
-    // project that is two gcloud runs for a write that cannot happen.
-    if (!this.#local) this.#requireProject();
-    const author = `agent via ${await this.#accountWithToken().catch(() => 'local')}`;
-
-    if (this.#local) {
-      const r = await this.#reachLocal('/api/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Dev-Email': author },
-        body: JSON.stringify(event),
-      });
-      if (!r.ok) throw await this.#localRefusal(r);
-      return ((await r.json()) as { id: string }).id;
+    const token = this.#local ? undefined : process.env.HOLDRIM_AGENT_TOKEN || undefined;
+    if (!token && !this.#local) {
+      throw new Error(
+        'writing needs the agent\'s own token: export HOLDRIM_AGENT_TOKEN with the token the owner issued\n' +
+        '  this agent on the people screen (and HOLDRIM_URL with the server\'s address), or use --local\n' +
+        '  with the local runner up (bash engine/run-local.sh).');
     }
-
-    const token = { Authorization: `Bearer ${await this.#gcloudToken()}` };
-    // An id, as the server writes it: the address stays in the people table, where forgetting
-    // the person can empty it (docs/PRIVACY.md, section 1).
-    const fields: Record<string, unknown> = { author: { stringValue: await this.#cloudPersonFor(author, token) } };
-    for (const [k, v] of Object.entries(event)) {
-      if (v == null) continue;
-      fields[k] = typeof v === 'object'
-        ? { mapValue: { fields: Object.fromEntries(Object.entries(v as object).map(([a, b]) => [a, { stringValue: String(b) }])) } }
-        : { stringValue: String(v) };
+    const url = this.#serverUrl();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (this.#local) headers['X-Dev-Email'] = 'agent@local';
+    let r: Response;
+    try {
+      r = await fetch(`${url}/api/events`, { method: 'POST', headers, body: JSON.stringify(event) });
+    } catch {
+      throw new Error(`nothing answered at ${url}. Is the server running? (bash engine/run-local.sh, or set `
+        + `${this.#local ? 'HOLDRIM_LOCAL_URL' : 'HOLDRIM_URL'} to where it is)`);
     }
-    const id = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
-    const r = await this.#commit(token, [{
-      update: { name: this.#documentName(`events/${id}`), fields },
-      currentDocument: { exists: false },                     // insert only, never overwrite
-      updateTransforms: [{ fieldPath: 'when', setToServerValue: 'REQUEST_TIME' }],
-    }]);
-    if (!r.ok) throw await this.#cloudError(r, 'writing to');
-    return id;
+    if (!r.ok) throw await this.#writeRefusal(r, url, Boolean(token));
+    return ((await r.json()) as { id: string }).id;
+  }
+
+  /**
+   * The server's refusal of a write, in words that name the fix. A 401 with a token is the token:
+   * revoked, replaced, or issued by another server; without one it is `#localRefusal`'s case.
+   * Anything else is the server's own sentence, which says why.
+   */
+  async #writeRefusal(r: Response, url: string, withToken: boolean): Promise<Error> {
+    if (!withToken) return this.#localRefusal(r);
+    const body = await r.text().catch(() => '');
+    let said: unknown = body.slice(0, 200);
+    try { said = (JSON.parse(body) as { error?: unknown })?.error ?? said; } catch { /* not JSON: the text is the sentence */ }
+    if (r.status === 401) {
+      return new Error(`the server at ${url} refused the agent token (401): it was revoked, replaced by a newer one, `
+        + 'or issued by another server. Ask the owner for a new one on the people screen.');
+    }
+    return new Error(`the server at ${url} refused it (${r.status})${said ? `: ${String(said)}` : ''}`);
   }
 }

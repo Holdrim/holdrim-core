@@ -91,13 +91,54 @@ Worth knowing before you run it:
     INTEGER PRIMARY KEY, so it is a plain rowid table SQLite's own docs allow `VACUUM` to renumber;
     today's SQLite keeps that renumbering in RELATIVE order, which is what the boundary and this
     guard both rest on, and neither this file nor the code that reads it can make a future SQLite
-    promise that. What no guard closes: an attacker who also drops and restores `events_no_delete`
-    and `events_no_low_rowid` between two reads (the same gap `sqlite_guard_missing` already admits
-    for every other one: the server on its next boot, and the CLI's `--db` reader on every read,
-    name a guard still dropped, and neither names one put back) can delete every hashed row and
-    start the boundary over, or delete an event and its texts row together and leave nothing to
-    compare against at all — an erasure, not a mismatch, and the panel already cannot tell an
-    erased event from one that was never made. One more limit worth naming plainly: `hashText`
+    promise that. Its counterpart, `events_no_high_rowid`
+    ([holdrim#109](https://github.com/Holdrim/holdrim-core/issues/109)), refuses an insert naming a
+    rowid above `MAX(rowid) + 1`, or above 1 on an empty table: without it, one event parked at the
+    largest rowid SQLite has sends every later append to a random rowid below it, where
+    `events_no_low_rowid` refuses each one — the owner's ✓ included — calling a genuine write a
+    forgery, and the parked row cannot be deleted. Between the two, an insert into a table that
+    holds a row takes exactly the next rowid. The other end is a trap as well: in a `BEFORE INSERT`
+    trigger SQLite gives an insert that names no rowid the placeholder -1, so one row held at rowid
+    -1 makes `events_no_replace`, `people_no_replace` or `texts_no_replace` read every genuine
+    insert into its table as a replace — no first event on an empty `events`, no new person (a new
+    reviewer, or the owner after a handover), no ✓ and no comment, since each carries a text — and
+    on `events` and `people` that row cannot be deleted either. A genuine insert takes a rowid
+    below 1 only when a row below 1 is already there (SQLite gives it `MAX(rowid) + 1`), so
+    `events_no_first_rowid_below_one` (an empty `events`, where `events_no_low_rowid` has nothing to
+    compare with), `people_no_rowid_below_one` and `texts_no_rowid_below_one` refuse one.
+    What no trigger can close from inside the file: a connection that turns triggers off for
+    itself (`SQLITE_DBCONFIG_ENABLE_TRIGGER`, `.dbconfig enable_trigger off` in the `sqlite3`
+    shell) runs no guard at all, and any of these guards dropped, a row written and the guard
+    recreated by its exact text leaves every guard as it was. For those, the rows are only
+    detected afterwards, and only the rows that still show it: an `events` table whose highest
+    rowid is the ceiling (`kind: "parked"`), and a row below rowid 1 in `events`, `people` or
+    `texts` (`kind: "sunk"`), however either got there, are named by the server on every boot and
+    by the CLI's `--db` reader on every read (a `sqlite_guard_missing` WARNING; `guardsTampered`,
+    so `sync`, `apply` and `state` refuse), and a write refused because of one says that is the
+    cause instead of calling the write a forgery. No boot repairs either. A parked row, and a row
+    below 1 on `events` or `people`, cannot be deleted, so a person recovers such a file by hand;
+    a row below 1 on `texts` that names an existing event can be removed with `removeText`
+    (docs/PRIVACY.md, section 5), which records a `text_removed` event for it. A row one short of
+    the ceiling traps nothing until a genuine append takes the ceiling, and is named from then on.
+    A column named `rowid`, `oid` or `_rowid_`, in any case and generated ones included, on
+    `events`, `people` or `texts`, takes that name from the real rowid for every guard that says it,
+    and `ALTER TABLE ... ADD COLUMN` makes one with every trigger's text unchanged. While it is
+    there, a row can go in at any rowid through `_rowid_` — below the boundary, or at the ceiling —
+    a DEFAULT on it makes every append collide, and an `UPDATE OR REPLACE` onto another person's
+    rowid erases that person's row. The server on every boot and the CLI's `--db` reader on every
+    read name such a column (`kind: "shadowed"`), the CLI refuses to act, and nothing repairs it.
+    Once the column is dropped again, only a row it left at the ceiling or below rowid 1 is still
+    named (above); a row it let in between 1 and the boundary, or a person's row it erased, leaves
+    nothing any check here can find — the same gap as a guard dropped and put back. What no guard closes: an attacker who
+    also drops and restores `events_no_delete` and `events_no_low_rowid` between two reads (the
+    same gap `sqlite_guard_missing` already admits for every other one: the server on its next
+    boot, and the CLI's `--db` reader on every read, name a guard still dropped, and neither names
+    one put back) can delete every hashed row and start the boundary over, or delete an event and
+    its texts row together and leave nothing to compare against at all — an erasure, not a
+    mismatch, and the panel already cannot tell an erased event from one that was never made.
+    Dropping and restoring `events_no_high_rowid` the same way parks a row at the ceiling; that
+    one is still named afterwards, by the row it leaves (above), and a row parked short of the
+    ceiling is not. One more limit worth naming plainly: `hashText`
     (`engine/api/texts.ts`) is an UNKEYED hash — plain sha256 of the salt, a NUL byte and the value,
     with no secret the write access lacks — so that same write access can just as easily compute
     a correct hash as strip one, and append a forged row at `MAX(rowid) + 1` with a matching
@@ -118,6 +159,11 @@ Worth knowing before you run it:
   it: the guard is in the application. Without a session, every static page redirects to the login
   screen. That guard has a test in the HTTP contract suite, because its absence would be silent:
   every page would simply be served to anyone.
+- **It stores agent tokens** (`docs/ROLES.md`, section 4) as SHA-256 of a 256-bit random secret,
+  compared in constant time. A token is shown once, to the owner who issued it, and never again: not
+  in a list, an event or a log line. It opens the API's event routes and nothing else, never gives a
+  ✓, and is refused when the same request also carries a session. A copy of the user store hands
+  over no token anyone can present.
 - **It stores passwords** with scrypt, per-user salt, and constant-time comparison. A test asserts
   the password does not appear in the raw database file.
 - **The first-access password is random**, printed once, and must be changed at first login. There
@@ -165,9 +211,13 @@ Worth knowing before you run it:
 
 ## Known limits
 
-- The agent's CLI can read the event store directly, bypassing the API — and therefore the cycle,
-  the roles and the limits. It only reads, and it is marked in the code. The right fix is the agent
-  having an identity of its own.
+- The agent's CLI can read the event store directly, bypassing the API. It only reads, and it is
+  marked in the code: every write it makes goes through the API with the agent's own token, and the
+  code that wrote to the cloud directly is gone (#122).
+- **An agent token does not expire.** It lasts until the owner revokes it or issues the address a
+  new one, so a token that leaks is good until someone notices. Revoke it on the people screen the
+  moment it may have been seen. The CLI sends it over https only, or over http to this machine, and
+  never to the local runner `--local` names.
 - **An old revision still taking traffic after the new one has written its lock baseline can record
   events the new version will trust as if it had written them itself.** `locks` and
   `authorCouldTriage` are trusted on any event dated after the baseline, whichever revision recorded

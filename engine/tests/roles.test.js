@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope,
-  parseAgents, AGENT_NEVER, rolesOf, refuseGrantsToAgents,
+  parseAgents, AGENT_NEVER, rolesOf, refuseGrantsToAgents, agentByToken, byToken, addressOf,
 } from '../core/roles.js';
 
 test('exactly one owner: zero or two refuse to start', () => {
@@ -421,4 +421,56 @@ test('rolesOf starts when no grant names an agent, and names every grant that do
   // The owner is in `admins` by consequence; naming them once, as the owner, is the honest message.
   assert.throws(() => rolesOf({ owner: AGENT, admins: '', locks: '', agents: AGENT }),
     (e) => !/HOLDRIM_ADMINS/.test(e.message));
+});
+
+// ---------------------------------------------------------------- agent tokens (issue #122)
+//
+// The second source of the agent flag: an identity the server built after checking an agent token.
+// None of these addresses is in HOLDRIM_AGENTS, so every refusal below can only come from the token.
+
+test('a token identity is an agent, whatever HOLDRIM_AGENTS says, and its bare address is not', () => {
+  const roles = createRoles('owner@example.org', 'ana@example.org', '', '');
+  assert.equal(roles.isAgent(agentByToken('bot@example.org')), true, 'the token alone makes it an agent');
+  assert.equal(roles.isAgent('bot@example.org'), false, 'the same address, signed in as a person, is not');
+});
+
+test('can refuses a token of an admin\'s address triage, approve, lock and people, and keeps read, comment and request', () => {
+  // The admin's address, through a token: `ROLE_CAPABILITIES` grants it everything but `lock`, so a
+  // refusal here comes from the agent check, before any grant is read — which is the layer a
+  // `roles.isAgent` blind to tokens would take away.
+  const roles = createRoles('owner@example.org', 'ana@example.org', '', '');
+  const token = agentByToken('ana@example.org');
+  for (const c of AGENT_NEVER) assert.equal(roles.can(c, token), false, c);
+  for (const c of ['read', 'comment', 'request']) assert.equal(roles.can(c, token), true, c);
+  assert.equal(roles.can('approve', 'ana@example.org'), true, 'the admin signed in as a person keeps approving');
+});
+
+test('a token issued for the owner\'s address is never the owner, and holds none of what the owner alone holds', () => {
+  // A handover can make the owner's address one a token was issued for. `isOwner` is what every
+  // owner-only guard asks — who issues a token, who resets the owner's account — so it has to say no.
+  const roles = createRoles('owner@example.org', '', '', '');
+  const token = agentByToken('Owner@Example.org');
+  assert.equal(roles.isOwner(token), false);
+  for (const c of AGENT_NEVER) assert.equal(roles.can(c, token), false, c);
+  assert.equal(roles.isOwner('owner@example.org'), true, 'the owner signed in is still the owner');
+});
+
+test('only an identity built by agentByToken reads as one: an address never does, whatever it holds', () => {
+  assert.equal(byToken(agentByToken('bot@example.org')), true);
+  assert.equal(byToken('bot@example.org'), false);
+  assert.equal(byToken({ email: 'bot@example.org', byToken: 'true' }), false, 'a string "true" is not the flag');
+  assert.equal(byToken(null), false);
+  assert.ok(Object.isFrozen(agentByToken('bot@example.org')), 'a checked identity cannot be edited into another');
+  assert.equal(agentByToken(' Bot@Example.org ').email, 'bot@example.org', 'normalized like every other address');
+  assert.equal(addressOf(agentByToken('bot@example.org')), 'bot@example.org');
+  assert.equal(addressOf('ana@example.org'), 'ana@example.org');
+  assert.equal(addressOf(null), null, 'a missing viewer stays missing, never a throw');
+});
+
+test('a token identity holds a member\'s role, even on an address HOLDRIM_ADMINS grants', () => {
+  // A restart can grant the address of a token already issued. The role is what `/api/me` shows and
+  // what `can` looks capabilities up in, so the token reads as what it is: an agent, a member's grants.
+  const roles = createRoles('owner@example.org', 'ana@example.org', '', '');
+  assert.equal(roles.roleOf(agentByToken('ana@example.org')), 'member');
+  assert.equal(roles.roleOf('ana@example.org'), 'admin', 'the admin signed in as a person is still an admin');
 });

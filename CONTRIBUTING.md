@@ -75,8 +75,10 @@ The pull request names its tier, and when in doubt the tier goes up, never down.
 another round: it rides the next commit when it is trivial, or becomes an issue. A later round reads
 only what the fix changed.
 
-Run them over your change and come back with no blocker before you open the pull request. Say in
-the pull request what they found and what you did with it.
+Read `LESSONS.md` first, its Security section above all: it is what earlier reviews missed, and
+the three questions every pull request answers. Then run them over your change and come back with
+no blocker before you open the pull request. Say in the pull request what they found and what you
+did with it.
 
 **Whichever agent you use.** Holdrim was built and proved with Claude Code, and there it is one
 command, `/full-review`. It picks no vendor: the six lenses are Markdown files any agent can be
@@ -177,7 +179,7 @@ two are separate on purpose: a `docs` change that rewords an invariant is still 
 | `tests` | proofs only: a test, a mutation that was missing, a flake with its root cause |
 | `tooling` | CI, scripts, hooks, agent configuration |
 | `refactor` | the same behaviour, arranged better; never mixed with a change of behaviour |
-| `lessons` | what a review missed, turned into a rule in a lens (full-review, step 6) |
+| `lessons` | what a review missed, turned into a rule in a lens and an entry in `LESSONS.md` (full-review, step 6) |
 | `contributor-experience` | what it takes to clone, build, run and contribute, found by doing it |
 
 Commit messages carry no kind prefix: the first line says what changed, in plain words, as the

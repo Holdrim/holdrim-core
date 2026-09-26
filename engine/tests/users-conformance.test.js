@@ -28,6 +28,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { UsersSqlite } from '../api/users-sqlite.ts';
+import { AGENT_TOKEN_FORMAT, AddressInUse } from '../api/users.ts';
+import { randomBytes, createHash } from 'node:crypto';
 import { freshFirestoreProject } from './helpers/firestore.js';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
@@ -65,7 +67,7 @@ try {
     open: async () => {
       const store = new UsersPostgres(PG_URL);
       await store.isEmpty();                       // forces the connection and creates the schema
-      await admin.query('TRUNCATE sessions, users');
+      await admin.query('TRUNCATE sessions, users, agent_tokens');
       return store;
     },
   });
@@ -145,9 +147,12 @@ async function millisecondsOf(fn) {
 
 /**
  * Registers the same test for every available store, and a skipped one for every store that is
- * not available — so the reason shows up in the output even when nothing ran.
+ * not available — so the reason shows up in the output even when nothing ran. `body` gets the store
+ * and its name. `firestoreTimeout` is for a test whose Firestore run is slow by nature, not by bug:
+ * contended transactions wait on the emulator's lock and retry with a backoff, and a cancellation
+ * there says nothing about the store.
  */
-function forEachStore(title, body) {
+function forEachStore(title, body, { firestoreTimeout = 15_000 } = {}) {
   for (const store of stores) {
     // ⚠️ Firestore only: a loop over pages that never terminates — an off-by-one in what counts as
     // "the page was full", say — would otherwise hang until CI's own ten-minute ceiling, on every
@@ -160,11 +165,11 @@ function forEachStore(title, body) {
     // preempt a running `while` loop from the outside. What this buys is the common case (a bug
     // that hangs on one call that never resolves) failing fast and by name; a true runaway loop
     // still falls back to whatever kills the process from outside it — CI's own job timeout.
-    const options = store.name === 'firestore' ? { timeout: 15_000 } : {};
+    const options = store.name === 'firestore' ? { timeout: firestoreTimeout } : {};
     test(`[${store.name}] ${title}`, options, async () => {
       const s = await store.open();
       try {
-        await body(s);
+        await body(s, store.name);
       } finally {
         await s.close();
       }
@@ -188,6 +193,16 @@ forEachStore('creates a person and finds them again', async (s) => {
   // What comes out of the store must not carry the secret: this object reaches the HTTP layer.
   assert.equal(found.salt, undefined);
   assert.equal(found.hash, undefined);
+});
+
+forEachStore('a second account for one address is refused, and the first one\'s password still gets in', async (s) => {
+  // A store that overwrote here would hand the address to whoever created it second, password and
+  // all, without an error anywhere: Firestore's `create`, where `set` would do exactly that.
+  await s.create('someone@example.org', 'Someone', 'the first password');
+  await assert.rejects(s.create('Someone@Example.org', 'Someone Else', 'the second password'));
+  assert.ok(await s.check('someone@example.org', 'the first password'), 'the first password no longer gets in');
+  assert.equal(await s.check('someone@example.org', 'the second password'), null, 'the second one does');
+  assert.equal((await s.find('someone@example.org'))?.name, 'Someone');
 });
 
 forEachStore('the generated password is what gets in, and only it', async (s) => {
@@ -734,4 +749,143 @@ forEachStore('the kept session survives even past a single delete page, and ever
     'a loop that stops the moment it sees the kept session sitting in a FULL page would leave every '
     + 'session past that page alive — this is the boundary a plain "a handful of sessions" test, or '
     + 'one that never excludes anybody, cannot reach');
+});
+
+// ===================================================================== agent tokens (issue #122)
+/** The public id and the secret a token carries, as `AGENT_TOKEN_FORMAT` reads them. */
+const partsOf = (token) => {
+  const m = AGENT_TOKEN_FORMAT.exec(token);
+  assert.ok(m, `not a token: ${token}`);
+  return { id: m[1], secret: m[2] };
+};
+
+forEachStore('an agent token is issued once, and names its agent back with kind agent', async (s) => {
+  const { token, agent, tokenId, replaced } = await s.issueAgentToken(' Bot@Example.org ');
+  assert.equal(partsOf(token).id, tokenId);
+  assert.equal(replaced, null, 'nothing was replaced on a first issue');
+  assert.deepEqual(agent, { email: 'bot@example.org', kind: 'agent', issuedAt: agent.issuedAt });
+  assert.match(agent.issuedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(await s.fromAgentToken(token), agent);
+});
+
+forEachStore('a token that is not the one issued opens nothing: another secret, an unknown id, a malformed one', async (s) => {
+  const { token } = await s.issueAgentToken('bot@example.org');
+  const { id, secret } = partsOf(token);
+  const other = secret.slice(0, -1) + (secret.endsWith('0') ? '1' : '0');
+  assert.equal(await s.fromAgentToken(`holdrim_agent_${id}_${other}`), null, 'the right id with another secret');
+  assert.equal(await s.fromAgentToken(`holdrim_agent_${'0'.repeat(24)}_${secret}`), null, 'the right secret under another id');
+  for (const bad of [undefined, '', token.toUpperCase(), ` ${token}`, `${token}x`, secret, id]) {
+    assert.equal(await s.fromAgentToken(bad), null, String(bad));
+  }
+});
+
+forEachStore('re-issuing revokes the previous token at once, and says which one it replaced', async (s) => {
+  // Owner decision 3 (issue #122): one token per agent address.
+  const first = await s.issueAgentToken('bot@example.org');
+  const second = await s.issueAgentToken('bot@example.org');
+  assert.equal(await s.fromAgentToken(first.token), null, 'the old token still opens the door after a re-issue');
+  assert.equal((await s.fromAgentToken(second.token))?.email, 'bot@example.org');
+  assert.equal(second.replaced, first.tokenId);
+  assert.equal((await s.listAgentTokens()).length, 1, 'one address, one token');
+});
+
+forEachStore('revoking makes the token fail at once, and a second revoke finds nothing to revoke', async (s) => {
+  const { token, tokenId } = await s.issueAgentToken('bot@example.org');
+  const kept = await s.issueAgentToken('other@example.org');
+  assert.equal(await s.revokeAgentToken('BOT@example.org'), tokenId, 'revoked by its address, normalized');
+  assert.equal(await s.fromAgentToken(token), null);
+  assert.equal(await s.revokeAgentToken('bot@example.org'), null);
+  assert.equal((await s.fromAgentToken(kept.token))?.email, 'other@example.org', 'another agent\'s token is untouched');
+  assert.deepEqual((await s.listAgentTokens()).map((a) => a.email), ['other@example.org']);
+});
+
+forEachStore('the list of agent tokens carries no secret, no hash and no id, ordered by address', async (s) => {
+  const issued = [await s.issueAgentToken('zed@example.org'), await s.issueAgentToken('abe@example.org')];
+  const list = await s.listAgentTokens();
+  assert.deepEqual(list.map((a) => a.email), ['abe@example.org', 'zed@example.org']);
+  for (const a of list) assert.deepEqual(Object.keys(a).sort(), ['email', 'issuedAt', 'kind']);
+  const said = JSON.stringify(list);
+  for (const { token, tokenId } of issued) {
+    assert.ok(!said.includes(partsOf(token).secret) && !said.includes(tokenId), 'a token\'s secret or id is in the list');
+  }
+});
+
+forEachStore('re-issuing under concurrency leaves one live token, and the trail names every token it stopped', async (s, name) => {
+  // Twelve issues for one address at once, as a double click, a retry and a second tab can make them.
+  // The chain the trail keeps (`replacedTokenId`, agent-tokens.ts) is right only when each issue saw
+  // the row the one before it wrote: exactly one issue replaced nothing, no token is named as replaced
+  // twice, and every token that no longer works is named by the issue that stopped it. An issue that
+  // reads the row outside its own write's turn breaks all three while still leaving one row.
+  // One round on Firestore: contended transactions there wait on the emulator's lock and retry with
+  // a backoff, so a single round takes from 6 to 15 seconds whatever the number racing, and a store
+  // that reads outside its turn already fails the first.
+  for (let round = 0; round < (name === 'firestore' ? 1 : 3); round++) {
+    const address = `race${round}@example.org`;
+    const issued = await Promise.all(Array.from({ length: 12 }, () => s.issueAgentToken(address)));
+    const live = [];
+    for (const i of issued) if (await s.fromAgentToken(i.token)) live.push(i.tokenId);
+    const named = issued.map((i) => i.replaced).filter((r) => r !== null);
+    assert.equal(live.length, 1, `round ${round}: live tokens ${live.length}`);
+    assert.equal(issued.filter((i) => i.replaced === null).length, 1, `round ${round}: issues that replaced nothing`);
+    assert.equal(new Set(named).size, named.length, `round ${round}: a token named as replaced twice`);
+    const unnamed = issued.filter((i) => !live.includes(i.tokenId) && !named.includes(i.tokenId));
+    assert.deepEqual(unnamed.map((i) => i.tokenId), [], `round ${round}: stopped tokens no issue names`);
+  }
+}, { firestoreTimeout: 60_000 });
+
+/** A user row as `insertUser` takes it; the hash is never checked here, so any bytes do. */
+const userRow = (email) => ({
+  email, name: 'Someone', salt: Buffer.alloc(16, 1), hash: Buffer.alloc(64, 2),
+  mustChangePassword: true, createdAt: new Date().toISOString(), enabled: true,
+});
+
+forEachStore('an address is a person\'s or an agent\'s, never both: each refuses the other, whichever came first', async (s) => {
+  // The owner's decision on issue #122: a token is never issued for an address with an account —
+  // disabled or not, since disabling one must not leave a token writing as that person — and no
+  // account is ever created for an address holding a token.
+  await s.create('person@example.org', 'A Person', 'a long enough password', false);
+  await s.setEnabled('person@example.org', false);
+  await assert.rejects(s.issueAgentToken('Person@Example.org'), (e) => e instanceof AddressInUse && e.heldBy === 'account');
+  assert.deepEqual(await s.listAgentTokens(), [], 'a token was written for an address with an account');
+
+  await s.issueAgentToken('bot@example.org');
+  await assert.rejects(s.create(' BOT@example.org ', 'A Bot'), (e) => e instanceof AddressInUse && e.heldBy === 'agentToken');
+  assert.equal(await s.find('bot@example.org'), null, 'an account was written for an address holding a token');
+
+  // Revoked, the address is free again: disjoint is about what an address IS now, not what it was.
+  await s.revokeAgentToken('bot@example.org');
+  await s.create('bot@example.org', 'Now A Person', 'a long enough password', false);
+  assert.equal((await s.find('bot@example.org'))?.name, 'Now A Person');
+});
+
+forEachStore('an account and a token written for one address at the same moment: exactly one of them lands', async (s) => {
+  // The row writes, not `create` and `issueAgentToken`: `create` spends a password hash first, so the
+  // two public calls would reach the store one after the other and never race. At the row writes they
+  // do, and a check made outside the write's own turn lets both through here.
+  const addresses = Array.from({ length: 16 }, (_, i) => `both${i}@example.org`);
+  const outcomes = await Promise.all(addresses.map(async (email) => {
+    const token = { email, kind: 'agent', tokenId: randomBytes(12).toString('hex'), hash: Buffer.alloc(32, 3), issuedAt: new Date().toISOString() };
+    return Promise.allSettled([s.insertUser(userRow(email)), s.writeAgentToken(token)]);
+  }));
+  const tokens = new Set((await s.listAgentTokens()).map((a) => a.email));
+  for (const [i, email] of addresses.entries()) {
+    const [account, token] = outcomes[i];
+    assert.equal([account, token].filter((o) => o.status === 'fulfilled').length, 1,
+      `${email}: ${account.status} account, ${token.status} token`);
+    const refused = account.status === 'rejected' ? account.reason : token.reason;
+    assert.ok(refused instanceof AddressInUse, `${email}: refused by something else: ${refused}`);
+    assert.equal(Boolean(await s.find(email)) !== tokens.has(email), true, `${email} is both, or neither`);
+  }
+}, { firestoreTimeout: 30_000 });
+
+forEachStore('a token row of another kind opens nothing, on a store with no constraint to refuse writing it', async (s) => {
+  // SQLite and Postgres refuse the row itself (CHECK kind = 'agent'); Firestore has no constraint, so
+  // there `fromAgentToken`'s own check on the kind it reads back is all that stands.
+  const tokenId = randomBytes(12).toString('hex');
+  const secret = randomBytes(32).toString('hex');
+  const hash = createHash('sha256').update(secret, 'utf8').digest();
+  const written = await s.writeAgentToken({ email: 'other@example.org', kind: 'session', tokenId, hash, issuedAt: new Date().toISOString() })
+    .then(() => true, () => false);
+  assert.equal(await s.fromAgentToken(`holdrim_agent_${tokenId}_${secret}`), null,
+    `a row of kind session opened as an agent's (written: ${written})`);
 });

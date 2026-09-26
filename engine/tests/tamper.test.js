@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createRoles } from '../core/roles.js';
+import { createRoles, agentByToken } from '../core/roles.js';
 import { withTexts, withTextsRetrying, hashText, newSalt, textKey, findingOf, observedOf, TEXT_REMOVED } from '../api/texts.ts';
 import {
   TAMPER_ACKNOWLEDGED, TAMPER_KINDS, tamperKey, tamperFieldKey, openFindings, mayAcknowledge,
@@ -231,6 +231,28 @@ test('an agent is refused even when the owner\'s own address is marked as one', 
   // on its own (roles.js, `createRoles`'s own comment).
   const contradictory = createRoles(OWNER, '', '', OWNER);
   assert.equal(mayAcknowledge(contradictory, OWNER), false);
+});
+
+test('a token carrying the owner\'s own address still cannot acknowledge (issue #138)', () => {
+  // `agentByToken(OWNER)` is what a request signs in as when the owner's address is behind a
+  // token, not a session (server.ts, `apiViewerOf`). Asked of the ADDRESS ALONE — the mistake this
+  // guards against — `isAgent` would miss it and `isOwner` would answer "yes": `email` is the
+  // owner's, and nothing about a plain string says it came in with a token. Asked of the identity
+  // itself, `isAgent` catches it first, the same as any other token (roles.js, `isAgent`).
+  const asToken = agentByToken(OWNER);
+  assert.equal(mayAcknowledge(roles, asToken), false);
+  assert.equal(mayAcknowledge(roles, OWNER), true, 'the same address, signed in with a session, still may');
+
+  const open = openOne();
+  assert.deepEqual(
+    acknowledgementRefusal(roles, asToken, { finding: open[0].finding }, open),
+    { refused: { status: 403, key: 'api.tamper.ownerOnly' } },
+  );
+
+  // `AS_AGENT_FIELD` on the event server.ts writes: `String(roles.isAgent(who))`. A token identity
+  // must stamp "true" so `isAcknowledgement` (this file) never reads it as the owner's — asking of
+  // `email` instead would stamp "false", the one shape that quiets the banner.
+  assert.equal(roles.isAgent(asToken), true);
 });
 
 const openOne = () => {

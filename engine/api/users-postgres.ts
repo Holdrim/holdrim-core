@@ -1,4 +1,4 @@
-import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
+import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
 
 /**
  * People and sessions in Postgres: tables `users` and `sessions`.
@@ -23,8 +23,13 @@ import { UserStoreBase, type StoredSession, type StoredUser } from './users.ts';
 const PG_MODULE = 'pg';
 
 /** The slice of `pg` this file touches. Everything else about the driver is none of our business. */
+interface PgClient {
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  release(): void;
+}
 interface PgPool {
   query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  connect(): Promise<PgClient>;
   end(): Promise<void>;
 }
 interface PgModule {
@@ -74,6 +79,16 @@ export class UsersPostgres extends UserStoreBase {
         expires_at TEXT NOT NULL
       )`);
     await pool.query('CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions (expires_at)');
+    // One row per agent address, as in SQLite: the primary key is what makes a second issue replace
+    // the first. users-sqlite.ts says why there is no reference to `users`.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS agent_tokens (
+        email     TEXT PRIMARY KEY,
+        kind      TEXT NOT NULL CHECK (kind = 'agent'),
+        token_id  TEXT NOT NULL UNIQUE,
+        hash      BYTEA NOT NULL,
+        issued_at TEXT NOT NULL
+      )`);
 
     this.#pool = pool;
     return pool;
@@ -84,11 +99,43 @@ export class UsersPostgres extends UserStoreBase {
     return (await pool.query(text, values)).rows;
   }
 
+  /**
+   * `body` in one transaction holding the address's own advisory lock, released at its end: every
+   * write that decides what an address is — a token issued, an account created — waits its turn
+   * behind any other for the same address (`writeAgentToken`, users.ts).
+   *
+   * An advisory lock and not `SELECT … FOR UPDATE`: a first issue, or an account next to no token,
+   * has no row to lock yet, and two such writes would both lock nothing and both go ahead. Read
+   * committed is enough under the lock: each statement after it sees what the previous holder
+   * committed. The key is prefixed so it cannot collide with another lock taken on the same database.
+   */
+  async #inAddressTurn<T>(email: string, body: (q: PgClient['query']) => Promise<T>): Promise<T> {
+    const pool = this.#pool ?? await this.#ready;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`holdrim:address:${email}`]);
+      const result = await body((text, values) => client.query(text, values));
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   protected async insertUser(row: StoredUser): Promise<void> {
-    await this.#query(
-      'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
-      + 'VALUES ($1, $2, $3, $4, $5, $6, $7)',
-      [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled]);
+    await this.#inAddressTurn(row.email, async (q) => {
+      if ((await q('SELECT 1 FROM agent_tokens WHERE email = $1', [row.email])).rows.length > 0) {
+        throw new AddressInUse(row.email, 'agentToken');
+      }
+      await q(
+        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
+        + 'VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled]);
+    });
   }
 
   protected async readUser(email: string): Promise<StoredUser | null> {
@@ -156,6 +203,39 @@ export class UsersPostgres extends UserStoreBase {
     await this.#query('DELETE FROM sessions WHERE email = $1 AND id != $2', [email, keepSessionId]);
   }
 
+  protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
+    // In the address's turn: a CTE reading the old row inside the upsert is one statement, but not one
+    // turn — two issues racing both read the row as it stood before either, both name the same
+    // predecessor, and a concurrent first issue reads nothing at all and names none.
+    return this.#inAddressTurn(row.email, async (q) => {
+      if ((await q('SELECT 1 FROM users WHERE email = $1', [row.email])).rows.length > 0) {
+        throw new AddressInUse(row.email, 'account');
+      }
+      const [before] = (await q('SELECT token_id FROM agent_tokens WHERE email = $1', [row.email])).rows;
+      await q(
+        'INSERT INTO agent_tokens (email, kind, token_id, hash, issued_at) VALUES ($1, $2, $3, $4, $5) '
+        + 'ON CONFLICT (email) DO UPDATE SET kind = EXCLUDED.kind, token_id = EXCLUDED.token_id, '
+        + 'hash = EXCLUDED.hash, issued_at = EXCLUDED.issued_at',
+        [row.email, row.kind, row.tokenId, row.hash, row.issuedAt]);
+      return (before?.token_id as string | undefined) ?? null;
+    });
+  }
+
+  protected async readAgentTokenById(tokenId: string): Promise<StoredAgentToken | null> {
+    const [r] = await this.#query('SELECT * FROM agent_tokens WHERE token_id = $1', [tokenId]);
+    return r ? rowToToken(r) : null;
+  }
+
+  protected async readAllAgentTokens(): Promise<StoredAgentToken[]> {
+    // Ordered out loud, for the collation reason `readAllUsers` gives.
+    return (await this.#query('SELECT * FROM agent_tokens ORDER BY email')).map(rowToToken);
+  }
+
+  protected async deleteAgentToken(email: string): Promise<string | null> {
+    const [r] = await this.#query('DELETE FROM agent_tokens WHERE email = $1 RETURNING token_id', [email]);
+    return (r?.token_id as string | undefined) ?? null;
+  }
+
   async close(): Promise<void> {
     // Awaiting the connection first: closing a store whose pool is still being built would leave
     // the pool open behind us and hold the process alive.
@@ -175,5 +255,13 @@ function rowToUser(r: Record<string, unknown>): StoredUser {
     salt: Buffer.from(r.salt as Uint8Array), hash: Buffer.from(r.hash as Uint8Array),
     mustChangePassword: !!r.must_change, createdAt: r.created_at as string,
     enabled: !!r.enabled,
+  };
+}
+
+/** One row of `agent_tokens`, shaped as `users.ts` expects it, for the single read and the listing. */
+function rowToToken(r: Record<string, unknown>): StoredAgentToken {
+  return {
+    email: r.email as string, kind: r.kind as 'agent', tokenId: r.token_id as string,
+    hash: Buffer.from(r.hash as Uint8Array), issuedAt: r.issued_at as string,
   };
 }

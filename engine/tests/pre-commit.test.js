@@ -86,3 +86,31 @@ test('both bundles rebuilding unchanged passes quietly', (t) => {
   assert.equal(code, 0);
   assert.doesNotMatch(out, /was stale/);
 });
+
+/**
+ * Section 4, the secret scan, for Holdrim's own agent token (issue #122). The token is built here from
+ * parts, so this file's own text never matches the pattern it proves.
+ */
+function commitText(t, text) {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-pre-commit-secret-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  git(dir, 'init', '-q');
+  // No extension the hook reads for anything else, so the scan is the only section this reaches.
+  writeFileSync(join(dir, 'notes.txt'), `${text}\n`);
+  git(dir, 'add', 'notes.txt');
+  const hookPath = join(dir, 'pre-commit-under-test');
+  writeFileSync(hookPath, HOOK_SRC);
+  const r = spawnSync('bash', [hookPath], { cwd: dir, env: isolatedEnv(process.env), encoding: 'utf8' });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+}
+
+test('an agent token staged for a commit is refused as a secret', (t) => {
+  const { code, out } = commitText(t, `export HOLDRIM_AGENT_TOKEN=${['holdrim', 'agent', '0'.repeat(24), 'f'.repeat(64)].join('_')}`);
+  assert.equal(code, 1);
+  assert.match(out, /there seems to be a SECRET/);
+});
+
+test('the name of the variable alone is not a secret', (t) => {
+  const { code, out } = commitText(t, 'export HOLDRIM_AGENT_TOKEN=<the token the owner issued>');
+  assert.equal(code, 0, out);
+});
