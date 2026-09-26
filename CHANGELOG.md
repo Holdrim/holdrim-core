@@ -15,6 +15,31 @@ who ran the engine from `main` before it.
 
 ### Breaking
 
+- **The CLI no longer writes to the cloud store directly: every write goes through the server's
+  `POST /api/events`, with an agent token the owner issues (#122).** Before this, `holdrim state` in
+  cloud mode wrote its event straight into Firestore as `agent via <gcloud account>`, skipping the
+  cycle, the roles, the limits and `data.asAgent`; that path, and the name, are gone. **What an
+  adopter in cloud mode changes:** (1) the server has to run with password sign-in
+  (`HOLDRIM_IDENTITY=password`, the default outside Development when `HOLDRIM_AUDIENCE` is unset),
+  since tokens live in its user store — behind an identity proxy there is no user store and so no
+  token, and the CLI there can no longer record a state at all; (2) the owner signs in, opens the
+  people screen, and issues a token for the agent's own address — never the owner's, an admin's or a
+  lock-holder's, which are refused; (3) wherever `holdrim` runs, export `HOLDRIM_AGENT_TOKEN` with
+  that token and `HOLDRIM_URL` with the server's address (`https://…`). Reading is unchanged:
+  `cloud.project`/`HOLDRIM_PROJECT` and gcloud are still what the CLI reads the cloud with, and
+  `--local` against `bash engine/run-local.sh` needs neither variable, writing as the runner's
+  development identity `agent@local`. Only the owner issues and revokes a token, one per address
+  (issuing again revokes the last), and it never expires until revoked; the people screen shows when
+  each was issued. A token reaches only the event routes, and a ✓ sent with one is refused whatever
+  its address. New on the surface: `GET /api/agent-tokens`, `POST /api/agent-tokens`, `POST
+  /api/agent-tokens/:email/revoke`; the event types `agent_token_issued` and `agent_token_revoked`
+  (page `_agent_tokens`, data `agent`, `tokenId`, `replacedTokenId`), which only those routes write;
+  and an `agent_tokens` table (SQLite, Postgres) or collection (Firestore) in the user store, created
+  on start. Two answers change: a request carrying both a session cookie and an `Authorization`
+  header is refused (401), and under password sign-in an `Authorization` that is not a live agent
+  token is refused (401) instead of ignored. And an agent — named in `HOLDRIM_AGENTS` or come in with
+  a token — may now move an approved request through `applying`, `waiting` and `applied` through the
+  API, as `docs/ROLES.md` section 4 already said it keeps; before, only the local runner let it.
 - **`/api/me`'s `role` answers `member` where it used to answer `other`.** The engine now speaks of
   three shipped roles — `owner`, `admin`, `member` — as sets of a closed capability list
   (`engine/core/roles.js`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`), and
@@ -36,9 +61,9 @@ who ran the engine from `main` before it.
   reader — the API, the panel, the home, and the CLI reading the events file or the cloud — gets the
   e-mail back, so nothing Holdrim shows changes. What reads the database directly, around Holdrim,
   now sees ids in `events.author`: join them to `people`. Events recorded before keep the e-mail they
-  hold and read as it. The CLI's direct write to the cloud names its `agent via <account>` by an id
-  too, and, like the server, now talks to the Firestore emulator when `FIRESTORE_EMULATOR_HOST` is
-  set. The development identity (`X-Dev-Email`, `HOLDRIM_DEV_EMAIL`) is lowercased and trimmed, as
+  hold and read as it. The CLI's reader of the cloud, like the server, talks to the Firestore
+  emulator when `FIRESTORE_EMULATOR_HOST` is set; the CLI no longer writes there at all (the first
+  entry above). The development identity (`X-Dev-Email`, `HOLDRIM_DEV_EMAIL`) is lowercased and trimmed, as
   sign-in and the identity proxy already were.
 - **An event's `text` and `snapshot` move to a table of their own, one row per event and field; the
   event keeps only a salted hash of each.** Reading an event is unchanged — the API, the panel, the

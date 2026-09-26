@@ -53,7 +53,9 @@ the site.
    owner the store needs its guards restored before anything in it can be trusted. If it reports
    `tampered`, stop the same way, but say instead that a text does not match its hash — that is not
    a guard problem.
-2. `holdrim state <id> applying "Received…"` — the reviewer sees the progress in the panel.
+2. `holdrim state <id> applying "Received…"` — the reviewer sees the progress in the panel. Every
+   `state` goes through the server with the agent's own token (`HOLDRIM_AGENT_TOKEN`, at
+   `HOLDRIM_URL`); without one it refuses. Ask the owner for a token; never work around it.
 3. `holdrim impact <id> --term "…"` — **everywhere else the subject shows up**. Never change
    anything without this: the command marks which blocks are **validated**, and those need the
    owner's permission to change.

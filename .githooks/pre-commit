@@ -41,8 +41,9 @@ for f in $json; do
 done
 
 # ------------------------------------------------------------------ 4. a secret heading into history
-# A committed secret never leaves: rewriting public history is worse than the leak.
-PATTERN='(GOCSPX-|AIza[0-9A-Za-z_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[0-9A-Za-z]{30,}|xox[baprs]-[0-9A-Za-z-]{10,})'
+# A committed secret never leaves: rewriting public history is worse than the leak. Holdrim's own
+# agent token is on the list: an agent pastes it where it works, and where it works is a repository.
+PATTERN='(GOCSPX-|AIza[0-9A-Za-z_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[0-9A-Za-z]{30,}|xox[baprs]-[0-9A-Za-z-]{10,}|holdrim_agent_[0-9a-f]{24}_[0-9a-f]{64})'
 # The hook itself and the CI workflow CONTAIN these patterns (they are their definition), so they
 # stay out of the scan — otherwise the hook blocks itself.
 SUSPECTS=$(echo "$FILES" | grep -vE '^(\.githooks/|\.github/)' || true)

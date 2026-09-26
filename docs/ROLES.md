@@ -148,8 +148,9 @@ current authority after 0.1.0. The
 
 ### 4. An agent never gives a ✓
 
-Refusing an agent by the name it writes is not enough: `agent via <account>` is chosen by the CLI,
-and an agent that reaches the server another way arrives as whoever it borrowed from. So:
+Refusing an agent by the name it writes is not enough: the name `agent via <account>` the CLI's old
+direct write chose for itself was the CLI's to choose, and an agent that reaches the server another
+way arrives as whoever it borrowed from. So:
 
 - **Who is an agent is set by the deployment, in `HOLDRIM_AGENTS`**, next to `HOLDRIM_LOCKS`:
   addresses separated by `;`, checked as strictly as a `HOLDRIM_LOCKS` entry, read from the
@@ -169,15 +170,32 @@ and an agent that reaches the server another way arrives as whoever it borrowed 
 - **Every event says whether its author was an agent.** `recordEvent` writes `data.asAgent`
   (`"true"` or `"false"`) on every event from the identity the server saw, replacing whatever the
   client sent — written at the moment, read forever after, like `locks` in section 3.
-- **Next: an agent has a credential of its own** — a token the owner issues, so the server knows an
-  agent by how it signed in, not only by an address the deployment listed. It becomes a second
-  source of the same identity flag `can` already asks, and with it the agent writes through the API
-  and the CLI's direct path to the cloud goes (`docs/PRIVACY.md`, section 3). Until then, an agent
-  that signs in as a person, or under an address `HOLDRIM_AGENTS` does not name, is that person to
-  the server, and the CLI's direct write to the cloud writes no `asAgent` at all.
-- **A ✓ that is a lock is given in an interactive session** — a person signed in, in a browser —
-  never with a token.
-- **What remains open, said plainly:** an agent running on a person's machine that reuses that
+- **An agent has a credential of its own (#122)** — a token the owner issues on the people screen,
+  so the server knows an agent by how it signed in, not only by an address the deployment listed.
+  It is a second source of the same identity flag `can` already asks: `roles.isAgent` answers true
+  for whoever comes in with one, whatever its address, and `isOwner` answers false. Only the owner
+  issues and revokes one — the `people` capability does not reach it. One token per address:
+  issuing again revokes the previous one at once. A token does not expire; it lasts until it is
+  revoked, and the people screen says when it was issued. The owner's address cannot be issued one,
+  nor an admin's or a lock-holder's, for the reason a grant cannot name an address `HOLDRIM_AGENTS`
+  marks; a token whose address becomes the owner's after a restart opens nothing at all. Issuing
+  and revoking are events, `agent_token_issued` and `agent_token_revoked`, written only by the
+  owner's own routes (`POST /events` refuses both), naming the agent by its person id.
+- **The token opens the API's event routes, and nothing else.** No account route, no token route,
+  no screen: a page, the home and the people screen still want a session. It is shown once, when
+  it is issued, and kept as a hash (`engine/api/users.ts`). A request that carries a session and a
+  token at once is refused rather than resolved to either, since whichever won would be wrong for
+  somebody. With it the CLI writes only through `POST /api/events` (`HOLDRIM_AGENT_TOKEN`, at
+  `HOLDRIM_URL`), and its direct path to the cloud is gone (`docs/PRIVACY.md`, section 3). Tokens
+  live in the user store, so they exist under password sign-in only; behind an identity proxy,
+  where people live in the proxy, an agent is marked by `HOLDRIM_AGENTS` alone.
+- **A ✓ is given in an interactive session** — a person signed in, in a browser — never with a
+  token. A ✓ sent with a token is refused outright, the owner's or an admin's address included,
+  asked on how the request signed in before any capability is read (`refusalOf`,
+  `engine/api/server.ts`).
+- **What remains open, said plainly:** an agent that signs in with a password, under an address
+  `HOLDRIM_AGENTS` does not name, is still that person to the server — the token marks an agent that
+  uses it, not one that avoids it. And an agent running on a person's machine that reuses that
   person's signed-in browser session is, to the server, that person. Nothing in 0.1.0 tells them
   apart, and the method's answer until signed events and a second factor exist (phase E) is the one
   it has always had: the ✓ is the person's, given with their session, and they are answerable for it.
@@ -261,7 +279,10 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | An admin probes candidate addresses to reconstruct the `HOLDRIM_LOCKS` list from which ones 409 | Not stopped, and not meant to be: the 409 itself already shows an address is reserved. What the refusal withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically — which is acceptable because the lock markers already in the event history name the holders anyway |
 | Someone with `people` makes themselves or an accomplice an approver | Only the owner grants roles |
 | A direct writer to the store forges a grant | Buys a role without `lock`, never `people` over a lock-holder; closed by signed events |
-| An agent approves its own text | An identity `HOLDRIM_AGENTS` names is refused any ✓ and any lock by `can`, before any grant is read; a lock ✓ needs an interactive session. Reuse of a person's session, and an agent signing in under an unlisted address, are the open gaps in section 4 |
+| An agent approves its own text | An identity `HOLDRIM_AGENTS` names, and anyone who comes in with an agent token, is refused any ✓ and any lock by `can`, before any grant is read; a ✓ sent with a token is refused outright, whatever its address. Reuse of a person's session, and an agent signing in with a password under an unlisted address, are the open gaps in section 4 |
+| An admin issues an agent token and acts through it | Only the owner issues or revokes one; `people` does not reach it |
+| A token outlives its revocation, or its replacement | The token is one row per address, overwritten on re-issue and deleted on revoke, and looked up on every request |
+| A copy of the user store hands over working tokens | Only a hash of each secret is stored |
 | A misconfigured grant hands an agent a lock: `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or `HOLDRIM_LOCKS` names it | The service and the CLI refuse to start; and `can` would deny it anyway, the agent check coming before the grant |
 | A revoked lock-holder's past ✓s are re-read as not locks | The lock is written on the event when given |
 | A scope meant for one page covers others | Scopes are exact, an explicit `*`, or block ids |
@@ -302,7 +323,7 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
 | Agents marked by the deployment (`HOLDRIM_AGENTS`), refused `triage`, `approve`, `lock` and `people` before any grant is read | built (#30) — `engine/core/roles.js`'s `parseAgents`, `isAgent`, `AGENT_NEVER` and `can` |
 | A grant naming an agent refusing to start, on the server and in the CLI | built (#30) — `refuseGrantsToAgents`, called by `rolesOf`; `holdrim.json` refuses `agents` too |
-| Every event marked with whether its author was an agent | built (#30) — `data.asAgent`, written by `recordEvent` (`engine/api/server.ts`); not by the CLI's direct write to the cloud, which bypasses the server |
-| An agent's own credential (a token the owner issues), and the agent writing through the API only | not built — the next step of section 4 |
+| Every event marked with whether its author was an agent | built (#30) — `data.asAgent`, written by `recordEvent` (`engine/api/server.ts`), on every event, the CLI's included since it writes through the server (#122) |
+| An agent's own credential (a token the owner issues), and the agent writing through the API only | built (#122) — `issueAgentToken`/`fromAgentToken` (`engine/api/users.ts`, all three stores), `agentByToken` (`engine/core/roles.js`), `apiViewerOf` and the `/api/agent-tokens` routes (`engine/api/server.ts`), the people screen, and `Source.add` (`engine/cli/remote.ts`) |
 | `people.show`, applied by the server | built (#31) — `engine/core/people-show.js`, `engine/api/server.ts`'s `personDisplay`/`authorDisplaysFor`, `engine/cli/requests.ts`'s `personLabel`. The CLI applies it too, though it can show no name and no id it has no accounts store to look either up in (docs/PRIVACY.md, section 1) — `personLabel` passes `id: null` as well as `name: null`, so both fall back to the address, the same as an event from before ids existed |
 | `features`, with both states tested | built — `engine/core/features.js`, `engine/api/server.ts`, `engine/cli/graph.ts`, `engine/web/src/Panel.jsx`, `engine/test-contract.sh` |

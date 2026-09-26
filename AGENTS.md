@@ -111,9 +111,10 @@ Each has a test. If you change the code around one, run the contract test and re
   and every reader uses what was written, never a recomputation from who holds `lock` now — an owner
   who hands over must not silently un-lock every ✓ they gave before. An agent may *close* an impact
   — "this change did not reach here" — and never *approve* — "this text is correct", and never gives
-  a ✓ at all. An address in `HOLDRIM_AGENTS` is refused `triage`, `approve`, `lock` and `people` by
-  `can` before any grant is read, a grant naming one refuses to start, and every event records
-  `data.asAgent` (`engine/core/roles.js`, `engine/api/server.ts`).
+  a ✓ at all. An address in `HOLDRIM_AGENTS`, and anyone who comes in with an agent token the owner
+  issued, is refused `triage`, `approve`, `lock` and `people` by `can` before any grant is read; a
+  grant naming one refuses to start, a ✓ sent with a token is refused whatever its address, and
+  every event records `data.asAgent` (`engine/core/roles.js`, `engine/api/server.ts`).
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
   known format; interpolating a raw string lets `red; } body { display:none } /*` through.
 
@@ -141,7 +142,9 @@ say a text is correct.
 **The engine calls no model and holds no API key.** The agent is whichever CLI the person has on
 their machine — Claude Code, Codex, Gemini — running with their own account. `holdrim list --json`
 is the queue as data, `holdrim apply <id>` writes the brief and hands it to that CLI
-(`engine/cli/agent.ts`), and `holdrim state <id> applied --commit` closes the loop. The plugin in
+(`engine/cli/agent.ts`), and `holdrim state <id> applied --commit` closes the loop — through the
+server's API, with the token the owner issued the agent on the people screen
+(`HOLDRIM_AGENT_TOKEN`); the CLI never writes to a store directly. The plugin in
 `plugins/holdrim/` teaches Claude Code the method; `examples/hello-world/AGENTS.md` teaches any other
 agent. Nothing here runs unattended on somebody's subscription: it is always a person, at their own
 computer, starting their own tool.
