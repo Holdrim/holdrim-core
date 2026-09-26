@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { readConfig } from '../core/config.js';
 import { rolesOf } from '../core/roles.js';
 import { parseHTML } from 'linkedom';
@@ -236,19 +237,53 @@ export type BlockLookup =
   | { ok: false; kind: 'not-found' | 'multiple' | 'invalid'; message: string };
 
 export function resolveBlock(root: string, id: string): BlockLookup {
-  return resolveBlocks(root, [id]).get(id)!;
+  const found = scanBlocks(root, [id], (path, html, element, document) => ({ path, html, element, document })).get(id)!;
+  return found.ok ? { ok: true, ...found.found } : found;
 }
 
 /**
- * `resolveBlock` for many ids at once, with each page read and parsed once for all of them: asked one
- * id at a time, a sync of N blocks parsed every page N times. Every id gets exactly the answer
- * `resolveBlock` alone gives it — the same pages in the same order, the same refusals — and the ids
- * found on one page share that page's parsed `document`, which is what lets `spliceAll` plan all of
- * them on a single parse.
+ * Where each id lives, for `markAll`: the page, and a digest of the text it was found in — the same
+ * answer `resolveBlock` gives each id alone, the same pages in the same order, the same refusals,
+ * from one read and parse per page for all of them. Only the path and the digest outlive the page's
+ * parse. Every touched page's text and parsed document, held until the last page is stamped, make a
+ * sync's memory grow with the whole site — about 100 MB for 500 pages of 100 KB — where stamping needs
+ * one page at a time; the page is read again when its turn comes, and the digest says whether it is
+ * still the page these answers are about.
  */
-export function resolveBlocks(root: string, ids: readonly string[]): Map<string, BlockLookup> {
-  const out = new Map<string, BlockLookup>();
-  const matches = new Map<string, { path: string; html: string; element: Element; document: Parsed }[]>();
+export type Location = { ok: true; path: string; digest: string } | Extract<BlockLookup, { ok: false }>;
+
+export function locateBlocks(root: string, ids: readonly string[]): Map<string, Location> {
+  const digests = new Map<string, string>();
+  const located = scanBlocks(root, ids, (path, html) => {
+    let digest = digests.get(path);
+    if (digest === undefined) digests.set(path, digest = digestOf(html));
+    return { path, digest };
+  });
+  return new Map([...located].map(([id, found]): [string, Location] => [id, found.ok ? { ok: true, ...found.found } : found]));
+}
+
+/** What `locateBlocks` compares a page's text by: equal digests, equal text, without keeping the text. */
+export function digestOf(html: string): string {
+  return createHash('sha256').update(html).digest('hex');
+}
+
+/** A page read afresh, parsed once, with its blocks by id — what `markAll` plans and splices from. */
+export function parsePage(html: string): { document: Parsed; byId: Map<string, Element[]> } {
+  const { document } = parseHTML(html);
+  return { document, byId: blocksById(document) };
+}
+
+/**
+ * The one pass `resolveBlock` and `locateBlocks` share: every page read and parsed once for all
+ * `ids`, and each element an id names handed to `keep` while its page is parsed — what `keep`
+ * returns is all that outlives the page. Asked one id at a time, a sync of N blocks parsed every
+ * page N times. Each id ends refused, or with exactly one kept value.
+ */
+function scanBlocks<T>(root: string, ids: readonly string[],
+                       keep: (path: string, html: string, element: Element, document: Parsed) => T):
+  Map<string, { ok: true; found: T } | Extract<BlockLookup, { ok: false }>> {
+  const out = new Map<string, { ok: true; found: T } | Extract<BlockLookup, { ok: false }>>();
+  const matches = new Map<string, T[]>();
   for (const id of ids) {
     // Stated policy, not what makes a stamp safe — `spliceAttributes` verifies every write whatever
     // the id holds. An id with `"` or `&` is one whose page text carries it as an entity (`&quot;`,
@@ -281,14 +316,14 @@ export function resolveBlocks(root: string, ids: readonly string[]): Map<string,
           continue;
         }
       }
-      for (const element of named) found.push({ path, html, element, document });
+      for (const element of named) found.push(keep(path, html, element, document));
     }
   }
   for (const [id, found] of matches) {
     if (out.has(id)) continue;
     if (found.length === 0) out.set(id, { ok: false, kind: 'not-found', message: 'not found' });
     else if (found.length > 1) out.set(id, { ok: false, kind: 'multiple', message: `${found.length} blocks carry this id` });
-    else out.set(id, { ok: true, ...found[0] });
+    else out.set(id, { ok: true, found: found[0] });
   }
   return out;
 }
@@ -518,13 +553,24 @@ export interface PageStamp { id: string; plan: MarkPlan }
  * When the whole page is refused, the stamps are halved until each refusal is down to a single
  * stamp, which then goes through `spliceAttributes` alone, on the page as it stands with the others
  * written: it tries that block's later candidates as it always has, and a block no candidate fits is
- * refused alone with the reason it always gave, while the rest of the page is stamped. If the stamps
- * the halving accepted are refused together — two writes that are safe apart and not together — every
- * stamp goes through `spliceAttributes` one after another, exactly the per-block path. Each result is
- * `{ ok: true }` or the error `spliceAttributes` would give; the returned `html` carries only the
- * accepted ones.
+ * refused alone with the reason it always gave, while the rest of the page is stamped. The stamps the
+ * halving accepted were each verified only inside their own half, so they are verified once more,
+ * together, before any of them is written; refused together — two writes safe apart and not together
+ * — every stamp goes through `spliceAttributes` one after another, exactly the per-block path. Without
+ * that last verification, a page whose halves each passed is written as a whole nobody verified. Each
+ * result is `{ ok: true }` or the error `spliceAttributes` would give; the returned `html` carries only
+ * the accepted ones.
+ *
+ * Two paths here are safety nets that no page found so far needs. The per-block fallback: linkedom
+ * reads each tag on its own, and no page is known whose writes are safe apart and refused together.
+ * `verify` is there so a test can make one — "spliceAll verifies the stamps the halving accepted
+ * together, and goes block by block when they are refused together" — and it defaults to the real
+ * check. And the overlap guard below: the `it's` page of "sync stamps the other blocks of a page and
+ * refuses only the one whose seal the parser would drop" reaches it, but its edits are insertions,
+ * which compose in any order, so with or without the guard that page ends the same; whatever edits are
+ * composed, the page they make is verified before it is written.
  */
-export function spliceAll(html: string, document: Parsed, stamps: readonly PageStamp[]):
+export function spliceAll(html: string, document: Parsed, stamps: readonly PageStamp[], verify: Verifier = verifyAll):
   { html: string; results: ({ ok: true } | { error: string })[] } {
   const results: ({ ok: true } | { error: string })[] = stamps.map(() => ({ ok: true }));
   const byId = blocksById(document);
@@ -552,8 +598,8 @@ export function spliceAll(html: string, document: Parsed, stamps: readonly PageS
     reach = to;
   }
 
-  const accepted = accept(html, disjoint);
-  if (accepted.bad.length && verifyAll(html, accepted.good) === null) return spliceOneByOne(html, stamps, results);
+  const accepted = accept(html, disjoint, verify);
+  if (!accepted.whole && verify(html, accepted.good) === null) return spliceOneByOne(html, stamps, results);
   let out = accepted.good.length ? applyEdits(html, accepted.good.flatMap((e) => e.edits)) : html;
   for (const i of [...alone, ...accepted.bad.map((e) => e.index)].sort((a, b) => a - b)) {
     const result = spliceAttributes(out, stamps[i].id, stamps[i].plan);
@@ -564,7 +610,7 @@ export function spliceAll(html: string, document: Parsed, stamps: readonly PageS
 }
 
 /** One stamp inside `spliceAll`: where it sits in the caller's list, and its first candidate. */
-interface Batched { index: number; id: string; written: Stamp[]; cleared: readonly string[]; edits: Edit[] }
+export interface Batched { index: number; id: string; written: Stamp[]; cleared: readonly string[]; edits: Edit[] }
 
 /** The stretch of raw text a stamp's edits cover, from the first one's start to the last one's end. */
 function spanOf({ edits }: Batched): { at: number; to: number } {
@@ -572,18 +618,22 @@ function spanOf({ edits }: Batched): { at: number; to: number } {
 }
 
 /**
- * The stamps `verifyAll` accepts together, found by halving: a group accepted whole is kept whole,
- * and a group refused is split until each refusal is one stamp. Only the refused stamps cost more
- * than the one verification of the whole page — a few halvings each.
+ * The stamps `verify` accepts, found by halving: a group accepted whole is kept whole, and a group
+ * refused is split until each refusal is one stamp. Only the refused stamps cost more than the one
+ * verification of the whole page — a few halvings each. `whole` says the `good` returned were
+ * verified as one group; after a split they were not, and `spliceAll` verifies them together.
  */
-function accept(html: string, entries: Batched[]): { good: Batched[]; bad: Batched[] } {
-  if (!entries.length || verifyAll(html, entries) !== null) return { good: entries, bad: [] };
-  if (entries.length === 1) return { good: [], bad: entries };
+function accept(html: string, entries: Batched[], verify: Verifier): { good: Batched[]; bad: Batched[]; whole: boolean } {
+  if (!entries.length || verify(html, entries) !== null) return { good: entries, bad: [], whole: true };
+  if (entries.length === 1) return { good: [], bad: entries, whole: false };
   const half = Math.ceil(entries.length / 2);
-  const left = accept(html, entries.slice(0, half));
-  const right = accept(html, entries.slice(half));
-  return { good: [...left.good, ...right.good], bad: [...left.bad, ...right.bad] };
+  const left = accept(html, entries.slice(0, half), verify);
+  const right = accept(html, entries.slice(half), verify);
+  return { good: [...left.good, ...right.good], bad: [...left.bad, ...right.bad], whole: false };
 }
+
+/** The check `spliceAll` holds a group of stamps to: the page they make together, or `null` when it is refused. */
+export type Verifier = (html: string, entries: readonly Batched[]) => string | null;
 
 /**
  * (a) and (b) of `writesOnlyThe`, for every stamp in `entries` at once, on `html` with all their edits

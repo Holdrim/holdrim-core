@@ -2,8 +2,8 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, resolveBlock, resolveBlocks, spliceAttributes, spliceAll, attributeText, textOf, shortName, ofProject, projectRoles,
-  namesNotLowerCase, browserIdOf, browserBlocks, type Block, type BlockLookup, type Stamp, type MarkPlan } from './pages.ts';
+import { readBlocks, sheetFiles, resolveBlock, locateBlocks, digestOf, parsePage, spliceAttributes, spliceAll, attributeText, textOf, shortName, ofProject, projectRoles,
+  namesNotLowerCase, browserIdOf, browserBlocks, type Block, type Stamp, type MarkPlan } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
@@ -366,7 +366,10 @@ function record(root: string, registry: Registry, id: string, path: string, when
   registry[id] = {
     file: shortName(root, path),
     date: when, fingerprint, source,
-    text: text.replace(/\s+/g, ' ').trim().slice(0, 120),
+    // Copied out of the text rather than sliced: V8 keeps a slice of a long string as a view into all
+    // of it, and the registry lives until the run ends. Sliced, every entry holds its block's whole
+    // text, and a sync's memory grows with the site instead of staying at one page.
+    text: Array.from(text.replace(/\s+/g, ' ').trim().slice(0, 120)).join(''),
     ...(Object.keys(dependsOn).length ? { dependsOn } : {}),
     ...(event ? { event } : {}),
   };
@@ -415,45 +418,53 @@ interface SiteStamp { id: string; when: string; event: string; expected: string;
 
 /**
  * `mark(…, 'site', event, fingerprintsNow, expected, true)` for many ✓ at once, with one parse and at
- * most one write per page instead of a whole-page read, parse and verification per block: every page
- * is resolved once (`resolveBlocks`), each page's seals are spliced and verified together
- * (`spliceAll`), and the page is written once, only with the seals that were accepted. A ✓ refused
- * anywhere along the way is said through its own `say`, exactly as `mark` would print it, records
- * nothing, and takes no other ✓ down with it. `settled` hears each ✓'s outcome — the fingerprint
- * recorded, or `null` for a refusal — as soon as its page is done.
+ * most one write per page instead of a whole-page read, parse and verification per block: every id is
+ * located once (`locateBlocks`), each page's seals are spliced and verified together (`spliceAll`),
+ * and the page is written once, only with the seals that were accepted. A ✓ refused anywhere along
+ * the way is said through its own `say`, exactly as `mark` would print it, records nothing, and takes
+ * no other ✓ down with it. `settled` hears each ✓'s outcome — the fingerprint recorded, or `null` for
+ * a refusal — as soon as its page is done.
  *
- * Each page is read again right before it is stamped, and one that changed since it was resolved has
+ * One page at a time: read, parsed, planned, spliced, verified, written, and let go before the next
+ * is read. Locating keeps only which page each id lives on and a digest of that page, so what a sync
+ * holds is one page, whatever the size of the site.
+ *
+ * The page read here is the one located only when its digest matches; one that changed since has
  * its ✓ written one by one through `mark`'s own path, which resolves and fingerprints the block afresh.
- * Without that, an edit made while the run is under way — to a page resolved at the start and written
- * at the end — is overwritten by a seal on the text as it was, where `mark` refuses a ✓ whose text
- * moved under it.
+ * An edit to a block's own text is refused either way, by its fingerprint; what the digest guards is
+ * everything else locating decided about the page. Without it, a `DATA-ID` written onto the page
+ * while the run is under way is stamped past, where `mark` refuses the whole page, and a block moved
+ * off the page is looked for where it no longer is. The whole text is compared, through its digest:
+ * an edit that keeps the page's length is an edit all the same.
  */
 async function markAll(root: string, registry: Registry, stamps: readonly SiteStamp[],
                        fingerprintsNow: Map<string, string>,
                        settled: (index: number, fingerprint: string | null) => void) {
-  const lookups = resolveBlocks(root, stamps.map((s) => s.id));
-  const pages = new Map<string, { html: string; document: Extract<BlockLookup, { ok: true }>['document'];
-                                   entries: { index: number; element: Element }[] }>();
+  const located = locateBlocks(root, stamps.map((s) => s.id));
+  const pages = new Map<string, { digest: string; entries: number[] }>();
   for (const [index, { id, say }] of stamps.entries()) {
-    const resolved = lookups.get(id)!;
-    if (!resolved.ok) { say(refusal(id, resolved.message)); settled(index, null); continue; }
-    const page = pages.get(resolved.path) ?? { html: resolved.html, document: resolved.document, entries: [] };
-    page.entries.push({ index, element: resolved.element });
-    pages.set(resolved.path, page);
+    const where = located.get(id)!;
+    if (!where.ok) { say(refusal(id, where.message)); settled(index, null); continue; }
+    const page = pages.get(where.path) ?? { digest: where.digest, entries: [] };
+    page.entries.push(index);
+    pages.set(where.path, page);
   }
 
-  for (const [path, { html, document, entries }] of pages) {
-    if (readFileSync(path, 'utf8') !== html) {
-      for (const { index } of entries) {
+  for (const [path, { digest, entries }] of pages) {
+    const html = readFileSync(path, 'utf8');
+    if (digestOf(html) !== digest) {
+      for (const index of entries) {
         const { id, when, event, expected, say } = stamps[index];
         settled(index, await markWith(say, root, registry, id, when, 'site', event, fingerprintsNow, expected, true));
       }
       continue;
     }
+    // The same text parses to the same blocks, so each id names here the one element it was located as.
+    const { document, byId } = parsePage(html);
     const planned: { index: number; planned: Planned }[] = [];
-    for (const { index, element } of entries) {
+    for (const index of entries) {
       const { id, when, expected, say } = stamps[index];
-      const plan = await planSeal(say, id, element, when, fingerprintsNow, expected, true);
+      const plan = await planSeal(say, id, byId.get(id)![0], when, fingerprintsNow, expected, true);
       if ('refused' in plan) { say(refusal(id, plan.refused)); settled(index, null); continue; }
       planned.push({ index, planned: plan });
     }
