@@ -9,3 +9,17 @@ data
 .env
 .env.*
 *.md
+# Test-only code. `Dockerfile`'s `COPY engine ./engine` ships everything under `engine/` unless a
+# line here excludes it, and `engine/`'s root holds three things nothing in a running container
+# reads: `engine/tests` (including engine/tests/hooks/scoped-roles.js, which wraps rolesOf so one
+# fixed address holds triage and approve on chosen pages — `node --import` reads NODE_OPTIONS, so a
+# hook of that shape reachable inside a container is one environment variable away from a backdoor),
+# `engine/test-contract.sh` and `engine/test-browser.js`. `CMD` runs `engine/api/server.ts` directly,
+# the HEALTHCHECK is a plain fetch, and neither script is imported from either — see
+# workflows.test.js's "the image ships no test-only paths". Everything else at `engine/`'s root
+# (`api`, `cli`, `core`, `cycle.json`, `locales`, `run-local.sh`, `surface.json`, `web`) is left in:
+# `run-local.sh` is not test-only, and `surface.json` is the published list of every name an adopter
+# builds on — nothing reads it at run time, but it documents the version the image is, so it ships.
+engine/tests
+engine/test-contract.sh
+engine/test-browser.js

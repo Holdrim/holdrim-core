@@ -391,6 +391,11 @@ try {
     // itself (docs/ROLES.md, "The front end obeys the server").
     await must('and it is always "You" to them, never the address',
       () => reader.page.locator('.rv-request', { hasText: 'Request from You:' }).waitFor());
+    // Triage is drawn from `status.triage` alone, which the server sends empty to whoever may not
+    // triage this request where it was filed (#33) — so a reader sees the state, and no decision.
+    expect('and is offered no triage on it', 0, await reader.page.locator('.rv-triage button').count());
+    expect('nor an Approve, with a request open', 0,
+      await reader.page.locator('.rv-panel').getByRole('button', { name: /^(✓ )?Approve/ }).count());
     await reader.page.getByRole('button', { name: 'Add details' }).click();
     await reader.page.locator('.rv-request .rv-form textarea').fill('in every sentence of section 1');
     // Twice, fast: a submit button with no guard would send the same details twice.

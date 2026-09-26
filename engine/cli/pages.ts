@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readConfig } from '../core/config.js';
-import { rolesOf } from '../core/roles.js';
+import { rolesOf, pageOfBlock } from '../core/roles.js';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { kindOf, whatIsMissing } from '../core/kinds.js';
@@ -210,7 +210,8 @@ async function blocksOf(file: string, path: string, html: string): Promise<reado
     });
 
     blocks.push(Object.freeze({
-      id, page: id.split('.')[0], path, code,
+      // `pageOfBlock`, the one derivation a scope is judged by too (engine/core/roles.js).
+      id, page: pageOfBlock(id), path, code,
       kind, missing: Object.freeze(whatIsMissing(kind, context)) as string[],
       proof: el.getAttribute('data-proof'),
       file,

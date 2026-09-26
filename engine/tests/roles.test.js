@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope,
   parseAgents, AGENT_NEVER, rolesOf, refuseGrantsToAgents, agentByToken, byToken, addressOf,
+  EVERYWHERE, scopeCovers, pageOfBlock, whereOf, lockCoverage,
 } from '../core/roles.js';
 
 test('exactly one owner: zero or two refuse to start', () => {
@@ -23,7 +24,7 @@ test('the owner is an admin by consequence, not by configuration', () => {
   const roles = createRoles('Owner@Example.org', '');
   assert.equal(roles.isOwner('owner@example.org'), true, 'case does not count in an e-mail');
   assert.equal(roles.roleOf('owner@example.org'), 'owner');
-  for (const capability of CAPABILITIES) assert.equal(roles.can(capability, 'owner@example.org'), true, capability);
+  for (const capability of CAPABILITIES) assert.equal(roles.can(capability, 'owner@example.org', EVERYWHERE), true, capability);
   assert.deepEqual(roles.admins, ['owner@example.org']);
 });
 
@@ -31,12 +32,12 @@ test('an admin can do everything the owner does, except be the owner and lock', 
   const roles = createRoles('owner@example.org', ' ana@example.org ,bob@example.org,, ');
   assert.equal(roles.isOwner('ana@example.org'), false);
   assert.equal(roles.roleOf('ana@example.org'), 'admin');
-  assert.equal(roles.can('approve', 'bob@example.org'), true);
-  assert.equal(roles.can('triage', 'bob@example.org'), true);
-  assert.equal(roles.can('people', 'bob@example.org'), true);
+  assert.equal(roles.can('approve', 'bob@example.org', EVERYWHERE), true);
+  assert.equal(roles.can('triage', 'bob@example.org', EVERYWHERE), true);
+  assert.equal(roles.can('people', 'bob@example.org', EVERYWHERE), true);
   // Only the owner's ✓ becomes a lock (AGENTS.md). An admin who could also lock would make every
   // admin an owner in every way that matters, which is exactly the invariant this file guards.
-  assert.equal(roles.can('lock', 'bob@example.org'), false);
+  assert.equal(roles.can('lock', 'bob@example.org', EVERYWHERE), false);
   assert.deepEqual([...roles.admins].sort(), ['ana@example.org', 'bob@example.org', 'owner@example.org']);
 });
 
@@ -45,11 +46,11 @@ test('anybody else — a member — can only read, comment and request', () => {
   for (const who of ['carl@example.org', '', null, undefined]) {
     assert.equal(roles.isOwner(who), false);
     assert.equal(roles.roleOf(who), 'member');
-    assert.equal(roles.can('read', who), true);
-    assert.equal(roles.can('comment', who), true);
-    assert.equal(roles.can('request', who), true);
+    assert.equal(roles.can('read', who, EVERYWHERE), true);
+    assert.equal(roles.can('comment', who, EVERYWHERE), true);
+    assert.equal(roles.can('request', who, EVERYWHERE), true);
     for (const capability of ['triage', 'approve', 'lock', 'people']) {
-      assert.equal(roles.can(capability, who), false, capability);
+      assert.equal(roles.can(capability, who, EVERYWHERE), false, capability);
     }
   }
 });
@@ -63,10 +64,10 @@ test('roleOf answers with the three names the engine ships, and no product role'
 
 test('can throws on a capability outside the closed list, rather than silently answering false', () => {
   const roles = createRoles('owner@example.org', '');
-  assert.throws(() => roles.can('superadmin', 'owner@example.org'), /"superadmin" is not a capability/);
+  assert.throws(() => roles.can('superadmin', 'owner@example.org', EVERYWHERE), /"superadmin" is not a capability/);
   // A typo must not read as "no": a mistyped capability that quietly refused everyone would look
   // exactly like a correct refusal, and nobody would notice which one it was.
-  assert.throws(() => roles.can('Approve', 'owner@example.org'), /"Approve" is not a capability/);
+  assert.throws(() => roles.can('Approve', 'owner@example.org', EVERYWHERE), /"Approve" is not a capability/);
 });
 
 // ------------------------------------------------------------------ the mapping the whole issue is
@@ -113,7 +114,7 @@ test('mutating what capabilitiesOf returns changes nothing the next caller reads
   // The mutated Set is a copy: a fresh call reads the frozen source again, not what somebody did to
   // an earlier call's answer.
   assert.equal(capabilitiesOf('admin').has('lock'), false);
-  assert.equal(roles.can('lock', 'ana@example.org'), false, 'an admin\'s ✓ must not have just become a lock');
+  assert.equal(roles.can('lock', 'ana@example.org', EVERYWHERE), false, 'an admin\'s ✓ must not have just become a lock');
 });
 
 // ------------------------------------------------------------------ #29: the validation core, kept
@@ -320,8 +321,8 @@ test('naming the owner in HOLDRIM_LOCKS is harmless', () => {
 test('a lock holder does not yet lock — can(\'lock\', …) still asks isOwner alone', () => {
   const roles = createRoles('owner@example.org', '', 'ana@example.org:P0*');
   assert.equal(roles.isLockHolder('ana@example.org'), true, 'the guard sees them');
-  assert.equal(roles.can('lock', 'ana@example.org'), false, 'but can() does not, yet');
-  assert.equal(roles.can('lock', 'owner@example.org'), true);
+  assert.equal(roles.can('lock', 'ana@example.org', EVERYWHERE), false, 'but can() does not, yet');
+  assert.equal(roles.can('lock', 'owner@example.org', EVERYWHERE), true);
 });
 
 test('the owner locks and admin and member do not, whatever a caller does to what capabilitiesOf returned', () => {
@@ -333,9 +334,9 @@ test('the owner locks and admin and member do not, whatever a caller does to wha
   // The table's own shape — that no role's entry carries `lock` in the first place — is the mapping
   // test above ("the three shipped roles hold exactly the capabilities docs/ROLES.md gives them").
   for (const role of ['owner', 'admin', 'member']) capabilitiesOf(role).add('lock');
-  assert.equal(roles.can('lock', 'owner@example.org'), true);
-  assert.equal(roles.can('lock', 'ana@example.org'), false, 'admin must not lock, whatever the table says');
-  assert.equal(roles.can('lock', 'carl@example.org'), false, 'member must not lock, whatever the table says');
+  assert.equal(roles.can('lock', 'owner@example.org', EVERYWHERE), true);
+  assert.equal(roles.can('lock', 'ana@example.org', EVERYWHERE), false, 'admin must not lock, whatever the table says');
+  assert.equal(roles.can('lock', 'carl@example.org', EVERYWHERE), false, 'member must not lock, whatever the table says');
 });
 
 // ---------------------------------------------------------------- agents (docs/ROLES.md, section 4)
@@ -376,24 +377,24 @@ for (const capability of ['triage', 'approve', 'lock', 'people']) {
   test(`can refuses an agent ${capability}, even when a grant names it the owner`, () => {
     const roles = createRoles(AGENT, '', `${AGENT}:A01`, AGENT);
     assert.equal(roles.isOwner(AGENT), true, 'the grant is really there');
-    assert.equal(roles.can(capability, AGENT), false);
+    assert.equal(roles.can(capability, AGENT, EVERYWHERE), false);
   });
 }
 
 test('can refuses an agent that HOLDRIM_ADMINS names, and the admin beside it keeps everything', () => {
   const roles = createRoles('owner@example.org', `${AGENT},ana@example.org`, '', AGENT);
   for (const c of ['triage', 'approve', 'people']) {
-    assert.equal(roles.can(c, AGENT), false, `the agent, ${c}`);
-    assert.equal(roles.can(c, 'ana@example.org'), true, `the admin, ${c}`);
+    assert.equal(roles.can(c, AGENT, EVERYWHERE), false, `the agent, ${c}`);
+    assert.equal(roles.can(c, 'ana@example.org', EVERYWHERE), true, `the admin, ${c}`);
   }
 });
 
 test('an agent keeps read, comment and request: it is refused deciding, not taking part', () => {
   const roles = createRoles(AGENT, '', '', AGENT);
-  for (const c of ['read', 'comment', 'request']) assert.equal(roles.can(c, AGENT), true, c);
+  for (const c of ['read', 'comment', 'request']) assert.equal(roles.can(c, AGENT, EVERYWHERE), true, c);
   // The owner-not-an-agent case still holds every capability: the check keys on the identity alone.
   const plain = createRoles('owner@example.org', '', '', AGENT);
-  for (const c of CAPABILITIES) assert.equal(plain.can(c, 'owner@example.org'), true, c);
+  for (const c of CAPABILITIES) assert.equal(plain.can(c, 'owner@example.org', EVERYWHERE), true, c);
 });
 
 /**
@@ -440,9 +441,9 @@ test('can refuses a token of an admin\'s address triage, approve, lock and peopl
   // `roles.isAgent` blind to tokens would take away.
   const roles = createRoles('owner@example.org', 'ana@example.org', '', '');
   const token = agentByToken('ana@example.org');
-  for (const c of AGENT_NEVER) assert.equal(roles.can(c, token), false, c);
-  for (const c of ['read', 'comment', 'request']) assert.equal(roles.can(c, token), true, c);
-  assert.equal(roles.can('approve', 'ana@example.org'), true, 'the admin signed in as a person keeps approving');
+  for (const c of AGENT_NEVER) assert.equal(roles.can(c, token, EVERYWHERE), false, c);
+  for (const c of ['read', 'comment', 'request']) assert.equal(roles.can(c, token, EVERYWHERE), true, c);
+  assert.equal(roles.can('approve', 'ana@example.org', EVERYWHERE), true, 'the admin signed in as a person keeps approving');
 });
 
 test('a token issued for the owner\'s address is never the owner, and holds none of what the owner alone holds', () => {
@@ -451,7 +452,7 @@ test('a token issued for the owner\'s address is never the owner, and holds none
   const roles = createRoles('owner@example.org', '', '', '');
   const token = agentByToken('Owner@Example.org');
   assert.equal(roles.isOwner(token), false);
-  for (const c of AGENT_NEVER) assert.equal(roles.can(c, token), false, c);
+  for (const c of AGENT_NEVER) assert.equal(roles.can(c, token, EVERYWHERE), false, c);
   assert.equal(roles.isOwner('owner@example.org'), true, 'the owner signed in is still the owner');
 });
 
@@ -473,4 +474,74 @@ test('a token identity holds a member\'s role, even on an address HOLDRIM_ADMINS
   const roles = createRoles('owner@example.org', 'ana@example.org', '', '');
   assert.equal(roles.roleOf(agentByToken('ana@example.org')), 'member');
   assert.equal(roles.roleOf('ana@example.org'), 'admin', 'the admin signed in as a person is still an admin');
+});
+
+// ------------------------------------------------------------------ scopes, asked with the place in hand (#33)
+
+test('can throws when it is not told where — a forgotten place is not an answer about everywhere', () => {
+  const roles = createRoles('owner@example.org', 'ana@example.org');
+  assert.throws(() => roles.can('approve', 'owner@example.org'), /needs to know where it is asked/);
+  assert.throws(() => roles.can('read', 'carl@example.org', {}), /needs to know where it is asked/);
+  assert.throws(() => roles.can('triage', 'ana@example.org', { page: '' }), /needs to know where it is asked/);
+  assert.throws(() => roles.can('lock', 'owner@example.org', null), /needs to know where it is asked/);
+  assert.equal(roles.can('approve', 'owner@example.org', { page: 'P03' }), true);
+  assert.equal(roles.can('approve', 'ana@example.org', { block: 'P03.1.1' }), true);
+  assert.equal(roles.can('people', 'ana@example.org', EVERYWHERE), true);
+});
+
+test('a family scope covers P01 to P09 and nothing that merely begins with P', () => {
+  for (const page of ['P01', 'P05', 'P09', 'P0a', 'P0-']) assert.equal(scopeCovers('P0*', { page }), true, page);
+  for (const page of ['P', 'P0', 'Q01', 'P010', 'P01a', 'p01']) assert.equal(scopeCovers('P0*', { page }), false, page);
+  assert.equal(scopeCovers('P0*', { block: 'P07.2.1' }), true, 'a block of a covered page');
+  assert.equal(scopeCovers('P0*', { block: 'P010.2.1' }), false, 'a block of a page the family does not reach');
+});
+
+test('a block scope covers its own block, and neither a page question nor the blocks under it', () => {
+  assert.equal(scopeCovers('P03.2', { block: 'P03.2' }), true);
+  assert.equal(scopeCovers('P03.2', { page: 'P03' }), false, 'a page-level question');
+  assert.equal(scopeCovers('P03.2', { block: 'P03.2.1' }), false, 'a descendant');
+  assert.equal(scopeCovers('P03.2', { block: 'P03.3' }), false, 'a neighbour');
+  assert.equal(scopeCovers('P03.2', { page: 'P03', block: 'P03.2.1' }), false, 'a descendant, named with its page');
+});
+
+test('a page scope covers a block by the block\'s own page, whatever page the client named beside it', () => {
+  assert.equal(pageOfBlock('P03.2.1'), 'P03');
+  assert.equal(scopeCovers('P03', { block: 'P03.2.1' }), true);
+  assert.equal(scopeCovers('P03', { page: 'P09', block: 'P03.2.1' }), true, 'the named page is not trusted to widen');
+  assert.equal(scopeCovers('P09', { page: 'P09', block: 'P03.2.1' }), false, 'nor to narrow onto another page');
+  assert.equal(scopeCovers('P03', { page: 'P03' }), true);
+  assert.equal(scopeCovers('P03', { page: 'P030' }), false);
+  assert.deepEqual(whereOf({ page: 'P09', block: 'P03.2.1' }), { block: 'P03.2.1' });
+  assert.deepEqual(whereOf({ page: 'P09', block: null }), { page: 'P09' });
+});
+
+test('a scoped grant never answers a question asked about everywhere; an unscoped one does', () => {
+  for (const scope of ['P03', 'P0*', 'P03.2.1']) assert.equal(scopeCovers(scope, EVERYWHERE), false, scope);
+  assert.equal(scopeCovers(null, EVERYWHERE), true);
+  assert.equal(scopeCovers(null, { block: 'Z99.1' }), true);
+  assert.equal(scopeCovers('not a scope!', { page: 'P03' }), false, 'a shape none of the three: nothing');
+  // No caller ever hands scopeCovers a non-string scope (parseLocks and isValidScope see to that),
+  // but the fallback below still fails closed rather than throwing if one ever did.
+  assert.equal(scopeCovers({ not: 'a string' }, { page: 'P03' }), false, 'a non-string scope: nothing, not a throw');
+});
+
+test('can refuses an agent triage and approve on the very page and block a grant would cover', () => {
+  // HOLDRIM_ADMINS names the agent: `rolesOf` refuses that at start; `can` still denies on its own.
+  const roles = createRoles('owner@example.org', 'agent@example.org', '', 'agent@example.org');
+  for (const where of [{ page: 'P03' }, { block: 'P03.2.1' }, EVERYWHERE]) {
+    assert.equal(roles.can('triage', 'agent@example.org', where), false, JSON.stringify(where));
+    assert.equal(roles.can('approve', 'agent@example.org', where), false, JSON.stringify(where));
+    assert.equal(roles.can('request', 'agent@example.org', where), true, JSON.stringify(where));
+  }
+});
+
+test('lockCoverage says what each HOLDRIM_LOCKS scope reaches on the site, and an empty list when nothing', () => {
+  const ids = ['A01.1.1', 'A01.2', 'A02.1.1', 'A10.1'];
+  assert.deepEqual(lockCoverage(parseLocks('a@example.org:A0*; b@example.org:A02; c@example.org:A01.2; d@example.org:P0*; e@example.org:A01.2.9'), ids), [
+    { scope: 'A0*', reaches: ['A01', 'A02'] },
+    { scope: 'A02', reaches: ['A02'] },
+    { scope: 'A01.2', reaches: ['A01.2'] },
+    { scope: 'P0*', reaches: [] },
+    { scope: 'A01.2.9', reaches: [] },
+  ]);
 });

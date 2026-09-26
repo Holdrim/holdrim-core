@@ -87,10 +87,10 @@ async function project(t, extra = {}, variables = { owner: OWNER }) {
   const ids = {};
   for (const [who, block] of Object.entries(BLOCK_OF)) {
     const request = await store.append({ type: 'request', page: 'A01', block, fingerprint: 'x',
-      text: `asked by ${who}`, snapshot: null, data: { authorCouldTriage: String(roles.can('triage', who)) } }, who);
+      text: `asked by ${who}`, snapshot: null, data: { authorCouldTriage: String(roles.can('triage', who, { block })) } }, who);
     ids[who] = request.id;
     await store.append({ type: 'approval', page: 'A01', block,
-      fingerprint: blocks.get(block).fingerprint, text: null, data: { locks: String(roles.can('lock', who)) } }, who);
+      fingerprint: blocks.get(block).fingerprint, text: null, data: { locks: String(roles.can('lock', who, { block })) } }, who);
   }
   const events = await store.list();
   await store.close();

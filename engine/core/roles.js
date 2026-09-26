@@ -14,10 +14,12 @@
  *   admin   every capability but `lock`. A role of the PROJECT, named by `HOLDRIM_ADMINS`.
  *   member  `read`, `comment`, `request` — everyone else who can sign in.
  *
- * The engine asks `can(capability, email)`, never a role's name: a role name changes with every
+ * The engine asks `can(capability, who, where)`, never a role's name: a role name changes with every
  * product this ships inside, and a caller that compared one directly (`role === 'admin'`) would stop
  * working the day a project renamed it. `engine/tests/roles-boundary.test.js` proves no caller
- * outside this file does.
+ * outside this file does. `where` — a page, a block, or `EVERYWHERE` — is asked every time, because
+ * a grant may be limited to some pages or blocks (docs/ROLES.md, section 2), and an answer given
+ * without a place would be the unscoped one.
  *
  * A project's OWN roles, and who holds them, are NOT read here yet, and never from `holdrim.json`
  * (docs/ROLES.md, "Authority comes from the deployment only"; `engine/core/config.js`'s
@@ -151,6 +153,122 @@ const SCOPE_BLOCK_FORMAT = /^(?:[A-Za-z][A-Za-z0-9-]{0,15}:)?[A-Za-z][A-Za-z0-9-
 export function isValidScope(scope) {
   if (typeof scope !== 'string' || scope === '') return false;
   return PAGE_FORMAT.test(scope) || SCOPE_FAMILY_FORMAT.test(scope) || SCOPE_BLOCK_FORMAT.test(scope);
+}
+
+/**
+ * The answer to "where?" when a question is about no page at all — managing people, for one. Frozen,
+ * and compared by identity: `can` has to tell a question about everywhere and a caller that forgot
+ * to say where apart, and a plain `{}` a caller built would read as the second. A scoped grant never answers it
+ * (`scopeCovers`), since a grant limited to some pages says nothing about the rest.
+ */
+export const EVERYWHERE = Object.freeze({ everywhere: true });
+
+/**
+ * The page a block id lives on: everything before its first `.`, the derivation `engine/cli/pages.ts`
+ * uses when it reads a block off disk. The server asks this of the BLOCK an event names rather than
+ * trusting the `page` the client sent beside it, so a ✓ on `P03.2.1` posted as if on `P09` is still
+ * judged as `P03`'s.
+ * @param {string} block
+ */
+export function pageOfBlock(block) {
+  return String(block).split('.')[0];
+}
+
+/**
+ * Whether a page family (`P0*`) reaches `page`: the family's prefix and exactly one character more,
+ * and the result still a page code `PAGE_FORMAT` accepts. One character, because docs/ROLES.md's
+ * example has `P0*` reach `P01` to `P09` and nothing that merely begins with `P`; `PAGE_FORMAT` is
+ * loose enough to call `P010` a page code, and a family that read `*` as "anything after" would
+ * reach it, and `P0-draft`, and every longer code a later commit invents. Case-sensitive, as every
+ * other comparison of a page code in the engine is.
+ * @param {string} family
+ * @param {string} page
+ */
+function familyCovers(family, page) {
+  const prefix = family.slice(0, -1);
+  return page.length === prefix.length + 1 && page.startsWith(prefix) && PAGE_FORMAT.test(page);
+}
+
+/**
+ * Whether a grant's `scope` reaches `where` (docs/ROLES.md, section 2). No scope — `null` — is
+ * everywhere. Otherwise, by the shape `isValidScope` gave the scope:
+ *   - a page (`P03`) reaches that page, and any block whose page is it (`pageOfBlock`);
+ *   - a family (`P0*`) reaches the pages `familyCovers` names, and their blocks the same way;
+ *   - a block id reaches that one block — not the blocks under it, and never a question asked of a
+ *     whole page, since a person trusted with one block was not trusted with its neighbours.
+ * A scoped grant never reaches `EVERYWHERE`, and a scope that fits none of the three reaches
+ * nothing: failing closed is the only safe reading of a value that should never have got this far.
+ * @param {string|null|undefined} scope
+ * @param {{page?: string, block?: string}|typeof EVERYWHERE} where
+ */
+export function scopeCovers(scope, where) {
+  if (scope === null || scope === undefined) return true;
+  // No guard for `EVERYWHERE`, on purpose: it names no page and no block, so every branch below
+  // compares a scope against nothing and answers false — a guard here would be one no test could
+  // tell from its absence. `typeof onPage` below is the one check `EVERYWHERE` does lean on: without
+  // it a family would read the length of a page that is not there, and throw. The dropped
+  // `typeof scope !== 'string'` needs no replacement either: every caller hands `scopeCovers` either
+  // `null` or a scope `isValidScope` already accepted — `parseLocks` throws on anything else before a
+  // scope reaches here, and `grantsOf`'s scope is `null` today — so a scope of the wrong type never
+  // arrives to be guarded against.
+  const { page, block } = /** @type {{page?: string, block?: string}} */ (where);
+  // The block's own page, never the `page` a caller put beside it: see `pageOfBlock`.
+  const onPage = block ? pageOfBlock(block) : page;
+  if (PAGE_FORMAT.test(scope)) return scope === onPage;
+  if (SCOPE_FAMILY_FORMAT.test(scope)) return typeof onPage === 'string' && familyCovers(scope, onPage);
+  // Compared with the block alone: a page question has none, so it can never equal a block scope.
+  if (SCOPE_BLOCK_FORMAT.test(scope)) return scope === block;
+  return false;
+}
+
+/**
+ * The `where` a question about an event's place is asked with: its block when it names one, its page
+ * otherwise. One function, so the server's checks and `/api/me`'s answer cannot phrase the same place
+ * two ways.
+ * @param {{page?: string|null, block?: string|null}} at
+ * @returns {{block: string}|{page: string}}
+ */
+export function whereOf(at) {
+  return at.block ? { block: at.block } : { page: String(at.page ?? '') };
+}
+
+/**
+ * Refuses a `where` `can` cannot read: missing, or naming neither a page nor a block. Thrown, like
+ * an unknown capability, because a check that forgot to say where would otherwise be answered — and
+ * an answer about nowhere in particular is the unscoped answer this change exists to stop giving.
+ * @param {unknown} where
+ */
+function checkWhere(where) {
+  if (where === EVERYWHERE) return;
+  const w = /** @type {{page?: unknown, block?: unknown}|null} */ (where);
+  const named = (v) => typeof v === 'string' && v !== '';
+  if (typeof w !== 'object' || w === null || !(named(w.page) || named(w.block))) {
+    throw new Error(
+      'roles.can needs to know where it is asked: a page ({ page }), a block ({ block }), or ' +
+      'EVERYWHERE for a question about no page at all (docs/ROLES.md, section 2).');
+  }
+}
+
+/**
+ * How far each `HOLDRIM_LOCKS` entry's scope reaches on this site: the pages a page or family scope
+ * covers, or the one block a block scope names. What start logs, and refuses on when a scope reaches
+ * nothing — docs/ROLES.md's attack table, "a commit renumbers a page into a lock-holder's scope":
+ * the renumbering is the repository's to decide, but a scope that matches no page at all is a typo
+ * or a page that moved away, and a lock quietly granted over nothing is found out only the day it
+ * starts matching something.
+ * @param {{scope: string}[]} locks  as `parseLocks` returns them
+ * @param {Iterable<string>} blockIds  every block id the site has
+ * @returns {{scope: string, reaches: string[]}[]}
+ */
+export function lockCoverage(locks, blockIds) {
+  const ids = [...blockIds];
+  const pages = [...new Set(ids.map(pageOfBlock))].sort();
+  return locks.map(({ scope }) => ({
+    scope,
+    reaches: SCOPE_BLOCK_FORMAT.test(scope)
+      ? ids.filter((id) => id === scope)
+      : pages.filter((page) => scopeCovers(scope, { page })),
+  }));
 }
 
 /**
@@ -398,6 +516,15 @@ export function createRoles(owner, admins, locksRaw, agentsRaw) {
    */
   const roleOf = (e) => (isOwner(e) ? 'owner'
     : !byToken(e) && everyone.has(normalized(addressOf(e))) ? 'admin' : 'member');
+  /**
+   * What `e` holds, as grants: capabilities, each set limited to a scope or to none (docs/ROLES.md,
+   * section 2). Today every grant is one of the three shipped roles, unscoped — `HOLDRIM_OWNER` and
+   * `HOLDRIM_ADMINS` name no pages — so this is one grant per person. It is the shape `can` reads so
+   * that a project's own scoped grants, once the owner can make them, are one more entry here and
+   * not a second way of answering.
+   * @returns {{capabilities: Set<string>, scope: string|null}[]}
+   */
+  const grantsOf = (e) => [{ capabilities: capabilitiesOf(roleOf(e)), scope: null }];
 
   return {
     owner: ownerEmail,
@@ -444,16 +571,19 @@ export function createRoles(owner, admins, locksRaw, agentsRaw) {
      * moment it starts reading as a lock — the exact forgery section 3 exists to close. `isOwner`
      * alone has no such gap, so `lock` stays exactly that, in this change.
      */
-    can: (capability, e) => {
+    can: (capability, e, where) => {
       if (!CAPABILITIES.includes(capability)) {
         throw new Error(`"${capability}" is not a capability engine/core/roles.js knows: ${CAPABILITIES.join(', ')}.`);
       }
+      // `where` is required, and checked before anything is answered: a caller that forgot it would
+      // otherwise get the unscoped answer, which is exactly what a scoped grant must never give.
+      checkWhere(where);
       // FIRST, before `isOwner` and before any role's capabilities: an agent is refused these on
       // who it is, so no grant — the owner's, `HOLDRIM_ADMINS`, a future role — is ever consulted
       // for them. Asked after a grant, the grant would already have answered.
       if (AGENT_NEVER.includes(capability) && isAgent(e)) return false;
       if (capability === 'lock') return isOwner(e);
-      return capabilitiesOf(roleOf(e)).has(capability);
+      return grantsOf(e).some((g) => g.capabilities.has(capability) && scopeCovers(g.scope, where));
     },
   };
 }

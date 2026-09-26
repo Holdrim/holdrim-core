@@ -1,6 +1,7 @@
 import { readBlocks, type Block } from './pages.ts';
 import { loadRegistry, type Registry } from './validation.ts';
 import { trafficLight, COLOURS } from '../core/validity.js';
+import { pageOfBlock } from '../core/roles.js';
 
 /**
  * The documentation graph, for scripts, other tools and review — outside the browser.
@@ -61,7 +62,7 @@ export function graphOf(blocks: Map<string, Block>, registry: Registry): Graph {
   // convention — and in a group of its own, named after the whole id, when it does not.
   const missingIds = new Set(edges.map((e) => e.to).filter((id) => !blocks.has(id)));
   const missing: GraphNode[] = [...missingIds]
-    .map((id) => ({ id, page: id.split('.')[0], kind: '', state: 'missing' as const }));
+    .map((id) => ({ id, page: pageOfBlock(id), kind: '', state: 'missing' as const }));
 
   const nodes = [...real, ...missing].sort((a, b) => a.id.localeCompare(b.id));
 

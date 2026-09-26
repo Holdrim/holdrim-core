@@ -1,5 +1,6 @@
 import { cpSync, mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, existsSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
+import { refuseLink } from './fs.ts';
 
 /**
  * The documentation as plain static files, for publishing it read-only: `holdrim export <folder>`.
@@ -48,9 +49,7 @@ export function withoutPanel(html: string): string {
 export function exportSite(root: string, out: string): { pages: number; files: number } {
   // A link where the output goes would take every file somewhere else, wherever it points; the
   // emptiness check below reads through it and would pass. Refused like a link inside the project.
-  if (existsSync(out) && lstatSync(out).isSymbolicLink()) {
-    throw new Error(`refusing to export into ${out}: it is a link, and a link is not followed`);
-  }
+  refuseLink(out, `export into ${out}`);
   if (existsSync(out) && readdirSync(out).length) {
     throw new Error(`refusing to export into ${out}: it is not empty, and nothing is deleted to make room`);
   }

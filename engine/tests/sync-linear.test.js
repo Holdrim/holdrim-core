@@ -467,7 +467,9 @@ test('sync whose registry save fails while it is aborting ends with the abort\'s
       'X02.html': '<main><p data-id="b">approved b</p></main>',
     });
     const events = await approvedInOrder(tmp, ['a', 'b']);
-    failingWrites(t, (path) => (path.endsWith('X02.html') ? 'EIO' : path.endsWith('r.json') ? 'ENOSPC' : null));
+    // `saveRegistry` now writes a temp file beside `r.json` before renaming over it (holdrim#150), so
+    // the failing write lands on THAT name — `includes`, not `endsWith`, is what still catches it.
+    failingWrites(t, (path) => (path.endsWith('X02.html') ? 'EIO' : path.includes('r.json') ? 'ENOSPC' : null));
     const errors = [];
     const log = t.mock.method(console, 'log', () => {});
     const error = t.mock.method(console, 'error', (...args) => { errors.push(args.join(' ')); });
@@ -485,7 +487,8 @@ test('sync whose registry save fails while it is aborting ends with the abort\'s
 test('sync whose registry save fails on a run that otherwise finished throws the save\'s error', async (t) => {
   const tmp = pages(t, { 'X01.html': '<main><p data-id="a">approved a</p></main>' });
   const events = await approvedInOrder(tmp, ['a']);
-  failingWrites(t, (path) => (path.endsWith('r.json') ? 'ENOSPC' : null));
+  // Same as above: the write that fails is the registry's TEMP file, matched by `includes`.
+  failingWrites(t, (path) => (path.includes('r.json') ? 'ENOSPC' : null));
   const log = t.mock.method(console, 'log', () => {});
   try {
     await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }), { code: 'ENOSPC' });

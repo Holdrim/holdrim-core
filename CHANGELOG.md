@@ -46,13 +46,32 @@ who ran the engine from `main` before it.
   sign-in screen is the gate), or have the gateway strip `Authorization` before it forwards. And an agent — named in `HOLDRIM_AGENTS` or come in with
   a token — may now move an approved request through `applying`, `waiting` and `applied` through the
   API, as `docs/ROLES.md` section 4 already said it keeps; before, only the local runner let it.
+- **`/api/me` no longer answers `canApprove` or `canTriage`; what a person may do is asked of one
+  page, with `POST /api/here` and a body `{ "page": "P03", "blocks": ["P03.1.1", …] }` (#33,
+  `docs/ROLES.md` section 2).** A grant may be limited to some pages or blocks, so "may this person
+  approve?" has no answer without a place. The answer is `{ page, may: { comment, request, triage,
+  approve }, blocks: { "<block id>": { triage, approve } } }`, booleans only, for the page and for
+  each id in `blocks` that is a block id and lives on that page — any other id is left out, never
+  echoed. A `page` that is not a page code, a `blocks` that is not a list, or more than 2000 ids
+  answers 400. A POST because a long page's ids do not fit in a query string; it writes nothing, and
+  an agent token does not reach it. New on the surface: `POST /api/here`. A request's
+  `status.triage`, in `/api/events` and `/api/events/:id`, now lists destinations only for a reader
+  who may triage that request, and is empty for everyone else. What to change: anything reading
+  `canApprove`/`canTriage` asks `POST /api/here` for the page and the blocks it draws. Every check the server makes is
+  now asked with the place: a ✓ by its block (the block's own page, never the `page` sent beside
+  it), triage and "add details" by where the STORED request was filed, never by the page or block
+  the triage event names. Who may do what does not change for the three shipped roles, which are
+  unscoped. **A `HOLDRIM_LOCKS` scope that matches no page and no block of the site now refuses to
+  start**, and each scope's reach is logged at start (`lock_scope_coverage`, the scope and the pages
+  it reaches, never the address): a scope granted over nothing is a typo, or a page that moved away.
+  What to change: fix or remove such an entry.
 - **`/api/me`'s `role` answers `member` where it used to answer `other`.** The engine now speaks of
   three shipped roles — `owner`, `admin`, `member` — as sets of a closed capability list
   (`engine/core/roles.js`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`), and
   a role display name that only ever meant "one of the two above" now says so. What to change:
   anything matching `/api/me`'s `role` against `'other'`, and the people screen's `people.role.other`
-  translation key, now `people.role.member`. `canApprove`, `canTriage` and every other field of
-  `/api/me` are unchanged.
+  translation key, now `people.role.member`. Every other field of `/api/me` keeps its meaning under
+  this rename; `canApprove` and `canTriage` are then removed by the per-page answer below (#33).
 - **`owner` and `admins` are no longer read from `holdrim.json`, and a `holdrim.json` that names
   `owner`, `admins` or `locks` now refuses to start the service and to run the CLI.** Authority is
   set by the deployment: whoever can commit to the file — or the agent applying an approved
@@ -364,6 +383,15 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
+  `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
+  chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY
+  engine ./engine` copied all of `engine/`, and `.dockerignore` excluded none of it, so the hook
+  reached a running container; `node --import` reads `NODE_OPTIONS`, so a single environment
+  variable could have activated it there. `.dockerignore` now excludes all three; nothing in the
+  image reads from any of them — `CMD` runs `engine/api/server.ts` directly, and the healthcheck is a
+  plain `fetch`. Nothing to change: an adopter's deployment sets no such variable, and now could not
+  reach the hook if it did.
 - **A text edited straight in the store now raises its CRITICAL alert even when a forged removal
   claims it (#133).** Before, a direct writer who edited a text's row and then added one
   `text_removed` event for it, dated and placed after its target, made the field read as a clean
@@ -468,3 +496,30 @@ who ran the engine from `main` before it.
   none of its ✓; the run still fails, and the CLI still exits non-zero, with the error that aborted it
   even when the registry cannot be saved either (that failure is printed on the way out). A process killed outright between a page write and the save can still leave a seal
   without its entry — never an entry without its seal — and the next `holdrim sync` records it again.
+- **`approvals.json` is now written atomically (holdrim#150).** `saveRegistry` used to overwrite it
+  in place with a single `writeFileSync`, which truncates the file before the new bytes land: a
+  process killed mid-write left every owner ✓ ever recorded in it gone, recoverable only from git.
+  It now writes to a temp file beside it, fsyncs it, copies the target's own mode AND owner (uid and
+  gid — a warning, not a failure, when this process cannot give the file away) onto it, and renames it
+  over the real name — a reader sees the previous file or the new one, whole, owned exactly as before,
+  never a partial one. **A registry that is a symlink is now refused on both read and write, whether
+  the link resolves or is dangling (its target already gone).** The refusal lives in `loadRegistry`
+  itself, so every reader of the registry changes with it, not only `holdrim sync`: `holdrim check`,
+  `restamp`, `lights`, `graph` and `if-i-touch`, and the server's home and `/graph` routes, all read
+  through `loadRegistry` and now refuse a symlinked registry, where every one of them used to read
+  through it — an adopter who relies on the panel, or on `check` in CI, and not only on `sync`, will
+  see this. This is a behaviour change for a project that shared one `approvals.json` between
+  checkouts through a symlink: that used to be read and written straight through, and now refuses
+  outright on every path that touches it. It has to, on both ends of `sync` at least — a `sync` that
+  read a working link, stamped seals onto every approved page, and only THEN hit the save's refusal in
+  its `finally` would leave those seals on disk with no registry entry to show for them, exactly the
+  state holdrim#148 and holdrim#151 already exist to prevent. Point such a project's `content.registry`
+  at a real file instead. `exportSite` already refused a symlinked `out` before this change, but only
+  when it resolved — a DANGLING `out` slipped past its own `existsSync`-gated check and died later
+  with a raw `ENOENT` out of `mkdirSync`, never having written anything through it either way; it now
+  gives a dangling `out` the same clear refusal as a resolving one, up front (all three call sites now
+  share one check, `refuseLink` in `engine/cli/fs.ts`). A registry this process cannot write to is
+  refused with `EACCES` before anything is touched, where the old in-place write refused it too.
+  Fsyncing the containing directory afterwards, where the platform allows it, is a durability step on
+  top of an already successful save: a failure there is a warning, never a reason to report the save
+  itself as failed.

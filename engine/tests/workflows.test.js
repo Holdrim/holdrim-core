@@ -113,6 +113,41 @@ test('contributors, CI and the image run the same Node major', () => {
   assert.match(testJob, /node-version-file:\s*\.nvmrc/, 'the test job does not read .nvmrc');
 });
 
+/**
+ * Round 4 of #33's review: excluding `engine/tests` alone left `engine/test-contract.sh` and
+ * `engine/test-browser.js` — the other two test-only things at `engine/`'s root — shipping the same
+ * way, and a `!` line re-including a path under an exclusion (Docker's own escape hatch for exactly
+ * this) would have kept every assertion here green while the image shipped the hook again. So this
+ * checks three things, not one: each test-only path is actually excluded, no `!` line re-includes
+ * anything, and — unchanged from round 3 — `COPY engine ./engine` is still what ships them all
+ * by default, so `.dockerignore` is still the one place doing the excluding.
+ */
+test('the image ships no test-only paths: COPY engine and .dockerignore agree on that', () => {
+  // engine/tests/hooks/scoped-roles.js wraps rolesOf so one fixed address holds triage and approve
+  // on chosen pages. `node --import` reads it out of NODE_OPTIONS, so this hook — or any other under
+  // engine/tests — reachable inside a running container is one environment variable away from a
+  // backdoor. The Dockerfile's `COPY engine ./engine` ships everything under engine/ that
+  // .dockerignore does not name, so the guard is .dockerignore, not a choice server.ts makes.
+  const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /^COPY engine \.\/engine$/m, 'the Dockerfile no longer copies all of engine/ — re-check this test');
+  const dockerignore = readFileSync(join(ROOT, '.dockerignore'), 'utf8');
+  const lines = dockerignore.split('\n').map((l) => l.trim()).filter(Boolean).filter((l) => !l.startsWith('#'));
+  // Everything under `engine/` that nothing a running container reads ever loads: the test suite, and
+  // the two scripts that only drive it (`engine/run-local.sh` is a real, non-test way to run the
+  // engine, and stays out of this list on purpose).
+  const TEST_ONLY = ['engine/tests', 'engine/test-contract.sh', 'engine/test-browser.js'];
+  for (const path of TEST_ONLY) {
+    assert.ok(lines.includes(path), `.dockerignore does not exclude ${path}`);
+  }
+  // A `!` line un-excludes whatever its pattern matches (docker's own syntax), so an exclusion above
+  // and a re-inclusion below leave every `includes` check passing while the path still reaches the
+  // image. Matching the `!` line's text against the paths is not enough: a glob such as
+  // `!**/scoped-roles.js` names none of them and still re-includes the hook. Nothing in this file
+  // needs a `!` line, so none is allowed; one that is ever wanted has to change this test on purpose.
+  const reincluded = lines.filter((l) => l.startsWith('!'));
+  assert.deepEqual(reincluded, [], `.dockerignore re-includes: ${reincluded.join(', ')}`);
+});
+
 test('CI runs the store suites against real Postgres and Firestore, and a skip there fails', () => {
   const tests = WORKFLOWS.find((w) => w.name === 'tests.yml').text;
   const job = /^ {2}stores:\n([\s\S]*?)(?=^ {2}\S|(?![\s\S]))/m.exec(tests)?.[1] ?? '';

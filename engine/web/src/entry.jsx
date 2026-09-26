@@ -14,7 +14,7 @@ import { useEffect, useState } from 'react';
 import Panel from './Panel.jsx';
 import TamperBanner from './Tamper.jsx';
 import {
-  whoAmI, eventsOfPage, record, fingerprintOf, fingerprintsOf, impactRadiusOf, textOf, tamperedFindings, acknowledgeFinding,
+  whoAmI, hereOn, eventsOfPage, record, fingerprintOf, fingerprintsOf, impactRadiusOf, textOf, tamperedFindings, acknowledgeFinding,
 } from './api.js';
 import { HOME_SCREEN } from '../../core/screens.js';
 import { blockState, trafficLightOf, foreignDependencies, summaryOf } from './state.js';
@@ -43,9 +43,8 @@ function dependedOnOf(el) {
   }
 }
 
-function App({ blocks, elsewhere, who }) {
+function App({ blocks, elsewhere, who, here }) {
   const [opened, setOpened] = useState(null);
-  const canApprove = Boolean(who.canApprove);
   // Which of the panel's own controls this project has turned off (docs/ROLES.md, section 7),
   // as `/api/me` sent them. A caller from before this toggle existed sends no `features` at all,
   // and `Panel.jsx` reads a missing key as on — so `{}` here changes nothing for it.
@@ -130,7 +129,7 @@ function App({ blocks, elsewhere, who }) {
   return (
     <Panel
       block={opened}
-      canApprove={canApprove}
+      here={here}
       features={features}
       events={events}
       radiusElsewhere={radiusElsewhere}
@@ -238,20 +237,30 @@ function switchOff(reason) {
   document.querySelectorAll('[data-review-ui]:not(.rv-tamper-host)').forEach((x) => x.remove());
 }
 
+/** The elements that get a button: every block in `main` numbered "section.n" — headings and
+ *  subheadings get none. One list, read before `/api/here` is asked about their ids and again to draw. */
+const reviewable = () => [...document.querySelectorAll('main [data-id][data-code]')]
+  .filter((el) => /^\d+\.\d/.test(el.getAttribute('data-code')));
+
 async function start() {
   if (!page || location.protocol === 'file:') return;
 
   // Who is reading comes first: with no session the page is simply read, not reviewed, and nothing
-  // of the panel is drawn; with one, the server's answer carries the language to draw it in.
+  // of the panel is drawn; with one, the server's answer carries the language to draw it in, and what
+  // this person may do on each block about to be drawn.
   let who;
-  try { who = await whoAmI(); } catch (e) { return switchOff(e); }
+  // What this person may do on this page and on each block about to be drawn (`POST /api/here`). A
+  // block the answer does not name gets no ✓: the panel draws only what the server said yes to.
+  let here;
+  try {
+    [who, here] = await Promise.all([whoAmI(), hereOn(page, reviewable().map((el) => el.getAttribute('data-id')))]);
+  } catch (e) { return switchOff(e); }
   await speak(who.language);
   await drawTampered();
 
   const blocks = [];
-  for (const el of document.querySelectorAll('main [data-id][data-code]')) {
+  for (const el of reviewable()) {
     const code = el.getAttribute('data-code');
-    if (!/^\d+\.\d/.test(code)) continue;              // headings and subheadings get no button
 
     const button = document.createElement('button');
     button.type = 'button';
@@ -297,7 +306,7 @@ async function start() {
   const where = document.createElement('div');
   where.setAttribute('data-review-ui', '');
   document.body.appendChild(where);
-  createRoot(where).render(<App blocks={blocks} elsewhere={elsewhere} who={who} />);
+  createRoot(where).render(<App blocks={blocks} elsewhere={elsewhere} who={who} here={here} />);
 }
 
 start().catch((e) => switchOff(e));

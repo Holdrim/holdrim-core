@@ -8,7 +8,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, symlinkSync,
+  lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exportSite, withoutPanel } from '../cli/export.ts';
@@ -90,6 +91,18 @@ test('an output folder that is a link is refused, and nothing reaches where it p
   symlinkSync(elsewhere, join(root, 'public'));
   assert.throws(() => exportSite(root, join(root, 'public')), /it is a link/);
   assert.deepEqual(readdirSync(elsewhere), []);
+});
+
+test('a DANGLING output link (its target already gone) is refused up front, not with a raw ENOENT '
+  + 'from mkdirSync once the walk starts', (t) => {
+  const root = project(t);
+  const out = join(root, 'public');
+  const nowhere = join(root, 'nowhere'); // never created — the link dangles
+  symlinkSync(nowhere, out);
+  assert.throws(() => exportSite(root, out), /it is a link/);
+  // Refused before anything else runs: the link is still exactly what it was, neither replaced nor
+  // removed by whatever `mkdirSync` or the walk would otherwise have done with it.
+  assert.ok(lstatSync(out).isSymbolicLink(), 'the dangling link must not be touched');
 });
 
 test('an export written inside the project is not copied into itself', (t) => {
