@@ -326,6 +326,10 @@ export function spliceAttributes(html: string, id: string, plan: MarkPlan): { ht
  * The acceptance test of one candidate, (a) and (b) in `spliceAttributes`. `getAttribute` hands
  * back the DECODED value, so each planned value is compared as `readBack` decodes it — the string a
  * reader of the page will actually get, not the escaped text that was spliced in.
+ *
+ * Every value on every write path today is either already safe (a date, a hex fingerprint) or goes
+ * through `attributeText` first, so this comparison agrees with a bare presence check on all of them
+ * — it stays a value check anyway, as the guard for a future writer that forgets to escape.
  */
 function writesOnlyThe(candidate: string, id: string, inserted: Stamp[], original: string): boolean {
   const { document } = parseHTML(candidate);

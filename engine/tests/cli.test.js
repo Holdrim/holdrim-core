@@ -942,6 +942,58 @@ test('restamp refuses a tag it cannot splice safely, counts it as refused and no
   assert.equal(page(), html);
 });
 
+// ===================================================================== holdrim#135, round 4
+
+/**
+ * Trying every occurrence of the needle in document order re-parses the whole page once per failed
+ * candidate — with a thousand prose mentions before the real block, minutes. `mayBeAttribute` orders
+ * the search so the real tag is usually reached first; this only measures that the order is doing its
+ * job, since nothing else here would fail if it silently stopped.
+ */
+test('mark\'s needle search is linear in prose mentions of the id: 1000 mentions searched well under a second',
+  async (t) => {
+    const { tmp } = onePage(t, '<main>' + '<p data-id="n">see data-id="y" here</p>'.repeat(1000)
+      + '<p data-id="y">real</p></main>');
+
+    const started = performance.now();
+    const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+    const took = performance.now() - started;
+
+    assert.ok(fingerprint);
+    assert.ok(took < 1500, `took ${Math.round(took)} ms`);
+  });
+
+/**
+ * `restamp` splices the registry's own recorded value, never text on disk — but until now it spliced
+ * it raw. A fingerprint holding an entity read back as something else, and `writesOnlyThe` refused the
+ * write instead of stamping it: the same rule other values already go through `attributeText` for.
+ */
+test('restamp writes a registry fingerprint holding an entity so the page reads it back unchanged', async (t) => {
+  const registry = { y: { file: 'X01.html', date: '2026-01-01', fingerprint: 'ab&lt;cd' } };
+  const { tmp, page } = onePage(t, '<main><p data-id="y">t</p></main>', registry);
+
+  const { written, refused } = await restamp(tmp);
+
+  assert.equal(written, 1);
+  assert.equal(refused, 0);
+  const { document } = parseHTML(page());
+  assert.equal(document.querySelector('p').getAttribute('data-validated-fingerprint'), 'ab&lt;cd');
+});
+
+/**
+ * A block with a fingerprint but no `data-validated` is what an older tool, or a hand-written ✓,
+ * leaves behind. `mark` still owes it the date — "nothing left to insert" must ask about the date too,
+ * not stop at whether the fingerprint attribute is already there.
+ */
+test('mark writes data-validated onto a block that already carries a fingerprint but no date', async (t) => {
+  const { tmp, page } = onePage(t, '<main><p data-id="y" data-validated-fingerprint="0000">t</p></main>');
+
+  const fingerprint = await mark(tmp, {}, 'y', '2026-09-22', 'test');
+
+  assert.ok(fingerprint);
+  assert.match(page(), /data-validated="2026-09-22"/);
+});
+
 /**
  * The rule's proof is the only demand satisfied by something OUTSIDE the documentation, so it is
  * the only one that can stop being true without anybody touching the page. Deleting a test is the

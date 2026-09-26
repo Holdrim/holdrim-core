@@ -454,7 +454,7 @@ export async function restamp(root: string) {
     const current = blocks.get(id)?.fingerprint;
     if (current && current !== recorded) willTurnYellow.push(id);
 
-    const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: recorded }];
+    const attributes: Stamp[] = [{ attr: 'data-validated-fingerprint', value: attributeText(recorded) }];
     if (entry.dependsOn && Object.keys(entry.dependsOn).length) {
       attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(entry.dependsOn)) });
     }
