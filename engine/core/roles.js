@@ -388,8 +388,16 @@ export function createRoles(owner, admins, locksRaw, agentsRaw) {
    * the server refused it earlier.
    */
   const isOwner = (e) => !byToken(e) && normalized(addressOf(e)) === ownerEmail;
-  /** The shipped role `e` holds — never handed to a caller, only used to look up its capabilities. */
-  const roleOf = (e) => (isOwner(e) ? 'owner' : everyone.has(normalized(addressOf(e))) ? 'admin' : 'member');
+  /**
+   * The shipped role `e` holds — never handed to a caller, only used to look up its capabilities.
+   *
+   * A token identity is a member whatever `HOLDRIM_ADMINS` says of its address, as an address in
+   * `HOLDRIM_AGENTS` always is (a grant naming one refuses to start). A restart can grant the address
+   * of a token already issued; without this, that token would read as an admin on `/api/me`, and would
+   * hold every admin capability `AGENT_NEVER` does not name — including any added later.
+   */
+  const roleOf = (e) => (isOwner(e) ? 'owner'
+    : !byToken(e) && everyone.has(normalized(addressOf(e))) ? 'admin' : 'member');
 
   return {
     owner: ownerEmail,

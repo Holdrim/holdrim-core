@@ -21,11 +21,14 @@ who ran the engine from `main` before it.
   cycle, the roles, the limits and `data.asAgent`; that path, and the name, are gone. **What an
   adopter in cloud mode changes:** (1) the server has to run with password sign-in
   (`HOLDRIM_IDENTITY=password`, the default outside Development when `HOLDRIM_AUDIENCE` is unset),
-  since tokens live in its user store — behind an identity proxy there is no user store and so no
-  token, and the CLI there can no longer record a state at all; (2) the owner signs in, opens the
-  people screen, and issues a token for the agent's own address — never the owner's, an admin's or a
-  lock-holder's, which are refused; (3) wherever `holdrim` runs, export `HOLDRIM_AGENT_TOKEN` with
-  that token and `HOLDRIM_URL` with the server's address (`https://…`). Reading is unchanged:
+  since tokens live in its user store. **Behind an identity proxy there is no user store, so no
+  token, and `holdrim state` there cannot record a state at all** — a token for that mode is not
+  built yet; (2) the owner signs in, opens the people screen, and issues a token for the
+  agent's own address — never the owner's, an admin's or a lock-holder's, and never an address that
+  has an account here, disabled or not: an address is a person's or an agent's, and creating an
+  account for an address holding a token is refused too; (3) wherever `holdrim` runs, export
+  `HOLDRIM_AGENT_TOKEN` with that token and `HOLDRIM_URL` with the server's address (`https://…`;
+  the CLI refuses plain `http://` to any host but this machine, and sends no token with `--local`). Reading is unchanged:
   `cloud.project`/`HOLDRIM_PROJECT` and gcloud are still what the CLI reads the cloud with, and
   `--local` against `bash engine/run-local.sh` needs neither variable, writing as the runner's
   development identity `agent@local`. Only the owner issues and revokes a token, one per address
@@ -37,7 +40,10 @@ who ran the engine from `main` before it.
   and an `agent_tokens` table (SQLite, Postgres) or collection (Firestore) in the user store, created
   on start. Two answers change: a request carrying both a session cookie and an `Authorization`
   header is refused (401), and under password sign-in an `Authorization` that is not a live agent
-  token is refused (401) instead of ignored. And an agent — named in `HOLDRIM_AGENTS` or come in with
+  token is refused (401) instead of ignored. **A password deployment behind an HTTP basic-auth
+  gateway stops working**: the browser attaches `Authorization: Basic …` to every request, and
+  every API call then answers 401 — the whole panel with it. Remove the gateway's basic auth (the
+  sign-in screen is the gate), or have the gateway strip `Authorization` before it forwards. And an agent — named in `HOLDRIM_AGENTS` or come in with
   a token — may now move an approved request through `applying`, `waiting` and `applied` through the
   API, as `docs/ROLES.md` section 4 already said it keeps; before, only the local runner let it.
 - **`/api/me`'s `role` answers `member` where it used to answer `other`.** The engine now speaks of

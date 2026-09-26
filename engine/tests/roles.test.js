@@ -466,3 +466,11 @@ test('only an identity built by agentByToken reads as one: an address never does
   assert.equal(addressOf('ana@example.org'), 'ana@example.org');
   assert.equal(addressOf(null), null, 'a missing viewer stays missing, never a throw');
 });
+
+test('a token identity holds a member\'s role, even on an address HOLDRIM_ADMINS grants', () => {
+  // A restart can grant the address of a token already issued. The role is what `/api/me` shows and
+  // what `can` looks capabilities up in, so the token reads as what it is: an agent, a member's grants.
+  const roles = createRoles('owner@example.org', 'ana@example.org', '', '');
+  assert.equal(roles.roleOf(agentByToken('ana@example.org')), 'member');
+  assert.equal(roles.roleOf('ana@example.org'), 'admin', 'the admin signed in as a person is still an admin');
+});

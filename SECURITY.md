@@ -155,7 +155,8 @@ Worth knowing before you run it:
   code that wrote to the cloud directly is gone (#122).
 - **An agent token does not expire.** It lasts until the owner revokes it or issues the address a
   new one, so a token that leaks is good until someone notices. Revoke it on the people screen the
-  moment it may have been seen.
+  moment it may have been seen. The CLI sends it over https only, or over http to this machine, and
+  never to the local runner `--local` names.
 - **An old revision still taking traffic after the new one has written its lock baseline can record
   events the new version will trust as if it had written them itself.** `locks` and
   `authorCouldTriage` are trusted on any event dated after the baseline, whichever revision recorded

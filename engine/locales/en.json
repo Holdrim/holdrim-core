@@ -15,6 +15,7 @@
     "instead of a list someone has to remember to edit."
   ],
   "api.agentTokens.notForAGrant": "{email} is an admin or may lock, and an agent is never either: issue the token for an address of its own",
+  "api.agentTokens.hasAccount": "{email} has an account here, and an address is a person's or an agent's, never both: issue the token for an address of its own",
   "api.agentTokens.notForTheOwner": "the owner is never an agent: an agent token cannot be issued for the owner's address",
   "api.agentTokens.notFound": "{email} holds no agent token",
   "api.agentTokens.ownerOnly": "only the owner issues and revokes agent tokens",
@@ -55,6 +56,7 @@
   "api.users.adminOnly": "only owner and admin manage the people who can sign in",
   "api.users.emailInvalid": "\"{email}\" is not an e-mail address",
   "api.users.emailTaken": "{email} already has an access here",
+  "api.users.holdsAgentToken": "{email} holds an agent token, and an address is a person's or an agent's, never both: revoke the token first, or use another address",
   "api.users.enabledMissing": "say enabled: true or enabled: false",
   "api.users.lockHolderIsOwnerToCreate": "{email}’s account is reserved: only the owner can create it here.",
   "api.users.lockHolderIsOwnerToDisable": "{email}’s account is reserved: only the owner can disable it here.",

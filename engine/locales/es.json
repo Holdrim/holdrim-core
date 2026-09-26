@@ -8,6 +8,7 @@
     "owner y admin no se traducen: son los nombres de los dos papeles del motor."
   ],
   "api.agentTokens.notForAGrant": "{email} es administrador o puede bloquear, y un agente nunca es ninguna de las dos cosas: emita el token para una dirección propia",
+  "api.agentTokens.hasAccount": "{email} tiene acceso aquí, y una dirección es de una persona o de un agente, nunca de los dos: emita el token para una dirección propia",
   "api.agentTokens.notForTheOwner": "el propietario nunca es un agente: no se emite un token de agente para la dirección del propietario",
   "api.agentTokens.notFound": "{email} no tiene token de agente",
   "api.agentTokens.ownerOnly": "solo el propietario emite y revoca tokens de agente",
@@ -48,6 +49,7 @@
   "api.users.adminOnly": "solo el propietario y los administradores gestionan quién puede entrar",
   "api.users.emailInvalid": "\"{email}\" no es una dirección de correo",
   "api.users.emailTaken": "{email} ya tiene acceso aquí",
+  "api.users.holdsAgentToken": "{email} tiene un token de agente, y una dirección es de una persona o de un agente, nunca de los dos: revoque el token antes, o use otra dirección",
   "api.users.enabledMissing": "indica enabled: true o enabled: false",
   "api.users.lockHolderIsOwnerToCreate": "la cuenta de {email} está reservada: solo el propietario puede crearla aquí.",
   "api.users.lockHolderIsOwnerToDisable": "la cuenta de {email} está reservada: solo el propietario puede deshabilitarla aquí.",

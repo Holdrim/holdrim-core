@@ -449,31 +449,50 @@ export class Source {
    * `--local`, the local server; otherwise `HOLDRIM_URL`, the deployed one. Never the store: a write
    * straight to Firestore skipped the cycle, the roles, the limits and `data.asAgent`, and named its
    * author with whatever the CLI chose to write there.
+   *
+   * `--local` wins over `HOLDRIM_URL`: an agent with the deployed address exported, asked to work
+   * against its local runner, must not write to the deployed server instead.
+   *
+   * ⚠️ A deployed server is reached over https, or over http only on this machine: the token goes in
+   * every write and never expires, so plain http to another host hands it to anyone on the path.
+   * Refused before anything is sent, naming the fix.
    */
   #serverUrl(): string {
     if (this.#local) return this.#localUrl;
-    if (this.#url) return this.#url.replace(/\/+$/, '');
-    throw new Error(
-      'I do not know which Holdrim server to write through.\n' +
-      '  Export HOLDRIM_URL with its address (https://…), and HOLDRIM_AGENT_TOKEN with the token the owner\n' +
-      '  issued this agent on the people screen. The CLI no longer writes to the cloud store directly.');
+    if (!this.#url) {
+      throw new Error(
+        'I do not know which Holdrim server to write through.\n' +
+        '  Export HOLDRIM_URL with its address (https://…), and HOLDRIM_AGENT_TOKEN with the token the owner\n' +
+        '  issued this agent on the people screen. The CLI no longer writes to the cloud store directly.');
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(this.#url);
+    } catch {
+      throw new Error(`HOLDRIM_URL is not an address: ${this.#url}. Export it as https://…`);
+    }
+    const onThisMachine = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && onThisMachine)) {
+      throw new Error(
+        `HOLDRIM_URL is ${this.#url}, and the agent token is sent only over https (or http to this machine).\n` +
+        '  Export HOLDRIM_URL with the server\'s https:// address.');
+    }
+    return this.#url.replace(/\/+$/, '');
   }
 
   /**
    * Records an event, always through the server's `POST /api/events` — and therefore through the
    * cycle, the roles, the limits, and the `asAgent` the server writes from who it saw.
    *
-   * With `HOLDRIM_AGENT_TOKEN`, as the agent that token was issued to. Without one, only against the
-   * local runner, as its development identity `agent@local` — the same one the local read uses; the
-   * runner has no tokens to check, and nothing it holds outlives it. A deployed server needs the
+   * With `HOLDRIM_AGENT_TOKEN`, as the agent that token was issued to, at `HOLDRIM_URL`. With
+   * `--local`, as the local runner's development identity `agent@local` — the same one the local read
+   * uses — sent in `X-Dev-Email`, since without it the runner records the write as whoever it acts
+   * as, the owner by default — and never with the token: the runner has no tokens to check, and
+   * whatever holds the local port would receive one that never expires. A deployed server needs the
    * token: without it, this refuses before sending anything.
-   *
-   * `X-Dev-Email` is sent only with `--local`, token or not: a local runner reads it and ignores a
-   * token, and, without it, would take the request as whoever the runner acts as — the owner, by
-   * default. A password server ignores the header and reads the token.
    */
   async add(event: Record<string, unknown>): Promise<string> {
-    const token = process.env.HOLDRIM_AGENT_TOKEN || undefined;
+    const token = this.#local ? undefined : process.env.HOLDRIM_AGENT_TOKEN || undefined;
     if (!token && !this.#local) {
       throw new Error(
         'writing needs the agent\'s own token: export HOLDRIM_AGENT_TOKEN with the token the owner issued\n' +

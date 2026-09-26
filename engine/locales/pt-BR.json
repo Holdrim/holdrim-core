@@ -3,6 +3,7 @@
     "O que o revisor lê, em português. Ver o en.json para a regra de o que NÃO entra aqui."
   ],
   "api.agentTokens.notForAGrant": "{email} é administrador ou pode travar, e um agente nunca é nenhum dos dois: emita o token para um endereço só dele",
+  "api.agentTokens.hasAccount": "{email} tem acesso aqui, e um endereço é de uma pessoa ou de um agente, nunca dos dois: emita o token para um endereço só dele",
   "api.agentTokens.notForTheOwner": "o dono nunca é um agente: não se emite token de agente para o endereço do dono",
   "api.agentTokens.notFound": "{email} não tem token de agente",
   "api.agentTokens.ownerOnly": "só o dono emite e revoga tokens de agente",
@@ -43,6 +44,7 @@
   "api.users.adminOnly": "só o dono e os administradores gerenciam quem pode entrar",
   "api.users.emailInvalid": "\"{email}\" não é um endereço de e-mail",
   "api.users.emailTaken": "{email} já tem acesso aqui",
+  "api.users.holdsAgentToken": "{email} tem um token de agente, e um endereço é de uma pessoa ou de um agente, nunca dos dois: revogue o token antes, ou use outro endereço",
   "api.users.enabledMissing": "diga enabled: true ou enabled: false",
   "api.users.lockHolderIsOwnerToCreate": "a conta de {email} é reservada: só o dono pode criá-la aqui.",
   "api.users.lockHolderIsOwnerToDisable": "a conta de {email} é reservada: só o dono pode desabilitá-la aqui.",

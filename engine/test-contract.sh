@@ -1943,6 +1943,16 @@ expect "the owner's own address cannot hold one → 409" 409 "$(t_owner -o /dev/
 expect "nor an admin's → 409"                    409 "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$T_ADMIN\"}" $B/api/agent-tokens)"
 expect "nor a lock-holder's → 409"               409 "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$T_LOCKED\"}" $B/api/agent-tokens)"
 expect "nor something that is not an address → 400" 400 "$(t_owner -o /dev/null -w '%{http_code}' -d '{"email":"not-an-address"}' $B/api/agent-tokens)"
+# By sentence, not by status: the owner is an admin too (`roles.admins`), so the grant check below the
+# owner's own would answer the same 409 if the owner's were gone.
+expect "and the owner's is refused as the owner's"  "$(say_en api.agentTokens.notForTheOwner)" "$(t_owner -d "{\"email\":\"$OWNER\"}" $B/api/agent-tokens | jfield error)"
+# The owner's decision (round 2): an address is a person's or an agent's, never both. Disabled is
+# still an account — disabling a person has to stop them, and a token on their address would not.
+T_GONE=tgone@example.org
+expect "(the owner creates an account, and the admin disables it)" "201 200" \
+  "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$T_GONE\",\"name\":\"Gone\"}" $B/api/users) $(t_admin -o /dev/null -w '%{http_code}' -d '{"enabled":false}' $B/api/users/$T_GONE/enabled)"
+expect "nor an address with an account, even a disabled one → 409" 409 "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$T_GONE\"}" $B/api/agent-tokens)"
+expect "saying the address is a person's"        "$(say_en api.agentTokens.hasAccount $T_GONE)" "$(t_owner -d "{\"email\":\"$T_GONE\"}" $B/api/agent-tokens | jfield error)"
 
 ISSUED=$(t_owner -w '\n%{http_code}' -d "{\"email\":\"$BOT\"}" $B/api/agent-tokens)
 ISSUE_CODE=$(echo "$ISSUED" | tail -1); ISSUED=$(echo "$ISSUED" | sed '$d')
@@ -1961,15 +1971,26 @@ expect "a member does not → 403"                 403 "$(t_member -o /dev/null 
 expect "the secret is in no list of tokens"      0 "$(t_owner $B/api/agent-tokens | grep -Fc -e "$BOT_SECRET")"
 expect "nor in the people list"                  0 "$(t_owner $B/api/users | grep -Fc -e "$BOT_SECRET")"
 expect "nor on the people screen"                0 "$(t_owner $B/engine/people | grep -Fc -e "$BOT_SECRET")"
+# The server decides who is drawn the controls (`servePeople`): the owner, who alone may use them.
+expect "the people screen offers the owner the issue form and a revoke" "1 1" \
+  "$(t_owner $B/engine/people | grep -c 'id="issue"') $(t_owner $B/engine/people | grep -c 'data-action="revoke"')"
+expect "and an admin, who sees the list, neither" "0 0 1" \
+  "$(t_admin $B/engine/people | grep -c 'id="issue"') $(t_admin $B/engine/people | grep -c 'data-action="revoke"') $(t_admin $B/engine/people | grep -Fc "$BOT")"
+# The other side of the owner's decision: an agent's address never becomes a person's.
+expect "an account for an address holding a token → 409, from an admin" 409 "$(t_admin -o /dev/null -w '%{http_code}' -d "{\"email\":\"$BOT\",\"name\":\"Bot\"}" $B/api/users)"
+expect "and from the owner, saying the address holds a token" "$(say_en api.users.holdsAgentToken $BOT)" "$(t_owner -d "{\"email\":\"$BOT\",\"name\":\"Bot\"}" $B/api/users | jfield error)"
+expect "so no account exists for it"             0 "$(t_owner $B/api/users | grep -Fc "\"$BOT\"")"
 expect "nor in any event"                        0 "$(t_owner $B/api/events | grep -Fc -e "$BOT_SECRET")"
 expect "nor anywhere in the log"                 0 "$(grep -Fc -e "$BOT_SECRET" $TLOG)"
 # The trail: who issued, which agent, which token — and the server's own route is the only door.
 token_events() { t_owner "$B/api/events?page=_agent_tokens" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(e=>e.type===process.argv[1]&&e.data.tokenId===process.argv[2]).map(e=>[e.own,(String(e.data.agent).startsWith('p_')&&e.data.agent.length===26),e.data.asAgent,e.data.replacedTokenId??'-'].join(' ')).join('|')))" "$@"; }
 expect "the issue is recorded: by the owner, naming the agent by its id, none replaced" "true true false " "$(token_events agent_token_issued $BOT_TOKEN_ID)"
-expect "POST /events will not write an issue, even from the owner → 400" 400 \
-  "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"type\":\"agent_token_issued\",\"page\":\"_agent_tokens\",\"data\":{\"tokenId\":\"$BOT_TOKEN_ID\"}}" $B/api/events)"
-expect "nor a revocation → 400"                  400 \
-  "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"type\":\"agent_token_revoked\",\"page\":\"_agent_tokens\",\"data\":{\"tokenId\":\"$BOT_TOKEN_ID\"}}" $B/api/events)"
+# On a real page, and by sentence: on `_agent_tokens` the page check refuses first, so these would
+# pass with both types added to EVENT_TYPES.
+forged() { t_owner -w '\n%{http_code}' -d "{\"type\":\"$1\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"data\":{\"agent\":\"p_x\",\"tokenId\":\"$BOT_TOKEN_ID\"}}" $B/api/events | { read -r body; read -r code; echo "$code $(echo "$body" | jfield error)"; }; }
+expect "POST /events will not write an issue, even from the owner → 400, as an unknown type" \
+  "400 $(say_en api.event.unknownType)" "$(forged agent_token_issued)"
+expect "nor a revocation → 400, as an unknown type" "400 $(say_en api.event.unknownType)" "$(forged agent_token_revoked)"
 # The log says it too, by id, with the event name an alert rule matches on — a field named `event`
 # on the line would replace that name, and nothing but this check would notice.
 expect "and the log names the issue and who made it, by id"  "$OWNER_LOG_ID" "$(log_field $TLOG agent_token_issued by)"
@@ -1984,6 +2005,11 @@ expect "which may neither approve nor triage"    "false false" "$(as_bot $B/api/
 BOT_COMMENT=$(as_bot -d '{"type":"comment","page":"A01","block":"A01.1.1","text":"the agent was here","data":{"asAgent":"false"}}' $B/api/events)
 expect "a comment through the token is recorded" comment "$(echo "$BOT_COMMENT" | jfield type)"
 expect "as an agent's, whatever the body claimed" true "$(echo "$BOT_COMMENT" | jfield data.asAgent)"
+# Each read the allowlist opens (`TOKEN_READS`, server.ts), reached: `holdrim` reads them, and one
+# dropped from the list would leave the agent blind with every write above still passing.
+expect "it reads the fingerprints, the impact radius, the graph and the open requests → 200" "200 200 200 200" \
+  "$(bot_code "$B/api/fingerprints?ids=A01.1.1") $(bot_code "$B/api/impact-radius?id=A01.1.1") $(bot_code $B/api/graph) $(bot_code $B/api/requests/open)"
+expect "and one event by its id"                 "$(echo "$BOT_COMMENT" | jfield id)" "$(as_bot $B/api/events/$(echo "$BOT_COMMENT" | jfield id) | jfield id)"
 expect "a ✓ through the token → 403"             403 "$(bot_code -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A011_FP\"}" $B/api/events)"
 # Its own sentence, not the capability's: this refusal is asked on how the request signed in, and
 # holds on its own if the token's address ever reads as able to approve.
@@ -2030,6 +2056,11 @@ expect "a token's write that is not JSON → 415, the same guard as a session's"
   "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BOT_TOKEN" -H 'Content-Type: text/plain' -d '{"type":"comment","page":"A01","text":"x"}' $B/api/events)"
 expect "an Authorization that is no token → 401, never a fall back to no credential" 401 \
   "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Basic YTpi' $B/api/me)"
+# By sentence too: with no cookie, a fall back to "no credential" is a 401 as well.
+expect "and says the token is not valid, not that nobody signed in" "$(say_en api.token.invalid)" \
+  "$(curl -s -H 'Accept-Language: en' -H 'Authorization: Basic YTpi' $B/api/me | jfield error)"
+expect "and logs why"                            1 "$(grep '"event":"agent_token_refused"' $TLOG | grep -c 'not a live agent token' | awk '{print ($1 >= 1)}')"
+expect "a live token under another scheme → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Token $BOT_TOKEN" $B/api/me)"
 expect "a token with its secret changed → 401"   401 \
   "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${BOT_TOKEN%?}$([ "${BOT_TOKEN: -1}" = 0 ] && echo 1 || echo 0)" $B/api/me)"
 expect "and the refusals are logged without the token" 0 "$(grep '"event":"agent_token_refused"' $TLOG | grep -Fc -e "$BOT_SECRET")"
@@ -2070,6 +2101,7 @@ T_REQUEST=$(t_member -d '{"type":"request","page":"A01","block":"A01.1.1","text"
 require_id "$T_REQUEST" T_REQUEST
 T_STATE=approved T_STATE_TEXT=ok
 expect "a token whose address is now an admin's still signs in as an agent" "$PROMOTED false" "$(as_bot $B/api/me | jfield email) $(as_bot $B/api/me | jfield canApprove)"
+expect "and reads as a member, not an admin"     member "$(as_bot $B/api/me | jfield role)"
 expect "and its ✓ is refused → 403"              403 "$(bot_code -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A011_FP\"}" $B/api/events)"
 expect "as a ✓ given without a session"          "$(say_en api.approval.sessionOnly)" "$(as_bot -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A011_FP\"}" $B/api/events | jfield error)"
 # The layer `roles.isAgent` holds on its own: the explicit refusal above covers only a ✓, so a
@@ -2083,5 +2115,25 @@ expect "a token whose address is now the owner's opens nothing → 401" 401 "$(b
 expect "not even a ✓ → 401"                      401 "$(bot_code -d "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"$A011_FP\"}" $B/api/events)"
 expect "and nothing of any token reached the log" 0 "$(grep -Fc -e "${PROMOTED_TOKEN##*_}" -e "${HEIR_TOKEN##*_}" $TLOG)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$TOKEN_DIR"
+
+# Where no user store holds tokens — the local runner here, an identity proxy in production — an
+# Authorization header is somebody else's and is left alone (`apiViewerOf`): the runner's identity
+# stands, and nothing answers 401 or 500 for it.
+PORT=$PORT HOLDRIM_OWNER=$OWNER bash engine/run-local.sh >$WORK/token-runner.log 2>&1 & RUNNER_PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+LOOSE=holdrim_agent_$(printf '0%.0s' $(seq 24))_$(printf 'f%.0s' $(seq 64))
+expect "the local runner leaves a bearer alone, and answers as its identity → 200" "200 agent@local" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Dev-Email: agent@local' -H "Authorization: Bearer $LOOSE" $B/api/me) $(curl -s -H 'X-Dev-Email: agent@local' -H "Authorization: Bearer $LOOSE" $B/api/me | jfield email)"
+expect "and records a write sent with one → 201" 201 "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Dev-Email: agent@local' -H "Authorization: Bearer $LOOSE" -H 'Content-Type: application/json' -d '{"type":"comment","page":"A01","block":"A01.1.1","text":"through the runner"}' $B/api/events)"
+L_REQUEST=$(curl -s -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d '{"type":"request","page":"A01","block":"A01.1.1","text":"born approved","data":{"category":"text"}}' $B/api/events | jfield id)
+require_id "$L_REQUEST" L_REQUEST
+# `--local` against the runner, with a token and a deployed address exported that lead nowhere: the
+# write reaches the runner, as its identity, or this fails.
+L_CLI=$(HOLDRIM_OWNER=$OWNER HOLDRIM_AGENT_TOKEN=$LOOSE HOLDRIM_URL=http://127.0.0.1:9 HOLDRIM_LOCAL_URL=$B \
+  node engine/cli/holdrim.ts state "$L_REQUEST" applying 'picking it up' --local --root "$SITE" 2>&1); L_CLI_EXIT=$?
+expect "holdrim state --local writes to the runner, whatever HOLDRIM_URL says → exit 0" 0 "$L_CLI_EXIT"
+expect "and the runner recorded it, as agent@local" "applying agent@local" \
+  "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type==='request_state'&&x.data.request===process.argv[1]).pop();console.log(e?e.data.state+' '+e.author:'none')})" "$L_REQUEST")"
+kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
 
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

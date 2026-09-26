@@ -11,7 +11,7 @@ import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
 import { SqliteEventStore } from './store-sqlite.ts';
 import {
-  openUserStore, ephemeralUserStoreWarning, DEFAULT_SQLITE_PATH, UserInputError,
+  openUserStore, ephemeralUserStoreWarning, DEFAULT_SQLITE_PATH, UserInputError, AddressInUse,
   normalizeEmail, isEmailAddress, MAX_NAME_LENGTH, type UserStore,
 } from './users.ts';
 import { log } from './log.ts';
@@ -915,7 +915,14 @@ async function userRoutes(
     let password: string;
     try {
       password = await users.create(address, name);
-    } catch {
+    } catch (error) {
+      // An agent's address never becomes a person's (issue #122): with a password on it, whoever
+      // created the account signs in under the agent's person id, in a session nobody marks as an
+      // agent. Decided by the store, in the write's own turn (`AddressInUse`, users.ts).
+      if (error instanceof AddressInUse) {
+        json(res, 409, { error: say('api.users.holdsAgentToken', { email: address }) });
+        return true;
+      }
       json(res, 400, { error: say('api.users.emailTaken', { email: address }) });
       return true;
     }
@@ -1078,7 +1085,18 @@ async function userRoutes(
       json(res, 409, { error: say('api.agentTokens.notForAGrant', { email: address }) });
       return true;
     }
-    const { token, agent, tokenId, replaced } = await users.issueAgentToken(address);
+    // A person's address never holds a token, disabled or not (issue #122): disabling someone has to
+    // stop them, and a token on their address would keep writing under their person id. Refused by
+    // the store in the write's own turn, so an account created a moment ago is seen.
+    let issued: Awaited<ReturnType<UserStore['issueAgentToken']>>;
+    try {
+      issued = await users.issueAgentToken(address);
+    } catch (error) {
+      if (!(error instanceof AddressInUse)) throw error;
+      json(res, 409, { error: say('api.agentTokens.hasAccount', { email: address }) });
+      return true;
+    }
+    const { token, agent, tokenId, replaced } = issued;
     // The trail, with who did it (issue #122): the agent by its person id, the token by its public
     // id, never the secret. Written after the token, like every account change here: the credential
     // is real the moment the store has it, and the event records that it happened.

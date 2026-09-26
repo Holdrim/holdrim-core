@@ -178,7 +178,11 @@ way arrives as whoever it borrowed from. So:
   issuing again revokes the previous one at once. A token does not expire; it lasts until it is
   revoked, and the people screen says when it was issued. The owner's address cannot be issued one,
   nor an admin's or a lock-holder's, for the reason a grant cannot name an address `HOLDRIM_AGENTS`
-  marks; a token whose address becomes the owner's after a restart opens nothing at all. Issuing
+  marks; a token whose address becomes the owner's after a restart opens nothing at all, and one
+  whose address becomes an admin's reads as a member. An address is a person's or an agent's, never
+  both: no token is issued for an address with an account, disabled or not, and no account is
+  created for an address holding one — each store decides it in the same per-address turn as the
+  write, so neither can be raced into existing beside the other. Issuing
   and revoking are events, `agent_token_issued` and `agent_token_revoked`, written only by the
   owner's own routes (`POST /events` refuses both), naming the agent by its person id.
 - **The token opens the API's event routes, and nothing else.** No account route, no token route,
@@ -186,7 +190,8 @@ way arrives as whoever it borrowed from. So:
   it is issued, and kept as a hash (`engine/api/users.ts`). A request that carries a session and a
   token at once is refused rather than resolved to either, since whichever won would be wrong for
   somebody. With it the CLI writes only through `POST /api/events` (`HOLDRIM_AGENT_TOKEN`, at
-  `HOLDRIM_URL`), and its direct path to the cloud is gone (`docs/PRIVACY.md`, section 3). Tokens
+  `HOLDRIM_URL`, over https or to this machine only, and never to `--local`'s runner), and its
+  direct path to the cloud is gone (`docs/PRIVACY.md`, section 3). Tokens
   live in the user store, so they exist under password sign-in only; behind an identity proxy,
   where people live in the proxy, an agent is marked by `HOLDRIM_AGENTS` alone.
 - **A ✓ is given in an interactive session** — a person signed in, in a browser — never with a
@@ -281,6 +286,7 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | A direct writer to the store forges a grant | Buys a role without `lock`, never `people` over a lock-holder; closed by signed events |
 | An agent approves its own text | An identity `HOLDRIM_AGENTS` names, and anyone who comes in with an agent token, is refused any ✓ and any lock by `can`, before any grant is read; a ✓ sent with a token is refused outright, whatever its address. Reuse of a person's session, and an agent signing in with a password under an unlisted address, are the open gaps in section 4 |
 | An admin issues an agent token and acts through it | Only the owner issues or revokes one; `people` does not reach it |
+| A disabled person's address keeps writing through a token, or an admin gives the agent's address a password | An address is a person's or an agent's, never both: issuing refuses an address with an account, creating an account refuses an address holding a token, both decided in the store's per-address turn (`AddressInUse`, `engine/api/users.ts`) |
 | A token outlives its revocation, or its replacement | The token is one row per address, overwritten on re-issue and deleted on revoke, and looked up on every request |
 | A copy of the user store hands over working tokens | Only a hash of each secret is stored |
 | A misconfigured grant hands an agent a lock: `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or `HOLDRIM_LOCKS` names it | The service and the CLI refuse to start; and `can` would deny it anyway, the agent check coming before the grant |
