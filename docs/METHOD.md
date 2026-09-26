@@ -286,8 +286,6 @@ Honest, `2026-09-22`:
 - **Generation.** Today a human writes and the tool keeps it honest. The intent is the tool writing
   the first draft, and the human correcting it.
 - **Generated diagrams.** `diagram` exists as a kind and enters the lock; nothing produces one.
-- **Automatic dependencies.** Dependencies are declared by hand. The tool should propose them: two
-  blocks using the same term probably depend on each other.
 - **Identity beyond password and identity proxy.** OIDC, Google, LDAP: `HOLDRIM_IDENTITY` knows
   `password`, `iap` and `dev`, and nothing else is written.
 - **On Cloud Run, SQLite loses users on instance recycling.** The disk there is ephemeral and per

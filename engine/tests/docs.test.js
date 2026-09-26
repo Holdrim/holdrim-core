@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { normalize } from '../core/fingerprint.js';
 import { CLI_COMMANDS as COMMANDS } from './helpers/cli-source.js';
+import { GLOSSARY_TERMS } from '../core/glossary.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const read = (path) => readFileSync(join(ROOT, path), 'utf8');
@@ -94,6 +95,14 @@ test('the glossary names every request category the cycle has, and no other', ()
   const table = read('docs/GLOSSARY.md').split('## Request categories')[1].split('\n## ')[0];
   const listed = [...table.matchAll(/^\| `([a-z]+)` \|/gm)].map(([, c]) => c).sort();
   assert.deepEqual(listed, Object.keys(cycle.request_categories).sort());
+});
+
+test('engine/core/glossary.js names every concept the glossary tables have, and no other', () => {
+  // `GLOSSARY_TERMS` is hand-copied, not read off this file at run time (`engine/core/glossary.js`'s
+  // own comment says why: the Dockerfile does not ship docs/). This is the one place the copy and
+  // the doc are compared, so a term added to one and not the other is caught here, not in production.
+  const listed = [...read('docs/GLOSSARY.md').matchAll(/\| \*\*([^*]+)\*\* \|/g)].map(([, c]) => c).sort();
+  assert.deepEqual(listed, [...GLOSSARY_TERMS].sort());
 });
 
 /** Text a reader sees, whatever wrote it: no tags, no bold marks, and the fingerprint's own spacing. */

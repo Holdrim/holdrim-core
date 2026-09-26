@@ -142,6 +142,7 @@
   ],
   "request-categories": [
     "bug",
+    "dependency",
     "doubt",
     "page",
     "remove",
@@ -159,6 +160,7 @@
     "kinds",
     "lights",
     "list",
+    "propose-deps",
     "restamp",
     "show",
     "state",

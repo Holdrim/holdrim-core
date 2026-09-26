@@ -77,6 +77,7 @@
   "cycle.applying": "Being applied",
   "cycle.approved": "Approved",
   "cycle.category.bug": "Report a bug",
+  "cycle.category.dependency": "Propose a dependency",
   "cycle.category.doubt": "Doubt",
   "cycle.category.page": "Ask for a new page",
   "cycle.category.remove": "Remove",

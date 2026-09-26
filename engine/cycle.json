@@ -54,7 +54,8 @@
     "remove": "Remove",
     "doubt": "Doubt",
     "bug": "Report a bug",
-    "page": "Ask for a new page"
+    "page": "Ask for a new page",
+    "dependency": "Propose a dependency"
   },
   "_request_categories": [
     "`doubt`, and not `question`, on purpose: `question` is already a STATE of the cycle (the owner",
@@ -69,6 +70,11 @@
     "`page` asks for documentation that does not exist yet, in plain words: the request hangs on the",
     "page it was asked from, and the agent that applies it writes a NEW page (see `brief` in",
     "engine/cli/agent.ts). It walks the same cycle too: a text nobody approved is not a lock, whoever",
-    "or whatever wrote it."
+    "or whatever wrote it.",
+    "",
+    "`dependency` is `holdrim propose-deps`'s own category (engine/cli/propose.ts, issue #43): two",
+    "blocks that share a glossary term and declare no data-depends on one another, so it is worth a",
+    "human looking. It walks the same cycle as every other request — approving one is not writing the",
+    "data-depends itself, only agreeing a human should add it by hand."
   ]
 }

@@ -159,6 +159,15 @@ const ALLOWED = [
   { file: 'engine/cli/requests.ts', text: 'role: roles.roleOf(email), alwaysNamed: false,',
     why: 'the CLI\'s own `people.show: "role"` case — the same DISPLAY use as server.ts\'s, in ' +
       'English since the CLI\'s output never goes through i18n (see the file\'s own header comment)' },
+  { file: 'engine/core/glossary.js',
+    text: "'admin', 'agent queue', 'agent token', 'block', 'brief', 'capability', 'config', 'demand',",
+    why: 'docs/GLOSSARY.md\'s own vocabulary, quoted verbatim so `holdrim propose-deps` can match it ' +
+      'in a block\'s text (issue #43) — "admin" here is a concept the glossary defines, never a ' +
+      'person\'s role; nothing in this list is compared against roles.roleOf() or anything like it' },
+  { file: 'engine/core/glossary.js',
+    text: "'i18n', 'index', 'kind', 'limits', 'lock', 'lock-holder', 'member', 'normalize', 'owner',",
+    why: 'same glossary vocabulary as the entry above — "member" and "owner" are glossary concepts ' +
+      'here too, not roles' },
 ];
 
 /**

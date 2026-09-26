@@ -349,6 +349,13 @@ who ran the engine from `main` before it.
   the pages and states a viewer cares about. The filtered graph is laid out afresh, and an edge is
   drawn only while both of its ends are. It filters in the browser, on what `GET /api/graph`
   already sends: no new route, no new field, and nothing is remembered between visits.
+- **`holdrim propose-deps`**, a deterministic proposal of likely `data-depends` (issue #43): two
+  blocks that use the same term from `docs/GLOSSARY.md` and declare no dependency on one another,
+  either way, are worth a human looking at. It writes a `request` of the new `dependency` category —
+  the same cycle as any other request, decided by the owner like any other — never a `data-depends`
+  itself: an approved proposal still has to be added by hand. No model, and nothing guessed past the
+  literal word: the same blocks always propose the same pairs, and a pair already proposed, in any
+  state, is never proposed again. `--dry-run` prints what would be proposed without writing anything.
 
 ### Security
 

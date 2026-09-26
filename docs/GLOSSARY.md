@@ -38,7 +38,7 @@ person who joins the project.
 | **validation** | a human ✓ tied to **one fingerprint**, not to a block. Change one letter and the approval stops holding, because nobody approved the new text |
 | **lock** | the consequence of that ✓ in the repository. Only the owner's ✓ locks; a reviewer's approval is recorded but does not lock |
 | **registry** | the approvals file of the adopting project, where each lock is written with its `fingerprint` and, when the block declares any, its `dependsOn`. Its path is `content.registry` in `holdrim.json` |
-| **dependency** | block B stands on block A. Declared by hand today, in `data-depends` |
+| **dependency** | block B stands on block A. Declared by hand, in `data-depends` — `holdrim propose-deps` (issue #43) proposes a likely one, deterministically, from two blocks sharing a glossary term; a proposal is a `request` like any other, and only an approved one is ever added by hand |
 | **proof** | the test that defends a `rule`. Declared in `data-proof`, as `path/to/file.test.js::name of the test`, with the path relative to the content project root. It is the only demand satisfied by something OUTSIDE the documentation, so it is the only one that stops being true without anybody touching the page — `holdrim check` accuses a path that is gone (`missingProofs`) |
 
 Three copies of the fingerprint, in three languages, would agree only by luck — a copy that did not
@@ -213,6 +213,7 @@ exception — there, ignoring what was written already equals the fail-closed an
 | `doubt` | "I do not understand this" — see **doubt** above |
 | `bug` | the documentation and the behaviour disagree — see [BUGS.md](BUGS.md) |
 | `page` | a page that does not exist yet, asked for in plain words; the agent that applies it writes a new page (`engine/cli/agent.ts`) |
+| `dependency` | a likely `data-depends`, proposed deterministically by `holdrim propose-deps` from two blocks sharing a glossary term (`engine/cli/propose.ts`, issue #43) — a request like any other; approving one does not write the `data-depends` itself |
 
 ## The database
 

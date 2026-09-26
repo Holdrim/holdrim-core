@@ -70,6 +70,7 @@
   "cycle.applying": "En aplicación",
   "cycle.approved": "Aprobado",
   "cycle.category.bug": "Reportar un error",
+  "cycle.category.dependency": "Proponer una dependencia",
   "cycle.category.doubt": "Duda",
   "cycle.category.page": "Pedir una página nueva",
   "cycle.category.remove": "Eliminar",

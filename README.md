@@ -383,8 +383,6 @@ Honest, as of `2026-09-22`:
   written from the business by the person's **own** agent, the same way `apply` works, and the human
   correcting — never by a model the engine calls.
 - **Generated diagrams.** Diagrams are text and enter the lock, but nothing produces them yet.
-- **Automatic dependencies.** Dependencies are declared by hand. The tool should propose them: two
-  blocks talking about the same term probably depend on each other.
 - **A public image.** Every version tag publishes the image to this repository's container registry,
   `ghcr.io/holdrim/holdrim-core`, with provenance and an SBOM attached. While the repository is private,
   so is the image, and pulling it needs a GitHub login with access; the commands above build it from
