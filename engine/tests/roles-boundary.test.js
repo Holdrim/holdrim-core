@@ -467,3 +467,70 @@ test('the address scan catches a role asked of email or addressOf(who), and an o
   assert.ok(!ROLE_QUESTION_OF_ADDRESS.test('if (roles.isOwner(target) && !roles.isOwner(who)) {'));
   assert.ok(!ROLE_QUESTION_OF_ADDRESS.test('if (!mayAcknowledge(roles, who)) return'));
 });
+
+// ------------------------------------------------------------------ every question asked with a place (#33)
+// `can` throws without `where`, so a two-argument call fails the first time it RUNS — which, for a
+// branch no test and no contract step reaches, is in production. This reads the source instead, so
+// such a call fails here whether or not anything ever runs it.
+
+/**
+ * Every `.can(` call in `text` given fewer than three arguments, as `line: call`. Arguments are
+ * counted at the call's own depth, past strings, so a comma inside `{ page, block }` or a quoted
+ * message is not mistaken for a third argument.
+ */
+function canCallsWithoutWhere(text) {
+  const code = withoutComments(text);
+  const found = [];
+  for (const match of code.matchAll(/\.can\(/g)) {
+    let depth = 0;
+    let args = 0;
+    let filled = false;          // whether the argument being read has anything in it yet
+    let quote = null;
+    let i = match.index + match[0].length - 1;
+    for (; i < code.length; i++) {
+      const c = code[i];
+      if (depth >= 1 && !/\s/.test(c) && !(depth === 1 && (c === ',' || c === ')'))) filled = true;
+      if (quote) {
+        if (c === '\\') i++;
+        else if (c === quote) quote = null;
+      } else if (c === '\'' || c === '"' || c === '`') quote = c;
+      else if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c) && --depth === 0) break;
+      else if (c === ',' && depth === 1) { if (filled) args++; filled = false; }
+    }
+    if (filled) args++;
+    if (args < 3) {
+      const line = code.slice(0, match.index).split('\n').length;
+      found.push(`${line}: ${code.slice(match.index, i + 1).replace(/\s+/g, ' ')}`);
+    }
+  }
+  return found;
+}
+
+test('the where scan catches a call with two arguments, and passes one with three, however it is split', () => {
+  assert.equal(canCallsWithoutWhere("if (roles.can('approve', who)) {").length, 1);
+  assert.equal(canCallsWithoutWhere("roles.can(\n  'triage',\n  viewer,\n)").length, 1, 'a trailing comma is not a third argument');
+  assert.equal(canCallsWithoutWhere("roles.can('people', who, EVERYWHERE)").length, 0);
+  assert.equal(canCallsWithoutWhere("roles.can('approve', who, whereOf({ page, block: 'a,b' }))").length, 0);
+  assert.equal(canCallsWithoutWhere("roles.can('approve', f(a, b))").length, 1, 'commas inside a nested call do not count');
+  assert.equal(canCallsWithoutWhere("// roles.can('approve', who)\nx").length, 0, 'a comment is prose');
+});
+
+test('planting a can() call with no where into the real server.ts is caught, by name', () => {
+  const real = readFileSync(join(ROOT, 'engine/api/server.ts'), 'utf8');
+  const marker = "const manages = () => roles.can('people', who, EVERYWHERE);";
+  assert.ok(real.includes(marker), 'the line this test plants a mutant into moved or was reworded');
+  const found = canCallsWithoutWhere(real.replace(marker, "const manages = () => roles.can('people', who);"));
+  assert.deepEqual(found.map((f) => f.replace(/^\d+: /, '')), [".can('people', who)"]);
+});
+
+test('no caller outside engine/core/roles.js asks can() without saying where', () => {
+  const offenders = [];
+  for (const file of filesUnder(...SCANNED)) {
+    for (const line of canCallsWithoutWhere(readFileSync(join(ROOT, file), 'utf8'))) offenders.push(`${file}:${line}`);
+  }
+  assert.deepEqual(offenders, [], [
+    'roles.can(capability, who) asked without a place — pass the page, the block, or EVERYWHERE:',
+    ...offenders,
+  ].join('\n  '));
+});

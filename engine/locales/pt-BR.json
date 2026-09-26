@@ -23,6 +23,8 @@
   "api.name.invalid": "esse nome não pode ser usado",
   "api.name.tooLong": "um nome tem no máximo {max} caracteres",
   "api.notAuthenticated": "não autenticado",
+  "api.me.badPage": "a página pedida não é um código de página",
+  "api.me.tooManyBlocks": "pergunte sobre no máximo {max} blocos de uma vez",
   "api.password.currentWrong": "a senha atual não confere",
   "api.password.invalid": "essa senha não pode ser usada",
   "api.password.tooShort": "a senha precisa de pelo menos {min} caracteres",

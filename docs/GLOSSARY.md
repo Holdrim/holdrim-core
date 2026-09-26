@@ -245,7 +245,7 @@ reads the old format: history does not get rewritten.
 | `acceptsSupplement` | `cycle.js` | states a supplement can reach |
 | `createRoles` | `roles.js` | the roles, from `HOLDRIM_OWNER` and `HOLDRIM_ADMINS`; throws on zero or two owners |
 | `isOwner` / `isAdmin` | `roles.js` | who someone is |
-| `canApprove` / `canTriage` | `roles.js` | what someone can do |
+| `can` / `scopeCovers` / `EVERYWHERE` | `roles.js` | what someone may do, always asked with a page, a block or `EVERYWHERE`; whether a grant's scope reaches that place |
 | `roleOf` | `roles.js` | returns `owner`, `admin` or `other` |
 | `overLimit` | `limits.js` | the first limit an event breaks, as a key and its parameters |
 | `validCommit` | `limits.js` | `applied` without a real commit is a hollow trail |
@@ -280,5 +280,6 @@ reads the old format: history does not get rewritten.
 | `openSession` / `fromSession` / `closeSession` / `purgeExpiredSessions` | sessions |
 | `close` | release the database |
 
-`/api/me` answers in the same vocabulary: `email`, `role`, `canApprove`, `canTriage`, `owner`,
-`admins`, `language` (the one the panel draws itself in) and `mustChangePassword` when it applies.
+`/api/me` answers in the same vocabulary: `email`, `role`, `owner`, `admins`, `language` (the one
+the panel draws itself in), `mustChangePassword` when it applies, and — asked with `?page=` and the
+`blocks=` the panel draws — `here`, what this person may do on that page and on each of those blocks.

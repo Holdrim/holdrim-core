@@ -20,7 +20,14 @@ async function call(path, body) {
   return r.json();
 }
 
-export const whoAmI = () => call('/me');
+/**
+ * Who is reading, and what they may do on `page` and on each block in `ids` (`here`) — the server
+ * answers per page and per block, since a grant may be limited to some (docs/ROLES.md, section 2).
+ * The panel names the blocks it draws, because the page in the browser is what the buttons go on:
+ * the server's own reading of the site need not include it.
+ */
+export const whoAmI = (page, ids) =>
+  call(`/me?page=${encodeURIComponent(page)}&blocks=${ids.map(encodeURIComponent).join(',')}`);
 export const eventsOfPage = (page) => call(`/events?page=${encodeURIComponent(page)}`);
 export const record = (event) => call('/events', event);
 export const fingerprintsOf = (ids) => call(`/fingerprints?ids=${ids.map(encodeURIComponent).join(',')}`);

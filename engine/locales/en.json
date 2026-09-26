@@ -35,6 +35,8 @@
   "api.name.invalid": "that name cannot be used",
   "api.name.tooLong": "a name is at most {max} characters",
   "api.notAuthenticated": "not signed in",
+  "api.me.badPage": "the page asked about is not a page code",
+  "api.me.tooManyBlocks": "ask about at most {max} blocks at once",
   "api.password.currentWrong": "the current password does not match",
   "api.password.invalid": "that password cannot be used",
   "api.password.tooShort": "a password needs at least {min} characters",

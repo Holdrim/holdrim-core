@@ -22,6 +22,15 @@ export const PAGE_FORMAT = /^[A-Za-z][A-Za-z0-9-]{0,7}$/;
 export const ID_FORMAT = /^[A-Za-z0-9._:-]+$/;
 const COMMIT_FORMAT = /^[0-9a-f]{7,40}$/;
 
+/**
+ * Whether `id` is a block id an event may name: the length and the characters `overLimit` holds an
+ * event's own `block` to, below. Exported so a route that takes block ids from a query string
+ * (`/api/me?blocks=`, engine/api/here.ts) accepts exactly the ids a ✓ on them could carry, and no id
+ * the store would have refused.
+ * @param {unknown} id
+ */
+export const isBlockId = (id) => typeof id === 'string' && id !== '' && id.length <= LIMITS.block && ID_FORMAT.test(id);
+
 // Exported: `server.ts`'s `refusalOf` echoes a caller-controlled category back in a 400 body, and
 // that value is not yet bounded by anything below when it gets there — an unbounded echo is how a
 // 200 KB category once became a 200 KB error body. Truncating it here, the one place this codebase

@@ -46,13 +46,30 @@ who ran the engine from `main` before it.
   sign-in screen is the gate), or have the gateway strip `Authorization` before it forwards. And an agent — named in `HOLDRIM_AGENTS` or come in with
   a token — may now move an approved request through `applying`, `waiting` and `applied` through the
   API, as `docs/ROLES.md` section 4 already said it keeps; before, only the local runner let it.
+- **`/api/me` no longer answers `canApprove` or `canTriage`; it answers what the person may do on
+  one page, `GET /api/me?page=P03&blocks=P03.1.1,P03.1.2` → `here` (#33, `docs/ROLES.md` section
+  2).** A grant may be limited to some pages or blocks, so "may this person approve?" has no answer
+  without a place. `here` is `{ page, may: { comment, request, triage, approve }, blocks: { "<block
+  id>": { triage, approve } } }`, booleans only, for the page and for each block `blocks` names that
+  is a block id and lives on that page — any other id is left out, never echoed. A `page` that is
+  not a page code, or more than 2000 ids, answers 400; without `?page=` there is no `here`. A request's
+  `status.triage`, in `/api/events` and `/api/events/:id`, now lists destinations only for a reader
+  who may triage that request, and is empty for everyone else. What to change: anything reading
+  `canApprove`/`canTriage` asks `/api/me?page=` and reads `here`. Every check the server makes is
+  now asked with the place: a ✓ by its block (the block's own page, never the `page` sent beside
+  it), triage and "add details" by where the STORED request was filed, never by the page or block
+  the triage event names. Who may do what does not change for the three shipped roles, which are
+  unscoped. **A `HOLDRIM_LOCKS` scope that matches no page and no block of the site now refuses to
+  start**, and each scope's reach is logged at start (`lock_scope_coverage`, the scope and the pages
+  it reaches, never the address): a scope granted over nothing is a typo, or a page that moved away.
+  What to change: fix or remove such an entry.
 - **`/api/me`'s `role` answers `member` where it used to answer `other`.** The engine now speaks of
   three shipped roles — `owner`, `admin`, `member` — as sets of a closed capability list
   (`engine/core/roles.js`: `read`, `comment`, `request`, `triage`, `approve`, `lock`, `people`), and
   a role display name that only ever meant "one of the two above" now says so. What to change:
   anything matching `/api/me`'s `role` against `'other'`, and the people screen's `people.role.other`
-  translation key, now `people.role.member`. `canApprove`, `canTriage` and every other field of
-  `/api/me` are unchanged.
+  translation key, now `people.role.member`. Every other field of `/api/me` keeps its meaning under
+  this rename; `canApprove` and `canTriage` are then removed by the per-page answer below (#33).
 - **`owner` and `admins` are no longer read from `holdrim.json`, and a `holdrim.json` that names
   `owner`, `admins` or `locks` now refuses to start the service and to run the CLI.** Authority is
   set by the deployment: whoever can commit to the file — or the agent applying an approved

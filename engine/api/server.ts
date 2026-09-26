@@ -5,8 +5,10 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
-import { createRoles, rolesOf, agentByToken, byToken, addressOf } from '../core/roles.js';
-import { overLimit, validCommit, short } from '../core/limits.js';
+import {
+  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, lockCoverage,
+} from '../core/roles.js';
+import { overLimit, validCommit, short, PAGE_FORMAT } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
 import { SqliteEventStore } from './store-sqlite.ts';
@@ -36,6 +38,7 @@ import { personAs } from '../core/people-show.js';
 import { resolveRemovedBy, type Removed, type TamperReport } from './texts.ts';
 import { issuedEvent, revokedEvent } from './agent-tokens.ts';
 import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
+import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED } from './here.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -147,6 +150,25 @@ try {
   }
 } catch (error) {
   refuseToStart(error);
+}
+
+// How far each HOLDRIM_LOCKS scope reaches on this site, said at start, and a scope that reaches no
+// page refused (docs/ROLES.md, the attack table: "start logs each scope's coverage and refuses a scope
+// that matches no page"). The repository decides what a page code means, so a commit can move pages
+// into or out of a scope; this line is how whoever deploys sees what the scope covers after it. The
+// scope and what it reaches, never the address it was granted to: a log names people by id.
+// Read only when HOLDRIM_LOCKS names a scope: every other deployment boots without reading a page,
+// as it did before this check existed.
+const lockScopes = parseLocks(project.locks);
+const lockReach = lockScopes.length ? lockCoverage(lockScopes, (await readBlocks(projectRoot)).keys()) : [];
+for (const { scope, reaches } of lockReach) {
+  if (reaches.length === 0) {
+    refuseToStart(new Error(
+      `HOLDRIM_LOCKS has the scope "${scope}", which matches no page and no block of this site ` +
+      '(docs/ROLES.md, section 2): a lock granted over nothing is found out only the day it starts ' +
+      'matching something. Fix the scope, or remove the entry.'));
+  }
+  log('INFO', 'lock_scope_coverage', { scope, reaches });
 }
 
 /**
@@ -400,8 +422,10 @@ function refusalOf(incoming: NewEvent, who: Who, say: (key: string, params?: Rec
     return { status: 403, body: { error: say('api.approval.sessionOnly') } };
   }
   // Approving belongs to owner and admin. Only the owner's ✓ becomes a lock in the repository —
-  // `holdrim sync` takes theirs alone — and an admin's is recorded, and stays an opinion.
-  if (incoming.type === 'approval' && !roles.can('approve', who)) {
+  // `holdrim sync` takes theirs alone — and an admin's is recorded, and stays an opinion. Asked of
+  // the BLOCK (`whereOf`), whose page is derived from its id: the `page` the client sent beside it is
+  // not trusted to say where the ✓ lands.
+  if (incoming.type === 'approval' && !roles.can('approve', who, whereOf({ block: incoming.block }))) {
     return { status: 403, body: { error: say('api.approval.ownerOnly') } };
   }
   if (['request', 'comment', 'supplement'].includes(incoming.type) && !incoming.text?.trim()) {
@@ -422,9 +446,11 @@ function refusalOf(incoming: NewEvent, who: Who, say: (key: string, params?: Rec
  * request from before this whole mechanism existed could hold a client-forged `authorCouldTriage`
  * `recordEvent` never wrote, back when it stored whatever `data` a client sent.
  */
-const withStatus = (e: Event, thread: Event[]) => ({
+const withStatus = (e: Event, thread: Event[], viewer: Who | null) => ({
   ...e,
-  status: cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e, LOCK_BASELINE))),
+  // Triage destinations only for a viewer who may triage THIS request, where it was filed (`statusFor`):
+  // the panel draws its triage buttons from this list alone.
+  status: statusFor(roles, viewer, e, cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e, LOCK_BASELINE)))),
 });
 
 /**
@@ -436,8 +462,8 @@ const withStatus = (e: Event, thread: Event[]) => ({
  * same way — falling back to `legacyLock` against `LOCK_BASELINE` for one that predates it, or holds
  * nothing at all. The one implementation this file and validation.ts (`holdrim sync`) both call.
  */
-const asRead = (e: Event, threads: Map<string, Event[]>) => {
-  if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? []);
+const asRead = (e: Event, threads: Map<string, Event[]>, viewer: Who | null) => {
+  if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? [], viewer);
   if (e.type === 'approval') return { ...e, locks: isLocked(e, LOCK_BASELINE) };
   return e;
 };
@@ -455,7 +481,7 @@ const asRead = (e: Event, threads: Map<string, Event[]>) => {
  * already had in hand.
  */
 async function personDisplay(subject: string, id: string | undefined, viewer: Who | null, lang: string): Promise<string> {
-  const alwaysNamed = viewer !== null && (subject === addressOf(viewer) || roles.can('people', viewer));
+  const alwaysNamed = viewer !== null && (subject === addressOf(viewer) || roles.can('people', viewer, EVERYWHERE));
   // Only asked when the answer could actually change: `alwaysNamed` and `people.show: "name"` are
   // the only two paths `personAs` reads `name` on at all, and behind no password there is no account
   // to find in the first place — an identity proxy holds no name Holdrim could show instead.
@@ -521,7 +547,6 @@ async function recordEvent(
   through = 'api',
 ): Promise<{ status: number; body: Record<string, unknown>; event?: Event }> {
   const email = addressOf(who);
-  const canApprove = roles.can('approve', who);
   const refusal = refusalOf(incoming, who, say);
   if (refusal) return refusal;
 
@@ -534,7 +559,8 @@ async function recordEvent(
     const current = cycle.currentState(requestId, ofPage, authorCouldTriage(request, LOCK_BASELINE));
 
     if (incoming.type === 'supplement') {
-      if (email !== request.author && !canApprove) {
+      // Judged on the STORED request's place, never on the page and block this event claims.
+      if (!mayAddDetails(roles, who, email, request)) {
         return { status: 403, body: { error: say('api.supplement.ownerOrAuthor') } };
       }
       if (!cycle.acceptsSupplement(current)) {
@@ -546,12 +572,9 @@ async function recordEvent(
       const target = incoming.data?.state as string | undefined;
       if (!target) return { status: 400, body: { error: say('api.state.required') } };
       if (!cycle.exists(target)) return { status: 400, body: { error: say('api.state.unknown') } };
-      // The states the agent owns — applying, waiting, applied — are what an agent keeps
-      // (docs/ROLES.md, section 4): without the second half, `holdrim state` through the API would
-      // be refused to the very identity it exists for, and the agent would have no door but the
-      // local runner's. Triage stays out of reach: `canApprove` is false for every agent.
-      const agentState = cycle.agentStates.includes(target);
-      if (!canApprove && !((iap?.localMode || roles.isAgent(who)) && agentState)) {
+      // `triage` on the STORED request's place, and the agent's own states for an agent — see
+      // `mayMove` (engine/api/here.ts) for why each half is there.
+      if (!mayMove(roles, who, request, target, { agentStates: cycle.agentStates, localMode: Boolean(iap?.localMode) })) {
         return { status: 403, body: { error: say('api.triage.ownerOnly') } };
       }
       if (cycle.requiresReason(target) && !incoming.text?.trim()) {
@@ -576,9 +599,13 @@ async function recordEvent(
   // gains `triage`, with no triage event ever written. Written as a STRING — see `writtenBoolean`'s
   // own comment for why a bare boolean here would silently break the CLI's cloud reader.
   if (incoming.type === 'approval') {
-    incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(roles.can('lock', who)) };
+    const locks = roles.can('lock', who, whereOf({ block: incoming.block }));
+    incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(locks) };
   } else if (incoming.type === 'request') {
-    incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(roles.can('triage', who)) };
+    // The block when it names one, the page it was asked on when it names none (a page request) —
+    // the same place its triage is judged on later (`mayMove`, engine/api/here.ts).
+    const couldTriage = roles.can('triage', who, whereOf(incoming));
+    incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(couldTriage) };
   }
   // Every event, not only the ones an agent may not write: the trail has to say an agent closed an
   // impact or moved a request (docs/ROLES.md §4), and it has to say so from the identity the server
@@ -662,11 +689,26 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   }
 
   if (req.method === 'GET' && route === '/me') {
+    // What this person may do on the page the panel is drawing, and on each block it names
+    // (`hereOf`, `blocksAsked`, engine/api/here.ts) — asked per page, since a grant may be limited to
+    // some. No global "may approve" any more: answered without a place, it would be the unscoped
+    // answer. The blocks are the ones the PANEL draws, the way `/fingerprints` takes its ids, not the
+    // ones this server reads from disk: a page served from outside `content.folders` still has blocks
+    // a person may approve. The page is checked against the page-code format before anything uses
+    // it, and never echoed back when it fails: it is whatever the query string held.
+    const page = url.searchParams.get('page');
+    if (page !== null && !PAGE_FORMAT.test(page)) {
+      return json(res, 400, { error: i18n.t(languageOf(req), 'api.me.badPage') });
+    }
+    const asked = page === null ? { ids: [] } : blocksAsked(page, url.searchParams.get('blocks'));
+    if ('tooMany' in asked) {
+      return json(res, 400, { error: i18n.t(languageOf(req), 'api.me.tooManyBlocks', { max: MAX_BLOCKS_ASKED }) });
+    }
+    const here = page === null ? undefined : hereOf(roles, who, page, asked.ids);
     return json(res, 200, {
       email,
       role: roles.roleOf(who),
-      canApprove: roles.can('approve', who),
-      canTriage: roles.can('triage', who),
+      ...(here ? { here } : {}),
       owner: roles.isOwner(who),
       admins: roles.admins,
       // The language this person reads in, decided here by the one rule the server's screens use —
@@ -715,7 +757,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // it there), so `displays` already has their entry — no second resolve, and no raw address left
     // inside `Removed` for a viewer `author` itself already hides it from.
     return json(res, 200, all.map((e) => ({
-      ...asRead(e, threads), author: displays.get(e.author) ?? e.author,
+      ...asRead(e, threads, who), author: displays.get(e.author) ?? e.author,
       textRemoved: resolveRemovedBy(e.textRemoved, displays), snapshotRemoved: resolveRemovedBy(e.snapshotRemoved, displays),
       own: e.author === email,
     })));
@@ -731,7 +773,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
     const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], who, lang);
     return json(res, 200, {
-      ...asRead(found, cycle.threadsOf(all)), author: displays.get(found.author) ?? found.author,
+      ...asRead(found, cycle.threadsOf(all), who), author: displays.get(found.author) ?? found.author,
       textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
       own: found.author === email,
     });
@@ -764,9 +806,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   // reasoning `stateOf` already relies on for "red when the dependency vanishes, too".
   //
   // ⚠️ Every dependent is named, with no visibility filter — the same gap `/fingerprints` already
-  // has. Fine today, when a session only needs to be signed in at all; once grants can be scoped to
-  // pages or blocks (#33), this has to filter by what the viewer may see, or the radius becomes a
-  // way to learn the ids of blocks a scoped grant was meant to hide.
+  // has. Fine today, when `read` is held everywhere by everyone signed in; the day a grant limits
+  // `read` to some pages, this has to filter by what the viewer may see (`can('read', …)`), or the
+  // radius becomes a way to learn the ids of blocks that grant was meant to hide.
   if (req.method === 'GET' && route === '/impact-radius') {
     const id = url.searchParams.get('id') ?? '';
     const blocks = await readBlocks(projectRoot);
@@ -889,7 +931,7 @@ async function userRoutes(
   const email = addressOf(who);
   const say = (key: string, params?: Record<string, string | number>) => i18n.t(lang, key, params);
   /** Owner and admin, and nobody else: the `people` capability, which member does not hold. */
-  const manages = () => roles.can('people', who);
+  const manages = () => roles.can('people', who, EVERYWHERE);
   const forbidden = () => (json(res, 403, { error: say('api.users.adminOnly') }), true);
 
   // ---------------------------------------------------------------- the list
@@ -1264,13 +1306,13 @@ async function apiViewerOf(req: IncomingMessage): Promise<{ who: Who } | { refus
  * serves the screen and the home that links to it — a link to a screen that then sends you away is
  * a door painted on a wall. Password sign-in only: behind a proxy, people live in the proxy.
  */
-const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.can('people', viewer));
+const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.can('people', viewer, EVERYWHERE));
 
 /**
  * Whether the people SCREEN (and its link in the nav) is reachable at all — `features.peopleScreen`.
  *
  * ⚠️ This is the ONLY place that toggle is read. The `/api/users*` routes (`userRoutes`, above) ask
- * `manages()` — `roles.can('people', who)` — and never this: hiding the screen must never mean
+ * `manages()` — `roles.can('people', who, EVERYWHERE)` — and never this: hiding the screen must never mean
  * disabling what it fronts (docs/ROLES.md, "no toggle may disable a guard"). An owner who knows the
  * routes, or a script that calls them directly, keeps every ability the screen merely gives a button
  * to; turning this off hides the button, nothing else. `engine/tests/features.test.js` proves the
@@ -1387,11 +1429,12 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
     new Map(pages.map((p) => [p.page, p.href])),
     (email) => displays.get(email) ?? email);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the
-  // same one the panel draws its buttons from. Nobody else is offered a form the server refuses.
-  if (viewer && roles.can('approve', viewer)) {
+  // same one the panel draws its buttons from, filtered by `statusFor` on the request's own place.
+  // Nobody is offered a form the server refuses.
+  if (viewer) {
     for (const r of requests) {
-      const { triage, requiresReason } = cycle.status(r.state);
-      Object.assign(r, { triage, requiresReason });
+      const { triage, requiresReason } = statusFor(roles, viewer, r, cycle.status(r.state));
+      if (triage.length) Object.assign(r, { triage, requiresReason });
     }
   }
   const nonce = randomBytes(16).toString('base64');
