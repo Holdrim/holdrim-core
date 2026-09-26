@@ -378,6 +378,18 @@ who ran the engine from `main` before it.
   member or an agent token sees the filter empty it out entirely — a clear "no match" rather than a
   blank or broken graph; scoped grants (#36) will narrow this to real subsets without the filter, or
   the field, changing shape.
+- **`content.glossary`**, `holdrim.json`'s new key: the project's own vocabulary, an array of up to
+  1000 terms of 1–64 characters each, no control characters — refused at load otherwise, the way a
+  bad feature toggle is. Empty when a project names none.
+- **`holdrim propose-deps`**, a deterministic proposal of likely `data-depends` (issue #43): two
+  blocks that use the same term of the project's own `content.glossary` and declare no dependency on
+  one another, either way, are worth a human looking at. Matching is exact-phrase (no stemming), but
+  works in any language: case-insensitive, on Unicode letters and digits, so a term like `"transação"`
+  matches whole and never as part of a longer word. It writes a `request` of the new `dependency`
+  category — the same cycle as any other request, decided by the owner like any other — never a
+  `data-depends` itself: an approved proposal still has to be added by hand. No model: the same
+  blocks and glossary always propose the same pairs, and a pair already proposed, in any state, is
+  never proposed again. `--dry-run` prints what would be proposed without writing anything.
 
 ### Security
 

@@ -252,6 +252,36 @@ test('list, show, impact, summary and apply --dry-run read the events file with 
   assert.doesNotMatch(dry.out, /Requested-by/);
 });
 
+/**
+ * `propose-deps` is wired into holdrim.ts's own switch like every other command — this is what
+ * catches `case 'propose-deps'` hard-coding `dryRun: false` (or `dryRun: true`, or falling out of
+ * the switch altogether), which no unit test of `proposeDeps` itself, called directly with a fake
+ * `Source`, would ever see: those never go through the switch at all.
+ *
+ * A write always goes through `Source.add`, which always POSTs to a real Holdrim server
+ * (`engine/cli/remote.ts`) — never straight to a store, and never through `--db` (that option only
+ * ever reads). Told to write with neither `--local` nor `HOLDRIM_AGENT_TOKEN` set, `add` refuses
+ * before sending anything, naming the fix — so a run WITHOUT `--dry-run` reaching exactly that
+ * refusal is proof it genuinely tried to write, the same proof "the requests land" would be,
+ * without booting a real server. `npm test` never boots one (AGENTS.md, rule 3).
+ */
+test('propose-deps\'s --dry-run really reaches proposeDeps as dryRun: true; without it, a write is really attempted', async (t) => {
+  const dir = project(t); // hello-world's own holdrim.json names a content.glossary
+  const db = join(dir, 'events.db');
+  await new SqliteEventStore(db).close(); // an empty, real events file — enough for --db to read from, no network
+
+  const dry = run(['propose-deps', '--dry-run', '--db', db], dir);
+  assert.equal(dry.code, 0, dry.out);
+  assert.match(dry.out, /^would propose: /m, 'a hard-coded dryRun: false would instead try to write and fail below');
+
+  // A `dryRun` hard-coded to `true` would print the SAME "would propose:" here too, never trying to
+  // write — the refusal below is what tells the two apart.
+  const real = run(['propose-deps', '--db', db], dir);
+  assert.equal(real.code, 1, real.out);
+  assert.match(real.out, /writing needs the agent's own token/);
+  assert.doesNotMatch(real.out, /^would propose: /m, 'a real run must not silently fall back to dry-run wording');
+});
+
 // ===================================================================== issue #91, round 1: exit codes
 // Round 1 of the #91 review, items 6 and 7: nothing had run `main()` itself against a tampered store —
 // every proof so far called `requests.list`/`validation.sync` directly, never through the `? 1 : 0`

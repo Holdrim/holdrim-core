@@ -8,6 +8,7 @@ import * as requests from './requests.ts';
 import * as validation from './validation.ts';
 import * as graph from './graph.ts';
 import * as agent from './agent.ts';
+import * as propose from './propose.ts';
 
 /**
  * The agent's tool for the Holdrim method.
@@ -47,6 +48,9 @@ holdrim — the agent's tool for the Holdrim method
     graph --json|--mermaid|--dot
                                  the dependency graph the traffic light reads, for a script or a
                                   diagram — exactly one format, never a guessed default
+    propose-deps [--dry-run]    proposes a data-depends for two blocks that share a glossary term
+                                  and do not depend on each other yet — a request, not a write;
+                                  --dry-run only prints what would be proposed
 
   Publishing
     export <folder>             the documentation as static pages, without the panel, for anyone
@@ -145,6 +149,7 @@ async function main() {
     case 'if-i-touch': return validation.ifITouch(root, requireArg(arg, 'if-i-touch <id>'));
     case 'graph':      return graph.showGraph(root, { json: values.json, mermaid: values.mermaid, dot: values.dot,
                          enabled: projectConfig.features.graph });
+    case 'propose-deps': return propose.proposeDeps(root, source, { dryRun: values['dry-run'] });
     case 'export': {
       const out = requireArg(arg, 'export <folder>');
       const { pages, files } = exportSite(root, out);
