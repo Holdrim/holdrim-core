@@ -263,3 +263,15 @@ who ran the engine from `main` before it.
   exact race issue #113's fix closed for a window nobody asked to reopen. Same failure reporting as
   above: a failed drop carries `sessionsDropped: false` and an `ERROR user_sessions_not_dropped` line,
   never a 500 for a credential that changed regardless.
+
+### Fixed
+
+- **A block id containing a regex or CSS metacharacter (`+ * ( [ | ? \` and more) is now marked,
+  synced and restamped correctly, instead of possibly hitting the wrong block, missing the right
+  one, or throwing.** `mark`, `sync` and `restamp` built a regex, and in one place a CSS selector,
+  straight out of the id — which is page text a documentation author writes, not something the
+  engine controls. The opening tag is now located by plain string search on `data-id="..."`
+  (`engine/cli/pages.ts`), so the id's own characters no longer choose what matches. Along the way,
+  writing `data-depended-on` (which carries other block ids inside a JSON blob) stopped going
+  through `String.replace` with a string replacement, whose `$&`/`$1`/`$$` syntax could corrupt an
+  id containing `$&`.

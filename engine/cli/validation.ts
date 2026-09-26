@@ -2,7 +2,8 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
-import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, projectRoles, type Block } from './pages.ts';
+import { readBlocks, sheetFiles, findBlockFile, shortName, ofProject, projectRoles, openTag, withAttribute,
+  withValidatedMark, type Block } from './pages.ts';
 import { trafficLight, dependentsOf, radiusOf, COLOURS } from '../core/validity.js';
 import { layerOf } from '../core/kinds.js';
 import { createRoles } from '../core/roles.js';
@@ -200,13 +201,14 @@ export async function mark(root: string, registry: Registry, id: string, when: s
   const found = findBlockFile(root, id);
   if (!found) { console.log(`  ✗ ${id}: not found`); return null; }
 
-  const marked = found.html.replace(
-    new RegExp(`(data-id="${id.replace(/\./g, '\\.')}")(?! data-validated=)`),
-    `$1 data-validated="${when}"`);
+  const marked = withValidatedMark(found.html, id, when);
   if (marked !== found.html) writeFileSync(found.path, marked, 'utf8');
 
   const { document } = parseHTML(marked);
-  const el = document.querySelector(`[data-id="${id}"]`)!;
+  // Not a selector built from `id`: the id is page text, and a `"` or `\` inside it would break or
+  // mis-match `[data-id="${id}"]`. Comparing the attribute's actual value has no such reading.
+  const el = [...document.querySelectorAll('[data-id]')].find((e) => e.getAttribute('data-id') === id);
+  if (!el) { console.log(`  ✗ ${id}: not found after marking`); return null; }
   const copy = el.cloneNode(true) as Element;
   copy.querySelectorAll('[data-review-ui]').forEach((x: Element) => x.remove());
   const text = copy.textContent ?? '';
@@ -233,8 +235,7 @@ export async function mark(root: string, registry: Registry, id: string, when: s
   }
   let html = readFileSync(found.path, 'utf8');
   for (const [attr, value] of Object.entries(attributes)) {
-    const target = new RegExp(`(data-id="${id.replace(/\./g, '\\.')}")((?:(?!${attr})[^>])*?)>`);
-    html = html.replace(target, `$1$2 ${attr}="${value}">`);
+    html = withAttribute(html, id, attr, value);
   }
   writeFileSync(found.path, html, 'utf8');
 
@@ -425,8 +426,8 @@ export async function restamp(root: string) {
     const current = blocks.get(id)?.fingerprint;
     if (current && current !== recorded) willTurnYellow.push(id);
 
-    const escaped = id.replace(/\./g, '\\.');
-    if (new RegExp(`data-id="${escaped}"[^>]*data-validated-fingerprint`).test(found.html)) {
+    const tag = openTag(found.html, id);
+    if (tag && found.html.slice(tag.needleEnd, tag.tagEnd).includes('data-validated-fingerprint')) {
       alreadyHad++; continue;
     }
 
@@ -437,8 +438,7 @@ export async function restamp(root: string) {
 
     let html = readFileSync(found.path, 'utf8');
     for (const [attr, value] of Object.entries(attributes)) {
-      html = html.replace(new RegExp(`(data-id="${escaped}")((?:(?!${attr})[^>])*?)>`),
-                          `$1$2 ${attr}="${value}">`);
+      html = withAttribute(html, id, attr, value);
     }
     writeFileSync(found.path, html, 'utf8');
     written++;

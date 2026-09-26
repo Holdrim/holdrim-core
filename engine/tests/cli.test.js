@@ -11,8 +11,8 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, cpSync, re
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
-import { readBlocks, sheetFiles } from '../cli/pages.ts';
-import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, check, ifITouch } from '../cli/validation.ts';
+import { readBlocks, sheetFiles, withAttribute } from '../cli/pages.ts';
+import { orphanMarks, loadRegistry, missingProofs, upwardDependencies, sync, mark, restamp, check, ifITouch } from '../cli/validation.ts';
 import { trafficLight, dependentsOf } from '../core/validity.js';
 import { setState, requests, queue, list, show } from '../cli/requests.ts';
 import { everyToggleFlipped } from '../core/features.js';
@@ -98,6 +98,127 @@ test('a validated block whose text changed is caught by check, and intact otherw
 
   writeFileSync(sheet, marked.replace('24 hours', '48 hours'));
   assert.equal(await check(tmp), 1, 'the text changed after the ✓ — this is what the lock exists to say');
+});
+
+/**
+ * `mark` and `restamp` build a regex, and once did, straight out of the id — page text a
+ * documentation author writes, not something the engine controls. A metacharacter in the id used to
+ * change what the pattern matched: it could mark the wrong block, miss the right one, or throw on
+ * an invalid pattern (holdrim#135). The tag is now found by plain string search, which reads every
+ * character of the id literally, so this suite plants each hostile id NEXT TO an innocent neighbour
+ * and checks the neighbour never moves.
+ */
+const HOSTILE_IDS = ['a+b', 'a(b', 'a|b', 'a[b', 'a\\b', 'a$&b'];
+const OTHER_ID = 'safe-neighbour';
+
+/** Two blocks on one page: the id under test, and an innocent neighbour right after it. */
+function hostilePage(id, other = OTHER_ID) {
+  return `<main><div data-id="${id}" data-code="1.1">hostile text</div>`
+    + `<div data-id="${other}" data-code="1.2">neighbour text</div></main>`;
+}
+
+for (const id of HOSTILE_IDS) {
+  test(`mark on id ${JSON.stringify(id)} touches only that block, and does not throw`, async (t) => {
+    const tmp = project(t);
+    const sheet = join(tmp, 'p', 'X01.html');
+    writeFileSync(sheet, hostilePage(id));
+    const registry = {};
+
+    const fingerprint = await mark(tmp, registry, id, '2026-09-22', 'test');
+    assert.ok(fingerprint, `mark must succeed for id ${id}, not throw or silently fail`);
+
+    const after = readFileSync(sheet, 'utf8');
+    assert.ok(after.includes(`<div data-id="${OTHER_ID}" data-code="1.2">neighbour text</div>`),
+      `the neighbour block must stay byte-identical when marking ${id}`);
+
+    // Found by indexOf, never by a pattern built from the (hostile) id itself.
+    const start = after.indexOf(`data-id="${id}"`);
+    const tagEnd = after.indexOf('>', start);
+    const tag = after.slice(start, tagEnd);
+    assert.ok(tag.includes('data-validated="2026-09-22"'), `the hostile block ${id} must carry the seal`);
+    assert.ok(tag.includes(`data-validated-fingerprint="${fingerprint}"`),
+      `the hostile block ${id} must carry its fingerprint`);
+  });
+
+  test(`restamp on id ${JSON.stringify(id)} touches only that block, and does not throw`, async (t) => {
+    const tmp = project(t);
+    const sheet = join(tmp, 'p', 'X01.html');
+    writeFileSync(sheet, hostilePage(id));
+    writeFileSync(join(tmp, 'r.json'),
+      JSON.stringify({ [id]: { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } }));
+
+    await restamp(tmp);
+
+    const after = readFileSync(sheet, 'utf8');
+    assert.ok(after.includes(`<div data-id="${OTHER_ID}" data-code="1.2">neighbour text</div>`),
+      `the neighbour block must stay byte-identical when restamping ${id}`);
+    const start = after.indexOf(`data-id="${id}"`);
+    const tagEnd = after.indexOf('>', start);
+    assert.ok(after.slice(start, tagEnd).includes('data-validated-fingerprint="ffffffffffffffff"'),
+      `restamp must stamp the hostile block ${id}`);
+  });
+}
+
+/**
+ * Without this guard, re-approving a block (`mark` called a second time, as `sync` does whenever
+ * the site's ✓ post-dates the last one already recorded) would append a SECOND
+ * `data-validated-fingerprint` to the same tag instead of updating the one already there — an
+ * attribute a browser resolves in an undefined order, painted from whichever one it happens to
+ * read.
+ */
+test('withAttribute does not duplicate an attribute the tag already carries', () => {
+  const html = '<div data-id="X" data-validated-fingerprint="aaa">text</div>';
+  const after = withAttribute(html, 'X', 'data-validated-fingerprint', 'bbb');
+  assert.equal(after, html, 'an attribute already in the tag must be left alone, not duplicated');
+});
+
+/**
+ * The dot case is mainly a regression guard: the old code escaped `.` on purpose, so `a.b` never
+ * broke it. What it did not guard is ORDER — a neighbour whose id loosely resembles the pattern
+ * (`aXb`, where `.` reads as "any character") sitting BEFORE the real target. This plants `aXb`
+ * first and confirms marking `a.b` never touches it.
+ */
+test('mark on "a.b" does not touch an "aXb" neighbour placed before it', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  writeFileSync(sheet, '<main><div data-id="aXb" data-code="1.1">neighbour text</div>'
+    + '<div data-id="a.b" data-code="1.2">hostile text</div></main>');
+  const registry = {};
+
+  const fingerprint = await mark(tmp, registry, 'a.b', '2026-09-22', 'test');
+  assert.ok(fingerprint);
+
+  const after = readFileSync(sheet, 'utf8');
+  assert.ok(after.includes('<div data-id="aXb" data-code="1.1">neighbour text</div>'),
+    'the aXb neighbour must stay byte-identical');
+  const start = after.indexOf('data-id="a.b"');
+  const tagEnd = after.indexOf('>', start);
+  assert.ok(after.slice(start, tagEnd).includes(`data-validated-fingerprint="${fingerprint}"`),
+    'the a.b block must carry its fingerprint');
+});
+
+/**
+ * `data-depended-on` carries another block's id inside a JSON blob, written as the VALUE of an
+ * attribute. `String.replace` with a string second argument reads `$&`/`$1`/`$$` inside that value
+ * as replacement syntax — an id containing `$&` used to corrupt the write by splicing in the whole
+ * matched tag a second time. Splicing the html by index instead treats the value as inert text.
+ */
+test('a dependency id containing $& lands intact in data-depended-on', async (t) => {
+  const tmp = project(t);
+  const sheet = join(tmp, 'p', 'X01.html');
+  const depId = 'a$&b';
+  writeFileSync(sheet, `<main><div data-id="target" data-code="1.1" data-depends="${depId}">text</div>`
+    + `<div data-id="${depId}" data-code="1.2">dep text</div></main>`);
+  const registry = {};
+  const fingerprintsNow = new Map([[depId, 'dddddddddddddddd']]);
+
+  const fingerprint = await mark(tmp, registry, 'target', '2026-09-22', 'test', undefined, fingerprintsNow);
+  assert.ok(fingerprint);
+
+  const after = readFileSync(sheet, 'utf8');
+  const expectedValue = JSON.stringify({ [depId]: 'dddddddddddddddd' }).replace(/"/g, '&quot;');
+  assert.ok(after.includes(`data-depended-on="${expectedValue}"`),
+    'the dependency id must appear exactly as JSON.stringify produced it, not mangled by $-substitution');
 });
 
 /**

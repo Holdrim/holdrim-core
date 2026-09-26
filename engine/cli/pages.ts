@@ -159,6 +159,44 @@ export function findBlockFile(root: string, id: string): { path: string; html: s
 }
 
 /**
+ * A block's opening tag, located by plain string search — a regex or a CSS selector built from the
+ * id lets the id's own characters (`+ * ( [ | ? \` and more) change what matches, so the tag is
+ * found by indexOf instead of a pattern. Returns null when the id, or its tag's `>`, is not there.
+ */
+export function openTag(html: string, id: string): { needleEnd: number; tagEnd: number } | null {
+  const needle = `data-id="${id}"`;
+  const start = html.indexOf(needle);
+  if (start === -1) return null;
+  const needleEnd = start + needle.length;
+  const tagEnd = html.indexOf('>', needleEnd);
+  return tagEnd === -1 ? null : { needleEnd, tagEnd };
+}
+
+/**
+ * Inserts `attr="value"` into a block's opening tag, unless that part of the tag already has it.
+ * Slicing keeps the id and the value out of a pattern entirely, and inserting by index (rather than
+ * `String.replace` with a string second argument) keeps `$&`/`$1`/`$$` inside `value` — a
+ * `data-depended-on` JSON blob carries other block ids — from being read as replacement syntax.
+ */
+export function withAttribute(html: string, id: string, attr: string, value: string): string {
+  const tag = openTag(html, id);
+  if (!tag) return html;
+  const { needleEnd, tagEnd } = tag;
+  if (html.slice(needleEnd, tagEnd).includes(attr)) return html;
+  return html.slice(0, tagEnd) + ` ${attr}="${value}"` + html.slice(tagEnd);
+}
+
+/** Marks a block validated, right after its `data-id`, unless it already carries the mark. */
+export function withValidatedMark(html: string, id: string, when: string): string {
+  const needle = `data-id="${id}"`;
+  const start = html.indexOf(needle);
+  if (start === -1) return html;
+  const needleEnd = start + needle.length;
+  if (html.startsWith(' data-validated=', needleEnd)) return html;
+  return html.slice(0, needleEnd) + ` data-validated="${when}"` + html.slice(needleEnd);
+}
+
+/**
  * The file name as it appears in the approvals record.
  *
  * The path relative to the root, minus whatever prefix the project asks to trim. Searching for a
