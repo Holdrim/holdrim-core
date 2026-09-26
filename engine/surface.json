@@ -51,6 +51,7 @@
     "cloud.region",
     "cloud.service",
     "content.folders",
+    "content.glossary",
     "content.home",
     "content.pageExamples",
     "content.registry",
@@ -142,6 +143,7 @@
   ],
   "request-categories": [
     "bug",
+    "dependency",
     "doubt",
     "page",
     "remove",
@@ -159,6 +161,7 @@
     "kinds",
     "lights",
     "list",
+    "propose-deps",
     "restamp",
     "show",
     "state",

@@ -181,8 +181,6 @@ In order of how much is missing:
    and the human correcting it — still the person's own agent, never a model the engine calls.
 2. **Generating diagrams.** A diagram in text is versioned and under the traffic light today;
    nothing draws one.
-3. **Automatic dependencies.** Today `data-depends` is written by hand. The tool ought to propose
-   them: two blocks talking about the same term probably depend on each other.
 
 ## The name
 
