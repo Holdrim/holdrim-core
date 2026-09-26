@@ -796,8 +796,10 @@ test('restamp never writes into an end tag when prose before the block mentions 
 
 /**
  * The locks lens's case: a block already sealed, a comment carrying the needle and an unbalanced
- * quote, and a neighbour with an apostrophe in an unquoted value. A second ✓ on the same text must
- * write nothing at all — not the comment, not the neighbour — and still be recorded.
+ * quote, and a neighbour with an apostrophe in an unquoted value. A ✓ on the same text, dated later,
+ * rewrites that block's own date in place and nothing else — not the comment, not the neighbour — and
+ * is recorded. Kept, the old date disagrees with the one the registry records, and `check` fails on
+ * it (holdrim#140).
  */
 test('sync over a pre-stamped block never moves its seal into a comment or onto a neighbour', async (t) => {
   const text = 'Never deploy on Friday';
@@ -815,7 +817,8 @@ test('sync over a pre-stamped block never moves its seal into a comment or onto 
 
     assert.equal(r.added, 1, decoy);
     assert.equal(r.refused, 0, decoy);
-    assert.equal(page(), html, `nothing written with ${decoy}`);
+    assert.equal(page(), html.replace('data-code="1.1" data-validated="2026-01-01"', 'data-code="1.1" data-validated="2026-09-22"'),
+      `only y's date is rewritten with ${decoy}`);
   }
 });
 

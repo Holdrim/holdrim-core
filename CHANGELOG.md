@@ -100,6 +100,22 @@ who ran the engine from `main` before it.
   summary line counting them (`… · 1 refused · …`), a `⚠ … could not be stamped safely` line, and exit
   code 1. What to change: fix what the reason names on the page — most often two blocks sharing one
   id — and run the command again; nothing to change in the pipeline itself.
+- **`holdrim check` now holds each block's seal to the registry, not only its date, and counts a seal
+  attribute whose name is not lower case as a problem.** For every registry entry whose block exists,
+  `data-validated-fingerprint` has to equal the entry's `fingerprint` (a missing one is a problem too),
+  and `data-depended-on` its `dependsOn` (absent and `{}` alike). And a `data-validated`,
+  `data-validated-fingerprint` or `data-depended-on` written in any other case, on any block, recorded
+  or not, is a problem: a browser reads it under the lower-case name and keeps the first copy, so it
+  is the value the panel shows. What an adopter's CI sees: a `✗ <id>: …` line for each, counted in
+  `check`'s total, and a non-zero exit where it used to pass. The likeliest source is the re-approval
+  bug under **Fixed**: a page synced before this version keeps the earlier ✓'s seal. What repairs it:
+  no command overwrites a seal already on a page — `holdrim restamp` writes only what is missing, and
+  `holdrim sync` skips a ✓ the registry already holds. `restamp` writes a missing
+  `data-validated-fingerprint` or `data-depended-on` from the registry; an attribute that disagrees
+  with the registry, or is not in lower case, has to be taken off the block by hand first, and
+  `restamp` then writes the registry's value (it refuses a block that still carries a name not in
+  lower case). `data-validated`, which `restamp` never writes, still has to carry the registry's
+  `date`, as `check` already required.
 
 ### Added
 
@@ -308,3 +324,13 @@ who ran the engine from `main` before it.
   `$&`/`$1`/`$$` syntax could corrupt an id containing `$&`, and now escapes `&` as well as `"`: a
   dependency id holding a literal `&quot;` or `&lt;` used to read back, in the browser, as `"` or
   `<` — a dependency naming a block that does not exist.
+- **A re-approval synced from the site now replaces the seal on its block (holdrim#140).** `holdrim
+  sync` recorded the new ✓ in the registry and kept the page's `data-validated`,
+  `data-validated-fingerprint` and `data-depended-on` from the earlier one: the panel showed 🟡 on a
+  block just approved, and `holdrim check` failed on the date. A ✓ that `sync` records now rewrites
+  those three attributes on its block — once each, in lower case, where the first copy was, with every
+  other copy of the same name in any case removed, and a `data-depended-on` the block no longer needs
+  dropped — and the write is verified as before, the only difference allowed being that one block's
+  seal. A block with no seal is stamped exactly as before. `holdrim restamp` still never overwrites;
+  it now refuses, and says why, a block carrying a seal attribute whose name is not in lower case,
+  rather than writing a copy the browser would ignore or counting the block as already stamped.

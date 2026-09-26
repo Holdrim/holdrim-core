@@ -78,11 +78,91 @@ export async function check(root: string): Promise<number> {
       problems++;
     }
   }
+  problems += sealMismatches(registry, blocks);
+  problems += sealNamesNotLowerCase(blocks);
   problems += await orphanMarks(root, registry);
   problems += missingProofs(root, blocks);
   problems += upwardDependencies(blocks);
   console.log(`${Object.keys(registry).length} validated · ${problems ? `${problems} problem(s)` : 'all intact'}`);
   return problems;
+}
+
+/**
+ * The page's copy of each ✓ against the registry's: `data-validated-fingerprint` has to be the
+ * entry's `fingerprint`, and `data-depended-on` its `dependsOn` (absent and empty alike).
+ *
+ * The browser paints the traffic light from these attributes alone — the page is static and the
+ * panel never reads the registry — so a seal that disagrees with the record shows a colour the
+ * record does not back: an old fingerprint paints 🟡 on a block just approved, and a stale snapshot
+ * paints 🔴, or hides it. Comparing only the date, as `orphanMarks` does, passes both. Each value is
+ * the one a browser reads — the first copy whatever the case of its name — not linkedom's
+ * case-sensitive `getAttribute`.
+ */
+export function sealMismatches(registry: Registry, blocks: Map<string, Block>): number {
+  let found = 0;
+  for (const [id, entry] of Object.entries(registry).sort(([a], [b]) => a.localeCompare(b))) {
+    const block = blocks.get(id);
+    if (!block) continue; // `check` already says the block is gone
+    const reads = (name: string) => block.seal.find((a) => a.name.toLowerCase() === name)?.value ?? null;
+
+    const fingerprint = reads('data-validated-fingerprint');
+    if (fingerprint === null) {
+      console.log(`  ✗ ${id}: the page carries no data-validated-fingerprint, and the registry records `
+        + `${entry.fingerprint} — without it the browser cannot show that the text drifted`);
+      found++;
+    } else if (fingerprint !== entry.fingerprint) {
+      console.log(`  ✗ ${id}: the page's data-validated-fingerprint (${fingerprint}) is not the registry's `
+        + `(${entry.fingerprint}) — the browser paints the traffic light from the page's copy`);
+      found++;
+    }
+
+    const written = reads('data-depended-on');
+    let dependedOn: unknown = {};
+    try {
+      dependedOn = written === null ? {} : JSON.parse(written);
+    } catch {
+      dependedOn = null;
+    }
+    if (!dependedOn || typeof dependedOn !== 'object' || Array.isArray(dependedOn)) {
+      console.log(`  ✗ ${id}: the page's data-depended-on is not a JSON object of dependency fingerprints, `
+        + 'which is what the browser judges 🔴 from');
+      found++;
+    } else if (!sameDependencies(dependedOn as Record<string, unknown>, entry.dependsOn ?? {})) {
+      console.log(`  ✗ ${id}: the page's data-depended-on (${written ?? 'absent'}) is not the registry's `
+        + `dependsOn (${JSON.stringify(entry.dependsOn ?? {})}) — the browser judges 🔴 from the page's copy`);
+      found++;
+    }
+  }
+  return found;
+}
+
+/** The same dependencies, each with the same fingerprint, whatever order the keys were written in. */
+function sameDependencies(page: Record<string, unknown>, recorded: Record<string, string>): boolean {
+  const a = Object.keys(page).sort();
+  const b = Object.keys(recorded).sort();
+  return a.length === b.length && a.every((k, i) => k === b[i] && page[k] === recorded[k]);
+}
+
+/**
+ * A seal attribute on any block whose name is not written in lower case — with or without a
+ * registry entry.
+ *
+ * A browser lowercases attribute names and keeps the first of two that then collide, so a
+ * `DATA-VALIDATED-FINGERPRINT` ahead of the real one is the value the panel paints from, and a
+ * `DATA-VALIDATED` alone is a seal the page shows. linkedom keeps the case, so every other sweep here,
+ * `orphanMarks` included, reads straight past it: this is the one that sees it.
+ */
+export function sealNamesNotLowerCase(blocks: Map<string, Block>): number {
+  let found = 0;
+  for (const [id, block] of [...blocks].sort(([a], [b]) => a.localeCompare(b))) {
+    for (const { name } of block.seal) {
+      if (name === name.toLowerCase()) continue;
+      console.log(`  ✗ ${id}: carries ${name}, which a browser reads as ${name.toLowerCase()} — and it reads `
+        + 'whichever copy comes first; a seal attribute is written in lower case only');
+      found++;
+    }
+  }
+  return found;
 }
 
 /**
@@ -202,6 +282,9 @@ function refuse(id: string, message: string): null {
 
 /** Writes a block's lock: marks the HTML and records the fingerprint.
  *
+ * `reseal` replaces a seal the block already carries with this one (`MarkPlan.replace`). `sync` sets
+ * it for every ✓ it records; without it, a seal already on the page is kept as it is.
+ *
  * `expectedFingerprint`, when given, is the fingerprint a caller already checked the ✓ against
  * (`sync`, against `readBlocks`'s view) — if the block THIS call resolves computes a different one,
  * the two views of the page disagree about what that id names, and writing the seal would be a guess
@@ -211,7 +294,7 @@ function refuse(id: string, message: string): null {
 export async function mark(root: string, registry: Registry, id: string, when: string,
                            source: string, event?: string,
                            fingerprintsNow?: Map<string, string>,
-                           expectedFingerprint?: string): Promise<string | null> {
+                           expectedFingerprint?: string, reseal = false): Promise<string | null> {
   const resolved = resolveBlock(root, id);
   if (!resolved.ok) return refuse(id, resolved.message);
   const { path, html, element } = resolved;
@@ -243,9 +326,10 @@ export async function mark(root: string, registry: Registry, id: string, when: s
     attributes.push({ attr: 'data-depended-on', value: attributeText(JSON.stringify(dependsOn)) });
   }
 
-  // The FULL plan: `spliceAttributes` leaves out whatever the resolved element already carries, the
-  // one rule for "already there", shared with `restamp`.
-  const plan: MarkPlan = { validatedAt: when, attributes };
+  // The FULL plan. Without `reseal`, `spliceAttributes` leaves out whatever the resolved element
+  // already carries — the one rule for "already there", shared with `restamp`. With it, the seal on
+  // the page is replaced by this one (see `MarkPlan.replace`).
+  const plan: MarkPlan = { validatedAt: when, attributes, replace: reseal };
   const result = spliceAttributes(html, id, plan);
   if ('error' in result) return refuse(id, result.error);
   if (result.html !== html) writeFileSync(path, result.html, 'utf8');
@@ -345,7 +429,10 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
     // block.fingerprint is what was just verified against e.fingerprint above (the two are equal at
     // this point) — passed on so `mark` refuses instead of writing if the block IT resolves ever
     // disagrees with the one `readBlocks` saw here.
-    if (await mark(root, registry, id, when, 'site', e.id, fingerprintsNow, block.fingerprint)) {
+    // `reseal`: this ✓ is newer than whatever seal the page carries — a registry that already held
+    // this fingerprint was skipped just above — so the page takes its date, fingerprint and
+    // dependencies, and never keeps an older ✓'s (holdrim#140).
+    if (await mark(root, registry, id, when, 'site', e.id, fingerprintsNow, block.fingerprint, true)) {
       console.log(`  ✓ ${id} validated by you on the site on ${when}`);
       added++;
     } else {
