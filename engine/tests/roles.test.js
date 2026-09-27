@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {
   CAPABILITIES, capabilitiesOf, createRoles, parseLocks, isValidScope,
   parseAgents, AGENT_NEVER, rolesOf, refuseGrantsToAgents, agentByToken, byToken, addressOf,
-  EVERYWHERE, scopeCovers, pageOfBlock, whereOf, lockCoverage,
+  EVERYWHERE, scopeCovers, pageOfBlock, whereOf, lockCoverage, SHIPPED_ROLES,
 } from '../core/roles.js';
 
 test('exactly one owner: zero or two refuse to start', () => {
@@ -97,6 +97,26 @@ test('the three shipped roles hold exactly the capabilities docs/ROLES.md gives 
 
 test('capabilitiesOf refuses a role this version does not ship', () => {
   assert.throws(() => capabilitiesOf('superadmin'), /"superadmin" is not one of the roles this version ships/);
+});
+
+// ------------------------------------------------------------------ #153: read is not yet scopable
+/**
+ * `/impact-radius`, `/fingerprints` and `/graph` (engine/api/server.ts) answer about every block on
+ * the site, with no `can('read', …)` filter — correct only as long as `read` cannot be scoped for
+ * anyone signed in, which is exactly what this test pins down. Every shipped role holds unscoped
+ * `read` (`ROLE_CAPABILITIES` above), and `grantsOf` (this file's `view`) always puts that unscoped
+ * entry into the list `can` searches, ahead of and beside any project grant — a project role can only
+ * ADD a further, scoped entry (`PROJECT_CAPABILITIES` includes `read`), never replace or remove the
+ * base one, since `can` answers `.some(...)` across the whole list. So nobody can be read-restricted
+ * today: those three routes leak nothing.
+ *
+ * Mutate `ROLE_CAPABILITIES.member` to drop `'read'` and this is the named test that fails — the day
+ * it does, issue #153's per-block filtering has to be built in the same change, not after.
+ */
+test('#153: every shipped role a signed-in person can hold includes unscoped read', () => {
+  for (const role of SHIPPED_ROLES) {
+    assert.ok(capabilitiesOf(role).has('read'), `${role} must hold read, or #153's routes can leak scoped-out blocks`);
+  }
 });
 
 // ------------------------------------------------------------------ the lock cannot come from a table edit
