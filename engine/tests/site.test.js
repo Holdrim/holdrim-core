@@ -60,10 +60,15 @@ for (const { folder, files } of BY_FOLDER) {
     for (const { file, id } of written) {
       assert.ok(id.startsWith(`${file.replace('.html', '')}.`), `${id} in ${label}/${file}`);
     }
-    // Written-once is checked globally (an id repeated across two files still collapses to one
-    // block in `blocks`), but only for what THIS folder actually declares — a duplicate cannot be
-    // proved from one folder's own count when the other two languages contribute ids of their own.
     for (const id of inThisFolder) assert.ok(blocks.has(id), `${id} did not survive readBlocks`);
+    // "Once" checked explicitly, not inferred from `blocks.has` above: `readBlocks` COLLAPSES a
+    // repeated id into a single entry, so every check that only asks "is this id there?" stays green
+    // even when it was written twice in the same file — the exact case this test exists to catch.
+    // Comparing set size against array length here, per folder, still points at the right file when
+    // the other two languages' own ids are not in scope to blur the count.
+    const distinct = new Set(inThisFolder);
+    assert.equal(distinct.size, inThisFolder.length,
+      `${label}: an id is written twice (${inThisFolder.filter((id, i) => inThisFolder.indexOf(id) !== i).join(', ')})`);
   });
 
   test(`${label}: the menu on every page lists every page here, and marks the one it is on`, () => {
@@ -91,6 +96,20 @@ for (const { folder, files } of BY_FOLDER) {
     }
   });
 }
+
+test('no id is written twice across the whole site, not only within one folder', async () => {
+  // The per-folder test above catches a duplicate a person is most likely to make — repeating an id
+  // inside one page or one language — by comparing a Set against an array's length. This one closes
+  // the gap that leaves open: the SAME id written in two different folders (an English page and a
+  // translation, say) never fails either folder's own check on its own, since each looks only at
+  // what it wrote itself.
+  const written = BY_FOLDER.flatMap(({ folder, files }) =>
+    files.flatMap((file) => [...read(folder, file).matchAll(/data-id="([^"]+)"/g)].map(([, id]) => id)));
+  const blocks = await readBlocks(SITE);
+  // `readBlocks` collapses a repeated id into one entry (docs/GLOSSARY.md never promises otherwise),
+  // so a shrunk `blocks.size` against everything written is the one signal that something collided.
+  assert.equal(blocks.size, written.length, 'an id written twice is read once, and one block disappears');
+});
 
 test('every dependency points at a block that exists', async () => {
   const blocks = await readBlocks(SITE);
