@@ -1,4 +1,4 @@
-import { MAX_EMAIL_LENGTH, type User, type UserStore } from './users.ts';
+import { MAX_EMAIL_LENGTH, type SignInFailures, type User, type UserStore } from './users.ts';
 
 /**
  * Identity by user and password, inside the service itself — the alternative to Google IAP.
@@ -33,51 +33,55 @@ export class PasswordIdentity {
   }
 
   /**
-   * Failed attempts per e-mail, and when the wait ends.
+   * Wrong passwords are counted in the USER STORE, per address as typed — every instance reads the
+   * same count, and a restart forgets nothing.
    *
-   * ⚠️ In memory on purpose, and that is a real limitation worth knowing: with more than one
-   * instance, each counts on its own, and restarting forgets everything. It still raises the cost
-   * of an online brute force by orders of magnitude, and putting it in the store would mean a write
-   * on every wrong password — which is a denial of service someone can trigger for free.
-   * The real fix is a shared cache, and it is not worth the dependency today.
+   * In memory instead, the count resets on every restart and is kept separately by every instance:
+   * whoever can make the service restart — a deploy, a crash, a platform recycling an idle
+   * instance — gets a fresh set of free guesses each time, and N instances give N times the
+   * guesses. The price is a write on every wrong password, which is small next to what each one
+   * already costs the server: a read of the account and a scrypt, tens of milliseconds of CPU,
+   * before the write is even reached.
+   *
+   * The shape, and what each part of it refuses:
+   *
+   * - **Keyed by the address as typed, not by the account.** An address nobody has is counted,
+   *   written, pruned and waited on exactly like one somebody has — the same reads, the same write,
+   *   the same answer. Counting only real accounts would put a write on the known-address path and
+   *   none on the other, and the time a wrong password takes would say who has an account here,
+   *   which `check` spends a whole scrypt on an unknown address to hide.
+   * - **Stored under a salted, slow key, never the address** (`users.ts`, `failureKey`): the
+   *   table is a record of what people typed at a sign-in form, and most of it names nobody here.
+   * - **Bounded twice.** A row is forgotten an hour after its wait ends, and past `MAX_TRACKED`
+   *   rows some go: an attacker posting a new invented address per request adds a row each time,
+   *   and without the ceiling the only thing that ever removed one was a successful sign-in of that
+   *   same address, which an attacker has no reason to make. WHICH go is the other half of the
+   *   ceiling (`#rowAfter`): a row still counting towards a wait is never evicted before one that
+   *   is not.
+   * - **Facts, not deadlines.** A row keeps the count and when the last wrong one came; the wait is
+   *   worked out on reading, and never longer than the count allows (`#waitOf`). Stored as a
+   *   deadline, a clock stepped back an hour would stretch every wait by an hour.
    */
-  #failures = new Map<string, { count: number; freeAt: number }>();
+  static readonly MAX_TRACKED = 10_000;
 
-  /**
-   * A ceiling on the memory this can cost, and it is not academic.
-   *
-   * The key is the e-mail AS IT ARRIVED IN THE REQUEST BODY, and `/api/sign-in` is the one route
-   * that answers without a session. So anybody, with no credential at all, could POST a different
-   * invented address in a loop and add one permanent entry per request until the process ran out
-   * of memory: without a ceiling, the only thing that removes an entry is a SUCCESSFUL login of
-   * that same key — which an attacker has no reason to perform.
-   *
-   * Two limits, because one would not be enough: a cap on how long a key may be (an e-mail is not
-   * a megabyte), and a prune of entries whose wait ended long ago. Past the cap, the oldest go.
-   */
   // The same ceiling users.ts puts on an address it stores, read from there: two copies of one
   // limit are two numbers that will one day disagree about what an address is.
   static readonly MAX_EMAIL = MAX_EMAIL_LENGTH;
   static readonly MAX_PASSWORD = 256;   // scrypt on a megabyte of text is a CPU bill, not a login
-  static readonly MAX_TRACKED = 10_000;
+
+  /** How many wrong passwords cost nothing (`#waitAfter` says why five). */
+  static readonly FREE = 5;
+
+  /** The longest a wait gets, and how long a count is kept after its wait ends. */
+  static readonly MAX_WAIT_MS = 15 * 60_000;
+  static readonly FORGET_AFTER_MS = 3_600_000;
 
   /** Overridable so a test can prove the ceiling in milliseconds instead of minutes. */
   #maxTracked = PasswordIdentity.MAX_TRACKED;
   set maxTracked(n: number) { this.#maxTracked = n; }
 
-  /** How many e-mails are being counted right now. Exists so a test can prove the ceiling holds. */
-  tracked(): number { return this.#failures.size; }
-
-  /** Forgets whoever finished their wait more than an hour ago, then trims the oldest if needed. */
-  #prune() {
-    const cutoff = Date.now() - 3_600_000;
-    for (const [k, f] of this.#failures) if (f.freeAt < cutoff) this.#failures.delete(k);
-    // Map preserves insertion order, so the front is the oldest. Dropping a counter is safe: the
-    // worst case is someone getting five fresh free attempts, which is the normal state anyway.
-    while (this.#failures.size > this.#maxTracked) {
-      this.#failures.delete(this.#failures.keys().next().value!);
-    }
-  }
+  /** How many addresses are being counted right now. Exists so a test can prove the ceiling holds. */
+  tracked(): Promise<number> { return this.#users.countSignInFailures(); }
 
   /**
    * How long the wait is after N failures. Free up to the fifth, then doubling, capped at 15
@@ -88,8 +92,49 @@ export class PasswordIdentity {
    * from "the account is gone" stops protecting anything and starts costing support.
    */
   #waitAfter(count: number): number {
-    if (count <= 5) return 0;
-    return Math.min(2 ** (count - 6) * 5_000, 15 * 60_000);
+    if (count <= PasswordIdentity.FREE) return 0;
+    return Math.min(2 ** (count - 6) * 5_000, PasswordIdentity.MAX_WAIT_MS);
+  }
+
+  /**
+   * Whether a row is past remembering: its wait ended more than an hour ago. Dropping a counter is
+   * safe — the worst case is someone getting five fresh free attempts, which is the normal state.
+   */
+  #forgotten(row: SignInFailures, now: number): boolean {
+    return Date.parse(row.lastAt) + this.#waitAfter(row.count) + PasswordIdentity.FORGET_AFTER_MS < now;
+  }
+
+  /**
+   * Milliseconds this row still has to wait, from the facts it keeps.
+   *
+   * ⚠️ Never more than the count's own wait. A `lastAt` in the future — the clock stepped back since
+   * it was written, or another instance's clock runs ahead — would otherwise keep the address locked
+   * for as long as the clocks disagree, however far that is. Clamped, it waits at most what the count
+   * allows, and the next wrong password rewrites `lastAt` on this clock. A forgotten row needs no
+   * check of its own here: its wait ended an hour ago, so what is left of it is below zero.
+   */
+  #waitOf(row: SignInFailures | null, now: number): number {
+    if (!row) return 0;
+    const wait = this.#waitAfter(row.count);
+    return Math.max(0, Math.min(wait, Date.parse(row.lastAt) + wait - now));
+  }
+
+  /**
+   * The row one more wrong password leaves behind: the count goes on, or starts again once the old
+   * one is forgotten.
+   *
+   * `escalated` is what the ceiling keeps first (`UserStore.pruneSignInFailures`): a row past the
+   * free attempts outranks every row that is not, and is evicted only when escalated rows alone
+   * outnumber the ceiling. Past the free attempts, and not "while its wait runs": the row's worth is
+   * the count it carries, and that count is what makes the NEXT wrong password cost a wait, during
+   * the wait and just as much in the hour after it. A predicate on time as well (count past the free
+   * ones AND a wrong password in the last fifteen minutes) would protect a row only until its wait
+   * ended, and leave the count evictable for the rest of the time it is remembered. Decided here,
+   * from `FREE`, and written into the row, so the three stores never each work out their own.
+   */
+  #rowAfter(current: SignInFailures | null, now: number): SignInFailures {
+    const count = current && !this.#forgotten(current, now) ? current.count + 1 : 1;
+    return { count, lastAt: new Date(now).toISOString(), escalated: count > PasswordIdentity.FREE };
   }
 
   /**
@@ -98,10 +143,9 @@ export class PasswordIdentity {
    * The count is per e-mail and NOT per IP: behind a proxy every request shares one address, and
    * locking by IP would let one person lock out an entire office.
    */
-  remainingWait(email: string): number {
-    const f = this.#failures.get(email.trim().toLowerCase());
-    if (!f) return 0;
-    return Math.max(0, Math.ceil((f.freeAt - Date.now()) / 1000));
+  async remainingWait(email: string): Promise<number> {
+    const row = await this.#users.readSignInFailures(email);
+    return Math.ceil(this.#waitOf(row, Date.now()) / 1000);
   }
 
   async signIn(email: string, password: string): Promise<{ user: User; session: string } | null> {
@@ -139,13 +183,12 @@ export class PasswordIdentity {
 
   /** A password check at any door that asks for one, with the wait that follows a wrong one. */
   async #verify(email: string, password: string): Promise<User | null> {
-    // Refused before the Map is touched and before scrypt runs: an oversized field is not a login
+    // Refused before the store is touched and before scrypt runs: an oversized field is not a login
     // attempt, it is an attempt to make the server work. Costs nothing to say no.
     if (email.length > PasswordIdentity.MAX_EMAIL || password.length > PasswordIdentity.MAX_PASSWORD) {
       return null;
     }
-    const key = email.trim().toLowerCase();
-    const locked = this.remainingWait(key) > 0;
+    const locked = (await this.remainingWait(email)) > 0;
 
     // ⚠️ An attempt made DURING the wait still counts. Without this the wait never escalates:
     // whoever is guessing simply pauses five seconds between bursts and keeps going forever, and
@@ -158,18 +201,19 @@ export class PasswordIdentity {
     const user = await this.#users.check(email, password);
 
     if (locked || !user) {
-      const f = this.#failures.get(key) ?? { count: 0, freeAt: 0 };
-      f.count++;
-      f.freeAt = Date.now() + this.#waitAfter(f.count);
-      this.#failures.set(key, f);
-      this.#prune();
-      // Pruned AFTER inserting, not before: pruning first leaves the new entry sitting one above
-      // the ceiling, which is exactly how a ceiling stops being one.
+      const now = Date.now();
+      await this.#users.updateSignInFailures(email, (current) => this.#rowAfter(current, now));
+      // Pruned AFTER writing, not before: pruning first leaves the new row sitting one above the
+      // ceiling, which is exactly how a ceiling stops being one. The cutoff is the oldest a row can
+      // be and still be remembered, whatever its count: `#forgotten` decides the rest on reading.
+      await this.#users.pruneSignInFailures(
+        new Date(now - PasswordIdentity.MAX_WAIT_MS - PasswordIdentity.FORGET_AFTER_MS).toISOString(),
+        this.#maxTracked);
       return null;
     }
     // Only a successful login clears it. Clearing on any attempt would let an attacker reset the
     // counter by interleaving a login they know to be valid.
-    this.#failures.delete(key);
+    await this.#users.updateSignInFailures(email, () => null);
     return user;
   }
 
