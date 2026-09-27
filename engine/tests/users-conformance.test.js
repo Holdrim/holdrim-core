@@ -1187,9 +1187,9 @@ forEachStore('the address is free again once removed: an account made for it is 
   assert.equal((await s.readAllUsers()).length, 2, 'beside the emptied one, which stays');
 });
 
-forEachStore('closing or emptying an account nobody has answers false, and writes nothing', async (s) => {
+forEachStore('emptying an account nobody has answers false, and writes nothing', async (s) => {
+  // Closing one is another matter: it takes the address (the test below).
   await s.create('bea@example.org', 'Bea');
-  assert.equal(await s.closeAccount('nobody@example.org'), false);
   assert.equal(await s.emptyAccount('nobody@example.org', false), false);
   assert.deepEqual((await s.readAllUsers()).map((r) => [r.email, r.removed]), [['bea@example.org', false]]);
 });
@@ -1203,4 +1203,18 @@ forEachStore('a removal\'s row change is one transaction: when it cannot land, t
   await assert.rejects(s.writeRemoved('ana@example.org', { key: 'bea@example.org', name: '' }));
   assert.equal((await s.fromSession(session))?.email, 'ana@example.org', 'the session is still there');
   assert.equal((await s.find('ana@example.org'))?.name, 'Ana Lima', 'and so is the account, as it was');
+});
+
+forEachStore('closing an address with no account takes it with a closed row, and emptying frees it', async (s) => {
+  // A person can have a row in the people table and no account: granted a role before anyone
+  // invited them. The address is taken from the first step of their removal all the same.
+  await s.create('bea@example.org', 'Bea');
+  assert.equal(await s.closeAccount('ana@example.org'), false, 'there was no account of theirs');
+  await assert.rejects(s.create('ana@example.org', 'Somebody else'), 'the address is taken meanwhile');
+  assert.equal(await s.find('ana@example.org'), null, 'by a row nothing finds');
+  assert.deepEqual((await s.list()).map((u) => u.email), ['bea@example.org'], 'and nothing lists');
+  assert.equal(await s.closeAccount('ana@example.org'), false, 'closed again, on a resumed run, it is still not theirs');
+  assert.equal(await s.emptyAccount('ana@example.org', false), true);
+  await s.create('ana@example.org', 'Ana, invited later');
+  assert.equal((await s.find('ana@example.org'))?.name, 'Ana, invited later', 'freed at the end like any closed account');
 });

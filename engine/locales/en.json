@@ -358,8 +358,8 @@
   "settings.remove.confirm": "The person asked for this, and I understand it cannot be undone",
   "settings.remove.submit": "Remove this person",
   "settings.remove.done": "The person was removed. The trail names them by an id from now on.",
-  "settings.remove.left": "{count} of their texts could not be removed: they read as tampered with, or are held inside events written before texts moved out of events. docs/PRIVACY.md lists what Holdrim cannot remove.",
-  "settings.remove.legacy": "{count} events written before authors were ids still name this address, and nothing rewrites an event. Under password sign-in the address stays taken, so nobody new becomes their author.",
+  "settings.remove.left": "Some of their texts could not be removed ({count}): they read as tampered with, or are held inside events written before texts moved out of events. docs/PRIVACY.md lists what Holdrim cannot remove.",
+  "settings.remove.legacy": "Events written before authors were ids still name this address ({count}), and nothing rewrites an event. Under password sign-in the address stays taken, so nobody new becomes their author.",
   "site.notFound": "not found",
   "site.pathOutside": "that path is outside the site"
 }

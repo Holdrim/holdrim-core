@@ -44,7 +44,7 @@ export class UsersFirestore extends UserStoreBase {
       tx.create(this.#db.collection('users').doc(row.email), {
         email: row.email, name: row.name, salt: row.salt, hash: row.hash,
         must_change: row.mustChangePassword, created_at: row.createdAt,
-        enabled: row.enabled,
+        enabled: row.enabled, removed: row.removed === true,
       });
     });
   }

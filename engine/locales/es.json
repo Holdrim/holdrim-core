@@ -351,8 +351,8 @@
   "settings.remove.confirm": "La persona lo pidió, y entiendo que no se puede deshacer",
   "settings.remove.submit": "Quitar a esta persona",
   "settings.remove.done": "La persona fue quitada. El historial la nombra por un id desde ahora.",
-  "settings.remove.left": "{count} textos de esa persona no se pudieron quitar: parecen manipulados, o están dentro de eventos escritos antes de que los textos salieran de los eventos. docs/PRIVACY.md enumera lo que Holdrim no puede quitar.",
-  "settings.remove.legacy": "{count} eventos escritos antes de que los autores fueran ids todavía nombran esta dirección, y nada reescribe un evento. Con inicio de sesión por contraseña, la dirección sigue ocupada, para que nadie nuevo pase a ser su autor.",
+  "settings.remove.left": "Algunos textos de esa persona no se pudieron quitar ({count}): parecen manipulados, o están dentro de eventos escritos antes de que los textos salieran de los eventos. docs/PRIVACY.md enumera lo que Holdrim no puede quitar.",
+  "settings.remove.legacy": "Eventos escritos antes de que los autores fueran ids todavía nombran esta dirección ({count}), y nada reescribe un evento. Con inicio de sesión por contraseña, la dirección sigue ocupada, para que nadie nuevo pase a ser su autor.",
   "site.notFound": "no encontrado",
   "site.pathOutside": "esa ruta está fuera del sitio"
 }

@@ -220,8 +220,13 @@ export interface UserStore {
    * open session goes, and it is marked removed — found by nothing from then on (`find`, `check`,
    * `list`), so no route resets or re-enables it. It stays keyed by the address, which keeps the
    * address taken: an account created for it while the removal runs, or after a run that a failure
-   * stopped, would act under the person's id and the grants given to it. Answers whether there was
-   * an account.
+   * stopped, would act under the person's id and the grants given to it.
+   *
+   * With no account for the address — a person granted a role before anyone invited them, say — a
+   * closed row is written in its place, with no name and a random credential, for the same reason:
+   * the address is taken from this step on, and `emptyAccount` frees it like any other. Answers
+   * whether the person had an account of their own; a row this step wrote itself, found again by a
+   * resumed run, is not one.
    */
   closeAccount(email: string): Promise<boolean>;
   /**
@@ -589,7 +594,26 @@ export abstract class UserStoreBase implements UserStore {
 
   async closeAccount(email: string): Promise<boolean> {
     const address = normalizeEmail(email);
-    return this.writeRemoved(address, { key: address });
+    const row = await this.readUser(address);
+    if (row) {
+      await this.writeRemoved(address, { key: address });
+      // Closed with no name only when this step wrote it: an account emptied later in a removal is
+      // past the point where a resumed run asks whether there was one.
+      return !(row.removed && row.name === '');
+    }
+    try {
+      await this.insertUser({
+        email: address, name: '', salt: randomBytes(SALT_LENGTH), hash: randomBytes(KEY_LENGTH),
+        mustChangePassword: true, createdAt: new Date().toISOString(), enabled: false, removed: true,
+      });
+      return false;
+    } catch (error) {
+      // An account was created for the address between the read and this insert: it is the one to
+      // close, and it was the person's to have. With no row there, the insert failed for its own
+      // reason, and the removal must stop rather than go on with the address free.
+      if (await this.writeRemoved(address, { key: address })) return true;
+      throw error;
+    }
   }
 
   async emptyAccount(email: string, keepAddress: boolean): Promise<boolean> {

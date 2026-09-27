@@ -158,9 +158,9 @@ export class UsersPostgres extends UserStoreBase {
         throw new AddressInUse(row.email, 'agentToken');
       }
       await q(
-        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
-        + 'VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled]);
+        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled, removed) '
+        + 'VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+        [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled, row.removed === true]);
     });
   }
 

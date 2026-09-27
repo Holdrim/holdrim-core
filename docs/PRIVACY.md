@@ -160,7 +160,8 @@ sign-in the closed account keeps it, emptied, so nobody new becomes the author o
 screen says how many such events there are.
 
 **In what order, and if it stops.** The account is closed first, keyed by its address, so no session
-of theirs acts while the rest runs and the address stays taken; the grants go before the texts; the
+of theirs acts while the rest runs and the address stays taken — under password sign-in, a person
+with no account of their own has a closed row written in its place, for the same reason; the grants go before the texts; the
 account is emptied before the row is forgotten; and the address is freed only after that. At no point
 is the address free while the row still leads to the person. A removal a failure stopped is finished
 by running it again, and writes `person_removed` once. If the very last step — freeing the address —

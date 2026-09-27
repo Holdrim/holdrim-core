@@ -346,8 +346,8 @@
   "settings.remove.confirm": "A pessoa pediu isso, e entendo que não se desfaz",
   "settings.remove.submit": "Remover esta pessoa",
   "settings.remove.done": "A pessoa foi removida. O histórico passa a nomeá-la por um id.",
-  "settings.remove.left": "{count} textos dessa pessoa não puderam ser removidos: parecem adulterados, ou estão dentro de eventos gravados antes de os textos saírem dos eventos. docs/PRIVACY.md lista o que o Holdrim não consegue remover.",
-  "settings.remove.legacy": "{count} eventos gravados antes de os autores virarem ids ainda nomeiam este endereço, e nada reescreve um evento. Com login por senha, o endereço continua ocupado, para que ninguém novo vire autor deles.",
+  "settings.remove.left": "Alguns textos dessa pessoa não puderam ser removidos ({count}): parecem adulterados, ou estão dentro de eventos gravados antes de os textos saírem dos eventos. docs/PRIVACY.md lista o que o Holdrim não consegue remover.",
+  "settings.remove.legacy": "Eventos gravados antes de os autores virarem ids ainda nomeiam este endereço ({count}), e nada reescreve um evento. Com login por senha, o endereço continua ocupado, para que ninguém novo vire autor deles.",
   "site.notFound": "não encontrado",
   "site.pathOutside": "caminho fora do site"
 }

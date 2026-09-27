@@ -147,10 +147,10 @@ export class UsersSqlite extends UserStoreBase {
         throw new AddressInUse(row.email, 'agentToken');
       }
       this.#db.prepare(
-        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
-        + 'VALUES (?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled, removed) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(row.email, row.name, row.salt, row.hash, row.mustChangePassword ? 1 : 0, row.createdAt,
-        row.enabled ? 1 : 0);
+        row.enabled ? 1 : 0, row.removed ? 1 : 0);
     });
   }
 

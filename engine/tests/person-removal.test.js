@@ -350,6 +350,41 @@ test('a run stopped at freeing the address leaves it taken, never free while any
   assert.deepEqual([row.name, row.enabled, row.removed], ['', false, true], 'by a row with nothing of theirs but the address');
 });
 
+test('a person with a grant and no account: a stopped run leaves the address taken, a finished one frees it', async () => {
+  let failing = true;
+  const events = new (class extends MemoryEventStore {
+    async removeText(event, field, by) {
+      if (failing) { failing = false; throw new Error('the disk is full'); }
+      return super.removeText(event, field, by);
+    }
+  })();
+  const users = new UsersSqlite(':memory:');
+  await events.append({ type: 'comment', page: 'A01', text: 'granted before I was invited' }, ANA);
+  await events.append(definedEvent('reviewer', ['approve'], false), OWNER);
+  await events.append(grantedEvent('reviewer', await events.personFor(ANA), null, false), OWNER);
+  const ctx = { events, users, deployment, by: OWNER, byAgent: false };
+  await assert.rejects(removePerson(ctx, { email: ANA, confirmed: true }), /the disk is full/);
+  // While the row still leads to Ana, an account made for her address would act under her id.
+  await assert.rejects(users.create(ANA, 'Somebody else'), 'the address is taken though she had no account');
+  const outcome = await removePerson(ctx, { email: ANA, confirmed: true });
+  assert.equal(outcome.status, 201);
+  assert.equal(outcome.removal.account, false, 'she had no account of her own');
+  assert.equal(typeof await users.create(ANA, 'Ana, invited later'), 'string', 'and once the removal is done, the address is free');
+});
+
+test('when the address cannot be taken for a person with no account, the removal stops before anything else', async () => {
+  const events = new MemoryEventStore();
+  const users = new (class extends UsersSqlite {
+    async insertUser() { throw new Error('the users store is unavailable'); }
+  })(':memory:');
+  await events.append(definedEvent('reviewer', ['approve'], false), OWNER);
+  await events.append(grantedEvent('reviewer', await events.personFor(ANA), null, false), OWNER);
+  await assert.rejects(removePerson({ events, users, deployment, by: OWNER, byAgent: false }, { email: ANA, confirmed: true }),
+    /the users store is unavailable/);
+  assert.equal(projectRolesOf(await events.listBare(ROLES_PAGE)).grants.length, 1, 'no step past it ran');
+  assert.ok(await events.personOf(ANA), 'and the row still finds her, for a run that can take the address');
+});
+
 // ---------------------------------------------------------------- stores from before ids and texts moved
 /** A SQLite store in a folder of its own, and a way to write rows the way an older version did. */
 async function olderStore() {
