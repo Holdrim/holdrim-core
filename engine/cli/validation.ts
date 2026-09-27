@@ -13,7 +13,7 @@ import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
 import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
-import { refuseLink, refuseUnreachableFolder, refuseEscapedFolder } from './fs.ts';
+import { refuseLink, refuseUnreachableFolder, refuseEscapedFolder, defaultIndexPath } from './fs.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -1092,11 +1092,16 @@ export async function ifITouch(root: string, id: string) {
  * ⚠️ The database does not become the truth. The truth stays in the file, versioned — the file is what
  * has diff and authorship. This is a snapshot, and it exists for the questions a file answers badly:
  * "every diagram in the project", "every decision without an owner", "what breaks if I touch this".
+ *
+ * Where it is stored, absent `--db` or `HOLDRIM_EVENTS_PATH`, is `defaultIndexPath` (engine/cli/fs.ts)
+ * — a per-user cache, never inside `root`: a generated snapshot has no business sitting in the folder a
+ * documentation project serves and commits (holdrim#170's reasoning for the server's own stores, and
+ * the same one here).
  */
 export async function rebuildIndex(root: string, databasePath?: string) {
   const { Index } = await import('../api/index-store.ts');
   const { currentCommit } = await import('../core/git.js');
-  const database = databasePath ?? process.env.HOLDRIM_EVENTS_PATH ?? join(root, 'data', 'events.db');
+  const database = databasePath ?? process.env.HOLDRIM_EVENTS_PATH ?? defaultIndexPath(root);
   const blocks = await readBlocks(root);
 
   // Which commit the content was sitting on, so that a later run can ask git which files changed

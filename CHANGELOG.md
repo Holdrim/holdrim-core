@@ -230,6 +230,15 @@ who ran the engine from `main` before it.
   password they already have; agent tokens are unaffected. Nothing to change in configuration or in
   the store — the `sessions` table (SQLite, Postgres) and collection (Firestore) keep their shape.
   Rolling back past this version signs everyone out once more, for the same reason.
+- **`holdrim index`'s database no longer defaults to `<project root>/data/events.db`.** That put a
+  generated, disposable snapshot inside the very folder a documentation project usually serves and
+  commits — the same reasoning that already made the server refuse to serve its own stores (#170),
+  even though the index is not a server store. Absent `--db` or `HOLDRIM_EVENTS_PATH`, it now lives
+  in a per-user cache: `$XDG_CACHE_HOME/holdrim/<project folder name>-<hash of the project's real
+  path>/index.db` (`~/.cache` when `XDG_CACHE_HOME` is unset). What to change: nothing to run the
+  command again — a fresh index is rebuilt wherever the new default points. An old
+  `<root>/data/events.db` left over from a previous run is not read and not migrated; it can be
+  deleted by hand; the index it held is rebuilt the next time `holdrim index` runs.
 
 ### Added
 
