@@ -112,12 +112,20 @@ Each has a test. If you change the code around one, run the contract test and re
   who hands over must not silently un-lock every ✓ they gave before. An agent may *close* an impact
   — "this change did not reach here" — and never *approve* — "this text is correct", and never gives
   a ✓ at all. An address in `HOLDRIM_AGENTS`, and anyone who comes in with an agent token the owner
-  issued, is refused `triage`, `approve`, `lock` and `people` by `can` before any grant is read. A
-  grant naming an address in `HOLDRIM_AGENTS` refuses to start; a token is not checked at start,
+  issued, is refused `triage`, `approve`, `lock` and `people` by `can` before any grant is read.
+  `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` or `HOLDRIM_LOCKS` naming an address in `HOLDRIM_AGENTS` refuses
+  to start; a project grant stored on `_roles` that names an agent is ignored and logged, and the
+  service starts. A token is not checked at start,
   holds a member's role whatever admin or lock grant its address is given later, and opens
   nothing once its address is the owner's; it reaches the event routes only, and has a ✓ refused
   whatever its address. No address holds both an account and a token.
   Every event records `data.asAgent` (`engine/core/roles.js`, `engine/api/server.ts`).
+- **A project's own roles are the owner's alone.** Only the owner defines, grants and revokes them —
+  `POST /api/roles`, `/api/grants`, `/api/grants/<id>/revoke` and the settings screen — and `POST
+  /events` refuses `role_defined`, `role_granted` and `grant_revoked`. A project role never holds
+  `people` or `lock`: refused when it is written, dropped when it is read. A grant names a person by
+  id, never an address, and is read on every request; a request skips triage only when its author
+  may triage everywhere (`engine/api/role-grants.ts`, `engine/core/roles.js`, `engine/api/server.ts`).
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
   known format; interpolating a raw string lets `red; } body { display:none } /*` through.
 
