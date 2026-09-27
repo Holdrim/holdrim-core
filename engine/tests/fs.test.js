@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import { saveRegistry, loadRegistry } from '../cli/validation.ts';
 import { exportSite } from '../cli/export.ts';
 import { sheetFiles } from '../cli/pages.ts';
+import { refuseServedStore } from '../cli/fs.ts';
+import { userStoreFile } from '../api/users.ts';
 
 /** Replaces `fs[name]` with `impl(real, ...args)` for the life of the test, through the ESM binding too. */
 function spy(t, name, impl) {
@@ -421,3 +423,111 @@ test('sheetFiles fails loudly on a page file that is a link to nothing, rather t
   assert.throws(() => sheetFiles(tmp), { code: 'ENOENT' });
 });
 
+
+// ===================================================================== a store the site would serve
+// The server refuses to start when a store it writes would be served by the site (`refuseServedStore`,
+// engine/cli/fs.ts, called from engine/api/server.ts before either store is opened). The contract
+// test boots the server to prove the wiring; these hold the rule itself.
+
+/** A throwaway parent holding a site folder, `site`, and nothing else yet. */
+function siteParent(t) {
+  const parent = mkdtempSync(join(tmpdir(), 'holdrim-store-'));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  mkdirSync(join(parent, 'site'));
+  return parent;
+}
+
+const SERVED = /the users store \(HOLDRIM_USERS_PATH\), .* would be served by the site: .* is in the site, /;
+
+test('the server refuses to start when a store it writes would be served by the site: a store inside the site', (t) => {
+  const parent = siteParent(t);
+  // `data` does not exist yet: the store would create it, inside the site.
+  assert.throws(() => refuseServedStore(join(parent, 'site'), join(parent, 'site', 'data', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'), SERVED);
+});
+
+test('the server refuses to start when a store it writes would be served by the site: its folder IS the site root', (t) => {
+  // Strictly inside is the rule for a page; for a store, the root itself holds its files, and
+  // the `-wal` and `-shm` beside them, directly under the site. The database file is a link leading
+  // out, so the file's own real location is outside and only the folder's answer can refuse it.
+  const parent = siteParent(t);
+  mkdirSync(join(parent, 'elsewhere'));
+  writeFileSync(join(parent, 'elsewhere', 'users.db'), '');
+  symlinkSync(join(parent, 'elsewhere', 'users.db'), join(parent, 'site', 'users.db'));
+  assert.throws(() => refuseServedStore(join(parent, 'site'), join(parent, 'site', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'), SERVED);
+  // …and the plain file there, no link, is refused as well.
+  rmSync(join(parent, 'site', 'users.db'));
+  assert.throws(() => refuseServedStore(join(parent, 'site'), join(parent, 'site', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'), SERVED);
+});
+
+test('the server refuses to start when a store it writes would be served by the site: a linked folder that lands inside it', (t) => {
+  // Spelled outside the site, really inside it: judged by where the folder really is.
+  const parent = siteParent(t);
+  mkdirSync(join(parent, 'site', 'hidden'));
+  symlinkSync(join(parent, 'site', 'hidden'), join(parent, 'data'));
+  assert.throws(() => refuseServedStore(join(parent, 'site'), join(parent, 'data', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'), SERVED);
+});
+
+test('the server refuses to start when a store it writes would be served by the site: a database file linked into it', (t) => {
+  // The folder is outside; the file is a link whose real location is inside, and the database is
+  // written wherever the link leads.
+  const parent = siteParent(t);
+  mkdirSync(join(parent, 'data'));
+  writeFileSync(join(parent, 'site', 'users.db'), '');
+  symlinkSync(join(parent, 'site', 'users.db'), join(parent, 'data', 'users.db'));
+  assert.throws(() => refuseServedStore(join(parent, 'site'), join(parent, 'data', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'), SERVED);
+});
+
+test('the server refuses to start when a store it writes would be served by the site: a folder inside it, the file linked out', (t) => {
+  // The rule is the folder: whatever the database file itself leads to, a store folder inside the
+  // site is refused, since that folder is where the store's other files are made.
+  const parent = siteParent(t);
+  mkdirSync(join(parent, 'site', 'data'));
+  mkdirSync(join(parent, 'elsewhere'));
+  writeFileSync(join(parent, 'elsewhere', 'users.db'), '');
+  symlinkSync(join(parent, 'elsewhere', 'users.db'), join(parent, 'site', 'data', 'users.db'));
+  assert.throws(() => refuseServedStore(join(parent, 'site'), join(parent, 'site', 'data', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'), SERVED);
+});
+
+test('the server refuses to start when a store it writes would be served by the site: a site that cannot be resolved', (t) => {
+  // Nothing can say whether the store is inside a site that is not there, and the store's folder,
+  // created first, could become part of it once it is: refused, never waved through.
+  const parent = siteParent(t);
+  assert.throws(() => refuseServedStore(join(parent, 'not-yet'), join(parent, 'data', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'),
+  /the users store \(HOLDRIM_USERS_PATH\), .*users\.db, cannot be checked against the site, .*not-yet: ENOENT/);
+});
+
+test('a store in a sibling folder whose name starts with the site\'s is not in the site', (t) => {
+  // `/x/site-data` passes a raw `startsWith("/x/site")`; it is not inside `/x/site`, and nothing
+  // there is served.
+  const parent = siteParent(t);
+  assert.doesNotThrow(() => refuseServedStore(join(parent, 'site'), join(parent, 'site-data', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'));
+});
+
+test('a store outside the site is accepted', (t) => {
+  const parent = siteParent(t);
+  assert.doesNotThrow(() => refuseServedStore(join(parent, 'site'), join(parent, 'data', 'users.db'),
+    'the users store (HOLDRIM_USERS_PATH)'));
+});
+
+test('a users store that writes no file names none, so no file is checked against the site', () => {
+  // The server checks exactly what `userStoreFile` returns, and `openUserStore` opens exactly that:
+  // a null here is a store the site cannot serve, whatever HOLDRIM_USERS_PATH says.
+  const inSite = '/srv/site/users.db';
+  assert.equal(userStoreFile('firestore', inSite), null, 'firestore');
+  assert.equal(userStoreFile('postgres://u:p@host/db', inSite), null, 'postgres');
+  assert.equal(userStoreFile('sqlite::memory:', inSite), null, 'sqlite in memory');
+  assert.equal(userStoreFile('sqlite://:memory:', inSite), null, 'the // form of the same');
+  // …while each spelling of a SQLite file names the file it opens.
+  assert.equal(userStoreFile(undefined, inSite), inSite, 'absent: HOLDRIM_USERS_PATH');
+  assert.equal(userStoreFile('sqlite', inSite), inSite, 'bare sqlite: HOLDRIM_USERS_PATH');
+  assert.equal(userStoreFile('sqlite:/var/lib/users.db', inSite), '/var/lib/users.db', 'sqlite:<path>');
+  assert.equal(userStoreFile('sqlite:///var/lib/users.db', inSite), '/var/lib/users.db', 'sqlite://<path>');
+});

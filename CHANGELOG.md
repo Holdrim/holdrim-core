@@ -402,6 +402,18 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **The server refuses to start when a store it writes would be served by the site.** Before either
+  store is opened, the folder of the SQLite users store (`HOLDRIM_USERS_PATH`, or `sqlite:<path>` in
+  `HOLDRIM_USERS`) and of the SQLite events store (`HOLDRIM_EVENTS_PATH`) is checked against the
+  site (`HOLDRIM_SITE`), each by where it really is, links followed: a folder inside the site, or
+  equal to it, stops the start with a line naming the store, the variable to change and the site,
+  and nothing is created there. The folder and not only the file, because SQLite keeps its `-wal`
+  and `-shm` files beside the database. Postgres, Firestore and memory stores write no file and are
+  not asked. What to change: a deployment that kept a store inside its site moves the file out and
+  points the variable at it. The image and `engine/run-local.sh` already keep them apart; running
+  `node engine/api/server.ts` from the engine's own folder with no `HOLDRIM_SITE` now refuses,
+  because the site is then that folder and both stores default to `./data` in it — set
+  `HOLDRIM_SITE` to the documentation's folder.
 - **Wrong passwords are now counted in the user store, so a restart no longer hands out a fresh set
   of free guesses, and every instance counts against the same number (#53).** Before, the count lived
   in each process's memory: a deploy, a crash or a platform recycling an instance reset it, and N

@@ -784,13 +784,11 @@ export async function openUserStore(
   const sqlitePath = options.sqlitePath ?? DEFAULT_SQLITE_PATH;
   const chosen = (url ?? '').trim();
 
-  if (chosen === '' || chosen === 'sqlite') {
+  if (chosen === '' || chosen === 'sqlite' || chosen.startsWith('sqlite:')) {
+    // The path comes from `userStoreFile`, the one the server checks against the site before this
+    // runs: worked out here a second time, the file checked and the file opened could differ.
     const { UsersSqlite } = await import('./users-sqlite.ts');
-    return new UsersSqlite(sqlitePath);
-  }
-  if (chosen.startsWith('sqlite:')) {
-    const { UsersSqlite } = await import('./users-sqlite.ts');
-    return new UsersSqlite(sqlitePathOf(chosen));
+    return new UsersSqlite(userStoreFile(chosen, sqlitePath) ?? ':memory:');
   }
   if (chosen === 'firestore') {
     if (!options.projectId) throw new Error('firestore needs HOLDRIM_PROJECT');
@@ -819,10 +817,21 @@ export async function openUserStore(
  * — firestore, postgres, or a value this factory does not recognise — is not a local file.
  */
 export function isFileBackedUserStore(url: string | undefined): boolean {
+  return userStoreFile(url, DEFAULT_SQLITE_PATH) !== null;
+}
+
+/**
+ * The file on disk the user store named by `url` writes, as `openUserStore` would open it — or null
+ * when it writes none: Firestore, Postgres, `sqlite::memory:`, or a value `openUserStore` refuses.
+ * The server checks this path against the site before the store is opened (`refuseServedStore`,
+ * engine/cli/fs.ts), and `openUserStore` opens the SQLite store at exactly this path — null there is
+ * `:memory:` — so the file checked and the file opened are one answer, not two.
+ */
+export function userStoreFile(url: string | undefined, sqlitePath: string = DEFAULT_SQLITE_PATH): string | null {
   const chosen = (url ?? '').trim();
-  if (chosen === '' || chosen === 'sqlite') return true;
-  if (!chosen.startsWith('sqlite:')) return false;
-  return sqlitePathOf(chosen) !== ':memory:';
+  const path = chosen === '' || chosen === 'sqlite' ? sqlitePath
+    : chosen.startsWith('sqlite:') ? sqlitePathOf(chosen) : null;
+  return path === ':memory:' ? null : path;
 }
 
 /**

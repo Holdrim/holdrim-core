@@ -1836,6 +1836,58 @@ expect "no owner anywhere → exits 1"   1 "$?"
 expect "and says what's missing"       0 "$(grep -qi 'HOLDRIM_OWNER' $WORK/no-config.log; echo $?)"
 rmdir $EMPTY
 
+echo "the server refuses to start when a store it writes would be served by the site:"
+# Each store in turn, placed in a `data` folder inside a copy of the site that has no such folder
+# yet: opening the store would create it, so an empty find afterwards is what shows the refusal came
+# BEFORE the store was opened, not after. engine/tests/fs.test.js holds the rule itself (a folder
+# equal to the root, a link, a sibling named like the site); this proves the server asks it at boot.
+IN_SITE=$(mktemp -d); cp -r "$SITE/." "$IN_SITE"
+# Both ways of naming the users store's file: the path variable, and a `sqlite:` URL.
+for USERS_AT in "HOLDRIM_USERS_PATH=$IN_SITE/data/users.db" "HOLDRIM_USERS=sqlite:$IN_SITE/data/users.db"; do
+  VARIABLE=${USERS_AT%%=*}
+  HOLDRIM_ENVIRONMENT=Production HOLDRIM_IDENTITY=password HOLDRIM_OWNER=$OWNER HOLDRIM_EVENTS=memory \
+    HOLDRIM_SITE="$IN_SITE" PORT=$PORT \
+    run_for 15 env "$USERS_AT" node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/users-in-site.log" 2>&1
+  expect "the users store inside the site, by $VARIABLE → exits 1"  1 "$?"
+  expect "and names the store and the site"                   0 \
+    "$(has -F "the users store ($VARIABLE), $IN_SITE/data/users.db, would be served by the site" "$WORK/users-in-site.log"; echo $?)"
+  expect "and no database file was created inside the site"   "" "$(find "$IN_SITE" -name data -o -name '*.db*')"
+  expect "and no first-access password was printed"           1 "$(has 'FIRST ACCESS' "$WORK/users-in-site.log"; echo $?)"
+done
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$IN_SITE/data/events.db" HOLDRIM_SITE="$IN_SITE" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/events-in-site.log" 2>&1
+expect "the events store inside the site → exits 1"         1 "$?"
+expect "and names the store and the site"                   0 \
+  "$(has -F "the events store (HOLDRIM_EVENTS_PATH), $IN_SITE/data/events.db, would be served by the site" "$WORK/events-in-site.log"; echo $?)"
+expect "and no database file was created inside the site"   "" "$(find "$IN_SITE" -name data -o -name '*.db*')"
+# A store that writes no file is not asked: the same path inside the site, with events in memory,
+# comes up — and still creates nothing there.
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=memory \
+  HOLDRIM_EVENTS_PATH="$IN_SITE/data/events.db" HOLDRIM_SITE="$IN_SITE" PORT=$PORT \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/memory-in-site.log" 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "events in memory, the path inside the site: it comes up" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+expect "and nothing was created inside the site"            "" "$(find "$IN_SITE" -name data -o -name '*.db*')"
+rm -rf "$IN_SITE"
+# The local runner serves the engine's own folder by default, where both stores' default `./data`
+# lies — and it still comes up, because it opens neither store as a file. Only the stores a boot
+# will open are asked; asking the others would refuse the documented way to run it locally.
+env -u HOLDRIM_EVENTS_PATH -u HOLDRIM_USERS -u HOLDRIM_USERS_PATH HOLDRIM_OWNER=$OWNER PORT=$PORT \
+  bash engine/run-local.sh >"$WORK/runner-default.log" 2>&1 & RUNNER_PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "the local runner on the engine's own folder comes up"  200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
+# SQLite with no file (`:memory:`) is not a file store either, even with the site on the working
+# directory that a path would be resolved against.
+env -u HOLDRIM_SITE HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=:memory: PORT=$PORT \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/sqlite-memory.log" 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "events in SQLite's memory, on the engine's own folder: it comes up" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
 echo "authority comes from the deployment only:"
 # The owner and the admins come from HOLDRIM_OWNER and HOLDRIM_ADMINS, never from holdrim.json: a
 # committer, or the agent applying an approved request, could otherwise name a new owner by editing

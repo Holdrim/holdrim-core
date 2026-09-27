@@ -13,7 +13,7 @@ import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
 import { SqliteEventStore } from './store-sqlite.ts';
 import {
-  openUserStore, ephemeralUserStoreWarning, DEFAULT_SQLITE_PATH, UserInputError, AddressInUse,
+  openUserStore, ephemeralUserStoreWarning, userStoreFile, DEFAULT_SQLITE_PATH, UserInputError, AddressInUse,
   normalizeEmail, isEmailAddress, MAX_NAME_LENGTH, type UserStore,
 } from './users.ts';
 import { log } from './log.ts';
@@ -26,7 +26,7 @@ import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js'
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { graphOf } from '../cli/graph.ts';
-import { realContainment } from '../cli/fs.ts';
+import { realContainment, refuseServedStore } from '../cli/fs.ts';
 import { loadTheme, DISK_THEME_IO } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
@@ -194,10 +194,50 @@ for (const { scope, reaches } of lockReach) {
  *   firestore | Google Cloud. Needs HOLDRIM_PROJECT.
  */
 const eventsKind = process.env.HOLDRIM_EVENTS ?? (cfg.mode === 'local' ? 'memory' : 'sqlite');
+const eventsPath = process.env.HOLDRIM_EVENTS_PATH ?? './data/events.db';
+const usersPath = process.env.HOLDRIM_USERS_PATH ?? DEFAULT_SQLITE_PATH;
+
+/**
+ * No store the server writes may be served by the site. Checked here, before either store is opened,
+ * because opening one creates its file and its folder: a check after that would find the files it
+ * exists to keep out already made, inside the site. Only the stores this boot will actually open as
+ * files — the SQLite events store, and the SQLite users store when people sign in with a password;
+ * Firestore, Postgres and memory write no file and are not asked.
+ *
+ * The defaults are refused by this same rule, not given a rule of their own. With HOLDRIM_SITE unset
+ * the site is the engine's own folder, and the stores default to `./data/`, relative to the working
+ * directory — so `node engine/api/server.ts` run from the engine's folder places both stores inside
+ * the site, and refuses, telling the operator which variables to set. Moving the default site
+ * elsewhere instead was rejected: the stores' default is relative to wherever the process starts, so
+ * no fixed site default keeps them apart everywhere, and a default that silently serves a different
+ * folder is a change nobody asked for. Neither shipped way of running it is touched: the image sets
+ * HOLDRIM_SITE and puts both stores in /data, and `engine/run-local.sh` keeps events in memory and
+ * signs nobody in with a password.
+ */
+const fileStores: Array<[string, string, string]> = [];
+if (eventsKind === 'sqlite' && eventsPath !== ':memory:') {
+  fileStores.push(['the events store', 'HOLDRIM_EVENTS_PATH', eventsPath]);
+}
+const usersFile = identityKind === 'password' ? userStoreFile(process.env.HOLDRIM_USERS, usersPath) : null;
+if (usersFile !== null) {
+  fileStores.push(['the users store', process.env.HOLDRIM_USERS?.trim().startsWith('sqlite:') ? 'HOLDRIM_USERS' : 'HOLDRIM_USERS_PATH', usersFile]);
+}
+for (const [what, variable, file] of fileStores) {
+  try {
+    refuseServedStore(cfg.site, file, `${what} (${variable})`);
+  } catch (error) {
+    const site = process.env.HOLDRIM_SITE === undefined
+      ? 'set HOLDRIM_SITE to the documentation\'s folder: it is unset, so the site is the engine\'s own folder'
+      : 'keep HOLDRIM_SITE on a folder that holds the documentation alone';
+    refuseToStart(new Error(`${error instanceof Error ? error.message : String(error)}. `
+      + `Keep ${variable} outside the site, and ${site}.`));
+  }
+}
+
 const events: EventStore = await (async () => {
   switch (eventsKind) {
     case 'memory': return new MemoryEventStore();
-    case 'sqlite': return new SqliteEventStore(process.env.HOLDRIM_EVENTS_PATH ?? './data/events.db');
+    case 'sqlite': return new SqliteEventStore(eventsPath);
     case 'firestore': {
       if (!cfg.project) { console.error('invalid configuration: firestore needs HOLDRIM_PROJECT'); process.exit(1); }
       // Imported here and only here — see the note at the top of store.ts. If the optional package
@@ -261,7 +301,7 @@ if (identityKind === 'password') {
   try {
     users = await openUserStore(process.env.HOLDRIM_USERS, {
       projectId: cfg.project,
-      sqlitePath: process.env.HOLDRIM_USERS_PATH ?? DEFAULT_SQLITE_PATH,
+      sqlitePath: usersPath,
     });
   } catch (error) {
     console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
