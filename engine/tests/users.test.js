@@ -152,6 +152,27 @@ test('the session cookie is not readable by JavaScript and does not travel to an
   assert.match(id.signOutCookie(), /Max-Age=0/, 'signing out has to kill the cookie, not only the row');
 });
 
+test('a users file from before removal existed gains the removed column, and its accounts read as not removed', async () => {
+  // The column was added after the table shipped (#37), and SQLite has no ADD COLUMN IF NOT EXISTS.
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-users-old-'));
+  const file = join(dir, 'users.db');
+  try {
+    const current = new UsersSqlite(file);
+    await current.create('ana@example.org', 'Ana', 'a password of her own');
+    await current.close();
+    const db = new DatabaseSync(file);
+    db.exec('ALTER TABLE users DROP COLUMN removed');
+    db.close();
+    const reopened = new UsersSqlite(file);
+    assert.equal((await reopened.check('ana@example.org', 'a password of her own'))?.email, 'ana@example.org');
+    assert.equal(await reopened.closeAccount('ana@example.org'), true);
+    assert.equal(await reopened.find('ana@example.org'), null);
+    await reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the first access is created only once', async () => {
   const id = new PasswordIdentity(new UsersSqlite(':memory:'), { secure: false });
   assert.ok(await id.firstAccess('owner@example.org'));

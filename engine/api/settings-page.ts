@@ -80,9 +80,10 @@ export const SETTINGS_KEYS = [
   'api.grants.notForTheOwner', 'api.grants.notForAnAdmin', 'api.grants.notForAnAgent', 'api.grants.roleUnknown',
   'api.grants.present', 'api.grants.notFound', 'api.grants.alreadyRevoked',
   'settings.remove.heading', 'settings.remove.lede', 'settings.remove.proxy', 'settings.remove.email',
-  'settings.remove.confirm', 'settings.remove.submit', 'settings.remove.done',
+  'settings.remove.confirm', 'settings.remove.submit', 'settings.remove.done', 'settings.remove.left',
+  'settings.remove.legacy',
   'api.removal.unconfirmed', 'api.removal.notTheOwner', 'api.removal.namedByDeployment',
-  'api.removal.holdsAgentToken', 'api.removal.nobody',
+  'api.removal.holdsAgentToken', 'api.removal.holdsOldLocks', 'api.removal.onlyOlderEvents', 'api.removal.nobody',
 ];
 
 /** `HOLDRIM_LOCKS`'s value for these entries: `;`-separated, as `parseLocks` splits it. */
@@ -207,6 +208,9 @@ export interface SettingsData {
   };
   /** A write that went through, on the redirect after it. */
   done?: SettingsAction;
+  /** After a removal: texts it could not let go of, and events that still name the address. */
+  removedLeft?: number;
+  removedLegacy?: number;
   features: Record<string, boolean>;
   peopleShow: string;
   /** Which of the two the project's `holdrim.json` names (`namedInFile`, engine/core/config.js). */
@@ -416,6 +420,8 @@ ${capabilityBoxes}
     <p class="holdrim-muted">${t('settings.remove.lede')}</p>
     ${data.byPassword ? '' : `<p class="holdrim-alert holdrim-alert--warn">${t('settings.remove.proxy')}</p>`}
     ${confirmed(['remove'], 'settings.remove.done')}
+    ${data.done === 'remove' && data.removedLeft ? `<p class="holdrim-alert holdrim-alert--warn" role="status">${t('settings.remove.left', { count: data.removedLeft })}</p>` : ''}
+    ${data.done === 'remove' && data.removedLegacy ? `<p class="holdrim-alert holdrim-alert--warn" role="status">${t('settings.remove.legacy', { count: data.removedLegacy })}</p>` : ''}
     ${refusal('remove')}
     <form method="post" action="${forHtml(SETTINGS_SCREEN)}#${SETTINGS_ACTIONS.remove}" class="settings-remove">
       <input type="hidden" name="action" value="remove">

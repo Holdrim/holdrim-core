@@ -120,15 +120,14 @@ box ticked to confirm they asked, and one button.
 
 - the person's row in the people table keeps its id and loses its e-mail;
 - their account, under password sign-in, loses its e-mail and name, its password and its open
-  sessions. The row stays, disabled, under a random key that is not an address, so nothing finds it
-  again and the address is free: an account made for it later is a new person, with a new id;
-- every `text` they wrote is removed, as above — the snapshots on their events stay. A text that
-  reads as tampered is left where it is, and counted: a removal beside it would read as the reason
-  its row is gone, and silence the finding (holdrim#133);
+  sessions. The row stays, closed — disabled, and found by nothing — under a random key that is not
+  an address, so the address is free: an account made for it later is a new person, with a new id;
+- every `text` they wrote is removed, as above — the snapshots on their events stay;
 - every grant of the project's roles in force for them is revoked, by a later `grant_revoked` — the
   grant itself stays in the trail;
 - a `person_removed` event, on the page `_people`, records that a person was removed, by whom and
-  when — with ids and counts only.
+  when — with ids and counts only: the texts removed, those that could not be, the older events
+  that still name the address, the grants revoked, and whether there was an account.
 
 Nothing an approval stands on is touched: the event, its fingerprint, its snapshot and the role it
 was given with all stay, so a lock stays a lock and says what it locked.
@@ -138,16 +137,34 @@ can ask the owner but not act, for the same reason only the owner resets the own
 refused, with nothing touched:
 
 - without the box ticked — it cannot be undone;
-- for the owner, who has to hand over before leaving; the new owner can then remove the old one;
+- for the owner, who has to hand over before leaving;
 - for an address `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` or `HOLDRIM_AGENTS` still names: the deployment
   would go on naming it after the row was emptied. Out of the variable and restarted, first;
 - for an address holding an agent token, which would go on writing, as a new person: revoked first;
+- for the person this version first started under as owner, when a ✓ they gave before that start
+  still names their address. Such a ✓ is a lock only through the lock baseline (section 2), whose
+  author is their id, and only while their row ties that id to the address: forgetting the row would
+  un-lock it. Nothing rewrites that ✓, so on this store they stay; their account can still be
+  disabled. A former owner with no such ✓ is removed like anybody else;
 - for an address with no account and no row in the people table — nobody to remove, which is also
-  what a second run answers.
+  what a second run answers. When only events from before authors were ids name it, the refusal says
+  so: nothing rewrites them, and there is nothing else to let go of.
 
-The steps run in an order a failure can be resumed from: the account first, so no session of theirs
-acts while the rest runs; the row last, since it is what finds the person again. A removal a failure
-stopped half-way is finished by running it again.
+A text is left where it is, and counted, when it reads as tampered with — a removal beside it would
+read as the reason its row is gone, and silence the finding — or when it is held inside its event,
+from before texts moved out of events. The screen says how many were left.
+
+**Events from before authors were ids** name the address itself, and nothing rewrites an event. Their
+texts are removed where they have a row of their own, and the address stays taken: under password
+sign-in the closed account keeps it, emptied, so nobody new becomes the author of those events. The
+screen says how many such events there are.
+
+**In what order, and if it stops.** The account is closed first, keyed by its address, so no session
+of theirs acts while the rest runs and the address stays taken; the grants go before the texts; the
+account is emptied before the row is forgotten; and the address is freed only after that. At no point
+is the address free while the row still leads to the person. A removal a failure stopped is finished
+by running it again, and writes `person_removed` once. If the very last step — freeing the address —
+fails, the address stays taken by the emptied account, as it does for older events.
 
 **Behind an identity proxy** there is no account to empty, and Holdrim holds no list of who the proxy
 admits: take the address out of the IAP, or whatever Cloud access policy is in front of Holdrim,
@@ -199,6 +216,12 @@ Said here so nobody promises it:
 - an exported copy of the documentation, once published;
 - log lines already shipped to a collector, and backups of the database — the operator's retention;
 - anything in the documentation text itself, which is the project's content.
+- events written before authors were ids: they name the address itself, and keep it. Under password
+  sign-in the address stays taken, by the removed person's emptied account;
+- a text held inside its event, from before texts moved out of events: it has no row of its own to
+  remove;
+- the ✓s the owner this version first started under gave before that start, and so that owner's row
+  in the people table: those ✓s are locks through it (section 5).
 
 ## What exists today
 

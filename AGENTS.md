@@ -106,8 +106,9 @@ Each has a test. If you change the code around one, run the contract test and re
   never its id or the row itself, so a forgotten person's id still names every event and lock they
   ever gave. Both are reached together, by the owner alone, from the settings screen: removing a
   person (`docs/PRIVACY.md`, section 5, `engine/api/person-removal.ts`) empties their account and
-  their row, removes their texts and revokes their grants, and never touches an event, a snapshot or
-  a lock.
+  their row, removes their texts and revokes their grants, and leaves every event, snapshot and lock
+  as it was — which is why it refuses the person whose row is what makes their oldest ✓s locks
+  (`legacyLock`, `engine/api/types.ts`): forgetting that row would un-lock them.
 - **A ✓ is a lock only when its author held `lock` at the moment they gave it, and it stays one.**
   Who holds `lock` is set by the deployment alone — never by the repository, the store or a screen.
   Today that is the owner only (`docs/ROLES.md` §3 names who else will, once `LOCKS` exists — not

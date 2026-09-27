@@ -3,7 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { SQLITE_BUSY_TIMEOUT_MS } from './store-sqlite.ts';
 import {
-  AddressInUse, UserStoreBase, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
+  AddressInUse, UserStoreBase, type RemovedChange, type SignInFailures, type StoredAgentToken, type StoredSession,
+  type StoredUser,
 } from './users.ts';
 
 /**
@@ -80,6 +81,12 @@ export class UsersSqlite extends UserStoreBase {
         value BLOB NOT NULL
       );
     `);
+    // Added after the table first shipped, so a file an earlier version made is given it here:
+    // SQLite has no `ADD COLUMN IF NOT EXISTS`. 1 marks an account closed by a person's removal.
+    const columns = this.#db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+    if (!columns.some((c) => c.name === 'removed')) {
+      this.#db.exec('ALTER TABLE users ADD COLUMN removed INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
@@ -167,12 +174,13 @@ export class UsersSqlite extends UserStoreBase {
     this.#db.prepare('UPDATE users SET name = ? WHERE email = ?').run(name, email);
   }
 
-  protected async writeRemoved(email: string, removedKey: string, salt: Buffer, hash: Buffer): Promise<boolean> {
+  protected async writeRemoved(email: string, change: RemovedChange): Promise<boolean> {
     return this.#immediate(() => {
       this.#db.prepare('DELETE FROM sessions WHERE email = ?').run(email);
       const r = this.#db.prepare(
-        "UPDATE users SET email = ?, name = '', salt = ?, hash = ?, must_change = 1, enabled = 0 WHERE email = ?",
-      ).run(removedKey, salt, hash, email);
+        'UPDATE users SET email = ?, name = COALESCE(?, name), salt = COALESCE(?, salt), hash = COALESCE(?, hash), '
+        + 'enabled = 0, removed = 1 WHERE email = ?',
+      ).run(change.key, change.name ?? null, change.salt ?? null, change.hash ?? null, email);
       return r.changes === 1;
     });
   }
@@ -285,7 +293,7 @@ function rowToUser(r: Record<string, string | number | Uint8Array>): StoredUser 
     email: r.email as string, name: r.name as string,
     salt: Buffer.from(r.salt as Uint8Array), hash: Buffer.from(r.hash as Uint8Array),
     mustChangePassword: !!r.must_change, createdAt: r.created_at as string,
-    enabled: !!r.enabled,
+    enabled: !!r.enabled, removed: !!r.removed,
   };
 }
 

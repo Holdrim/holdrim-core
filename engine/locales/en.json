@@ -35,6 +35,8 @@
   "api.removal.notTheOwner": "the owner cannot be removed: the owner comes from HOLDRIM_OWNER. Hand over first; the new owner can then remove the old one",
   "api.removal.namedByDeployment": "{email} is named in {variable}: take the address out of it and restart first, or the deployment goes on naming them after they are removed",
   "api.removal.holdsAgentToken": "{email} holds an agent token: revoke it on the people screen first, or it goes on writing after the address is removed",
+  "api.removal.holdsOldLocks": "{email} gave ✓s before this version first started, and those are locks only through their row in the people table: removing them would un-lock those ✓s, so they cannot be removed from this store. Disabling their account takes the access away",
+  "api.removal.onlyOlderEvents": "only events from before authors were ids name {email}, and nothing rewrites an event: there is no account and no row in the people table here to remove",
   "api.removal.nobody": "nobody here goes by {email}: no account and nothing in the trail, so nothing was removed",
   "api.approval.needsBlockAndFingerprint": "an approval needs a block and a fingerprint",
   "api.approval.ownerOnly": "only owner and admin approve; ask for a change or leave a comment instead",
@@ -356,6 +358,8 @@
   "settings.remove.confirm": "The person asked for this, and I understand it cannot be undone",
   "settings.remove.submit": "Remove this person",
   "settings.remove.done": "The person was removed. The trail names them by an id from now on.",
+  "settings.remove.left": "{count} of their texts could not be removed: they read as tampered with, or are held inside events written before texts moved out of events. docs/PRIVACY.md lists what Holdrim cannot remove.",
+  "settings.remove.legacy": "{count} events written before authors were ids still name this address, and nothing rewrites an event. Under password sign-in the address stays taken, so nobody new becomes their author.",
   "site.notFound": "not found",
   "site.pathOutside": "that path is outside the site"
 }

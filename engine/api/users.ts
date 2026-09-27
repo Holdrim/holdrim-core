@@ -216,18 +216,27 @@ export interface UserStore {
   /** Changes the display name. The e-mail is the identity and does not change. */
   rename(email: string, name: string): Promise<void>;
   /**
-   * Empties the account of a person being removed (docs/PRIVACY.md, section 5): it loses its e-mail,
-   * its name, its password and every open session, in one step, and the row itself stays. Answers
-   * whether there was an account to empty.
-   *
-   * The row is kept, as disabling keeps it (`User.enabled`): what goes is what names the person.
-   * Its key becomes `REMOVED_ACCOUNT_PREFIX` and a random value, never derived from the address or
-   * the person's id, so nothing in the row leads back to them. Its credential becomes random bytes no
-   * password derives to, and it is disabled. A key that is not an address is found by nothing
-   * (`find`, `check`, `list`), so no route can reset, re-enable or sign in to what is left, and the
-   * address is free again: an account made for it later is a new person.
+   * The first step of removing a person (docs/PRIVACY.md, section 5): the account is disabled, every
+   * open session goes, and it is marked removed — found by nothing from then on (`find`, `check`,
+   * `list`), so no route resets or re-enables it. It stays keyed by the address, which keeps the
+   * address taken: an account created for it while the removal runs, or after a run that a failure
+   * stopped, would act under the person's id and the grants given to it. Answers whether there was
+   * an account.
    */
-  removeAccount(email: string): Promise<boolean>;
+  closeAccount(email: string): Promise<boolean>;
+  /**
+   * The last step: the closed account loses its name and its password — a random credential nothing
+   * derives to — and, unless `keepAddress`, its address too, re-keyed to `REMOVED_ACCOUNT_PREFIX` and a
+   * random value, never derived from the address or the person's id. The row itself stays, as
+   * disabling keeps it (`User.enabled`). The address is freed only once the person's row in the
+   * people table is forgotten, so an account made for it later is a new person with a new id.
+   *
+   * `keepAddress` is for an address that events from before authors were ids still name: those
+   * events cannot be rewritten, and an account on their address would read as their author (an
+   * own request, details added to it). The address then stays taken by this closed row. Answers
+   * whether there was an account.
+   */
+  emptyAccount(email: string, keepAddress: boolean): Promise<boolean>;
   /** True when nobody has been created yet: the first-access condition. */
   isEmpty(): Promise<boolean>;
   openSession(email: string, hours?: number): Promise<string>;
@@ -314,15 +323,20 @@ export interface StoredAgentToken extends AgentToken {
 export const AGENT_TOKEN_FORMAT = /^holdrim_agent_([0-9a-f]{24})_([0-9a-f]{64})$/;
 
 /**
- * How the key of a removed person's account begins (`removeAccount`). With no `@`, it is never an
- * address (`isEmailAddress`), so no lookup of a person ever finds it.
+ * How the key of a removed person's account begins, once its address is freed (`emptyAccount`). With
+ * no `@`, it is never an address, so nobody types their way to it.
  */
 const REMOVED_ACCOUNT_PREFIX = 'removed:';
+
+/** What `writeRemoved` changes on a row besides closing it: its key, and optionally its name and credential. */
+export interface RemovedChange { key: string; name?: string; salt?: Buffer; hash?: Buffer }
 
 /** A row as a database keeps it: the profile plus the two things that must never leave this file. */
 export interface StoredUser extends User {
   salt: Buffer;
   hash: Buffer;
+  /** Closed by the removal of a person (`closeAccount`): found by nothing, listed nowhere. */
+  removed: boolean;
 }
 
 /**
@@ -367,15 +381,15 @@ export abstract class UserStoreBase implements UserStore {
   protected abstract writeEnabled(email: string, enabled: boolean): Promise<void>;
   protected abstract writeName(email: string, name: string): Promise<void>;
   /**
-   * `removeAccount`'s row operation, in ONE transaction: every session under `email` deleted, then
-   * the row re-keyed to `removedKey`, its name emptied, `salt` and `hash` written, a change demanded
-   * and the account disabled. True when a row was re-keyed.
+   * The row operation behind `closeAccount` and `emptyAccount`, in ONE transaction: every session
+   * under `email` deleted, then the row disabled, marked removed, keyed by `change.key` — `email`
+   * itself to keep it — and given `change.name`, `salt` and `hash` when they are set. True when a row
+   * was there, whether or not it was already marked.
    *
-   * One transaction, sessions first: Postgres holds `sessions.email` to `users.email` by a foreign
-   * key, so the row cannot move while a session names it; and a session left behind would still
-   * name the address in the clear.
+   * Sessions first: Postgres holds `sessions.email` to `users.email` by a foreign key, so the row
+   * cannot move while a session names it; and a session left behind would still name the address.
    */
-  protected abstract writeRemoved(email: string, removedKey: string, salt: Buffer, hash: Buffer): Promise<boolean>;
+  protected abstract writeRemoved(email: string, change: RemovedChange): Promise<boolean>;
   /**
    * Every session operation below that names a row takes its KEY, `sessionKey(id)`, and never sees
    * the id a cookie carries: the hashing is decided here, once, so no store can keep a live session
@@ -471,7 +485,7 @@ export abstract class UserStoreBase implements UserStore {
       mustChangePassword: mustChange, createdAt: new Date().toISOString(),
       // Somebody just created on purpose is somebody who is meant to get in. Being disabled is
       // always an explicit act, never a starting state.
-      enabled: true,
+      enabled: true, removed: false,
     });
     return chosen;
   }
@@ -556,28 +570,35 @@ export abstract class UserStoreBase implements UserStore {
   }
 
   /**
-   * ⚠️ Leaves out the rows of removed people (`removeAccount`): kept, emptied, and nobody's to manage
-   * any more. Listed, the people screen would offer a reset and a re-enable on a row that names no one.
+   * ⚠️ Leaves out the rows of removed people (`closeAccount`): kept, and nobody's to manage any more.
+   * Listed, the people screen would offer a reset and a re-enable on them.
    */
   async list(): Promise<User[]> {
-    return (await this.readAllUsers()).filter((row) => isEmailAddress(row.email)).map(profileOf);
+    return (await this.readAllUsers()).filter((row) => !row.removed).map(profileOf);
   }
 
   /**
-   * The row an ADDRESS keys, or null. Every lookup of a person goes through here, so a removed
-   * account's key — never an address (`removeAccount`) — finds nothing, whoever typed it: a route that
-   * found it could hand the emptied row a new password and re-enable it.
+   * The row an address keys, unless it was closed by a removal. Every lookup of a person goes through
+   * here, so a closed account is found by nothing, whoever typed its key: a route that found it could
+   * hand it a new password and re-enable it.
    */
   async #readAccount(email: string): Promise<StoredUser | null> {
-    return isEmailAddress(email) ? this.readUser(email) : null;
+    const row = await this.readUser(email);
+    return row && !row.removed ? row : null;
   }
 
-  async removeAccount(email: string): Promise<boolean> {
+  async closeAccount(email: string): Promise<boolean> {
+    const address = normalizeEmail(email);
+    return this.writeRemoved(address, { key: address });
+  }
+
+  async emptyAccount(email: string, keepAddress: boolean): Promise<boolean> {
+    const address = normalizeEmail(email);
     // Random, all three: a key derived from the address or the id would lead back to the person, and
     // a credential derived from anything could be derived again. `check` compares a derivation of
     // whatever is typed with `hash`, and nothing typed derives to 64 random bytes.
-    const removedKey = `${REMOVED_ACCOUNT_PREFIX}${randomBytes(12).toString('hex')}`;
-    return this.writeRemoved(normalizeEmail(email), removedKey, randomBytes(SALT_LENGTH), randomBytes(KEY_LENGTH));
+    const key = keepAddress ? address : `${REMOVED_ACCOUNT_PREFIX}${randomBytes(12).toString('hex')}`;
+    return this.writeRemoved(address, { key, name: '', salt: randomBytes(SALT_LENGTH), hash: randomBytes(KEY_LENGTH) });
   }
 
   async setEnabled(email: string, enabled: boolean): Promise<{ sessionsDropped: boolean }> {

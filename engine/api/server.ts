@@ -859,8 +859,14 @@ async function recordEvent(
 // before it reads what was sent; what follows is the one set of checks both then share, so the
 // screen cannot accept what the API refuses.
 
-/** What a role operation answered: the event it wrote, or the sentence that says why not. */
-interface RoleOutcome { status: number; event?: Event; key?: string; params?: Record<string, string | number> }
+/**
+ * What a role operation answered: the event it wrote, or the sentence that says why not. `counts`,
+ * numbers only, travel on the redirect back to the screen, for it to say what a write left behind.
+ */
+interface RoleOutcome {
+  status: number; event?: Event; key?: string; params?: Record<string, string | number>;
+  counts?: Record<string, number>;
+}
 
 /**
  * Defines a role, or redefines it in place: the latest `role_defined` is the role, every grant of it
@@ -1747,7 +1753,8 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
           ? await revokeGrant(viewer, form.get('grant') ?? '', state)
           : await removeFromSettings(viewer, form);
     if (outcome.event) {
-      res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}#${SETTINGS_ACTIONS[action]}` });
+      const counts = Object.entries(outcome.counts ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `&${k}=${n}`).join('');
+      res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}${counts}#${SETTINGS_ACTIONS[action]}` });
       return res.end();
     }
     edit = {
@@ -1795,6 +1802,8 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
       grants, ended: state.ended.length,
     },
     edit, done: isSettingsAction(done) && !asked ? done : undefined, byPassword: byPassword !== null,
+    // Counts only, read as whole numbers: anything else in the URL is nobody's to show.
+    removedLeft: countParam(url, 'left'), removedLegacy: countParam(url, 'legacy'),
     compose: composing ? { email, scope, result: composeLock(lockScopes, { email, scope }, blockIds, deployment) } : undefined,
     features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,
   }, projectTheme, nonce));
@@ -1815,9 +1824,18 @@ async function removeFromSettings(viewer: string, form: URLSearchParams): Promis
     { email: form.get('email'), confirmed: form.get('confirm') === 'yes' },
   );
   if (outcome.status !== 201) return outcome;
-  const { person, texts, textsLeft, grants, account } = outcome.removal;
-  log('INFO', 'person_removed', { id: outcome.event.id, person, texts, textsLeft, grants, account, by: await idForLog(viewer) });
-  return { status: 201, event: outcome.event };
+  const { person, texts, textsTampered, textsInline, legacyEvents, grants, account } = outcome.removal;
+  log('INFO', 'person_removed', {
+    id: outcome.event.id, person, texts, textsTampered, textsInline, legacyEvents, grants, account, by: await idForLog(viewer),
+  });
+  // What the removal could not let go of, for the screen to say rather than a bare success.
+  return { status: 201, event: outcome.event, counts: { left: textsTampered + textsInline, legacy: legacyEvents } };
+}
+
+/** A whole number the screen's own redirect put in the URL, or 0 for anything else. */
+function countParam(url: URL, name: string): number {
+  const value = url.searchParams.get(name) ?? '';
+  return /^[1-9][0-9]{0,6}$/.test(value) ? Number(value) : 0;
 }
 
 /**

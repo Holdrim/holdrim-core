@@ -9,13 +9,18 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { MemoryEventStore } from '../api/store.ts';
 import { UsersSqlite } from '../api/users-sqlite.ts';
 import { createRoles } from '../core/roles.js';
 import { removePerson, removedPersonEvent, PERSON_REMOVED, PEOPLE_PAGE } from '../api/person-removal.ts';
 import { ROLES_PAGE, definedEvent, grantedEvent, projectRolesOf, GRANT_REVOKED } from '../api/role-grants.ts';
-import { EVENT_TYPES } from '../api/types.ts';
-import { TEXT_REMOVED, noText } from '../api/texts.ts';
+import { EVENT_TYPES, ensureLockBaseline, earliestLockBaseline, isLocked, LOCK_BASELINE_PAGE } from '../api/types.ts';
+import { TEXT_REMOVED, noText, hashText, newSalt } from '../api/texts.ts';
 import { PERSON_ID } from '../api/people.ts';
 
 const OWNER = 'owner@example.org';
@@ -56,7 +61,7 @@ test('removing a person empties their account, their texts, their grants and the
   const w = await world();
   const outcome = await removePerson(context(w), { email: ' Ana@Example.org ', confirmed: true });
   assert.equal(outcome.status, 201);
-  assert.deepEqual(outcome.removal, { person: w.person, texts: 2, textsLeft: 0, grants: 1, account: true });
+  assert.deepEqual(outcome.removal, { person: w.person, texts: 2, textsTampered: 0, textsInline: 0, legacyEvents: 0, grants: 1, account: true });
 
   // The account: no e-mail, no name, no password, no session — and the row kept.
   assert.equal(await w.store.find(ANA), null, 'the address finds no account');
@@ -92,15 +97,18 @@ test('removing a person empties their account, their texts, their grants and the
   assert.equal(removed.id, outcome.event.id);
   assert.equal(removed.type, PERSON_REMOVED);
   assert.equal(removed.author, OWNER);
-  assert.deepEqual(removed.data, { person: w.person, texts: '2', textsLeft: '0', grants: '1', account: 'true', asAgent: 'false' });
+  assert.deepEqual(removed.data, { person: w.person, texts: '2', textsTampered: '0', textsInline: '0', legacyEvents: '0',
+    grants: '1', account: 'true', asAgent: 'false' });
   assert.match(removed.data.person, PERSON_ID);
   assert.doesNotMatch(JSON.stringify(removed.data), /@/, 'no address in what an event keeps for good');
 });
 
 test('the event every removal writes carries ids and counts, as strings, and nothing a client may post', () => {
-  const event = removedPersonEvent({ person: `p_${'a'.repeat(24)}`, texts: 3, textsLeft: 1, grants: 0, account: false }, true);
+  const event = removedPersonEvent({ person: `p_${'a'.repeat(24)}`, texts: 3, textsTampered: 1, textsInline: 2,
+    legacyEvents: 4, grants: 0, account: false }, true);
   assert.deepEqual(event, { type: PERSON_REMOVED, page: PEOPLE_PAGE, block: null,
-    data: { person: `p_${'a'.repeat(24)}`, texts: '3', textsLeft: '1', grants: '0', account: 'false', asAgent: 'true' } });
+    data: { person: `p_${'a'.repeat(24)}`, texts: '3', textsTampered: '1', textsInline: '2', legacyEvents: '4', grants: '0',
+      account: 'false', asAgent: 'true' } });
   assert.ok(!EVENT_TYPES.has(PERSON_REMOVED), 'POST /events refuses it as an unknown type');
 });
 
@@ -172,7 +180,7 @@ test('nobody by that address is refused as nobody, and so is a second run', asyn
 test('behind an identity proxy there is no account: the texts, the grants and the row go all the same', async () => {
   const w = await world({ users: false });
   const outcome = await removePerson(context(w), { email: ANA, confirmed: true });
-  assert.deepEqual(outcome.removal, { person: w.person, texts: 2, textsLeft: 0, grants: 1, account: false });
+  assert.deepEqual(outcome.removal, { person: w.person, texts: 2, textsTampered: 0, textsInline: 0, legacyEvents: 0, grants: 1, account: false });
   assert.equal(await w.events.personOf(ANA), null);
 });
 
@@ -203,7 +211,7 @@ test('a tampered text is left and counted, never removed: a removal would silenc
   events.tampered = comment.id;
   const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: ANA, confirmed: true });
   assert.equal(outcome.removal.texts, 1);
-  assert.equal(outcome.removal.textsLeft, 1);
+  assert.equal(outcome.removal.textsTampered, 1);
   // Read past the stub: the row of the tampered text was not removed, so no removal claims it.
   const removals = (await MemoryEventStore.prototype.list.call(events, null)).filter((e) => e.type === TEXT_REMOVED);
   assert.deepEqual(removals.map((e) => e.data.event).includes(comment.id), false);
@@ -226,25 +234,197 @@ test('a text already gone goes on to the next, counted as left', async () => {
   events.make = noText;
   const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: ANA, confirmed: true });
   assert.equal(outcome.status, 201);
-  assert.deepEqual([outcome.removal.texts, outcome.removal.textsLeft], [1, 1]);
+  assert.deepEqual([outcome.removal.texts, outcome.removal.textsInline], [1, 1]);
 });
 
-test('a store failing stops the removal before the row is emptied, and a second run finishes it', async () => {
+test('a store failing stops the removal with the address still taken and the grants gone, and a second run finishes it', async () => {
   const events = new FailingAt();
   const store = new UsersSqlite(':memory:');
   await store.create(ANA, 'Ana Lima');
   const first = await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
   await events.append({ type: 'comment', page: 'A01', text: 'two' }, ANA);
+  await events.append(definedEvent('reviewer', ['approve'], false), OWNER);
+  await events.append(grantedEvent('reviewer', await events.personFor(ANA), null, false), OWNER);
   const person = await events.personOf(ANA);
   events.failing = first.id;
   events.make = () => new Error('the disk is full');
   const ctx = { events, users: store, deployment, by: OWNER, byAgent: false };
   await assert.rejects(removePerson(ctx, { email: ANA, confirmed: true }), /the disk is full/);
   assert.equal(await store.find(ANA), null, 'the account went first, so no session of theirs acted meanwhile');
+  // While the row still leads to the person, nobody else may take the address: an account made for
+  // it would act under their id.
+  await assert.rejects(store.create(ANA, 'Somebody else'), 'the address is still taken');
+  assert.deepEqual(projectRolesOf(await events.listBare(ROLES_PAGE)).grants, [], 'and the grants were gone before the texts');
   assert.equal(await events.personOf(ANA), person, 'the row still finds them: the run can be taken up again');
   assert.equal((await events.list(PEOPLE_PAGE)).length, 0, 'and no event claims a removal that did not finish');
   const outcome = await removePerson(ctx, { email: ANA, confirmed: true });
   assert.equal(outcome.status, 201);
-  assert.deepEqual(outcome.removal, { person, texts: 2, textsLeft: 0, grants: 0, account: false });
+  assert.deepEqual(outcome.removal, { person, texts: 2, textsTampered: 0, textsInline: 0, legacyEvents: 0, grants: 0, account: true },
+    'what this run did: the grants went on the first');
   assert.equal(await events.personOf(ANA), null);
+  assert.equal(typeof await store.create(ANA, 'Somebody new'), 'string', 'and once the row is forgotten, the address is free');
+});
+
+/**
+ * A removal whose run fails once at `step`, then runs again: the stores, both answers, and the
+ * `person_removed` events on `_people`. Ana has an account, two texts and one grant.
+ */
+async function stoppedAt(step) {
+  let armed = true;
+  const once = (name) => { if (armed && step === name) { armed = false; throw new Error(`the store failed at ${name}`); } };
+  const events = new (class extends MemoryEventStore {
+    async append(event, author) { if (event.type === GRANT_REVOKED) once('grant'); return super.append(event, author); }
+    async forget(id) { once('forget'); return super.forget(id); }
+  })();
+  const users = new (class extends UsersSqlite {
+    async closeAccount(email) { once('close'); return super.closeAccount(email); }
+    async emptyAccount(email, keep) { once(keep ? 'empty' : 'free'); return super.emptyAccount(email, keep); }
+  })(':memory:');
+  await users.create(ANA, 'Ana Lima');
+  await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
+  await events.append({ type: 'comment', page: 'A01', text: 'two' }, ANA);
+  await events.append(definedEvent('reviewer', ['approve'], false), OWNER);
+  await events.append(grantedEvent('reviewer', await events.personFor(ANA), null, false), OWNER);
+  const person = await events.personOf(ANA);
+  const ctx = { events, users, deployment, by: OWNER, byAgent: false };
+  await assert.rejects(removePerson(ctx, { email: ANA, confirmed: true }), new RegExp(`failed at ${step}`));
+  // Whatever step stopped it, the address was never left free while the row still led to Ana.
+  if (await events.personOf(ANA)) {
+    assert.ok((await users.readAllUsers()).some((r) => r.email === ANA), 'the address is still taken while the row leads to her');
+  }
+  const second = await removePerson(ctx, { email: ANA, confirmed: true });
+  const removed = (await events.list(PEOPLE_PAGE)).filter((e) => e.type === PERSON_REMOVED);
+  return { events, users, person, second, removed };
+}
+
+/** What every resumed run has to have done in the end, whichever step stopped the first. */
+async function finished({ events, users, person, removed }) {
+  assert.equal(removed.length, 1, 'one person_removed per person');
+  assert.equal(await events.personOf(ANA), null, 'the row is forgotten');
+  assert.deepEqual(projectRolesOf(await events.listBare(ROLES_PAGE)).grants, [], 'no grant in force names them');
+  assert.equal((await events.list(null)).filter((e) => e.authorId === person && e.text).length, 0, 'no text of theirs is left');
+  assert.equal(await users.find(ANA), null);
+}
+
+const COUNTS = { texts: '2', textsTampered: '0', textsInline: '0', legacyEvents: '0', grants: '1', account: 'true' };
+const countsOf = (e) => Object.fromEntries(Object.keys(COUNTS).map((k) => [k, e.data[k]]));
+
+test('a run stopped at closing the account finishes when run again, with one event counting all of it', async () => {
+  const run = await stoppedAt('close');
+  assert.equal(run.second.status, 201);
+  await finished(run);
+  assert.deepEqual(countsOf(run.removed[0]), COUNTS);
+});
+
+test('a run stopped at revoking a grant finishes when run again, and the grant is revoked', async () => {
+  const run = await stoppedAt('grant');
+  assert.equal(run.second.status, 201);
+  await finished(run);
+  assert.deepEqual(countsOf(run.removed[0]), COUNTS, 'the second run did all of it: nothing had gone but the account');
+});
+
+test('a run stopped at emptying the account, after the event, finishes without a second event', async () => {
+  const run = await stoppedAt('empty');
+  assert.equal(run.second.status, 201);
+  assert.equal(run.second.event.id, run.removed[0].id, 'answered with the event the first run wrote');
+  await finished(run);
+  assert.deepEqual(countsOf(run.removed[0]), COUNTS, 'and the event counts what the first run did');
+});
+
+test('a run stopped at forgetting the row finishes without a second event', async () => {
+  const run = await stoppedAt('forget');
+  assert.equal(run.second.status, 201);
+  assert.equal(run.second.event.id, run.removed[0].id);
+  await finished(run);
+  assert.deepEqual(countsOf(run.removed[0]), COUNTS);
+});
+
+test('a run stopped at freeing the address leaves it taken, never free while anything led to the person', async () => {
+  // Past the forget, nothing finds the person again: the second run answers nobody, and the address
+  // stays taken by an emptied account, as it does while older events name it.
+  const run = await stoppedAt('free');
+  assert.deepEqual(run.second, { status: 404, key: 'api.removal.nobody', params: { email: ANA } });
+  await finished(run);
+  await assert.rejects(run.users.create(ANA, 'Somebody new'), 'the address stays taken');
+  const [row] = await run.users.readAllUsers();
+  assert.deepEqual([row.name, row.enabled, row.removed], ['', false, true], 'by a row with nothing of theirs but the address');
+});
+
+// ---------------------------------------------------------------- stores from before ids and texts moved
+/** A SQLite store in a folder of its own, and a way to write rows the way an older version did. */
+async function olderStore() {
+  const path = join(mkdtempSync(join(tmpdir(), 'holdrim-removal-')), 'events.db');
+  await new SqliteEventStore(path).close();
+  const raw = (sql, ...values) => { const db = new DatabaseSync(path); try { db.prepare(sql).run(...values); } finally { db.close(); } };
+  return { path, raw, open: () => new SqliteEventStore(path) };
+}
+const INSERT = 'INSERT INTO events (id, type, page, block, fingerprint, text, text_hash, author, happened_at, data) '
+  + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+
+test('the first owner is refused while a ✓ from before the lock baseline names their address, and it stays a lock', async () => {
+  const old = await olderStore();
+  // A ✓ an older version recorded, its author the address itself; then this version's first start.
+  old.raw(INSERT, 'old-approval', 'approval', 'A01', 'A01.1.1', 'f', null, null, BEA, '2026-01-01T00:00:00.000Z', null);
+  const events = old.open();
+  const baseline = await ensureLockBaseline(events, BEA);
+  const approval = async () => (await events.list('A01')).find((e) => e.id === 'old-approval');
+  assert.equal(isLocked(await approval(), baseline), true, '(a lock, through the baseline\'s author)');
+  // Bea hands over to the owner, who is asked to remove her.
+  const before = JSON.stringify(await events.list(null));
+  assert.deepEqual(await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true }),
+    { status: 409, key: 'api.removal.holdsOldLocks', params: { email: BEA } });
+  assert.equal(JSON.stringify(await events.list(null)), before, 'nothing was touched');
+  assert.equal(isLocked(await approval(), earliestLockBaseline(await events.list(LOCK_BASELINE_PAGE))), true, 'and it is still a lock');
+  await events.close();
+});
+
+test('the first owner with no ✓ from before the baseline is removed, and their ✓s since stay locks', async () => {
+  const events = new MemoryEventStore();
+  const baseline = await ensureLockBaseline(events, BEA);
+  // Later than the baseline by the clock, as a ✓ given after a start always is: in the same
+  // millisecond, `isLocked` would not trust what is written on it.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const given = await events.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f', data: { locks: 'true' } }, BEA);
+  assert.equal((await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true })).status, 201);
+  assert.equal(isLocked(await byId(events, given.id), baseline), true);
+});
+
+test('texts from before ids and before texts moved out are removed where they can be, and counted where they cannot', async () => {
+  const old = await olderStore();
+  const events = old.open();
+  const id = await events.personFor(ANA);
+  await events.close();
+  const salt = newSalt();
+  // Three shapes an older store holds: text inside the event, under the id; text inside the event,
+  // under the address; and text in its own row, under the address.
+  old.raw(INSERT, 'inline-id', 'comment', 'A01', null, null, 'my CPF is 123', null, id, '2025-01-01T00:00:00.000Z', '{}');
+  old.raw(INSERT, 'inline-address', 'comment', 'A01', null, null, 'call me at 555', null, ANA, '2025-01-01T00:00:01.000Z', '{}');
+  old.raw(INSERT, 'row-address', 'comment', 'A01', null, null, null, hashText('my home address', salt), ANA,
+    '2025-01-01T00:00:02.000Z', '{}');
+  old.raw('INSERT INTO texts (event, field, value, salt) VALUES (?, ?, ?, ?)', 'row-address', 'text', 'my home address', salt);
+  const reopened = old.open();
+  const users = new UsersSqlite(':memory:');
+  await users.create(ANA, 'Ana Lima');
+  const outcome = await removePerson({ events: reopened, users, deployment, by: OWNER, byAgent: false }, { email: ANA, confirmed: true });
+  assert.deepEqual(outcome.removal, { person: id, texts: 1, textsTampered: 0, textsInline: 2, legacyEvents: 2, grants: 0, account: true });
+  const text = async (eventId) => (await byId(reopened, eventId)).text;
+  assert.equal(await text('row-address'), null, 'the one with a row of its own, under the address, is removed');
+  assert.equal(await text('inline-address'), 'call me at 555', 'held inside the event: nothing removes it');
+  // Those events still name the address, so the address stays taken: nobody new becomes their author.
+  await assert.rejects(users.create(ANA, 'Somebody new'), 'the address stays taken');
+  assert.equal(await users.find(ANA), null, 'by an account nothing finds');
+  const [row] = await users.readAllUsers();
+  assert.deepEqual([row.email, row.name, row.enabled, row.removed], [ANA, '', false, true], 'emptied, and closed');
+  await reopened.close();
+});
+
+test('somebody only older events name is refused as such, and no person is made for them', async () => {
+  const old = await olderStore();
+  old.raw(INSERT, 'inline-address', 'comment', 'A01', null, null, 'call me at 555', null, ANA, '2025-01-01T00:00:01.000Z', '{}');
+  const events = old.open();
+  assert.deepEqual(await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: ANA, confirmed: true }),
+    { status: 409, key: 'api.removal.onlyOlderEvents', params: { email: ANA } });
+  assert.equal(await events.personOf(ANA), null, 'no row made for them');
+  assert.deepEqual((await events.list(null)).map((e) => e.id), ['inline-address'], 'and nothing written');
+  await events.close();
 });
