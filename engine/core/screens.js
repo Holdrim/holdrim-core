@@ -9,3 +9,6 @@ export const HOME_SCREEN = '/engine/home';
 
 /** Who can sign in, managed from the browser — password identity only. See engine/api/people-page.ts. */
 export const PEOPLE_SCREEN = '/engine/people';
+
+/** Who holds what, and where it comes from — the owner's alone, and read-only. See engine/api/settings-page.ts. */
+export const SETTINGS_SCREEN = '/engine/settings';

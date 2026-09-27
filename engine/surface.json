@@ -217,6 +217,7 @@
     "* /engine/home",
     "* /engine/locales/*",
     "* /engine/people",
+    "* /engine/settings",
     "* /engine/web/*",
     "* /language",
     "* /sign-in",

@@ -1,7 +1,7 @@
 import type { AgentToken, User } from './users.ts';
 import { BASE_CSS, brandmark, forHtml, type Translator } from './login-page.ts';
 import { themeCss, type Theme } from './theme.ts';
-import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
+import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js';
 
 /**
  * Who can get in, managed from the browser: create an access, hand out a new password, take an
@@ -47,19 +47,23 @@ export const PEOPLE_KEYS = [
   'people.agents.none', 'people.agents.issue', 'people.agents.revoke', 'people.agents.confirm.revoke',
   'people.agents.once',
   'people.once', 'people.noAnswer', 'people.warn.sessionsNotDropped', 'people.warn.sessionsNotDropped.reset',
-  'nav.home', 'nav.people',
+  'nav.home', 'nav.people', 'nav.settings',
 ] as const;
 
 /**
- * The two engine screens, linked to each other. `People` only for whoever may manage people: a
- * link to a screen that answers "you may not" is a door painted on a wall.
+ * The engine's screens, linked to each other. `People` only for whoever may manage people, and
+ * `Settings` only for the owner: a link to a screen that answers "you may not" is a door painted on
+ * a wall. `isOwner` defaults to false, so a caller that does not say never offers the owner's screen.
  */
-export function engineNav(i18n: Translator, lang: string, current: 'home' | 'people', canManage: boolean): string {
-  const link = (key: 'home' | 'people', href: string) => key === current
+export function engineNav(
+  i18n: Translator, lang: string, current: 'home' | 'people' | 'settings', canManage: boolean, isOwner = false,
+): string {
+  const link = (key: 'home' | 'people' | 'settings', href: string) => key === current
     ? `<a href="${href}" aria-current="page">${forHtml(i18n.t(lang, `nav.${key}`))}</a>`
     : `<a href="${href}">${forHtml(i18n.t(lang, `nav.${key}`))}</a>`;
   return `<nav class="holdrim-nav">${link('home', HOME_SCREEN)}`
-    + `${canManage ? link('people', PEOPLE_SCREEN) : ''}</nav>`;
+    + `${canManage ? link('people', PEOPLE_SCREEN) : ''}`
+    + `${isOwner ? link('settings', SETTINGS_SCREEN) : ''}</nav>`;
 }
 
 /**
@@ -159,7 +163,7 @@ ${themeCss(theme)}
 <main class="holdrim-screen__main">
   <header class="holdrim-screen__head">
     <div class="holdrim-brandmark">${brandmark(theme)}</div>
-    ${engineNav(i18n, lang, 'people', true)}
+    ${engineNav(i18n, lang, 'people', true, data.viewerIsOwner)}
   </header>
   <h1 class="holdrim-title">${t('people.title')}</h1>
   <p class="holdrim-lede">${t('people.lede')}</p>

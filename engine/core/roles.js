@@ -24,9 +24,10 @@
  * A project's OWN roles, and who holds them, are NOT read here yet, and never from `holdrim.json`
  * (docs/ROLES.md, "Authority comes from the deployment only"; `engine/core/config.js`'s
  * `AUTHORITY_KEYS` refuses the file the moment it names `roles` or `grants`). They come from the
- * owner, through events at a settings screen — a later piece, which will need its own name grammar
- * for a project role then, not before: a format with no caller is untested by construction, whatever
- * a unit test that calls it directly says — the settings screen gets one when it exists, not sooner.
+ * owner, through events at the settings screen (read-only today); granting from it is not built, and
+ * defining a project role there will need its own name grammar then, not before: a format with no
+ * caller is untested by construction, whatever a unit test that calls it directly says — the grammar
+ * comes with the screen's first role definition, not sooner.
  * `isValidScope` below is different: `HOLDRIM_LOCKS` (`parseLocks`) is a real caller of it TODAY, so
  * its grammar is proved against the tier this change actually ships.
  *
@@ -68,8 +69,8 @@ const GRANTABLE = Object.freeze(CAPABILITIES.filter((c) => c !== 'lock'));
  * — `capabilitiesOf('admin').add('lock')` — would otherwise reach into this table itself, and every
  * `can()` call for the rest of the process would read it too.
  *
- * A project-defined role, once the settings screen exists, will extend this shape rather than
- * replace it: the same kind of array, held in the store instead of written here.
+ * A project-defined role, once the settings screen (read-only today) can define one, will extend this
+ * shape rather than replace it: the same kind of array, held in the store instead of written here.
  *
  * `owner` is included for `capabilitiesOf` and the mapping test to read from one table, not two,
  * even though the owner is not a role a project can hold or grant (see the module comment) — its
@@ -82,6 +83,15 @@ const ROLE_CAPABILITIES = Object.freeze({
   admin: GRANTABLE,
   member: Object.freeze(['read', 'comment', 'request']),
 });
+
+/**
+ * The three shipped roles' names, in `ROLE_CAPABILITIES`'s own order — for a screen that shows the
+ * table (engine/api/settings-page.ts), so it lists the roles this file ships rather than a copy of
+ * their names that the day a role is added would leave one short. Names only: what each holds is
+ * still asked of `capabilitiesOf`, which hands back a copy, and nothing here reaches `can`.
+ * @type {readonly ('owner'|'admin'|'member')[]}
+ */
+export const SHIPPED_ROLES = Object.freeze(/** @type {('owner'|'admin'|'member')[]} */ (Object.keys(ROLE_CAPABILITIES)));
 
 /**
  * The capabilities a shipped role holds, as a FRESH `Set` — a new one on every call, copied from the

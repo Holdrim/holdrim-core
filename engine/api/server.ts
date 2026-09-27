@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
 import {
-  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, lockCoverage,
+  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, parseAgents, lockCoverage,
 } from '../core/roles.js';
 import { overLimit, validCommit, short, PAGE_FORMAT } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
@@ -21,7 +21,8 @@ import { renderLoginPage, signInPolicy, screenPolicy } from './login-page.ts';
 import { withPanelNonce, pagePolicy, FILE_POLICY } from './content-policy.ts';
 import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
 import { renderPeoplePage } from './people-page.ts';
-import { HOME_SCREEN, PEOPLE_SCREEN } from '../core/screens.js';
+import { renderSettingsPage, composeLock } from './settings-page.ts';
+import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js';
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { graphOf } from '../cli/graph.ts';
@@ -1356,6 +1357,54 @@ async function servePeople(req: IncomingMessage, res: ServerResponse) {
 }
 
 /**
+ * The settings screen (engine/api/settings-page.ts): the owner's, and nobody else's — not an admin's,
+ * since it shows who holds `lock` and composes grants of it, and `lock` is the one thing the
+ * deployment decides for the owner alone. Anybody else is sent home, as `servePeople` sends whoever
+ * may not manage people: the nav never offered them the link. `viewerOf` reads the session only, so
+ * an agent token never reaches here, whatever it carries.
+ *
+ * It writes nothing, on any method: the composer's answer is a line of text, and every value shown
+ * is read from what start already parsed (`project`, `roles`, `lockScopes`). The composer posts, so
+ * the address typed stays out of the URL, and its post is refused from anywhere but this server's own
+ * page, as the home's forms are (`sameOrigin`). The site's blocks are read afresh, and only when a
+ * scope needs measuring against them — the pages a commit moved since start are what the owner is
+ * asking about.
+ */
+async function serveSettings(req: IncomingMessage, res: ServerResponse) {
+  const viewer = await viewerOf(req);
+  if (!viewer || !roles.isOwner(viewer)) return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
+  const lang = languageOf(req);
+  const asked = req.method === 'POST';
+  if (asked && !sameOrigin(req)) return json(res, 403, { error: i18n.t(lang, 'api.crossSite') });
+  const form = asked ? new URLSearchParams(await rawBody(req)) : null;
+  const email = form?.get('email') ?? null;
+  const scope = form?.get('scope') ?? null;
+  const blockIds = lockScopes.length || asked ? [...(await readBlocks(projectRoot)).keys()] : [];
+  const reach = lockCoverage(lockScopes, blockIds);
+  // As the panel, the home and the API show a person to the owner — never a second way of spelling
+  // an address on this one screen.
+  const shown = (address: string) => personDisplay(address, undefined, viewer, lang);
+  const nonce = randomBytes(16).toString('base64');
+  res.writeHead(200, screenHeaders(nonce, false));
+  res.end(renderSettingsPage(i18n, lang, {
+    projectName: project.name,
+    canManagePeople: peopleScreenOn() && managesPeople(viewer),
+    holders: {
+      owner: await shown(roles.owner),
+      admins: await Promise.all(roles.admins.filter((a) => !roles.isOwner(a)).map(shown)),
+      agents: await Promise.all(parseAgents(project.agents).map(shown)),
+      locks: await Promise.all(lockScopes.map(async (l, i) => ({ who: await shown(l.email), scope: l.scope,
+        reaches: reach[i].reaches }))),
+    },
+    compose: asked ? {
+      email: email ?? '', scope: scope ?? '',
+      result: composeLock(lockScopes, { email: email ?? '', scope: scope ?? '' }, blockIds, roles),
+    } : undefined,
+    features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,
+  }, projectTheme, nonce));
+}
+
+/**
  * Whether a form post came from a page this server served.
  *
  * With password sign-in the session cookie is `SameSite=Strict`, so a form on another site arrives
@@ -1456,6 +1505,7 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
     canManagePeople: peopleScreenOn() && managesPeople(viewer),
     pageRequestsEnabled: project.features.pageRequests, ask,
     graphEnabled: project.features.graph,
+    isOwner: viewer !== null && roles.isOwner(viewer),
   }, projectTheme, nonce));
 }
 
@@ -1662,6 +1712,7 @@ const server = createServer(async (req, res) => {
         : await serveHome(req, res, { asked: url.searchParams.has('asked'), decided: url.searchParams.has('decided') });
     }
     if (url.pathname === PEOPLE_SCREEN) return await servePeople(req, res);
+    if (url.pathname === SETTINGS_SCREEN) return await serveSettings(req, res);
 
     return await serveStatic(url, res, languageOf(req));
   } catch (error) {
