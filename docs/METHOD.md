@@ -200,7 +200,7 @@ anyone else.
 | Server | `engine/api/server.ts` | Node 24 running TypeScript directly — no build step |
 | Event store | `engine/api/store-sqlite.ts` | SQLite on `/data`; the interface takes other stores |
 | Index | `engine/api/index-store.ts` | derived, disposable, rebuilt by `index` |
-| Identity | `engine/api/identity-password.ts`, `identity-iap.ts` | password, or a signed header from an identity proxy |
+| Identity | `engine/api/identity-password.ts`, `identity-iap.ts`, `first-access.ts` | password, or a signed header from an identity proxy; the owner's first password, in a file and never the log |
 | User store | `engine/api/users.ts` + `users-sqlite.ts`, `users-firestore.ts`, `users-postgres.ts` | one interface, three databases; the hashing lives in the interface so none of them can diverge |
 | Review panel | `engine/web/` | React, bundled into `panel-react.js` |
 | The agent's tool | `engine/cli/holdrim.ts` | the commands above |
@@ -221,6 +221,7 @@ anyone else.
 | `HOLDRIM_IDENTITY` | `password`, `iap`, or `dev` — never `dev` outside Development |
 | `HOLDRIM_USERS` | where the people who log in are kept — see below |
 | `HOLDRIM_USERS_PATH` | the SQLite users file, when `HOLDRIM_USERS` is not set (default: `./data/users.db`) |
+| `HOLDRIM_FIRST_ACCESS_PATH` | the file the first-access password is written to, mode 0600, never the log (default: `first-access-password` beside the users SQLite file, or beside `HOLDRIM_USERS_PATH` for Firestore and Postgres). Required on a runtime that looks ephemeral (`K_SERVICE`), where the default is a disk nobody can read |
 | `HOLDRIM_LANGUAGE` | the project's default language, when the reader has no preference (default: `en`) |
 
 **Where the users live.** People and sessions are stored apart from the events, and the storage is

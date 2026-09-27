@@ -231,16 +231,12 @@ const server = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')
 // that response's nonce run — so a policy one directive too tight locks everybody out, and only a
 // real browser running the page's script can tell. `localhost`, not 127.0.0.1: the session cookie
 // is `Secure`, and that is the name Chrome treats as a secure origin over plain http.
-let firstAccess = '';
 const signInServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
   env: {
     ...process.env, PORT: String(PORT + 1), HOLDRIM_ENVIRONMENT: 'Production', HOLDRIM_IDENTITY: 'password',
     HOLDRIM_OWNER: OWNER, HOLDRIM_EVENTS: 'memory', HOLDRIM_USERS_PATH: join(site, 'users.db'), HOLDRIM_SITE: site,
   },
-  stdio: ['ignore', 'pipe', 'inherit'],
-});
-signInServer.stdout.on('data', (chunk) => {
-  firstAccess ||= String(chunk).match(/password:\s+(\S+)/)?.[1] ?? '';
+  stdio: ['ignore', 'ignore', 'inherit'],
 });
 
 // A third server, on its own copy of the site, with the three toggles the panel itself draws a
@@ -1054,7 +1050,10 @@ try {
   await page.goto(`${SIGN_IN}/pages/A01.html`);
   await must('a page without a session lands on the sign-in screen', () => page.locator('#email').waitFor());
   expect('the screen came up with nothing refused', '', problems.join(' | '));
-  expect('the first-access password was printed', true, firstAccess.length > 0);
+  // Read from its file, beside the users store: the log never carries it (#53). Read here, once the
+  // screen is up, because the server writes it before it listens.
+  const firstAccess = readFileSync(join(site, 'first-access-password'), 'utf8');
+  expect('the first-access password is in its file', true, firstAccess.length > 0);
   await page.locator('#email').fill(OWNER);
   await page.locator('#password').fill(firstAccess);
   await page.locator('#button').click();

@@ -128,7 +128,8 @@ bash engine/run-local.sh                              # straight in, no login, e
 HOLDRIM_OWNER=you@example.org docker compose up       # the real sign-in screen, data in a volume
 ```
 Working on the engine cannot touch anybody's real approvals: the local runner keeps events in
-memory. The first-access password is printed once, in the log.
+memory. The first-access password is written to a file beside the store, never to the log; the log
+says where.
 
 ⚠️ If the port is taken, the OLD process keeps answering and you end up testing the previous build
 without knowing it. `run-local.sh` refuses to start rather than lie; stop the process **by port**,

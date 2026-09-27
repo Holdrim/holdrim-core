@@ -43,8 +43,11 @@ cd holdrim-core
 HOLDRIM_OWNER=you@example.org docker compose up
 ```
 
-Open `http://localhost:8080`. The first-access password is printed **once** in the log, and the
-first login forces you to change it. There is no `admin/admin`: internal tools stay up for years.
+Open `http://localhost:8080`. The first-access password is **never** in the log: it is in a file
+on the data volume, readable only by the service's own user, and the log says where. Read it with
+`docker compose exec holdrim /bin/cat /data/first-access-password`. The first login forces you to
+change it, and the file is removed when you do. There is no `admin/admin`: internal tools stay up
+for years.
 
 You land on the project's home, `/engine/home`: every page with its traffic light, and every
 request someone is still waiting on. The pages are `examples/hello-world` — two of them, explaining
@@ -225,6 +228,15 @@ that fails the boot if either is loaded on a path that does not need it.
 > which Cloud Run sets) with people kept in a file, it logs a `WARNING` naming what will be lost
 > and what to set instead. It **warns and starts** — the configuration works, it just forgets
 > people, and refusing to come up would be a worse surprise.
+
+The first-access password is written to a file, never to the log: `first-access-password`, beside
+the users SQLite file, or beside `HOLDRIM_USERS_PATH` for Firestore and Postgres (`/data` in the
+image), mode 0600. `HOLDRIM_FIRST_ACCESS_PATH` puts it elsewhere. On a runtime that looks ephemeral
+that variable is required: the default there is a disk nobody can open from outside the instance,
+so the owner's account is **not created** — an `ERROR`, `first_access_not_created`, says so — until
+the variable names a file on a volume mounted into the service that only its operators read. On a
+first start, a file already at that path is never overwritten: the service refuses to start until
+it is removed. The file is removed when the owner changes the password.
 
 All three implementations are checked by **the same suite**,
 `engine/tests/users-conformance.test.js`. A store that does not pass it is not supported. In CI all

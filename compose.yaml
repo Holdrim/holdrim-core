@@ -2,7 +2,11 @@
 #
 #   HOLDRIM_OWNER=you@example.org docker compose up
 #
-# The first-access password appears ONCE in the log. The first sign-in forces a change.
+# The first-access password is never in the log; read it from the data volume, then sign in:
+#
+#   docker compose exec holdrim /bin/cat /data/first-access-password
+#
+# The first sign-in forces a change, and the file is removed when the password changes.
 # Without HOLDRIM_SITE, it comes up with the example (examples/hello-world).
 services:
   holdrim:

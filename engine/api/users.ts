@@ -35,9 +35,10 @@ export { normalizeEmail, isEmailAddress, MAX_EMAIL_LENGTH };
  * - comparison in **constant time**, so the response time does not reveal how many characters match;
  * - a hash is derived even for an e-mail that does not exist, or the response time would say who
  *   has an account here;
- * - the admin's initial password is **randomly generated** and shown ONCE in the log of the first
- *   start. "admin/admin" is inviting, but whoever starts it and forgets leaves the door open — and
- *   an internal documentation tool tends to stay up for years with nobody looking;
+ * - the owner's initial password is **randomly generated** and written, at the first start, to a
+ *   file only whoever operates the deployment can read — never to the log (`first-access.ts`).
+ *   "admin/admin" is inviting, but whoever starts it and forgets leaves the door open — and an
+ *   internal documentation tool tends to stay up for years with nobody looking;
  * - changing the initial password is **mandatory**: until it changes, the person reaches only the
  *   change screen.
  *
@@ -421,7 +422,7 @@ export abstract class UserStoreBase implements UserStore {
    * people reach for when they suspect a credential has leaked.
    */
   #generatePassword(): string {
-    return randomBytes(12).toString('base64url');
+    return generatePassword();
   }
 
   async create(email: string, name: string, password?: string, mustChange = true): Promise<string> {
@@ -763,6 +764,16 @@ function profileOf(row: StoredUser): User {
   };
 }
 
+/**
+ * The one generator of a password nobody chose. Exported for the first access alone
+ * (`engine/api/first-access.ts`), which must hold the password in its file BEFORE the account that
+ * uses it exists — so it cannot wait for `create` to generate one. Every other path goes through
+ * `UserStoreBase`, and all of them reach this same function, so none can drift weaker.
+ */
+export function generatePassword(): string {
+  return randomBytes(12).toString('base64url');
+}
+
 /** Where SQLite writes when nothing is configured. The tool has to work with no configuration. */
 export const DEFAULT_SQLITE_PATH = './data/users.db';
 
@@ -874,7 +885,7 @@ export function maskCredentials(value: string): string {
  * SQLite expects. The `//` form is accepted too, because everyone writes URLs that way at least
  * once.
  */
-function sqlitePathOf(url: string): string {
+export function sqlitePathOf(url: string): string {
   const rest = url.slice('sqlite:'.length);
   return rest.startsWith('//') ? rest.slice(2) : rest;
 }

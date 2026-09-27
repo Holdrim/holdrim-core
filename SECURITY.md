@@ -170,8 +170,9 @@ Worth knowing before you run it:
   over no token anyone can present.
 - **It stores passwords** with scrypt, per-user salt, and constant-time comparison. A test asserts
   the password does not appear in the raw database file.
-- **The first-access password is random**, printed once, and must be changed at first login. There
-  is no default account.
+- **The first-access password is random**, written to a file beside the store with mode 0600 and
+  never to the log, and must be changed at first login; the file is removed when it is. The log says
+  only where the file is. There is no default account.
 - **Exactly one owner**, and it comes from `HOLDRIM_OWNER`, never from a database column. Zero or
   two and the service refuses to start. Nobody but the owner resets or creates the owner's account.
 - **Authority comes from the deployment only.** The owner and the admins are read from

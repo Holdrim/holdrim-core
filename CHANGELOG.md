@@ -262,7 +262,7 @@ who ran the engine from `main` before it.
   DOT — for a script, another tool, or a diagram to look at outside the browser. It reads the same
   blocks and the same traffic light every other command does, never a second copy of either.
 - **Sign-in** with passwords, or behind an identity proxy. There is exactly one owner, named by
-  `HOLDRIM_OWNER`, and the first-access password is printed once.
+  `HOLDRIM_OWNER`, and the first-access password is written to a file, never to the log.
 - **Storage.** Events go to SQLite or Firestore and are only ever appended; SQLite refuses
   `UPDATE` and `DELETE` by trigger. People go to SQLite, Postgres or Firestore. Every event store
   and every user store passes its own conformance suite in CI, against real databases. Reopening a
@@ -402,6 +402,21 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **The first-access password is never written to the log (#53).** It goes to a file,
+  `first-access-password`, beside the users SQLite file — `/data/first-access-password` in the
+  image, and beside `HOLDRIM_USERS_PATH` for Firestore and Postgres too — created with mode 0600
+  and never overwritten, and removed when the owner changes the password. The log says only where
+  the file is. Before, the password sat in plain text in every log collector that ever read the
+  first start, for as long as it kept the line; a password shown once on a screen instead would go
+  to whoever reached the server first. New on the surface: `HOLDRIM_FIRST_ACCESS_PATH`, to put the
+  file elsewhere, and the log events `first_access_not_created`, `first_access_file_removed` and
+  `first_access_file_not_removed`. **What an operator changes:** read the password with `docker
+  compose exec holdrim /bin/cat /data/first-access-password` (or from the volume), not from the log; a
+  script that grepped the log for it finds nothing now. On a runtime that looks ephemeral
+  (`K_SERVICE`, Cloud Run), set `HOLDRIM_FIRST_ACCESS_PATH` to a file on a mounted volume only the
+  operators read — without it the owner's account is not created, and an `ERROR` says why, since
+  a file on that disk is one nobody can open. On a first start, a file already at the path stops the
+  service until it is removed by hand.
 - **Wrong passwords are now counted in the user store, so a restart no longer hands out a fresh set
   of free guesses, and every instance counts against the same number (#53).** Before, the count lived
   in each process's memory: a deploy, a crash or a platform recycling an instance reset it, and N
