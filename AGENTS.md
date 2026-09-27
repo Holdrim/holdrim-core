@@ -125,7 +125,7 @@ Each has a test. If you change the code around one, run the contract test and re
   `POST /api/roles`, `/api/grants`, `/api/grants/<id>/revoke` and the settings screen — and `POST
   /events` refuses `role_defined`, `role_granted` and `grant_revoked`. A project role never holds
   `people` or `lock`: refused when it is written, dropped when it is read. A grant names a person by
-  id, never an address, and is read on every request. A request skips or passes triage only by
+  id, never an address, and is read on every signed-in request. A request skips or passes triage only by
   someone who may triage everywhere, so a scoped triager never decides their own
   (`engine/api/role-grants.ts`, `engine/core/roles.js`, `engine/api/server.ts`, `engine/api/here.ts`).
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
