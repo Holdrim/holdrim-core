@@ -674,6 +674,29 @@ try {
     expect('and nothing failed', '', owner.problems.join(' | '));
   }
 
+  console.log('the settings screen, the owner\'s and read-only (#36):');
+  {
+    const owner = await person(OWNER);
+    await owner.page.goto(`${BASE}/engine/home`);
+    await owner.page.locator('nav a[href="/engine/settings"]').click();
+    await must('the owner reaches it from the home', () => owner.page.locator('#settings-compose').waitFor());
+    await owner.page.locator('.settings-compose input[name="email"]').fill('Bea@Example.org');
+    await owner.page.locator('.settings-compose input[name="scope"]').fill('A0*');
+    await owner.page.locator('.settings-compose button[type="submit"]').click();
+    await must('composing a grant answers with a line', () => owner.page.locator('.settings-line code').first().waitFor());
+    // This server sets no HOLDRIM_LOCKS, so the line is the one entry, normalized as start would.
+    expect('the whole line to set, single-quoted, in the shape start parses', "HOLDRIM_LOCKS='bea@example.org:A0*'",
+      await owner.page.locator('.settings-answer .settings-line code').textContent());
+    // Posted, so what was typed is in no URL the browser keeps.
+    expect('and the address is not in the address bar', `${BASE}/engine/settings#settings-compose`, owner.page.url());
+    // Styled under a policy that runs no inline style without its nonce: a style the page forgot to
+    // sign, or a script it should not carry, is logged by the browser as a violation, and fails here.
+    expect('and nothing was refused, blocked or thrown on the way', '', owner.problems.join(' | '));
+    const reader = await person(READER);
+    await reader.page.goto(`${BASE}/engine/settings`);
+    expect('somebody who is not the owner is sent home', `${BASE}/engine/home`, reader.page.url());
+  }
+
   console.log('deciding a request from the home, with no script:');
   {
     // A reader's request: one filed by the owner starts approved, and there would be nothing to decide.

@@ -2262,6 +2262,59 @@ expect "nor sign out → 403"                      403 "$(bot_code -X POST $B/ap
 expect "and it opens no screen: the people screen still wants a session" 0 \
   "$(curl -s -D- -o /dev/null -H "Authorization: Bearer $BOT_TOKEN" $B/engine/people | has -i 'location: /sign-in'; echo $?)"
 expect "nor a page of the documentation"         302 "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $BOT_TOKEN" $B/pages/A01.html)"
+
+# The settings screen (#36): the owner's alone, read-only, and its composer writes nothing. Here, on
+# this server, because it is the one with every kind of viewer at hand — an owner, an admin, a member
+# and a live agent token — and a HOLDRIM_LOCKS entry whose coverage the screen has to show.
+echo "the settings screen, the owner's and read-only (#36):"
+curl -s -b $TOC -H 'Accept-Language: en' -D "$WORK/settings.h" -o "$WORK/settings.html" $B/engine/settings
+expect "the owner opens it → 200" 1 "$(grep -c '^HTTP/1.1 200' "$WORK/settings.h")"
+SETTINGS_CSP=$(grep -i '^content-security-policy:' "$WORK/settings.h")
+expect "under a policy that runs no script at all" 0 \
+  "$(echo "$SETTINGS_CSP" | has "default-src 'none'" && echo "$SETTINGS_CSP" | has "style-src 'nonce-" && ! echo "$SETTINGS_CSP" | has 'script-src'; echo $?)"
+expect "and it is never cached" 1 "$(grep -ci '^cache-control: no-store' "$WORK/settings.h")"
+expect "and carries no script tag" 0 "$(grep -c '<script' "$WORK/settings.html")"
+# The row itself, not merely the scope somewhere on the page: who, the scope, and the first page it
+# reaches on this site, together.
+expect "it shows the owner who HOLDRIM_LOCKS names, and what the scope reaches" 0 \
+  "$(has -F "<td>$T_LOCKED</td><td><code class=\"holdrim-code\">A0*</code></td><td><code class=\"holdrim-code\">A01</code>" "$WORK/settings.html"; echo $?)"
+expect "and says HOLDRIM_LOCKS is not in force yet" 0 "$(has -F 'HOLDRIM_LOCKS is checked at start' "$WORK/settings.html"; echo $?)"
+expect "and the owner's home links to it" 0 "$(t_owner $B/engine/home | has 'href="/engine/settings"'; echo $?)"
+expect "an admin is sent home" 0 "$(t_admin -D- -o /dev/null $B/engine/settings | has -i '^location: /engine/home'; echo $?)"
+expect "and their home offers no Settings link" 1 "$(t_admin $B/engine/home | has '/engine/settings'; echo $?)"
+expect "a member is sent home" 0 "$(t_member -D- -o /dev/null $B/engine/settings | has -i '^location: /engine/home'; echo $?)"
+expect "an agent token opens no screen: it is sent to sign in" 0 \
+  "$(curl -s -D- -o /dev/null -H "Authorization: Bearer $BOT_TOKEN" $B/engine/settings | has -i '^location: /sign-in'; echo $?)"
+# The composer posts a plain form, as a browser does from the page: its own origin, url-encoded fields.
+compose_as() { curl -s -b $TOC -H 'Accept-Language: en' --data-urlencode "email=$1" --data-urlencode "scope=$2" "${@:3}" $B/engine/settings; }
+# What the store holds, before and after composing: the same bytes, or the composer wrote something.
+EVENTS_BEFORE=$(t_owner $B/api/events | cksum)
+# Without this, two identical error answers would compare equal and prove nothing about the store.
+expect "(the events are read as a list, not an error)" 0 "$(t_owner $B/api/events | has '^\[{'; echo $?)"
+COMPOSED=$(compose_as Bea@Example.org A01 -H "Origin: $B")
+expect "the composer answers the whole line, single-quoted: the entry already set, then the new one" 0 \
+  "$(echo "$COMPOSED" | has -F 'HOLDRIM_LOCKS=&#39;tlocked@example.org:A0*; bea@example.org:A01&#39;'; echo $?)"
+expect "and says a restart is what makes it count" 0 "$(echo "$COMPOSED" | has -F "$(say_en settings.compose.restart)"; echo $?)"
+expect "and the events are exactly what they were" "$EVENTS_BEFORE" "$(t_owner $B/api/events | cksum)"
+# The address travels in the body only: one in the query string composes nothing.
+expect "an address in the URL composes nothing" 1 \
+  "$(t_owner "$B/engine/settings?email=bea@example.org&scope=A01" | has -F 'bea@example.org:A01'; echo $?)"
+expect "a post from another site is refused → 403" 403 "$(compose_as bea@example.org A01 -H 'Origin: https://elsewhere.example' -o /dev/null -w '%{http_code}')"
+expect "and one that names no origin → 403" 403 "$(compose_as bea@example.org A01 -o /dev/null -w '%{http_code}')"
+expect "an admin's post is sent home, like their visit" 0 \
+  "$(curl -s -b $TAC -D- -o /dev/null -H "Origin: $B" --data-urlencode 'email=bea@example.org' --data-urlencode 'scope=A01' $B/engine/settings | has -i '^location: /engine/home'; echo $?)"
+expect "an entry already set is refused, in words" 0 \
+  "$(compose_as $T_LOCKED 'A0*' -H "Origin: $B" | has -F "HOLDRIM_LOCKS already grants $T_LOCKED the scope A0*"; echo $?)"
+expect "a scope that reaches no page of this site is refused, as start refuses it" 0 \
+  "$(compose_as bea@example.org 'Z0*' -H "Origin: $B" | has -F 'reaches no page and no block of this site'; echo $?)"
+expect "an address the line cannot carry safely is refused, in words" 0 \
+  "$(compose_as 'be$(id)a@example.org' A01 -H "Origin: $B" | has -F "$(say_en settings.compose.error.characters)"; echo $?)"
+SETTINGS_HOSTILE=$(compose_as '"><b>x' '"><b>y' -H "Origin: $B")
+expect "a hostile input is refused in words" 0 "$(echo "$SETTINGS_HOSTILE" | has -F "$(say_en settings.compose.error.characters)"; echo $?)"
+expect "and shown back escaped, never as markup" "1 0" \
+  "$(echo "$SETTINGS_HOSTILE" | grep -c 'value="&quot;&gt;&lt;b&gt;x"') $(echo "$SETTINGS_HOSTILE" | grep -c '"><b>')"
+expect "and still nothing was written" "$EVENTS_BEFORE" "$(t_owner $B/api/events | cksum)"
+
 # What an agent keeps (docs/ROLES.md, section 4): moving an approved request through its own states.
 expect "(the owner approves the request)"        201 "$(t_state t_owner)"
 T_STATE=applying T_STATE_TEXT='picking it up'

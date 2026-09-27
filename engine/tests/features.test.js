@@ -436,6 +436,30 @@ const ALLOWED = [
     text: 'features: { comments: project.features.comments, pageRequests: project.features.pageRequests, bugCategory: project.features.bugCategory },',
     why: '/api/me telling the PANEL which of its own controls to draw (docs/ROLES.md, "The front ' +
       'end obeys the server") — never peopleScreen or graph, which the panel does not render' },
+  { file: 'engine/api/server.ts', text: 'canManagePeople: peopleScreenOn() && managesPeople(viewer),',
+    why: 'serveSettings\'s nav prop (#36), the same text as serveHome\'s above and the same question: ' +
+      'whether to draw the People link, never whether the routes answer. Two entries, since each ' +
+      'excuses one line' },
+  { file: 'engine/api/server.ts',
+    text: 'features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,',
+    why: 'serveSettings (#36) handing the owner\'s read-only screen the values to SHOW — it renders ' +
+      'them as text, and decides nothing from them' },
+  { file: 'engine/api/settings-page.ts', text: 'features: Record<string, boolean>;',
+    why: 'the settings screen\'s data type: the toggles it displays' },
+  { file: 'engine/api/settings-page.ts', text: 'namedInFile: { features: string[]; peopleShow: boolean };',
+    why: 'the same type: which toggles the file names, so the screen can say where each value comes from' },
+  { file: 'engine/api/settings-page.ts',
+    text: 'const featureRows = Object.entries(data.features).map(([key, on]) => `<tr><td>${code(`features.${key}`)}</td>`',
+    why: 'one table row per toggle, its name and value as text — display, never a condition on what renders' },
+  { file: 'engine/api/settings-page.ts',
+    text: "+ `<td>${code(String(on))}</td><td>${data.namedInFile.features.includes(key) ? code('holdrim.json') : t('settings.project.default')}</td></tr>`)",
+    why: 'the same row\'s "comes from" cell: which of two words to print, never whether anything runs' },
+  { file: 'engine/api/settings-page.ts',
+    text: 'const snippet = JSON.stringify({ features: data.features, people: { show: data.peopleShow } }, null, 2);',
+    why: 'the holdrim.json snippet the owner commits to change a value — text on the screen' },
+  { file: 'engine/core/config.js', text: 'features: file.features === undefined ? [] : Object.keys(file.features),',
+    why: 'namedInFile: which toggles the file itself names, for the settings screen to say where a ' +
+      'value comes from — after readFeatures has refused anything unknown' },
   { file: 'engine/cli/graph.ts',
     text: 'console.error(\'graph is turned off: this project\\\'s holdrim.json sets "features": { "graph": false }\');',
     why: 'the refusal MESSAGE quoting the key a project would set — text for a person to read, not ' +
