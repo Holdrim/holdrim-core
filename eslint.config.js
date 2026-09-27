@@ -34,6 +34,9 @@ export default [
       globals: {
         process: 'readonly', console: 'readonly', crypto: 'readonly', fetch: 'readonly',
         URL: 'readonly', TextEncoder: 'readonly', Buffer: 'readonly', setTimeout: 'readonly',
+        // A `fetch` that must not hang forever needs a signal that fires on its own
+        // (`test-browser.js`'s port probe, waiting on a socket that is bound but never answers).
+        AbortSignal: 'readonly',
       },
     },
   },

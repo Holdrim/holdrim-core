@@ -794,6 +794,10 @@ async function recordEvent(
       // triager refused only because the request is their own is told that, not that they may not
       // triage at all.
       if (!mayMove(roles, who, request, target, { agentStates: cycle.agentStates, localMode: Boolean(iap?.localMode) })) {
+        // `isOwnRequest` is implied today: `mayTriage` refuses a triager on somebody else's request
+        // only where they may not triage, so `can` alone would pick the same sentence, and no test
+        // can tell the conjunct from its absence. It stays so that "it is yours" is only ever said
+        // about the asker's own request, whatever `mayTriage` comes to allow.
         const ownOnly = isOwnRequest(who, request) && roles.can('triage', who, whereOf(request));
         return { status: 403, body: { error: say(ownOnly ? 'api.triage.notOwn' : 'api.triage.ownerOnly') } };
       }

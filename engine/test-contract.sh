@@ -141,7 +141,18 @@ WORK=$(mktemp -d)
 # EADDRINUSE, the old one keeps answering, and the whole suite ends up testing the previous code —
 # enough to make a fix that is actually correct look broken, and get it undone. Better not to run
 # than to run while lying.
-if curl -s -o /dev/null --max-time 2 $B/api/health; then
+# Three outcomes, not two: curl's exit 28 is a timeout, a port bound by something that never answers.
+# Read as "free", the server started there dies with EADDRINUSE and the run fails later, somewhere
+# that names neither the port nor the reason.
+curl -s -o /dev/null --max-time 2 $B/api/health
+PROBE=$?
+if [ "$PROBE" -eq 28 ]; then
+  echo "port $PORT is bound but never answered its health check — no server can start there."
+  { ss -ltnp 2>/dev/null | grep ":$PORT " || lsof -nP -iTCP:"$PORT" 2>/dev/null; } || true
+  echo "  free the port (or run with PORT=another) and try again."
+  exit 1
+fi
+if [ "$PROBE" -eq 0 ]; then
   echo "port $PORT is already in use — the test would run against ANOTHER server."
   # Whichever of the three is installed. `ss` is Linux, `lsof` is macOS and most Linuxes, and
   # Windows has neither — so this is a hint, never the check itself.
@@ -2528,6 +2539,21 @@ expect "and both still wait at triage"           "open open" "$(request_state_of
 OTHERS_A02=$(new_request $REVIEWER '{"type":"request","page":"A02","block":"A02.1.1","fingerprint":"x","text":"somebody else asks on A02"}')
 require_id "$OTHERS_A02" OTHERS_A02
 expect "somebody else's request on the same page is theirs to decide → 201" 201 "$(post $GRANTEE "$(triage_json A02 $OTHERS_A02)")"
+# The refusal above picks its sentence from two conjuncts (server.ts, `recordEvent`'s `ownOnly`):
+# the request is the asker's own, AND they hold `triage` at the request's own place. Both were
+# untested before this: a member with none of it at all, and a scoped grantee outside their scope,
+# each have to read as "the owner decides this", not "it is yours, not to decide" — the sentence
+# `notOwn` promises only to someone who really could triage somewhere.
+NOOWN_REQUEST=$(new_request $REVIEWER '{"type":"request","page":"A01","block":"A01.1.1","fingerprint":"x","text":"a member with no triage anywhere"}')
+require_id "$NOOWN_REQUEST" NOOWN_REQUEST
+expect "a member with no triage anywhere, deciding their own request → 403" 403 "$(post $REVIEWER "$(triage_json A01 $NOOWN_REQUEST)")"
+expect "is told only the owner decides, not that it is theirs not to" "$(r_say api.triage.ownerOnly)" \
+  "$(r_body $REVIEWER events "$(triage_json A01 $NOOWN_REQUEST)" | jfield error)"
+OUTSIDE_SCOPE_REQUEST=$(new_request $REVIEWER '{"type":"request","page":"A01","block":"A01.1.1","fingerprint":"x","text":"somebody else asks on A01, outside the grant"}')
+require_id "$OUTSIDE_SCOPE_REQUEST" OUTSIDE_SCOPE_REQUEST
+expect "the A02 grantee cannot decide somebody else's request on A01 → 403" 403 "$(post $GRANTEE "$(triage_json A01 $OUTSIDE_SCOPE_REQUEST)")"
+expect "the same sentence: it is not theirs to decide either way"           "$(r_say api.triage.ownerOnly)" \
+  "$(r_body $GRANTEE events "$(triage_json A01 $OUTSIDE_SCOPE_REQUEST)" | jfield error)"
 WIDE=wide@example.org
 expect "(the owner grants triage everywhere to somebody else)" 201 "$(r_code $OWNER grants "$(grant_json $WIDE 'legal review')")"
 WIDE_REQUEST=$(new_request $WIDE '{"type":"request","page":"A01","block":"A01.1.2","fingerprint":"x","text":"from a grant with no scope"}')
