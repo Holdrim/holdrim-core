@@ -20,6 +20,7 @@
   "api.credentials.invalid": "el correo o la contraseña no coinciden",
   "api.crossSite": "Este formulario solo acepta envíos desde su propia página.",
   "api.event.notFound": "evento no encontrado",
+  "api.event.pageMismatch": "el bloque {block} pertenece a la página {expected}, no a {page}",
   "api.event.unknownType": "tipo de evento desconocido",
   "api.feature.disabled": "este proyecto tiene {feature} desactivado",
   "api.internal": "Algo salió mal en el servidor. Indique el código {id} a quien lo administra.",
