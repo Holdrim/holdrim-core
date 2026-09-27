@@ -13,7 +13,7 @@ import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
 import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
-import { refuseLink } from './fs.ts';
+import { refuseLink, refuseUnreachableFolder } from './fs.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -63,7 +63,17 @@ export function loadRegistry(root: string): Registry {
   // unmounted shared volume, say, which `existsSync` reads as "nothing here", the same as a registry
   // simply never written yet) is refused too, rather than silently read as an empty registry.
   refuseLink(p, `load ${p}`);
-  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
+  if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'));
+  // NOTHING under this exact name — but that reads as "never written" only when nothing further up
+  // stops it from ever being written, not when an ANCESTOR is a dangling symlink (`docs ->
+  // /mnt/shared`, unmounted): that gives the exact same ENOENT `existsSync` just read above, so left
+  // unchecked here, `sync` would start from an empty registry and stamp seals onto pages nobody can
+  // then account for (holdrim#155). A folder simply never created yet is a different thing —
+  // `refuseUnreachableFolder` walks from `root` down and tells the two apart component by component,
+  // rather than asking one `statSync` that fails ENOENT on both alike (round 1 of this fix did, and
+  // wrongly refused a project that had simply never run sync).
+  refuseUnreachableFolder(root, p, `load ${p}`);
+  return {};
 }
 
 /**
