@@ -101,6 +101,35 @@ Locks, tamper detection, the stores, and who holds authority.
   a token the wrong one. Lives in: `engine/api/server.ts` and the address scan; the scan matches
   spellings, not meaning, so a new spelling still needs a reviewer.
 
+- **A rule that a path stays inside the project or the site is checked on the path's real
+  location, links followed, where the file is opened; a check on the path as written is only the
+  first half.** Taught by #165, whose first round checked `content.registry` only as written, and
+  carried by #167 to the configured folders and by #168 ("Serve, scan and embed only files whose
+  real location is inside the site") to each file the engine reads from the content. Lives in:
+  `insideRoot` (`engine/core/paths.js`) and `realContainment` (`engine/cli/fs.ts`), now the one
+  rule for a real location: `refuseEscapedFolder`, `refuseServedStore`, `serveStatic` and
+  `loadLogo` all ask it. `serveStatic`'s own lexical checks answer the request URL alone, before
+  it.
+- **When a review finds a gap in one caller of a check, the next question is where else the same
+  shape lives, before the fix is called done.** Taught by #168: the gap #165 closed for the
+  registry was the one the served site, the page scan and the theme logo each carried, and one
+  helper closed all three. #170 asked the same question of what the server writes, and now refuses
+  to start when a store would be served by the site. Lives in: not yet. `review-locks` is not told
+  to look for the other callers of a guard it finds weak.
+- **A capped table never evicts a row that still protects someone before a row that does not:
+  evicting oldest first lets anyone who can add rows push out the row they are after.** Taught by
+  #166: the sign-in failure table's ceiling evicts rows not yet counting towards a wait first, and
+  rows that do only when they alone exceed it. Lives in: `escalated`, in
+  `engine/api/identity-password.ts`, and each user store's prune, held by "a row still in its wait
+  outlasts a flood of newer rows over the ceiling" (`engine/tests/login-throttle.test.js`) and
+  "past the ceiling, escalated rows go last…" (`engine/tests/users-conformance.test.js`).
+- **A guard that would have to re-implement a language to judge a construct refuses the construct
+  outright, and whoever needs it changes the guard on purpose.** Taught by #157: a check that read
+  `.dockerignore`'s `!` lines for the names of the test-only paths stayed green for a glob that
+  named none of them and still re-included one. Every `!` line is now refused. Lives in:
+  `engine/tests/workflows.test.js`, "the image ships no test-only paths"; not yet as a general rule
+  in `review-locks`.
+
 ## Proof
 
 - **A test whose expected value is computed by the function under test proves nothing.** Taught by
@@ -131,6 +160,27 @@ Locks, tamper detection, the stores, and who holds authority.
 - **A lens report of `[]` without what it checked is weak evidence, and is asked again.** Taught by
   #129's correctness lens. Lives in: the lens contract, which asks for "clean with what you checked".
 
+- **A test that depends on file permissions is proved as a plain user: root passes every access
+  check, and CI runs as a plain user.** Taught by #156: a test that saved over a 0440 registry
+  passed locally as root, and in CI the save was refused with EACCES, exactly as the code intends.
+  Lives in: the comment on that test in `engine/tests/atomic-registry.test.js`; not yet in
+  `review-proof`.
+- **A refusal is proved through the entry point that meets the input (a boot of the real server,
+  the CLI command), not only through the function beneath it.** Taught by #165, whose round-1 proof
+  lens found `content.registry`'s refusal proved only through `readConfig` with a mocked reader.
+  Lives in: the boot-refusal cases in `engine/test-contract.sh` for `content.registry` (#165),
+  `content.folders` (#167) and a store inside the site (#170); not yet as a rule in `review-proof`.
+- **A comment that says a case is already handled elsewhere is a claim, and it gets a test of that
+  case before anyone relies on it.** Taught by #165: the first commit's comment said a symlink
+  inside the root that points elsewhere was "already refused" where the registry is loaded and
+  saved, and a working symlinked folder passed every check it named. Lives in: not yet. The three
+  questions call a comment that lies amateurism; no lens is told to test a comment's claim of
+  coverage.
+- **A test that races a clock against a wait flakes on a slow runner, so it asserts the state the
+  rule protects instead.** Taught by #166: a test expected a 5 s wait to still hold after eighty
+  wrong passwords, CI's floor runner took 6.4 s to get there, and the test now reads the row itself.
+  Lives in: that test, in `engine/tests/login-throttle.test.js`; not yet in `review-proof`.
+
 ## Correctness
 
 - **A read-consistency fix on Firestore stays inside the 270-second transaction limit: read
@@ -148,6 +198,11 @@ Locks, tamper detection, the stores, and who holds authority.
 - **SQLite's largest rowid does not fit a JavaScript integer and throws `RangeError`, so a rowid a
   hostile file can set is read as REAL.** Taught by round 2 of #109. Lives in: not on main. The
   open work on #109 enforces it.
+- **A gap between a check and the use of a path is named in the pull request, with who could win
+  it and whether they are inside the trust boundary; a rewrite onto file descriptors that the
+  platform cannot do cleanly is not chased.** Taught by #165, and said the same way in #156, #162
+  and #168: only someone who can already write to the server's disk can swap a folder between the
+  check and the use, and that person is outside what these guards defend. Lives in: not yet.
 
 ## Process
 
@@ -197,6 +252,26 @@ The crew, and the review.
   #113. Lives in: not yet.
 - **When an issue names a design document, the document wins, and the orchestrator rescopes on the
   record.** Taught by #29. Lives in: not yet.
+
+- **A hook that refuses is an answer: fix what it refused, and never switch the hook off to get
+  past it.** Taught by #166, where a merge of main was committed with `core.hooksPath` pointed at
+  `/dev/null`; the proofs ran afterwards and the setting was restored, but a guard switched off for
+  one commit guards nothing in it. Lives in: not yet. `.githooks/pre-commit` still offers a person
+  `--no-verify` once, with the reason in the commit, and no agent file says an agent never takes it.
+- **Merging main into a pull request re-runs its contract test, because two branches that each add
+  a refusal at boot can make each other's expectations stale.** Taught by #170: once it merged, an
+  open pull request's contract case for a users store inside the site stopped on #170's refusal
+  first, and its expectation had to change. Lives in: `AGENTS.md` rule 3, "before every commit",
+  which does not exempt a merge; not yet said there in words.
+- **A lens's CRITICAL is a claim to check against main and the threat model before anyone acts on
+  it.** Taught by #166: a lens called a missing migration CRITICAL for `sign_in_failures`, a table
+  the same unmerged pull request introduced. Lives in: `.claude/skills/full-review/SKILL.md`, step
+  4, for checking the file at the line; not yet for checking whether main already has what the
+  finding assumes, or whether the actor it needs is inside the threat model.
+- **Every pull request answers the three questions in its body.** Taught by the fourteen pull
+  requests merged between #145 and this pass, #154 to #171: none has the section, though the
+  template asks for it, so none recorded its cost either. Lives in: not yet.
+  `.github/PULL_REQUEST_TEMPLATE.md` asks, and nothing refuses a body without the answers.
 
 ## Cost
 
