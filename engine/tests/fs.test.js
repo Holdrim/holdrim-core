@@ -300,3 +300,46 @@ test('sheetFiles accepts a configured folder that is a working symlink resolving
   assert.deepEqual(sheetFiles(tmp), [join(tmp, 'mnt', 'X01.html')],
     'a working symlinked folder is a legitimate way to mount content, exactly like the registry\'s own');
 });
+
+/**
+ * Round 1 of #164's review: a configured folder that was never created at all must still read as
+ * empty, exactly as it did before this issue — the ordinary "nobody has run sync yet" case, not an
+ * error. Nothing in the fixture above pins this: every one of them `mkdirSync`s its folder first,
+ * so a mutant that made `refuseUnreachableFolder`'s own ENOENT walk-up throw unconditionally passed
+ * every existing #164 test and was only caught by this one.
+ */
+test('sheetFiles reads a configured folder as empty when it was simply never created', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['pages'], registry: 'r.json' } }));
+  assert.deepEqual(sheetFiles(tmp), [], 'no `pages` folder at all — a project that has never run sync');
+});
+
+/**
+ * Round 1 of #164's review, finding 1: `refuseEscapedFolder`'s own walk to the "deepest existing
+ * ancestor" stops AT a dangling symlink — its `lstatSync` succeeds, the link itself is there — and
+ * the `realpathSync` that follows then throws the filesystem's raw `ENOENT`, not a message naming
+ * what happened. `refuseUnreachableFolder` runs first now, in the order `loadRegistry` already
+ * uses, and tells the two apart. `docs/sheets` is the ancestor-dangling shape (`nestedProject`-style,
+ * holdrim#155); the configured folder itself being the dangling link is the shape `escapingPagesProject`
+ * above already builds for the escape case, so this reuses that name for a dangling target instead.
+ */
+test('sheetFiles refuses a configured folder that is ITSELF a dangling symlink, "cannot be reached"', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['mnt'], registry: 'r.json' } }));
+  symlinkSync(join(tmp, 'never-mounted'), join(tmp, 'mnt'));
+
+  assert.throws(() => sheetFiles(tmp), /its folder, .*mnt, cannot be reached/);
+});
+
+test('sheetFiles refuses a configured folder whose ANCESTOR is a dangling symlink, "cannot be reached"', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['docs/sheets'], registry: 'r.json' } }));
+  // `docs` itself is the dangling link; `sheets` is never reached — the same shape holdrim#155
+  // already pins for the registry, one level up from a configured folder instead of a file.
+  symlinkSync(join(tmp, 'never-mounted'), join(tmp, 'docs'));
+
+  assert.throws(() => sheetFiles(tmp), /its folder, .*docs, cannot be reached/);
+});

@@ -6,7 +6,7 @@ import { rolesOf, pageOfBlock } from '../core/roles.js';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { kindOf, whatIsMissing } from '../core/kinds.js';
-import { refuseEscapedFolder } from './fs.ts';
+import { refuseEscapedFolder, refuseUnreachableFolder } from './fs.ts';
 
 /**
  * Reading a repository's pages: which blocks exist, the text of each one, and the fingerprint.
@@ -145,6 +145,28 @@ export function sheetFiles(root: string): string[] {
     // one check that sees a link's real target. Called before the `try` below, on purpose: a folder
     // that escapes must fail loudly, not be swallowed by the "never created yet" catch meant for an
     // ordinary missing folder.
+    //
+    // `refuseUnreachableFolder` runs FIRST, in the same order `loadRegistry` already uses, because
+    // `refuseEscapedFolder` is safe only once a DANGLING chain is ruled out (its own comment says
+    // so): `lstatSync` on a dangling symlink still succeeds — the link itself is there — so the walk
+    // to the "deepest existing ancestor" would stop right AT it, and the `realpathSync` that follows
+    // would then throw the filesystem's own raw `ENOENT`, not a message naming what happened. Passing
+    // `join(folder, "…probe")`, never `folder` itself: `refuseUnreachableFolder` walks the ancestors of
+    // `dirname(path)`, which is how `loadRegistry` already reaches the registry's own immediate
+    // folder — the file named there always sits ONE level inside whatever is being checked. `folder`
+    // has no such file; appending a name nothing ever reads (and `readdirSync` below never lists,
+    // since it is not real) makes `dirname` land on `folder` itself, so the folder's own last
+    // segment is walked too, not only what sits above it — the exact gap that let `content.folders:
+    // ["mnt"]`, `mnt` itself a dangling symlink, straight through to `refuseEscapedFolder`'s crash.
+    // A folder that was simply never created stays silent either way: the walk's own `ENOENT` on the
+    // first missing component returns before any of this, exactly as it did before this call existed.
+    //
+    // This is a deliberate behaviour change, not a new bug: a configured folder unreachable through a
+    // dangling symlink used to read as an empty folder — no pages, no error — and now refuses to
+    // start the read at all. holdrim#155 made the identical call for the registry: an unmounted
+    // shared volume must not silently read as "nothing here", because the two are indistinguishable
+    // to whoever is looking at an empty page list and has no idea their content folder never mounted.
+    refuseUnreachableFolder(root, join(folder, '.holdrim-reachability-probe'), `scan pages in ${folder}`);
     refuseEscapedFolder(root, folder, `scan pages in ${folder}`);
     try {
       // By number, as a person counts: a plain sort puts A10 before A9, and so would the home,

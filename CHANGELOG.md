@@ -441,8 +441,16 @@ who ran the engine from `main` before it.
   place a configured folder is actually opened, now runs `refuseEscapedFolder` (engine/cli/fs.ts,
   holdrim#161) on each folder first, resolving its real location and the project's real root with
   `fs.realpathSync` before ever reading it. A working symlinked folder that resolves INSIDE the
-  project keeps working, at any depth, exactly as before. Nothing to change for a project whose
-  `content.folders` already names ordinary paths inside its own folder. **Left open, and not this
+  project keeps working, at any depth, exactly as before. **A behaviour change found in review:** a
+  configured folder that is unreachable through a DANGLING symlink — the folder itself, or an
+  ancestor of it — now refuses to start the read, naming the folder that "cannot be reached", the
+  same message and the same `refuseUnreachableFolder` (engine/cli/fs.ts, holdrim#155) the registry
+  already uses; before, it silently read as an empty folder — no pages, no error. holdrim#155 made
+  the identical call for the registry: an unmounted shared volume must not read as "nothing here",
+  because the two look the same to whoever is staring at an empty page list. A folder that was
+  simply never created (no `sync` has run yet) is unaffected and still reads as empty. Nothing to
+  change for a project whose `content.folders` already names ordinary paths inside its own folder.
+  **Left open, and not this
   fix's to close:** `sheetFiles` never recurses into a configured folder's own subfolders, so a
   symlinked subfolder or page FILE inside one is not walked into by this check either — see the pull
   request for the recommendation.
