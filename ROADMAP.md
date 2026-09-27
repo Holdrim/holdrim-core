@@ -23,35 +23,40 @@ flowchart TB
   A["<b>A · Foundations</b> #13<br/>▸ Firestore tests outside CI<br/>▸ agents configured, no prompts<br/>▸ public surface locked in CI<br/>▸ one owner, CLI and server agree"]
   B["<b>B · People, roles, privacy</b> #14<br/>▸ author by id, never e-mail<br/>▸ roles as sets of capabilities<br/>▸ grants per page or per item<br/>▸ only the owner grants lock<br/>▸ settings screen, toggles<br/>▸ remove a person, trail kept"]
   C["<b>C · See the whole</b> #15<br/>▸ the documentation graph<br/>▸ impact radius, filters<br/>▸ graph export · Mermaid"]
-  D["<b>D · Create</b> #16<br/>▸ voice (the browser's own)<br/>▸ sketch canvas, as text<br/>▸ sketch → screen, by your agent<br/>▸ Figma links"]
-  E["<b>E · Ready for a company</b> #17<br/>▸ events signed by the server<br/>▸ OIDC · two-step sign-in<br/>▸ hardening · audit export"]
+  E["<b>E · Ready for a company</b> #17<br/>▸ events signed by the server<br/>▸ hardening · audit export"]
   G["<b>G · Acceptance &amp; launch</b> #18<br/>▸ reference project: expense reimbursement #60<br/>▸ site in pt-BR and es<br/>▸ the owner signs off<br/>🚀 0.1.0 tagged"]
-  Later["<b>After 0.1.0</b><br/>▸ first case study: an internal pilot #61<br/>❌ protocol between systems<br/>❌ plugins<br/>❌ many projects per instance"]
+  Next["<b>0.2</b><br/>▸ D · Create #16<br/>▸ OIDC · two-step sign-in<br/>▸ lock grants from the settings screen"]
+  Later["<b>After 0.2</b><br/>▸ first case study: an internal pilot #61<br/>❌ protocol between systems<br/>❌ plugins<br/>❌ many projects per instance"]
 
   A --> B
   B --> C
-  B --> D
   B --> E
   C --> G
-  D --> G
   E --> G
-  G -.-> Later
+  G -.-> Next
+  Next -.-> Later
 
   classDef later stroke-dasharray: 6 4,opacity:0.7
-  class Later later
+  class Next,Later later
 ```
 
 An arrow means "built after". **B** goes first because it changes the event format: nothing should
-write new kinds of event before that. **C**, **D** and **E** only read or extend what B leaves, in any
+write new kinds of event before that. **C** and **E** only read or extend what B leaves, in either
 order. Nothing is released before **G**. The letter **F** is the platform, after 0.1.0.
+
+**D** and part of **E** wait for 0.2. An adopter needs the method whole — approvals, roles, the
+graph, a trail that can be exported — before they need to create by voice or sketch, or to sign in
+through OIDC; the identity proxy already covers a company's single sign-on. Cutting them brings the
+first version worth pinning weeks closer, and nothing in 0.1 has to be undone to add them. Events
+signed by the server stay in 0.1.0: they change the event format, and a format changed after the
+first release is one every adopter's history already holds (`docs/PRIVACY.md`).
 
 | Phase | What it delivers | Design |
 |---|---|---|
 | **A · Foundations** | the Firestore tests outside CI; the agents that build Holdrim itself working unattended; the public surface locked in CI; one owner, the same for the CLI and the server | — |
 | **B · People, roles, privacy** | a person named by an id, never an e-mail; roles as sets of capabilities, granted per page or per item; only the owner grants `lock`; a lock written when it is given; a settings screen; feature toggles; removing a person without losing the trail | [`docs/ROLES.md`](docs/ROLES.md), [`docs/PRIVACY.md`](docs/PRIVACY.md) |
 | **C · See the whole** | the documentation as a graph, coloured by the traffic light; the impact of touching a block; the graph exported from the CLI; proposed dependencies; diagrams drawn | [`docs/IMPACT.md`](docs/IMPACT.md) |
-| **D · Create** | dictating a request by voice (the browser's own recognition); a sketch canvas saved as text, under the traffic light; a sketch turned into a screen by the person's own agent; design links | [`docs/VISION.md`](docs/VISION.md) |
-| **E · Ready for a company** | events signed by the server; OIDC and two-step sign-in; hardening; an audit export | [`docs/PRIVACY.md`](docs/PRIVACY.md) §3 |
+| **E · Ready for a company** | events signed by the server; hardening; an audit export | [`docs/PRIVACY.md`](docs/PRIVACY.md) §3 |
 | **G · Acceptance & launch** | a reference project anyone can copy (expense reimbursement); the site in Portuguese and Spanish; the owner's acceptance; the release | — |
 
 ### Already built
@@ -83,7 +88,17 @@ order. Nothing is released before **G**. The letter **F** is the platform, after
   code — written as a Holdrim project (`site/`), reviewed in the engine and published as plain pages
   with `holdrim export`.
 
-## After 0.1.0
+## Next — 0.2
+
+What was planned for 0.1.0 and moved, so that 0.1.0 ships sooner. The issues stay open under their
+phase.
+
+| Phase | What it delivers | Design |
+|---|---|---|
+| **D · Create** #16 | attachments on a request; dictating a request by voice (the browser's own recognition); a sketch canvas saved as text, under the traffic light; a sketch turned into a screen by the person's own agent; design links | [`docs/VISION.md`](docs/VISION.md) |
+| **E · Ready for a company** #17 | OIDC (#51) and two-step sign-in (#52); lock grants from the settings screen (#54) | [`docs/PRIVACY.md`](docs/PRIVACY.md) §3, [`docs/ROLES.md`](docs/ROLES.md) §3 |
+
+## After 0.2
 
 - **The first case study**: an internal system at an adopting company, documented in a pinned
   0.1.0, accepted item by item, and written up with numbers — anonymously.
