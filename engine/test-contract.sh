@@ -2472,4 +2472,53 @@ expect "and the runner recorded it, as agent@local" "applying agent@local" \
   "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type==='request_state'&&x.data.request===process.argv[1]).pop();console.log(e?e.data.state+' '+e.author:'none')})" "$L_REQUEST")"
 kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
 
+echo "the site serves only files whose real location is inside it:"
+# The prefix check (`encoded traversal → 403`, above) reads the path as a STRING, and the reads after
+# it follow links, so this proves the second check, on the REAL location, against a real server.
+# Everything is built in this run's own folder: a copy of the site, a harmless file the test writes
+# beside it (outside the site), and three links — to that file, to a page inside, and to nothing.
+# The server is booted through a link to the site, too — how a mounted site can arrive — so a check
+# that compared a real location with the root as SPELLED would refuse every page here, the plain one
+# included.
+# `MSYS=winsymlinks:nativestrict`: Git Bash's `ln -s` otherwise COPIES the file where it cannot make
+# a link, and a copy inside the site is served 200 for a reason that proves nothing; strict, it fails
+# instead, and the fixture check below says why the rest of this section cannot mean anything.
+REAL_SITE="$WORK/real-site"
+cp -r "$SITE" "$REAL_SITE"
+echo 'written by the contract test, outside the site' >"$WORK/beside-the-site.txt"
+MSYS=winsymlinks:nativestrict ln -s "$WORK/beside-the-site.txt" "$REAL_SITE/pages/leads-out.txt"
+MSYS=winsymlinks:nativestrict ln -s A01.html "$REAL_SITE/pages/leads-in.html"
+MSYS=winsymlinks:nativestrict ln -s "$WORK/never-written.txt" "$REAL_SITE/pages/leads-nowhere.txt"
+MSYS=winsymlinks:nativestrict ln -s "$REAL_SITE" "$WORK/mounted-site"
+expect "the fixture holds real links, not copies" 0 \
+  "$([ -L "$REAL_SITE/pages/leads-out.txt" ] && [ -L "$REAL_SITE/pages/leads-in.html" ] \
+     && [ -L "$REAL_SITE/pages/leads-nowhere.txt" ] && [ -L "$WORK/mounted-site" ]; echo $?)"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_SITE="$WORK/mounted-site" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/mounted-site.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+site_get() { curl -s -H "X-Dev-Email: $REVIEWER" "$@"; }
+site_code() { site_get -o /dev/null -w '%{http_code}' "$B$1"; }
+expect "a plain page serves, on a site mounted through a link → 200"  200 "$(site_code /pages/A01.html)"
+expect "a link that stays inside the site serves → 200"                 200 "$(site_code /pages/leads-in.html)"
+expect "and serves the page it leads to"                                0 "$(site_get $B/pages/leads-in.html | has 'What Holdrim demands of a page'; echo $?)"
+# A link whose real location leaves the site is indistinguishable from a file that is not there:
+# the same status, headers and body as a path nothing answers to, byte for byte. Any difference
+# between the two would itself say something about what lies outside the site. `Date` is the one
+# header left out, as it moves with the clock, not with the file. Each comparison first checks the
+# missing path's own answer is really there, so two empty answers cannot agree their way to a pass.
+site_answer() { site_get -D - -o "$2" "$B$1" | tr -d '\r' | grep -iv '^date:' >"$2.head"; }
+site_answer /pages/leads-out.txt "$WORK/answer-leads-out"
+site_answer /pages/nothing-here.txt "$WORK/answer-missing"
+expect "a link whose real location is outside the site → 404"           404 "$(site_code /pages/leads-out.txt)"
+expect "with the status and headers of a missing file" 0 \
+  "$(has '^HTTP/1.1 404' "$WORK/answer-missing.head" && cmp -s "$WORK/answer-leads-out.head" "$WORK/answer-missing.head"; echo $?)"
+expect "and its body, byte for byte" 0 \
+  "$([ -s "$WORK/answer-missing" ] && cmp -s "$WORK/answer-leads-out" "$WORK/answer-missing"; echo $?)"
+expect "and nothing of the file it leads to is sent"                    1 "$(site_get $B/pages/leads-out.txt | has 'written by the contract test'; echo $?)"
+expect "a missing file is still → 404"                                  404 "$(site_code /pages/nothing-here.html)"
+# A link to nothing has no real location to judge: it is a missing file, answered as one.
+expect "and so is a link that leads nowhere → 404"                      404 "$(site_code /pages/leads-nowhere.txt)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

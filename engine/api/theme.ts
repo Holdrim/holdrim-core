@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { normalize, join, extname } from 'node:path';
 import { insideRoot } from '../core/paths.js';
+import { realContainment } from '../cli/fs.ts';
 
 /**
  * The project's theme: how a project dresses the engine, in the Keycloak sense.
@@ -113,7 +115,16 @@ export interface Theme {
 /** Injected so the theme can be tested without a disk. */
 export interface ThemeIO {
   readBinary(path: string): Uint8Array;
+  /** Where `path` really is, links followed, and whether that is inside `root`'s real location. */
+  realContainment(root: string, path: string): { inside: boolean; realTarget: string };
 }
+
+/**
+ * The real disk, as the server reads the theme at boot. Exported so a test of a logo that is a link
+ * runs through exactly what the server passes, never a copy of it that could agree with the test
+ * and disagree with the server.
+ */
+export const DISK_THEME_IO: ThemeIO = { readBinary: (p) => readFileSync(p), realContainment };
 
 /** True for a value this engine is willing to write into a stylesheet. */
 export function isBrandColor(value: unknown): value is string {
@@ -192,8 +203,9 @@ const MAX_LOGO_BYTES = 64 * 1024;
  *      would be redirected to the sign-in page and render as a broken image ON the sign-in page.
  *      Opening a route for it would mean punching a second hole in the authentication wall to
  *      serve decoration.
- *   2. The path comes from a file we did not write. Resolved here, `../../etc/passwd` is caught;
- *      handed to the browser as a URL it would just be another request the server has to defend.
+ *   2. The path comes from a file we did not write. Resolved here, a path that walks out of the
+ *      project is caught, and so is one whose real location is outside it; handed to the browser as
+ *      a URL it would just be another request the server has to defend.
  *
  * @param warnings  appended to, never thrown: a bad logo must not stop anyone from signing in.
  */
@@ -210,7 +222,30 @@ function loadLogo(root: string, configured: string, io: ThemeIO, warnings: strin
     return null;
   }
 
-  const type = LOGO_TYPES[extname(target).toLowerCase()];
+  // The theme embeds only a logo whose REAL location is inside the project. The check above reads
+  // the path as written, and the read below follows links, so without this the bytes put on the
+  // sign-in page — the one page served without a session — would be decided by where a link leads
+  // rather than by where the project is. The same helper the site's files and the page scan use
+  // (engine/cli/fs.ts), and the same answer as a path that walks out. It throws for a link to
+  // nothing, which has no real location to judge: that is a logo that cannot be read, and is
+  // answered as one — a warning, never a throw, as everything else here.
+  let real: string;
+  try {
+    const where = io.realContainment(base, target);
+    if (!where.inside) {
+      warnings.push(`theme logo "${configured}" resolves outside the project; ignored`);
+      return null;
+    }
+    real = where.realTarget;
+  } catch {
+    warnings.push(`theme logo "${configured}" could not be read; the name will be shown instead`);
+    return null;
+  }
+
+  // Typed by the file actually read, not by the name it was reached through: the extension decides
+  // the `content-type` (see LOGO_TYPES), and a link's own name says nothing about the bytes at its
+  // far end — `logo.svg` can lead to a file of any kind.
+  const type = LOGO_TYPES[extname(real).toLowerCase()];
   if (!type) {
     warnings.push(`theme logo "${configured}" is not one of ${Object.keys(LOGO_TYPES).join(', ')}; ignored`);
     return null;
@@ -218,7 +253,8 @@ function loadLogo(root: string, configured: string, io: ThemeIO, warnings: strin
 
   let bytes: Uint8Array;
   try {
-    bytes = io.readBinary(target);
+    // The real path, the one just judged, rather than the written one resolved all over again.
+    bytes = io.readBinary(real);
   } catch {
     warnings.push(`theme logo "${configured}" could not be read; the name will be shown instead`);
     return null;
