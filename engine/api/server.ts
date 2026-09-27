@@ -30,6 +30,7 @@ import { realContainment, refuseServedStore, realStoreFolder, insideStoreFolder 
 import { loadTheme, DISK_THEME_IO } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
+import { provisionFirstAccess, retireFirstAccessFile } from './first-access.ts';
 import { IapIdentity } from './identity-iap.ts';
 import {
   EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, AS_AGENT_FIELD, ensureLockBaseline, isLocked, authorCouldTriage,
@@ -58,7 +59,8 @@ const projectRoot = process.env.HOLDRIM_SITE ?? join(import.meta.dirname, '..', 
 function refuseToStart(error: unknown): never {
   // ⚠️ English, hard-coded, and NOT through i18n. This prints before the server listens, so there
   // is no request, no session and nobody whose language we could have chosen — the same reason the
-  // first-access banner below stays English. See the comment at the top of engine/core/i18n.js.
+  // first-access banner (engine/api/first-access.ts) stays English. See the comment at the top of
+  // engine/core/i18n.js.
   console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
   process.exit(1);
 }
@@ -324,24 +326,22 @@ if (identityKind === 'password') {
   const ephemeralWarning = ephemeralUserStoreWarning(process.env.HOLDRIM_USERS);
   if (ephemeralWarning) log('WARNING', 'ephemeral_user_store', { warning: ephemeralWarning });
 
-  // First boot: creates the owner's access and shows the password ONCE. A fixed password like
-  // "admin" is an invitation, and an internal tool stays up for years with nobody looking.
+  // First boot: creates the owner's access, with its password in a file beside the store and never
+  // in the log (engine/api/first-access.ts says why a file, where, and in what order). A fixed
+  // password like "admin" is an invitation, and an internal tool stays up for years with nobody
+  // looking.
   //
   // The display name comes from configuration because the alternative is everyone's first account
   // being called "Owner" — and a review history where every approval is signed by a job title
   // instead of a person is a history that answers "who said this?" with "the owner did".
   //
-  // ⚠️ English, hard-coded, and NOT through i18n. This prints before anyone has a session, so
-  // there is no person and no chosen language yet — the same reason boot errors stay English. The
-  // comment at the top of engine/core/i18n.js is the long version.
-  const password = await byPassword.firstAccess(cfg.owner!, process.env.HOLDRIM_OWNER_NAME || 'Owner');
-  if (password) {
-    console.log('\n' + '='.repeat(72));
-    console.log('  FIRST ACCESS — write it down now, this password is not shown again:');
-    console.log(`     sign in with: ${cfg.owner}`);
-    console.log(`     password:     ${password}`);
-    console.log('  You will have to change it when you sign in.');
-    console.log('='.repeat(72) + '\n');
+  // A file that cannot be written, one already there, or one the site would serve refuses to start:
+  // with no file there is no password anybody holds, and the account is not created until there is.
+  try {
+    await provisionFirstAccess(byPassword, cfg.owner!, process.env.HOLDRIM_OWNER_NAME || 'Owner',
+      { site: cfg.site });
+  } catch (error) {
+    refuseToStart(error);
   }
 }
 
@@ -800,6 +800,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
       return json(res, 400, { error: i18n.t(languageOf(req), failure.key, failure.params) });
     }
     log('INFO', 'password_changed', { person: await idForLog(email) });
+    // The owner is the only person a first access is created for, so their change is the moment the
+    // first-access file stops holding anything that opens a door. Anyone else's change leaves it be.
+    if (roles.isOwner(who)) await retireFirstAccessFile();
     // Same reasoning as the reset and the disable routes: the credential already changed either way,
     // but a failed drop means every OTHER session for this account may still be alive — reported the
     // same way theirs is, by id and at ERROR, never swallowed into a plain 200 nobody reads twice.

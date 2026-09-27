@@ -6,8 +6,9 @@
 #   docker build -t holdrim .
 #   docker run -p 8080:8080 -v data:/data -e HOLDRIM_OWNER=you@example.org holdrim
 #
-# The first-access password appears ONCE in the log, and the first sign-in forces a change. There
-# is no admin/admin: an internal tool stays up for years.
+# The first-access password goes to /data/first-access-password, never to the log (the log says
+# where), and the first sign-in forces a change. There is no admin/admin: an internal tool stays up
+# for years.
 #
 # To point it at YOUR documentation, mount it and say where it is:
 #

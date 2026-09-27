@@ -24,12 +24,14 @@ export class PasswordIdentity {
   get users() { return this.#users; }
 
   /**
-   * Creates the first access, if nobody exists yet. The password is generated and returned to be
-   * shown ONCE, in the log of the first start.
+   * Creates the first access, if nobody exists yet, and returns its password — `password` when the
+   * caller already holds one, a generated one otherwise. The server passes one in: it is written to
+   * the first-access file before the account exists (`first-access.ts` says why), and never to the
+   * log.
    */
-  async firstAccess(email: string, name = 'Administration'): Promise<string | null> {
+  async firstAccess(email: string, name = 'Administration', password?: string): Promise<string | null> {
     if (!(await this.#users.isEmpty())) return null;
-    return this.#users.create(email, name);
+    return this.#users.create(email, name, password);
   }
 
   /**

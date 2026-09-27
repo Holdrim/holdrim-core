@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { chromium } from 'playwright-core';
 import { hashText, newSalt } from './api/texts.ts';
@@ -231,7 +231,7 @@ const server = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')
 // that response's nonce run — so a policy one directive too tight locks everybody out, and only a
 // real browser running the page's script can tell. `localhost`, not 127.0.0.1: the session cookie
 // is `Secure`, and that is the name Chrome treats as a secure origin over plain http.
-let firstAccess = '';
+const firstAccessFile = join(mkdtempSync(join(tmpdir(), 'holdrim-browser-first-')), 'first-access-password');
 // Its users store in a folder of its own, outside the site: the server refuses to start when a
 // store it writes would be served by the site.
 const signInData = mkdtempSync(join(tmpdir(), 'holdrim-browser-sign-in-'));
@@ -239,11 +239,10 @@ const signInServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'serve
   env: {
     ...process.env, PORT: String(PORT + 1), HOLDRIM_ENVIRONMENT: 'Production', HOLDRIM_IDENTITY: 'password',
     HOLDRIM_OWNER: OWNER, HOLDRIM_EVENTS: 'memory', HOLDRIM_USERS_PATH: join(signInData, 'users.db'), HOLDRIM_SITE: site,
+    // Outside the site: the server refuses to write the owner's password where the site serves it.
+    HOLDRIM_FIRST_ACCESS_PATH: firstAccessFile,
   },
-  stdio: ['ignore', 'pipe', 'inherit'],
-});
-signInServer.stdout.on('data', (chunk) => {
-  firstAccess ||= String(chunk).match(/password:\s+(\S+)/)?.[1] ?? '';
+  stdio: ['ignore', 'ignore', 'inherit'],
 });
 
 // A third server, on its own copy of the site, with the three toggles the panel itself draws a
@@ -287,6 +286,7 @@ const cleanUp = async () => {
   rmSync(tamperedData, { recursive: true, force: true });
   rmSync(signInData, { recursive: true, force: true });
   rmSync(offSite, { recursive: true, force: true });
+  rmSync(dirname(firstAccessFile), { recursive: true, force: true });
 };
 
 try {
@@ -1058,7 +1058,10 @@ try {
   await page.goto(`${SIGN_IN}/pages/A01.html`);
   await must('a page without a session lands on the sign-in screen', () => page.locator('#email').waitFor());
   expect('the screen came up with nothing refused', '', problems.join(' | '));
-  expect('the first-access password was printed', true, firstAccess.length > 0);
+  // Read from its file: the log never carries it (#53). Read here, once the screen is up, because
+  // the server writes it before it listens.
+  const firstAccess = readFileSync(firstAccessFile, 'utf8');
+  expect('the first-access password is in its file', true, firstAccess.length > 0);
   await page.locator('#email').fill(OWNER);
   await page.locator('#password').fill(firstAccess);
   await page.locator('#button').click();

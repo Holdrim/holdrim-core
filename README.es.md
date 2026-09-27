@@ -4,7 +4,7 @@ Documentación que avisa cuando dejó de ser verdad.
 
 [English](README.md) · [Português](README.pt-BR.md)
 
-<!-- source: README.md up to the translated marker, sha256 e9ce59647bc7d753c00f9a1a52956bbb57872a3d830116b87f2015d8e27df2dd -->
+<!-- source: README.md up to the translated marker, sha256 8262806cca5ca41aba0e431060e1008b2b1f50240e340767d1c802f6986e0174 -->
 
 **Misión.** El documento aprobado es la fuente de verdad del sistema: quien conoce el negocio lo
 escribe y lo aprueba, un agente de IA facilita la construcción, y el código queda a la vista de
@@ -46,9 +46,11 @@ cd holdrim-core
 HOLDRIM_OWNER=you@example.org docker compose up
 ```
 
-Abre `http://localhost:8080`. La contraseña de primer acceso aparece **una vez** en el log, y el
-primer inicio de sesión obliga a cambiarla. No existe `admin/admin`: una herramienta interna sigue
-en marcha durante años.
+Abre `http://localhost:8080`. La contraseña de primer acceso **nunca** va al log: está en un
+archivo en el volumen de datos, que solo el usuario del propio servicio puede leer, y el log dice
+dónde. Léela con `docker compose exec holdrim /bin/cat /data/first-access-password`. El primer
+inicio de sesión obliga a cambiarla, y el archivo se borra cuando lo haces. No existe
+`admin/admin`: una herramienta interna sigue en marcha durante años.
 
 Llegas a la home del proyecto, `/engine/home`: cada página con su semáforo, y cada pedido que
 alguien sigue esperando. Las páginas son las de `examples/hello-world` — dos, que explican en su

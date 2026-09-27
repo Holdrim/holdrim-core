@@ -133,8 +133,8 @@ run_for() {
 
 # One folder per run. It is removed by the trap further down — NOT here: bash keeps only the last
 # EXIT trap, so a `trap ... EXIT` written at this line is silently replaced by the one that stops
-# the server, and every run would leave its folder behind, each holding a server log with a
-# generated first-access password in it.
+# the server, and every run would leave its folder behind, each holding the logs and cookies of
+# every server it booted.
 WORK=$(mktemp -d)
 
 # A port already in use is the most treacherous failure there is here: the new server dies with
@@ -712,7 +712,8 @@ HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$TADMIN HOLDR
   HOLDRIM_SITE="$POFF_SITE" \
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/toggles-people.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
-TFIRST=$(grep -A2 'FIRST ACCESS' $WORK/toggles-people.log | sed -n -E 's/.*password: *//p' | head -1)
+TFIRST=$(cat "$PDATA/first-access-password")
+require_id "$TFIRST" TFIRST
 TCOOKIES=$WORK/toggle-owner-cookies.txt
 curl -s -c $TCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
   -d "{\"email\":\"$OWNER\",\"password\":\"$TFIRST\"}" $B/api/sign-in >/dev/null
@@ -1025,9 +1026,20 @@ HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$ADMIN HOLDRI
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/password.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 
-PASSWORD=$(grep -A2 'FIRST ACCESS' $WORK/password.log | sed -n -E 's/.*password: *//p' | head -1)
-expect "the first password is said once" 0 "$([ -n "$PASSWORD" ] && echo 0 || echo 1)"
+# Issue #53: the first-access password goes to a file beside the store, and never to the log. The log
+# is read by whoever reads the log collector, for as long as it keeps lines; the file, by whoever
+# operates this deployment — the one who set HOLDRIM_OWNER. So the password is read from the file,
+# and the log is searched for it: finding it there is the leak this closes.
+FIRST_FILE=$DATA_DIR/first-access-password
+PASSWORD=$(cat "$FIRST_FILE" 2>/dev/null)
+expect "the first password is in its file" 0 "$([ -n "$PASSWORD" ] && echo 0 || echo 1)"
+require_id "$PASSWORD" PASSWORD
 expect "and it isn't 'admin'"          1 "$(echo "$PASSWORD" | has -x 'admin'; echo $?)"
+# Through node, not `stat`: GNU and BSD `stat` take different flags for the same question.
+expect "the file is readable by its owner alone" 600 \
+  "$(node -e "console.log((require('fs').statSync(process.argv[1]).mode & 0o777).toString(8))" "$FIRST_FILE")"
+expect "the log names the file"        1 "$(grep -Fc -e "$FIRST_FILE" $WORK/password.log)"
+expect "and never the password"        0 "$(grep -Fc -e "$PASSWORD" $WORK/password.log)"
 login() { curl -s -c $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"email\":\"$OWNER\",\"password\":\"$1\"}" $B/api/sign-in; }
 
 expect "no session → 401"              401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/me)"
@@ -1177,6 +1189,12 @@ expect "and the change is logged by id, not by e-mail" 0 \
 expect "as the owner's own id, not merely something id-shaped" "$OWNER_ID" \
   "$(log_field $WORK/password.log password_changed person)"
 expect "and nothing is demanded any more" false "$(curl -s -b $COOKIES $B/api/me | jfield mustChangePassword)"
+# The file's password opens nothing now, so it goes: a secret left on a disk is one more thing a
+# backup carries.
+expect "the first-access file is gone with the password it held" 1 "$([ -e "$FIRST_FILE" ]; echo $?)"
+expect "and the log says so, by path"  1 \
+  "$(grep '"event":"first_access_file_removed"' $WORK/password.log | grep -Fc -e "$FIRST_FILE")"
+expect "and the password never reached the log, first access to change" 0 "$(grep -Fc -e "$PASSWORD" $WORK/password.log)"
 # The whole point of #115: the OTHER session for this account is exactly as exposed as a stolen
 # password is, and dies with the change — while the session that CHOSE the new password is not the
 # one that pays for it.
@@ -1567,6 +1585,7 @@ expect "the member's wait survived the restart → 401" 401 "$(mlogin "$NEW_PASS
 
 expect "the new owner has no account yet" 1 "$(as_admin $B/api/users | has -F "$HANDOVER"; echo $?)"
 expect "and no first-access was printed" 0 "$(grep -c 'FIRST ACCESS' $WORK/handover.log)"
+expect "nor a first-access file written"  1 "$([ -e "$FIRST_FILE" ]; echo $?)"
 expect "an admin still cannot create it → 409" 409 "$(code_admin -d "{\"email\":\"$HANDOVER\",\"name\":\"Taking Over\"}" $B/api/users)"
 expect "so nobody signed in as the new owner" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"email\":\"$HANDOVER\",\"password\":\"anything-at-all\"}" $B/api/sign-in)"
 # The handover itself: $OWNER is no longer HOLDRIM_OWNER in THIS process, and a `roles.can('lock', …)`
@@ -1985,6 +2004,70 @@ expect "two owners in the variable → exits 1" 1 "$?"
 expect "and says it needs exactly one"        0 "$(grep -q 'exactly one e-mail (got 2)' $WORK/two-owners.log; echo $?)"
 rm -rf "$TWO"
 
+# Issue #53: the first-access file is created, never opened when it exists. A file already there on
+# an empty store is left by an earlier first access, or planted: overwriting it would decide for the
+# operator, so the boot stops, names it, and creates no account whose password is in no file.
+STALE=$(mktemp -d); printf 'left-by-an-earlier-first-access' > "$STALE/first-access-password"
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory \
+  HOLDRIM_USERS_PATH=$STALE/users.db HOLDRIM_SITE="$SITE" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/stale-first.log" 2>&1
+expect "a first-access file already there → exits 1" 1 "$?"
+expect "and names it"                    1 "$(grep -Fc -e "invalid configuration: $STALE/first-access-password already exists" $WORK/stale-first.log)"
+expect "and leaves it as it was"         left-by-an-earlier-first-access "$(cat "$STALE/first-access-password")"
+expect "and creates nobody"              0 "$(node -e "const {DatabaseSync}=require('node:sqlite');
+  console.log(new DatabaseSync(process.argv[1]).prepare('SELECT count(*) AS n FROM users').get().n)" "$STALE/users.db")"
+rm -rf "$STALE"
+# Round 1 of #53's review: the site is served whole to anyone signed in, so a first-access file
+# inside it is the owner's password one URL away from every member. Refused before a password
+# exists, for HOLDRIM_FIRST_ACCESS_PATH and for the default beside a users store kept in the site.
+SERVED=$(mktemp -d); cp -r "$SITE/." "$SERVED"; SERVED_USERS=$(mktemp -d)
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory \
+  HOLDRIM_USERS_PATH=$SERVED_USERS/users.db HOLDRIM_FIRST_ACCESS_PATH=$SERVED/private/first-access-password \
+  HOLDRIM_SITE="$SERVED" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/served-first.log" 2>&1
+expect "a first-access file inside the served site → exits 1" 1 "$?"
+expect "and names the file and the site" 1 "$(grep -Fc -e "invalid configuration: the first-access password would go to $SERVED/private/first-access-password, inside the folder this server serves (HOLDRIM_SITE, $SERVED)" $WORK/served-first.log)"
+expect "and writes no password anywhere" 0 "$(find "$SERVED" "$SERVED_USERS" -name 'first-access-password' | wc -l | tr -d ' ')"
+expect "not even the folder for it"      1 "$([ -e "$SERVED/private" ]; echo $?)"
+expect "and no banner"                   0 "$(grep -c 'FIRST ACCESS' $WORK/served-first.log)"
+expect "and creates nobody"              0 "$(node -e "const {DatabaseSync}=require('node:sqlite');
+  console.log(new DatabaseSync(process.argv[1]).prepare('SELECT count(*) AS n FROM users').get().n)" "$SERVED_USERS/users.db")"
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory \
+  HOLDRIM_USERS_PATH=$SERVED/users.db HOLDRIM_SITE="$SERVED" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/served-default.log" 2>&1
+expect "the default beside a users store in the site → exits 1 too" 1 "$?"
+# The users store itself sits in the site, so the check on the stores (#170) refuses first, before
+# a first-access path is even worked out: the default file beside it is never reached. What matters
+# here holds either way: the service stops, and no password is written.
+expect "and names the users store"       1 "$(grep -Fc -e "the users store (HOLDRIM_USERS_PATH), $SERVED/users.db, would be served by the site" $WORK/served-default.log)"
+expect "and writes it nowhere"           0 "$(find "$SERVED" -name 'first-access-password' | wc -l | tr -d ' ')"
+rm -rf "$SERVED" "$SERVED_USERS"
+# On a disk nobody can read from outside the instance (K_SERVICE, Cloud Run), the default path is a
+# file nobody will open: the service comes up, says why at ERROR, and creates nobody until
+# HOLDRIM_FIRST_ACCESS_PATH names somewhere an operator reads.
+EPHEMERAL=$(mktemp -d)
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory K_SERVICE=holdrim \
+  HOLDRIM_USERS_PATH=$EPHEMERAL/users.db HOLDRIM_SITE="$SITE" PORT=$PORT \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/ephemeral-first.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "on an ephemeral disk, no first-access file" 1 "$([ -e "$EPHEMERAL/first-access-password" ]; echo $?)"
+expect "and the reason, at ERROR, names the variable" 1 \
+  "$(grep '"event":"first_access_not_created"' $WORK/ephemeral-first.log | grep '"severity":"ERROR"' | grep -c HOLDRIM_FIRST_ACCESS_PATH)"
+expect "and no banner pretends otherwise" 0 "$(grep -c 'FIRST ACCESS' $WORK/ephemeral-first.log)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory K_SERVICE=holdrim \
+  HOLDRIM_USERS_PATH=$EPHEMERAL/users.db HOLDRIM_FIRST_ACCESS_PATH=$EPHEMERAL/mounted/first \
+  HOLDRIM_SITE="$SITE" PORT=$PORT \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >>$WORK/ephemeral-first.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+EPHEMERAL_PASSWORD=$(cat "$EPHEMERAL/mounted/first" 2>/dev/null)
+expect "named by HOLDRIM_FIRST_ACCESS_PATH, the next start creates it there" 0 "$([ -n "$EPHEMERAL_PASSWORD" ] && echo 0 || echo 1)"
+expect "and it signs the owner in"       200 "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OWNER\",\"password\":\"$EPHEMERAL_PASSWORD\"}" $B/api/sign-in)"
+expect "and it is not in the log"        0 "$(grep -Fc -e "${EPHEMERAL_PASSWORD:-unset}" $WORK/ephemeral-first.log)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+rm -rf "$EPHEMERAL"
+
 # holdrim#161: `content.registry` climbing out of the project root, proved through a real boot, not
 # only through `readConfig`'s own unit tests (engine/tests/config.test.js) — the same reason the
 # owner-in-the-file case above boots a real server rather than trusting the unit test alone.
@@ -2260,7 +2343,7 @@ start_token_server() {
   for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 }
 start_token_server $OWNER $T_ADMIN
-T_OWNER_PASSWORD=$(grep -A2 'FIRST ACCESS' $TLOG | sed -n -E 's/.*password: *//p' | head -1)
+T_OWNER_PASSWORD=$(cat "$TOKEN_DIR/first-access-password")
 require_id "$T_OWNER_PASSWORD" T_OWNER_PASSWORD
 TOC=$WORK/tokens-owner.txt; TAC=$WORK/tokens-admin.txt; TMC=$WORK/tokens-member.txt
 t_signin() { curl -s -c "$1" -o /dev/null -H 'Content-Type: application/json' -d "{\"email\":\"$2\",\"password\":\"$3\"}" $B/api/sign-in; }
