@@ -1168,9 +1168,11 @@ forEachStore('a closed account keeps its address taken, and is found by nothing'
 
 forEachStore('an account emptied with its address kept stays keyed by it, taken, and empty', async (s) => {
   await s.create('ana@example.org', 'Ana Lima');
+  const [before] = await s.readAllUsers();
   await removeAccount(s, 'ana@example.org', true);
   const [row] = await s.readAllUsers();
   assert.deepEqual([row.email, row.name, row.enabled, row.removed], ['ana@example.org', '', false, true]);
+  assert.notDeepEqual([row.salt, row.hash], [before.salt, before.hash], 'its credential is replaced, not kept');
   await assert.rejects(s.create('ana@example.org', 'Somebody new'), 'nobody new takes the address');
   assert.equal(await s.find('ana@example.org'), null);
 });
@@ -1218,3 +1220,33 @@ forEachStore('closing an address with no account takes it with a closed row, and
   await s.create('ana@example.org', 'Ana, invited later');
   assert.equal((await s.find('ana@example.org'))?.name, 'Ana, invited later', 'freed at the end like any closed account');
 });
+
+// Postgres alone: its `removed` column is added on start to a table an earlier version made
+// (`ADD COLUMN IF NOT EXISTS`), as SQLite's is in users.test.js. Firestore has no columns to add.
+const postgres = stores.find((s) => s.name === 'postgres');
+test('[postgres] a users table from before removal existed gains the removed column, and its accounts read as not removed',
+  { skip: postgres ? false : skipped.find((s) => s.name === 'postgres')?.why }, async () => {
+    const first = await postgres.open();
+    await first.create('ana@example.org', 'Ana', 'a password of her own');
+    await first.close();
+    const pg = await import('pg');
+    const { Client } = pg.default ?? pg;
+    const client = new Client({ connectionString: PG_URL });
+    await client.connect();
+    try {
+      await client.query('ALTER TABLE users DROP COLUMN removed');
+    } finally {
+      await client.end();
+    }
+    const { UsersPostgres } = await import('../api/users-postgres.ts');
+    const reopened = new UsersPostgres(PG_URL);
+    try {
+      assert.equal((await reopened.check('ana@example.org', 'a password of her own'))?.email, 'ana@example.org');
+      await reopened.create('bea@example.org', 'Bea');
+      assert.equal(await reopened.closeAccount('ana@example.org'), true);
+      assert.equal(await reopened.find('ana@example.org'), null);
+      assert.equal((await reopened.find('bea@example.org'))?.name, 'Bea');
+    } finally {
+      await reopened.close();
+    }
+  });

@@ -398,8 +398,9 @@ const INSERT = 'INSERT INTO events (id, type, page, block, fingerprint, text, te
 
 test('the first owner is refused while a ✓ from before the lock baseline names their address, and it stays a lock', async () => {
   const old = await olderStore();
-  // A ✓ an older version recorded, its author the address itself; then this version's first start.
-  old.raw(INSERT, 'old-approval', 'approval', 'A01', 'A01.1.1', 'f', null, null, BEA, '2026-01-01T00:00:00.000Z', null);
+  // A ✓ an older version recorded, its author the address itself — spelled as the person typed it,
+  // which `legacyLock` reads as the same address — then this version's first start.
+  old.raw(INSERT, 'old-approval', 'approval', 'A01', 'A01.1.1', 'f', null, null, 'Bea@Example.ORG', '2026-01-01T00:00:00.000Z', null);
   const events = old.open();
   const baseline = await ensureLockBaseline(events, BEA);
   const approval = async () => (await events.list('A01')).find((e) => e.id === 'old-approval');
@@ -411,6 +412,29 @@ test('the first owner is refused while a ✓ from before the lock baseline names
   assert.equal(JSON.stringify(await events.list(null)), before, 'nothing was touched');
   assert.equal(isLocked(await approval(), earliestLockBaseline(await events.list(LOCK_BASELINE_PAGE))), true, 'and it is still a lock');
   await events.close();
+});
+
+test('the first owner whose older events are only comments is removed: a comment is no lock', async () => {
+  const old = await olderStore();
+  old.raw(INSERT, 'old-comment', 'comment', 'A01', 'A01.1.1', null, 'an old remark', null, BEA, '2026-01-01T00:00:00.000Z', '{}');
+  const events = old.open();
+  await ensureLockBaseline(events, BEA);
+  const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true });
+  assert.equal(outcome.status, 201);
+  assert.equal(outcome.removal.legacyEvents, 1);
+  await events.close();
+});
+
+test('two people removed from one store: one person_removed each, each naming its own person', async () => {
+  const w = await world();
+  await w.events.append({ type: 'comment', page: 'A01', text: 'Bea says' }, BEA);
+  const bea = await w.events.personOf(BEA);
+  const first = await removePerson(context(w), { email: ANA, confirmed: true });
+  const second = await removePerson(context(w), { email: BEA, confirmed: true });
+  assert.equal(second.event.data.person, bea, 'the second answer names the second person');
+  assert.notEqual(second.event.id, first.event.id);
+  const removed = (await w.events.list(PEOPLE_PAGE)).filter((e) => e.type === PERSON_REMOVED);
+  assert.deepEqual(removed.map((e) => e.data.person), [w.person, bea]);
 });
 
 test('the first owner with no ✓ from before the baseline is removed, and their ✓s since stay locks', async () => {
@@ -440,6 +464,7 @@ test('texts from before ids and before texts moved out are removed where they ca
   const reopened = old.open();
   const users = new UsersSqlite(':memory:');
   await users.create(ANA, 'Ana Lima');
+  const [before] = await users.readAllUsers();
   const outcome = await removePerson({ events: reopened, users, deployment, by: OWNER, byAgent: false }, { email: ANA, confirmed: true });
   assert.deepEqual(outcome.removal, { person: id, texts: 1, textsTampered: 0, textsInline: 2, legacyEvents: 2, grants: 0, account: true });
   const text = async (eventId) => (await byId(reopened, eventId)).text;
@@ -450,6 +475,7 @@ test('texts from before ids and before texts moved out are removed where they ca
   assert.equal(await users.find(ANA), null, 'by an account nothing finds');
   const [row] = await users.readAllUsers();
   assert.deepEqual([row.email, row.name, row.enabled, row.removed], [ANA, '', false, true], 'emptied, and closed');
+  assert.notDeepEqual([row.salt, row.hash], [before.salt, before.hash], 'its credential replaced, the address kept');
   await reopened.close();
 });
 
