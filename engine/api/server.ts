@@ -27,7 +27,7 @@ import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { graphOf } from '../cli/graph.ts';
 import { realContainment } from '../cli/fs.ts';
-import { loadTheme } from './theme.ts';
+import { loadTheme, DISK_THEME_IO } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { IapIdentity } from './identity-iap.ts';
@@ -100,9 +100,7 @@ const languageOf = (req: IncomingMessage) =>
  * was refused is that the value looked like an injection attempt, that is the line an operator
  * needs to find.
  */
-const { theme: projectTheme, warnings: themeWarnings } = loadTheme(
-  projectRoot, project.theme, { readBinary: (p: string) => readFileSync(p) },
-);
+const { theme: projectTheme, warnings: themeWarnings } = loadTheme(projectRoot, project.theme, DISK_THEME_IO);
 for (const warning of themeWarnings) log('WARNING', 'theme_rejected', { reason: warning });
 
 const cfg = {

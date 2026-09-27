@@ -9,8 +9,8 @@ import { normalize, relative, sep } from 'node:path';
  * as three hand-rolled comparisons that drift the day one of them is fixed and the others are not:
  * `readConfig`'s own `content.registry` and `content.folders` (engine/core/config.js), the theme's
  * logo (`loadLogo`, engine/api/theme.ts), and the REAL, symlink-resolved location of a registry, a
- * configured page folder, a page file, or a file the server serves from the site (`realContainment`,
- * engine/cli/fs.ts, holdrim#161 and holdrim#164).
+ * configured page folder, a page file, a file the server serves from the site, or the theme's logo
+ * (`realContainment`, engine/cli/fs.ts, holdrim#161 and holdrim#164).
  *
  * Checked by RESOLUTION, with `path.relative`, never by a raw `startsWith` on the two strings:
  * `relative` folds `a/../../x` and a leading `./` down to what they actually resolve to, where a

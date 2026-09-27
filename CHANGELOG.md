@@ -466,6 +466,13 @@ who ran the engine from `main` before it.
   keeps working, a site mounted through a symlink keeps working, and a missing file — a link to
   nothing included — is still a 404. Nothing to change for a project whose content keeps its links
   inside itself.
+- **The theme embeds only a logo whose real location is inside the project.** `loadLogo`
+  (engine/api/theme.ts) checked `theme.logo` as written; it now asks the same `realContainment`
+  before reading, and a logo whose real location is outside the project is ignored with the same
+  warning as a path that walks out — never a throw, since a logo must not stop anyone signing in. A
+  link to nothing is a logo that cannot be read, answered as one. The logo is typed by the file
+  actually read, not by the name it was reached through. A logo that is a link staying inside the
+  project keeps working.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY
