@@ -38,9 +38,7 @@ Locks, tamper detection, the stores, and who holds authority.
 
 - **Every claim in `SECURITY.md` is attacked store by store, SQLite with its triggers and Firestore
   with none, because security wording overclaims easily.** Taught by #28, #91, #107, #109.
-  Lives in: not yet. `review-locks` reads `SECURITY.md` but is not told to attack each claim per
-  store, and it takes the invariants from `AGENTS.md` alone, so a new exception has to be stated
-  there, exactly.
+  Lives in: `.claude/agents/review-locks.md`, under "What else you look for".
 - **A table the security rests on is a frozen array, and callers get a copy: `Object.freeze` on a
   `Set` freezes the binding, not its contents.** Taught by #104. Lives in: `engine/core/roles.js`
   (the comment on `ROLE_CAPABILITIES`) and `engine/tests/roles.test.js`, for the roles table.
@@ -53,8 +51,8 @@ Locks, tamper detection, the stores, and who holds authority.
   `engine/core/features.js`.
 - **Data interpolated into a pattern (a RegExp, SQL, a shell line) is a finding; prefer the
   construct that needs no escaping, such as comparing strings.** Taught by #83, where CodeQL caught
-  a partial escape six lenses missed. Lives in: not yet. `review-locks` refuses raw interpolation
-  into CSS, HTML and SQL, not into a RegExp or a shell line.
+  a partial escape six lenses missed. Lives in: `.claude/agents/review-locks.md`, under "What else
+  you look for".
 - **An output identifier is synthetic, a real id appears only inside an escaped label, and hostile
   ids prove it: `"`, `\`, `<`, `#`, the keyword `end`, two ids that sanitise alike.** Taught by
   #106. Lives in: `engine/tests/graph.test.js`.
@@ -85,7 +83,8 @@ Locks, tamper detection, the stores, and who holds authority.
   way.** Taught by #135: the fix asked for was "escape the id better", and the defect was that the
   writer (the first raw match, anywhere) and the reader (`main [data-id]`) could pick different
   elements, so a ✓'s fingerprint could come from one the owner never saw. Lives in:
-  `engine/cli/pages.ts` (`resolveBlock` resolves as `readBlocks` does); not yet in `review-locks`.
+  `engine/cli/pages.ts` (`resolveBlock` resolves as `readBlocks` does), and
+  `.claude/agents/review-locks.md`, under "What else you look for".
 - **A write that must touch one element is verified by re-parsing the whole result, not by checking
   that the target changed.** Taught by #135: a check satisfied by what the target already carried
   let a repeat stamp land on another element. Lives in: `engine/cli/pages.ts` (`writesOnlyThe`).
@@ -114,8 +113,8 @@ Locks, tamper detection, the stores, and who holds authority.
   shape lives, before the fix is called done.** Taught by #168: the gap #165 closed for the
   registry was the one the served site, the page scan and the theme logo each carried, and one
   helper closed all three. #170 asked the same question of what the server writes, and now refuses
-  to start when a store would be served by the site. Lives in: not yet. `review-locks` is not told
-  to look for the other callers of a guard it finds weak.
+  to start when a store would be served by the site. Lives in: `.claude/agents/review-locks.md`,
+  under "What else you look for".
 - **A capped table never evicts a row that still protects someone before a row that does not:
   evicting oldest first lets anyone who can add rows push out the row they are after.** Taught by
   #166: the sign-in failure table's ceiling evicts rows not yet counting towards a wait first, and
@@ -127,14 +126,14 @@ Locks, tamper detection, the stores, and who holds authority.
   outright, and whoever needs it changes the guard on purpose.** Taught by #157: a check that read
   `.dockerignore`'s `!` lines for the names of the test-only paths stayed green for a glob that
   named none of them and still re-included one. Every `!` line is now refused. Lives in:
-  `engine/tests/workflows.test.js`, "the image ships no test-only paths"; not yet as a general rule
-  in `review-locks`.
+  `engine/tests/workflows.test.js`, "the image ships no test-only paths", and as a general rule in
+  `.claude/agents/review-locks.md`, under "What else you look for".
 
 ## Proof
 
 - **A test whose expected value is computed by the function under test proves nothing.** Taught by
-  round 2 of #107. Lives in: not yet. The nearest is `review-proof`'s test that "asserts on a value
-  it just built".
+  round 2 of #107. Lives in: `.claude/agents/review-proof.md`, under "What you look for", in "A
+  test that cannot fail".
 - **Each condition in a trigger's `WHEN` gets its own test: dropping any one conjunct fails a named
   test.** Taught by #28. Lives in: not yet.
 - **A ROLLBACK is proved only by a failure that comes after a write.** Taught by #28. Lives in: not
@@ -163,23 +162,24 @@ Locks, tamper detection, the stores, and who holds authority.
 - **A test that depends on file permissions is proved as a plain user: root passes every access
   check, and CI runs as a plain user.** Taught by #156: a test that saved over a 0440 registry
   passed locally as root, and in CI the save was refused with EACCES, exactly as the code intends.
-  Lives in: the comment on that test in `engine/tests/atomic-registry.test.js`; not yet in
-  `review-proof`.
+  Lives in: the comment on that test in `engine/tests/atomic-registry.test.js`, and
+  `.claude/agents/review-proof.md`, under "What you look for".
 - **A refusal is proved through the entry point that meets the input (a boot of the real server,
   the CLI command), not only through the function beneath it.** Taught by #165, whose round-1 proof
   lens found `content.registry`'s refusal proved only through `readConfig` with a mocked reader.
   Lives in: the boot-refusal cases in `engine/test-contract.sh` for `content.registry` (#165),
-  `content.folders` (#167) and a store inside the site (#170); not yet as a rule in `review-proof`.
+  `content.folders` (#167) and a store inside the site (#170), and as a rule in
+  `.claude/agents/review-proof.md`, under "What you look for".
 - **A comment that says a case is already handled elsewhere is a claim, and it gets a test of that
   case before anyone relies on it.** Taught by #165: the first commit's comment said a symlink
   inside the root that points elsewhere was "already refused" where the registry is loaded and
-  saved, and a working symlinked folder passed every check it named. Lives in: not yet. The three
-  questions call a comment that lies amateurism; no lens is told to test a comment's claim of
-  coverage.
+  saved, and a working symlinked folder passed every check it named. Lives in:
+  `.claude/agents/review-proof.md`, under "What you look for".
 - **A test that races a clock against a wait flakes on a slow runner, so it asserts the state the
   rule protects instead.** Taught by #166: a test expected a 5 s wait to still hold after eighty
   wrong passwords, CI's floor runner took 6.4 s to get there, and the test now reads the row itself.
-  Lives in: that test, in `engine/tests/login-throttle.test.js`; not yet in `review-proof`.
+  Lives in: that test, in `engine/tests/login-throttle.test.js`, and
+  `.claude/agents/review-proof.md`, under "What you look for".
 
 ## Correctness
 

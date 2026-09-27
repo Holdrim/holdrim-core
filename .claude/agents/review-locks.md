@@ -47,6 +47,26 @@ These are always CRITICAL, whatever the change says about them:
 - A `WHERE` that trusts a value from the request to decide whose row it is.
 - An error message that says which half of a credential was wrong.
 - A session that survives the account being disabled.
+- **Every claim in `SECURITY.md`, attacked store by store**: SQLite with its triggers, and
+  Firestore with none. Security wording overclaims easily, and a sentence true of one store reads
+  as true of both. You take the invariants from `AGENTS.md` alone, so a new exception has to be
+  stated there, exactly.
+- **Data interpolated into a pattern** — a RegExp or a shell line, not only the CSS, HTML and SQL
+  above. An escape covers only the characters its author thought of, and a partial one is how a
+  value gets through. Prefer the construct that needs no escaping, such as comparing strings.
+- **How a thing is read, before how it is written.** When a change fixes how a value or a mark is
+  written, read the code that reads it back, and check that both find the same element the same
+  way. A writer that took the first raw match anywhere and a reader that took `main [data-id]`
+  could pick different elements, so a ✓'s fingerprint could come from a block the owner never saw.
+- **The other callers of a weak guard.** When you find a guard weak in one caller, grep for every
+  other place the same check, or a check of the same shape, is made, and report those too. A path
+  checked only as written was one gap in the registry, and the same gap in the served site, the
+  page scan and the theme logo.
+- **A guard that re-implements a language to judge a construct** — a glob, a shell word, an ignore
+  file's `!` lines. It is beaten by the case it did not model, so it refuses the construct outright,
+  and whoever needs the construct changes the guard on purpose. A check that read `.dockerignore`'s
+  `!` lines for the names of the test-only paths stayed green for a glob that named none of them
+  and still re-included one.
 
 ## Severity
 
