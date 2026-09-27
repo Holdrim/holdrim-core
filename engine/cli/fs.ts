@@ -1,5 +1,5 @@
 import { lstatSync, statSync, realpathSync } from 'node:fs';
-import { dirname, relative, join, resolve, basename, sep } from 'node:path';
+import { dirname, relative, join, resolve, basename, sep, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { insideRoot } from '../core/paths.js';
@@ -289,7 +289,10 @@ export function insideStoreFolder(storeFolders: readonly string[], realTarget: s
  */
 export function defaultIndexPath(root: string): string {
   const real = realpathSync(root);
-  const cacheHome = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
+  // A relative XDG_CACHE_HOME is invalid by the XDG spec and ignored, not resolved: against the
+  // working directory, which is usually the project itself, it would put the index right back in it.
+  const xdg = process.env.XDG_CACHE_HOME;
+  const cacheHome = xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.cache');
   const hash = createHash('sha256').update(real).digest('hex').slice(0, 12);
   return join(cacheHome, 'holdrim', `${basename(real)}-${hash}`, 'index.db');
 }

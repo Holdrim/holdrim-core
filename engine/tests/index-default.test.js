@@ -127,3 +127,19 @@ test('HOLDRIM_EVENTS_PATH still wins over the default, even with a fresh XDG_CAC
   assert.ok(existsSync(fromEnv), 'HOLDRIM_EVENTS_PATH names the file that should have been written');
   assert.ok(!existsSync(join(root, 'data')), 'the project folder must stay untouched when the variable is set');
 });
+
+test('a relative XDG_CACHE_HOME is ignored, as the XDG spec says, never resolved against the working directory', (t) => {
+  const root = projectRoot(t);
+  // A stand-in home, so the fallback to `~/.cache` is checked without touching the real one:
+  // `defaultIndexPath` only computes the path, it creates nothing.
+  const home = mkdtempSync(join(tmpdir(), 'holdrim-idx-home-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const saved = { XDG_CACHE_HOME: process.env.XDG_CACHE_HOME, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  process.env.XDG_CACHE_HOME = 'relative-cache';
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+
+  const path = defaultIndexPath(root);
+  assert.ok(path.startsWith(join(home, '.cache', 'holdrim')), `expected under the home's .cache, got ${path}`);
+});
