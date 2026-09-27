@@ -2020,7 +2020,10 @@ HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HO
   HOLDRIM_USERS_PATH=$SERVED/users.db HOLDRIM_SITE="$SERVED" PORT=$PORT \
   run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/served-default.log" 2>&1
 expect "the default beside a users store in the site → exits 1 too" 1 "$?"
-expect "and names that file"             1 "$(grep -Fc -e "would go to $SERVED/first-access-password, inside the folder this server serves" $WORK/served-default.log)"
+# The users store itself sits in the site, so the check on the stores (#170) refuses first, before
+# a first-access path is even worked out: the default file beside it is never reached. What matters
+# here holds either way: the service stops, and no password is written.
+expect "and names the users store"       1 "$(grep -Fc -e "the users store (HOLDRIM_USERS_PATH), $SERVED/users.db, would be served by the site" $WORK/served-default.log)"
 expect "and writes it nowhere"           0 "$(find "$SERVED" -name 'first-access-password' | wc -l | tr -d ' ')"
 rm -rf "$SERVED" "$SERVED_USERS"
 # On a disk nobody can read from outside the instance (K_SERVICE, Cloud Run), the default path is a
