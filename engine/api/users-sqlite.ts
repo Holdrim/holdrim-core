@@ -167,6 +167,16 @@ export class UsersSqlite extends UserStoreBase {
     this.#db.prepare('UPDATE users SET name = ? WHERE email = ?').run(name, email);
   }
 
+  protected async writeRemoved(email: string, removedKey: string, salt: Buffer, hash: Buffer): Promise<boolean> {
+    return this.#immediate(() => {
+      this.#db.prepare('DELETE FROM sessions WHERE email = ?').run(email);
+      const r = this.#db.prepare(
+        "UPDATE users SET email = ?, name = '', salt = ?, hash = ?, must_change = 1, enabled = 0 WHERE email = ?",
+      ).run(removedKey, salt, hash, email);
+      return r.changes === 1;
+    });
+  }
+
   protected async writeCredential(
     email: string, salt: Buffer, hash: Buffer, mustChange: boolean): Promise<void> {
     this.#db.prepare('UPDATE users SET salt = ?, hash = ?, must_change = ? WHERE email = ?')

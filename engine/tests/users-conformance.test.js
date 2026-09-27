@@ -1112,3 +1112,60 @@ forEachDurableStore('the failure key comes back the same after the store is clos
     await after.close();
   }
 });
+
+// --------------------------------------------------------------------- removing a person (#37)
+// docs/PRIVACY.md, section 5: the account loses its e-mail, its name, its password and every open
+// session, and the row itself stays (`removeAccount`, users.ts).
+
+forEachStore('removing an account empties it of the person: no e-mail, no name, no password, no session', async (s) => {
+  const password = await s.create('ana@example.org', 'Ana Lima', 'a password of her own');
+  const one = await s.openSession('ana@example.org');
+  const two = await s.openSession('ana@example.org');
+  await s.create('bea@example.org', 'Bea');
+  const kept = await s.openSession('bea@example.org');
+  const [before] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  assert.equal(await s.removeAccount('  Ana@Example.ORG '), true, 'found by any spelling of the address');
+  assert.equal(await s.find('ana@example.org'), null, 'the address finds nothing');
+  assert.equal(await s.check('ana@example.org', password), null, 'the password opens nothing');
+  assert.equal(await s.fromSession(one), null, 'no session of theirs survives');
+  assert.equal(await s.fromSession(two), null, 'not one');
+  assert.equal((await s.fromSession(kept))?.email, 'bea@example.org', 'and nobody else\'s is touched');
+  assert.deepEqual((await s.list()).map((u) => u.email), ['bea@example.org'], 'the list leaves it out');
+  // Read beneath the list: the row is still there, and nothing in it names the person.
+  const rows = await s.readAllUsers();
+  assert.equal(rows.length, 2, 'the row is kept, never deleted');
+  const emptied = rows.find((r) => r.email !== 'bea@example.org');
+  assert.match(emptied.email, /^removed:[0-9a-f]{24}$/, 'its key is random, and never an address');
+  assert.equal(emptied.name, '', 'its name is gone');
+  assert.equal(emptied.enabled, false, 'it is disabled');
+  assert.equal(emptied.mustChangePassword, true);
+  assert.notDeepEqual([emptied.salt, emptied.hash], [before.salt, before.hash], 'its credential is replaced, not kept');
+  assert.doesNotMatch(JSON.stringify(emptied), /ana|Lima/i, 'nothing in the row names them');
+});
+
+forEachStore('a removed account is found by nothing, not even by its own key', async (s) => {
+  // Found, it could be handed a new password and re-enabled by the routes that look people up.
+  await s.create('ana@example.org', 'Ana Lima');
+  await s.removeAccount('ana@example.org');
+  const [{ email: key }] = await s.readAllUsers();
+  assert.equal(await s.find(key), null);
+  assert.equal(await s.check(key, 'anything at all'), null);
+});
+
+forEachStore('the address is free again once removed: an account made for it is a new one', async (s) => {
+  await s.create('ana@example.org', 'Ana Lima');
+  const old = await s.openSession('ana@example.org');
+  await s.removeAccount('ana@example.org');
+  await s.create('ana@example.org', 'Ana, again');
+  assert.equal((await s.find('ana@example.org'))?.name, 'Ana, again');
+  // The sessions went with the account: left behind, one would name the address in the clear, and
+  // open the new account for whoever still holds the removed person's cookie.
+  assert.equal(await s.fromSession(old), null, 'no session of the removed person opens the new account');
+  assert.equal((await s.readAllUsers()).length, 2, 'beside the emptied one, which stays');
+});
+
+forEachStore('removing an account nobody has answers false, and writes nothing', async (s) => {
+  await s.create('bea@example.org', 'Bea');
+  assert.equal(await s.removeAccount('nobody@example.org'), false);
+  assert.deepEqual((await s.readAllUsers()).map((r) => r.email), ['bea@example.org']);
+});

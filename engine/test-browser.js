@@ -733,6 +733,24 @@ try {
     await owner.page.locator('tr', { hasText: GRANTED }).getByRole('button', { name: 'Revoke' }).click();
     await must('the owner revokes it, and is told so', () => owner.page.locator('.holdrim-alert--ok', { hasText: 'Grant revoked.' }).waitFor());
     expect('and on their next page, Approve is gone again', 0, await offersApprove());
+
+    // Removing a person, at their request (#37): one form, a box the browser will not post unticked,
+    // and the words they wrote gone from what the server answers.
+    const said = await fetch(`${BASE}/api/events`, { method: 'POST',
+      headers: { 'X-Dev-Email': GRANTED, 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'comment', page: 'A01', block: 'A01.1.3', text: 'Remove me, and these words' }) });
+    expect('the person to remove leaves a comment', 201, said.status);
+    const comment = (await said.json()).id;
+    await owner.page.goto(`${BASE}/engine/settings`);
+    await owner.page.locator('.settings-remove input[name="email"]').fill(GRANTED);
+    expect('the browser will not post it with the box unticked', true,
+      await owner.page.locator('.settings-remove input[name="confirm"]').evaluate((box) => box.validity.valueMissing));
+    await owner.page.locator('.settings-remove input[name="confirm"]').check();
+    await owner.page.locator('.settings-remove button[type="submit"]').click();
+    await must('ticked, the person is removed, and the owner is told so',
+      () => owner.page.locator('.holdrim-alert--ok', { hasText: 'The person was removed.' }).waitFor());
+    const after = await (await fetch(`${BASE}/api/events/${comment}`, { headers: { 'X-Dev-Email': OWNER } })).json();
+    expect('their comment is still there, without its text', 'comment null', `${after.type} ${after.text}`);
     expect('and nothing on the settings screen was refused, blocked or thrown', '', owner.problems.join(' | '));
   }
 

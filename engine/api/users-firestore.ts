@@ -70,6 +70,28 @@ export class UsersFirestore extends UserStoreBase {
     await this.#db.collection('users').doc(email).update({ name });
   }
 
+  /**
+   * A document's id cannot change, so the row moves: the emptied copy created under `removedKey` and
+   * the address's document deleted, with every session naming the address, in one transaction.
+   * `create`, so a key already taken refuses rather than overwrites.
+   */
+  protected async writeRemoved(email: string, removedKey: string, salt: Buffer, hash: Buffer): Promise<boolean> {
+    const users = this.#db.collection('users');
+    const account = users.doc(email);
+    const sessions = this.#db.collection('sessions').where('email', '==', email);
+    return this.#db.runTransaction(async (tx) => {
+      const row = await tx.get(account);
+      if (!row.exists) return false;
+      const open = await tx.get(sessions);
+      tx.create(users.doc(removedKey), {
+        email: removedKey, name: '', salt, hash, must_change: true, created_at: row.data()!.created_at, enabled: false,
+      });
+      tx.delete(account);
+      for (const session of open.docs) tx.delete(session.ref);
+      return true;
+    });
+  }
+
   protected async writeCredential(
     email: string, salt: Buffer, hash: Buffer, mustChange: boolean): Promise<void> {
     await this.#db.collection('users').doc(email).update({ salt, hash, must_change: mustChange });

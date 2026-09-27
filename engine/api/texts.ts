@@ -111,9 +111,16 @@ export function saltFields(event: { text?: string | null; snapshot?: string | nu
   return { hashes, rows };
 }
 
+/**
+ * What `noText` throws: its own class, so a caller that removes many texts in a row (removing a
+ * person, `engine/api/person-removal.ts`) tells "this one was already gone" from a store failing by
+ * the class, never by matching the message.
+ */
+export class NoText extends Error {}
+
 /** The one error every store gives for a field with nothing to remove, so a caller matches one text. */
 export function noText(event: string, field: TextField): Error {
-  return new Error(`no ${field} to remove on event ${event}: it was never given, or is already gone`);
+  return new NoText(`no ${field} to remove on event ${event}: it was never given, or is already gone`);
 }
 
 /**

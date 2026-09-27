@@ -97,14 +97,17 @@ Each has a test. If you change the code around one, run the contract test and re
   deleted, and disabling drops the open session. An event's own `text` and `snapshot` live apart, in
   `texts`: a row there is never updated or replaced, and is deleted only by `EventStore.removeText`,
   together with a `text_removed` event recording who and when (`texts_no_update`, `texts_no_replace`,
-  `texts_no_delete`, `engine/api/store-sqlite.ts`). No route writes a `text_removed` event — `POST
-  /events` refuses the type. A hash with no row that matches it, and no valid removal (later than
-  its target) naming it, or with two removals, reads as tampered, not as erased. A person's row in
+  `texts_no_delete`, `engine/api/store-sqlite.ts`). Only the owner's removal of a person writes a
+  `text_removed` event, through `removeText` itself — `POST /events` refuses the type. A hash with
+  no row that matches it, and no valid removal (later than its target) naming it, or with two
+  removals, reads as tampered, not as erased. A person's row in
   the people table takes the same shape: `people_only_lose_email`, `people_no_delete` and
   `people_no_replace` (`engine/api/store-sqlite.ts`) let `EventStore.forget` empty its e-mail and
   never its id or the row itself, so a forgotten person's id still names every event and lock they
-  ever gave (`docs/PRIVACY.md`, section 5, is the procedure for both, run by hand until there is a
-  screen for it).
+  ever gave. Both are reached together, by the owner alone, from the settings screen: removing a
+  person (`docs/PRIVACY.md`, section 5, `engine/api/person-removal.ts`) empties their account and
+  their row, removes their texts and revokes their grants, and never touches an event, a snapshot or
+  a lock.
 - **A ✓ is a lock only when its author held `lock` at the moment they gave it, and it stays one.**
   Who holds `lock` is set by the deployment alone — never by the repository, the store or a screen.
   Today that is the owner only (`docs/ROLES.md` §3 names who else will, once `LOCKS` exists — not

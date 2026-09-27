@@ -281,6 +281,23 @@ who ran the engine from `main` before it.
   name an agent — an address `HOLDRIM_AGENTS` marks, or one holding an agent token — is ignored,
   with a `role_grant_ignored` line in the log on the agent's first request, and the service still
   starts.
+- **Removing a person, at their request, from the settings screen** (#37, `docs/PRIVACY.md` section
+  5). The owner types the address, ticks a box saying the person asked, and removes them: their
+  account loses its e-mail, name, password and every open session (the row stays, disabled, under a
+  key that is no address, and the address is free for a new person); every text they wrote is
+  removed, each with a `text_removed` event; every grant of a project role they held is revoked by a
+  later `grant_revoked`; and their row in the people table loses its e-mail and keeps its id. Their
+  events, snapshots and locks stay exactly as they were. A new event, `person_removed`, on the
+  reserved page `_people`, records it with ids and counts only (`data.person`, `texts`, `textsLeft`,
+  `grants`, `account`), listable by anyone signed in and refused by `POST /api/events`. The owner's
+  alone, from the screen's own form, with no API route. Refused, touching nothing: without the box
+  ticked, for the owner, for an address `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` or `HOLDRIM_AGENTS` still
+  names (take it out and restart first), for an address holding an agent token (revoke it first),
+  and for an address nobody here goes by, which is also what a second run answers. A text that
+  reads as tampered is left, and counted in `textsLeft`. Behind an identity proxy there is no account
+  to empty, and the screen says to take the address out of the proxy first. `text_removed` and
+  `person_removed` join the event types on `engine/surface.json`: from this version on, the engine
+  writes both.
 - **Ask for a new page, in plain words**, from the home (a form that needs no script) or from any
   block (the new `page` category). `holdrim apply` tells the agent to write one new page shaped like
   the one it was asked near, and to mark nothing as validated.

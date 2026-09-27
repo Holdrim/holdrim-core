@@ -181,6 +181,18 @@ export class UsersPostgres extends UserStoreBase {
     await this.#query('UPDATE users SET name = $1 WHERE email = $2', [name, email]);
   }
 
+  protected async writeRemoved(email: string, removedKey: string, salt: Buffer, hash: Buffer): Promise<boolean> {
+    // In the address's turn, as creating an account is: an account created for the address while this
+    // runs lands before or after it, never half-way through the move.
+    return this.#inAddressTurn(email, async (q) => {
+      await q('DELETE FROM sessions WHERE email = $1', [email]);
+      const moved = await q(
+        "UPDATE users SET email = $1, name = '', salt = $2, hash = $3, must_change = TRUE, enabled = FALSE "
+        + 'WHERE email = $4 RETURNING email', [removedKey, salt, hash, email]);
+      return moved.rows.length === 1;
+    });
+  }
+
   protected async writeCredential(
     email: string, salt: Buffer, hash: Buffer, mustChange: boolean): Promise<void> {
     await this.#query(
