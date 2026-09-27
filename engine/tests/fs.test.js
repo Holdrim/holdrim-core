@@ -10,14 +10,15 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import fs, { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { saveRegistry, loadRegistry } from '../cli/validation.ts';
 import { exportSite } from '../cli/export.ts';
 import { sheetFiles } from '../cli/pages.ts';
-import { refuseServedStore } from '../cli/fs.ts';
+import { refuseServedStore, realStoreFolder, insideStoreFolder } from '../cli/fs.ts';
+import { eventStoreFile } from '../api/store-sqlite.ts';
 import { userStoreFile } from '../api/users.ts';
 
 /** Replaces `fs[name]` with `impl(real, ...args)` for the life of the test, through the ESM binding too. */
@@ -525,9 +526,78 @@ test('a users store that writes no file names none, so no file is checked agains
   assert.equal(userStoreFile('postgres://u:p@host/db', inSite), null, 'postgres');
   assert.equal(userStoreFile('sqlite::memory:', inSite), null, 'sqlite in memory');
   assert.equal(userStoreFile('sqlite://:memory:', inSite), null, 'the // form of the same');
-  // …while each spelling of a SQLite file names the file it opens.
-  assert.equal(userStoreFile(undefined, inSite), inSite, 'absent: HOLDRIM_USERS_PATH');
-  assert.equal(userStoreFile('sqlite', inSite), inSite, 'bare sqlite: HOLDRIM_USERS_PATH');
-  assert.equal(userStoreFile('sqlite:/var/lib/users.db', inSite), '/var/lib/users.db', 'sqlite:<path>');
-  assert.equal(userStoreFile('sqlite:///var/lib/users.db', inSite), '/var/lib/users.db', 'sqlite://<path>');
+  assert.equal(userStoreFile(undefined, ':memory:'), null, 'HOLDRIM_USERS_PATH in memory');
+});
+
+test('a users store names its file and the variable that named it, for the refusal to name', () => {
+  const inSite = '/srv/site/users.db';
+  const byPath = { file: inSite, variable: 'HOLDRIM_USERS_PATH' };
+  assert.deepEqual(userStoreFile(undefined, inSite), byPath, 'absent: HOLDRIM_USERS_PATH');
+  assert.deepEqual(userStoreFile('sqlite', inSite), byPath, 'bare sqlite: HOLDRIM_USERS_PATH');
+  assert.deepEqual(userStoreFile('sqlite:/var/lib/users.db', inSite),
+    { file: '/var/lib/users.db', variable: 'HOLDRIM_USERS' }, 'sqlite:<path>');
+  assert.deepEqual(userStoreFile('sqlite:///var/lib/users.db', inSite),
+    { file: '/var/lib/users.db', variable: 'HOLDRIM_USERS' }, 'sqlite://<path>');
+});
+
+test('the server refuses to start on a users store that names an empty file, naming the variable', () => {
+  // Taken as a path, `''` would be checked as the working directory while SQLite opened a
+  // temporary database elsewhere, and the refusal would name an empty file.
+  assert.throws(() => userStoreFile('sqlite:', '/x/users.db'), /^Error: HOLDRIM_USERS="sqlite:" names no file/);
+  assert.throws(() => userStoreFile('sqlite://', '/x/users.db'), /^Error: HOLDRIM_USERS="sqlite:\/\/" names no file/);
+  assert.throws(() => userStoreFile(undefined, ''), /^Error: HOLDRIM_USERS_PATH is empty and names no file/);
+});
+
+test('an events store names its file only when it is SQLite on a file', () => {
+  assert.equal(eventStoreFile('memory', '/srv/site/events.db'), null, 'memory');
+  assert.equal(eventStoreFile('firestore', '/srv/site/events.db'), null, 'firestore');
+  assert.equal(eventStoreFile('sqlite', ':memory:'), null, 'sqlite in memory');
+  assert.deepEqual(eventStoreFile('sqlite', '/srv/data/events.db'), { file: '/srv/data/events.db', variable: 'HOLDRIM_EVENTS_PATH' });
+  assert.deepEqual(eventStoreFile('sqlite', undefined), { file: './data/events.db', variable: 'HOLDRIM_EVENTS_PATH' },
+    'unset: the default, which the site check then judges like any other path');
+});
+
+test('the server refuses to start on an events store that names an empty file, naming the variable', () => {
+  assert.throws(() => eventStoreFile('sqlite', ''), /^Error: HOLDRIM_EVENTS_PATH is empty and names no file/);
+  assert.equal(eventStoreFile('memory', ''), null, 'a store that writes no file does not read the variable');
+});
+
+// ===================================================================== a store, on every request
+// `serveStatic` answers "not there" for a file inside a store's real folder, resolved once at boot,
+// so the server never serves a store it writes even after the site's root is re-pointed. The
+// contract test re-points a live server's site; these hold the two pieces it is built from.
+
+test('the server never serves a store it writes: a file inside a store folder is inside it', (t) => {
+  const parent = siteParent(t);
+  mkdirSync(join(parent, 'data'));
+  writeFileSync(join(parent, 'data', 'events.db'), '');
+  const folders = [realStoreFolder(join(parent, 'data', 'events.db'))];
+  for (const name of ['events.db', 'events.db-wal', 'events.db-shm']) {
+    assert.equal(insideStoreFolder(folders, join(folders[0], name)), true, name);
+  }
+  assert.equal(insideStoreFolder([join(parent, 'elsewhere'), ...folders], join(folders[0], 'events.db')), true,
+    'whichever of the store folders it is in');
+});
+
+test('the server never serves a store it writes, and serves what is beside it', (t) => {
+  const parent = siteParent(t);
+  mkdirSync(join(parent, 'data'));
+  writeFileSync(join(parent, 'data', 'events.db'), '');
+  // Real paths on both sides, as `serveStatic` compares them: the temporary folder may itself be a link.
+  const real = realpathSync(parent);
+  const folders = [realStoreFolder(join(parent, 'data', 'events.db'))];
+  assert.equal(insideStoreFolder(folders, join(real, 'data-old', 'events.db')), false, 'a sibling named like it');
+  assert.equal(insideStoreFolder(folders, join(real, 'site', 'index.html')), false, 'a page');
+  assert.equal(insideStoreFolder([], join(real, 'data', 'events.db')), false, 'no file-backed store at all');
+});
+
+test('the server never serves a store it writes: its folder is where the database REALLY is', (t) => {
+  // SQLite follows a database file that is a link and keeps `-wal` and `-shm` beside the real file,
+  // so that folder, not the link's, is the one to keep out.
+  const parent = siteParent(t);
+  mkdirSync(join(parent, 'real'));
+  mkdirSync(join(parent, 'linked'));
+  writeFileSync(join(parent, 'real', 'events.db'), '');
+  symlinkSync(join(parent, 'real', 'events.db'), join(parent, 'linked', 'events.db'));
+  assert.equal(realStoreFolder(join(parent, 'linked', 'events.db')), realpathSync(join(parent, 'real')));
 });

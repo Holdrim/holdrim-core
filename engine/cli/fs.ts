@@ -230,3 +230,26 @@ export function refuseServedStore(site: string, file: string, what: string): voi
     }
   }
 }
+
+/**
+ * The folder a SQLite store's files REALLY live in: the real location of the database file's own
+ * folder, every link followed. SQLite follows a database file that is a link and keeps its `-wal`
+ * and `-shm` beside the real file, so this one folder holds all three. Read by the server once, at
+ * boot, after the store is opened — the file exists by then — and handed to `insideStoreFolder` on
+ * every request.
+ */
+export function realStoreFolder(file: string): string {
+  return dirname(realpathSync(file));
+}
+
+/**
+ * Whether `realTarget`, a path already resolved to its real location, lies inside one of the
+ * `storeFolders` (`realStoreFolder`'s answers). `serveStatic` (engine/api/server.ts) answers "not
+ * there" for such a file, so the server never serves a store it writes — whatever the site's root
+ * points at by then. `refuseServedStore` holds the same guarantee once, at boot; the site root is
+ * resolved again on every request, so this holds it on every request too. A comparison against at
+ * most one folder per file-backed store, with `insideRoot`, the same rule as everywhere else.
+ */
+export function insideStoreFolder(storeFolders: readonly string[], realTarget: string): boolean {
+  return storeFolders.some((folder) => insideRoot(folder, realTarget));
+}

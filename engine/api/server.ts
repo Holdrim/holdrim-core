@@ -11,7 +11,7 @@ import {
 import { overLimit, validCommit, short, PAGE_FORMAT } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
 import { MemoryEventStore } from './store.ts';
-import { SqliteEventStore } from './store-sqlite.ts';
+import { SqliteEventStore, eventStoreFile } from './store-sqlite.ts';
 import {
   openUserStore, ephemeralUserStoreWarning, userStoreFile, DEFAULT_SQLITE_PATH, UserInputError, AddressInUse,
   normalizeEmail, isEmailAddress, MAX_NAME_LENGTH, type UserStore,
@@ -26,7 +26,7 @@ import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js'
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { graphOf } from '../cli/graph.ts';
-import { realContainment, refuseServedStore } from '../cli/fs.ts';
+import { realContainment, refuseServedStore, realStoreFolder, insideStoreFolder } from '../cli/fs.ts';
 import { loadTheme, DISK_THEME_IO } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
@@ -194,7 +194,6 @@ for (const { scope, reaches } of lockReach) {
  *   firestore | Google Cloud. Needs HOLDRIM_PROJECT.
  */
 const eventsKind = process.env.HOLDRIM_EVENTS ?? (cfg.mode === 'local' ? 'memory' : 'sqlite');
-const eventsPath = process.env.HOLDRIM_EVENTS_PATH ?? './data/events.db';
 const usersPath = process.env.HOLDRIM_USERS_PATH ?? DEFAULT_SQLITE_PATH;
 
 /**
@@ -214,15 +213,19 @@ const usersPath = process.env.HOLDRIM_USERS_PATH ?? DEFAULT_SQLITE_PATH;
  * HOLDRIM_SITE and puts both stores in /data, and `engine/run-local.sh` keeps events in memory and
  * signs nobody in with a password.
  */
-const fileStores: Array<[string, string, string]> = [];
-if (eventsKind === 'sqlite' && eventsPath !== ':memory:') {
-  fileStores.push(['the events store', 'HOLDRIM_EVENTS_PATH', eventsPath]);
+let eventsFile: ReturnType<typeof eventStoreFile> = null;
+let usersFile: ReturnType<typeof userStoreFile> = null;
+try {
+  eventsFile = eventStoreFile(eventsKind, process.env.HOLDRIM_EVENTS_PATH);
+  usersFile = identityKind === 'password' ? userStoreFile(process.env.HOLDRIM_USERS, usersPath) : null;
+} catch (error) {
+  refuseToStart(error);
 }
-const usersFile = identityKind === 'password' ? userStoreFile(process.env.HOLDRIM_USERS, usersPath) : null;
-if (usersFile !== null) {
-  fileStores.push(['the users store', process.env.HOLDRIM_USERS?.trim().startsWith('sqlite:') ? 'HOLDRIM_USERS' : 'HOLDRIM_USERS_PATH', usersFile]);
-}
-for (const [what, variable, file] of fileStores) {
+const fileStores = [
+  ...(eventsFile ? [{ what: 'the events store', ...eventsFile }] : []),
+  ...(usersFile ? [{ what: 'the users store', ...usersFile }] : []),
+];
+for (const { what, variable, file } of fileStores) {
   try {
     refuseServedStore(cfg.site, file, `${what} (${variable})`);
   } catch (error) {
@@ -237,7 +240,7 @@ for (const [what, variable, file] of fileStores) {
 const events: EventStore = await (async () => {
   switch (eventsKind) {
     case 'memory': return new MemoryEventStore();
-    case 'sqlite': return new SqliteEventStore(eventsPath);
+    case 'sqlite': return new SqliteEventStore(eventsFile?.file ?? ':memory:');
     case 'firestore': {
       if (!cfg.project) { console.error('invalid configuration: firestore needs HOLDRIM_PROJECT'); process.exit(1); }
       // Imported here and only here — see the note at the top of store.ts. If the optional package
@@ -341,6 +344,22 @@ if (identityKind === 'password') {
     console.log('='.repeat(72) + '\n');
   }
 }
+
+/**
+ * The real folders the file-backed stores' files live in, resolved once, now that both stores are
+ * open and their files exist. `serveStatic` answers "not there" for anything inside one of them, so
+ * the server never serves a store it writes: the boot check above holds that for the site as it was
+ * at start, and this holds it for the site as it is on each request — its root is resolved again
+ * every time, and may have been re-pointed since. At most one folder per store, so a request pays
+ * at most two comparisons.
+ */
+const storeFolders = (() => {
+  try {
+    return fileStores.map(({ file }) => realStoreFolder(file));
+  } catch (error) {
+    return refuseToStart(error);
+  }
+})();
 
 // ---------------------------------------------------------------- helpers
 /**
@@ -1661,7 +1680,10 @@ async function serveStatic(url: URL, res: ServerResponse, lang: string) {
     // The site root is resolved on every request, not once at boot: it is not the engine's to hold
     // still — a release that re-points a symlinked site at new content is an ordinary deployment,
     // and a real root remembered from before it would refuse the whole site until a restart.
-    if (!realContainment(cfg.site, target).inside) return notFound();
+    const where = realContainment(cfg.site, target);
+    if (!where.inside) return notFound();
+    // The same "not there" for a file of a store this server writes (`storeFolders` above says why).
+    if (insideStoreFolder(storeFolders, where.realTarget)) return notFound();
     const info = await stat(target);
     if (info.isDirectory()) return serveStatic(new URL(url.href.replace(/\/?$/, '/index.html')), res, lang);
     return serveFile(target, res, path);

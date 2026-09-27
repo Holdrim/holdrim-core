@@ -1871,6 +1871,17 @@ expect "events in memory, the path inside the site: it comes up" 200 "$(curl -s 
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 expect "and nothing was created inside the site"            "" "$(find "$IN_SITE" -name data -o -name '*.db*')"
 rm -rf "$IN_SITE"
+# A store variable that names no file is refused by name, rather than read as the working directory.
+for EMPTY_AT in "HOLDRIM_USERS=sqlite:" "HOLDRIM_EVENTS_PATH="; do
+  VARIABLE=${EMPTY_AT%%=*}
+  HOLDRIM_ENVIRONMENT=Production HOLDRIM_IDENTITY=password HOLDRIM_OWNER=$OWNER HOLDRIM_EVENTS=sqlite \
+    HOLDRIM_USERS_PATH="$WORK/empty-store/users.db" HOLDRIM_EVENTS_PATH="$WORK/empty-store/events.db" \
+    HOLDRIM_SITE="$SITE" PORT=$PORT \
+    run_for 15 env "$EMPTY_AT" node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/empty-store.log" 2>&1
+  expect "$EMPTY_AT, naming no file → exits 1"               1 "$?"
+  expect "and says which variable names no file"              0 "$(has "^invalid configuration: $VARIABLE.* names no file" "$WORK/empty-store.log"; echo $?)"
+  expect "and opened no store"                                1 "$([ -e "$WORK/empty-store" ]; echo $?)"
+done
 # The local runner serves the engine's own folder by default, where both stores' default `./data`
 # lies — and it still comes up, because it opens neither store as a file. Only the stores a boot
 # will open are asked; asking the others would refuse the documented way to run it locally.
@@ -2571,6 +2582,28 @@ expect "and nothing of the file it leads to is sent"                    1 "$(sit
 expect "a missing file is still → 404"                                  404 "$(site_code /pages/nothing-here.html)"
 # A link to nothing has no real location to judge: it is a missing file, answered as one.
 expect "and so is a link that leads nowhere → 404"                      404 "$(site_code /pages/leads-nowhere.txt)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+echo "the server never serves a store it writes, even with the site re-pointed after start:"
+# The site is a link, re-pointed after boot at a folder that holds the events store — the start
+# check saw the site as it was, so what refuses here is the per-request one. A harmless file beside
+# the store answers 200 first, so the 404 after it is the store kept out, not a re-point that failed.
+REPOINT="$WORK/repoint"
+mkdir -p "$REPOINT/after"
+cp -r "$SITE" "$REPOINT/before"
+echo 'written by the contract test, beside the store' >"$REPOINT/after/note.txt"
+MSYS=winsymlinks:nativestrict ln -s "$REPOINT/before" "$REPOINT/current"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH="$REPOINT/after/data/events.db" HOLDRIM_SITE="$REPOINT/current" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/repoint.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "a store outside the site at start: it comes up"   200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+rm "$REPOINT/current"; MSYS=winsymlinks:nativestrict ln -s "$REPOINT/after" "$REPOINT/current"
+expect "the fixture: the site re-pointed, the store on disk" 0 \
+  "$([ -L "$REPOINT/current" ] && [ -f "$REPOINT/after/data/events.db" ]; echo $?)"
+expect "the re-pointed site serves what it holds → 200"   200 "$(site_code /note.txt)"
+expect "and not the store it now holds → 404"             404 "$(site_code /data/events.db)"
+expect "and nothing of it is sent"                        1 "$(site_get $B/data/events.db | has 'SQLite format'; echo $?)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

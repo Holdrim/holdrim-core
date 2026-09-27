@@ -505,6 +505,32 @@ function refusedBecause(db: DatabaseSync, err: unknown, what: 'event' | 'person'
     + 'This is how the file was left, not what this write did: see SECURITY.md', { cause: err });
 }
 
+/** Where the events store writes when `HOLDRIM_EVENTS_PATH` is unset. */
+const DEFAULT_EVENTS_PATH = './data/events.db';
+
+/**
+ * The file on disk the events store writes for `HOLDRIM_EVENTS` = `kind` and `HOLDRIM_EVENTS_PATH`
+ * = `path`, and the variable that named it — or null when it writes none: memory, Firestore, or
+ * SQLite at `:memory:`. The server checks this file against the site before the store is opened
+ * (`refuseServedStore`, engine/cli/fs.ts) and opens `SqliteEventStore` at exactly this file, so the
+ * file checked and the file opened are one answer — the same arrangement as `userStoreFile`
+ * (engine/api/users.ts) for the people.
+ *
+ * An empty path names no file and is refused, naming the variable: taken as a path, it would be
+ * checked as the working directory while SQLite opened a temporary database somewhere else.
+ */
+export function eventStoreFile(
+  kind: string, path: string | undefined,
+): { file: string; variable: 'HOLDRIM_EVENTS_PATH' } | null {
+  if (kind !== 'sqlite') return null;
+  const file = path ?? DEFAULT_EVENTS_PATH;
+  if (file === ':memory:') return null;
+  if (file.trim() === '') {
+    throw new Error(`HOLDRIM_EVENTS_PATH is empty and names no file (set a path, or unset it for ${DEFAULT_EVENTS_PATH})`);
+  }
+  return { file, variable: 'HOLDRIM_EVENTS_PATH' };
+}
+
 export class SqliteEventStore implements EventStore {
   #db: DatabaseSync;
 

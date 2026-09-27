@@ -785,10 +785,10 @@ export async function openUserStore(
   const chosen = (url ?? '').trim();
 
   if (chosen === '' || chosen === 'sqlite' || chosen.startsWith('sqlite:')) {
-    // The path comes from `userStoreFile`, the one the server checks against the site before this
+    // The file comes from `userStoreFile`, the one the server checks against the site before this
     // runs: worked out here a second time, the file checked and the file opened could differ.
     const { UsersSqlite } = await import('./users-sqlite.ts');
-    return new UsersSqlite(userStoreFile(chosen, sqlitePath) ?? ':memory:');
+    return new UsersSqlite(userStoreFile(chosen, sqlitePath)?.file ?? ':memory:');
   }
   if (chosen === 'firestore') {
     if (!options.projectId) throw new Error('firestore needs HOLDRIM_PROJECT');
@@ -821,17 +821,30 @@ export function isFileBackedUserStore(url: string | undefined): boolean {
 }
 
 /**
- * The file on disk the user store named by `url` writes, as `openUserStore` would open it — or null
- * when it writes none: Firestore, Postgres, `sqlite::memory:`, or a value `openUserStore` refuses.
- * The server checks this path against the site before the store is opened (`refuseServedStore`,
- * engine/cli/fs.ts), and `openUserStore` opens the SQLite store at exactly this path — null there is
- * `:memory:` — so the file checked and the file opened are one answer, not two.
+ * The file on disk the user store named by `url` writes, as `openUserStore` would open it, and the
+ * variable that named it — or null when it writes none: Firestore, Postgres, `sqlite::memory:`, or a
+ * value `openUserStore` refuses. The server checks this file against the site before the store is
+ * opened (`refuseServedStore`, engine/cli/fs.ts) and names `variable` in its refusal, and
+ * `openUserStore` opens the SQLite store at exactly this file — null there is `:memory:` — so the
+ * file checked, the variable named and the file opened are one answer, not three.
+ *
+ * An empty path — `sqlite:` with nothing after the colon, or an empty `HOLDRIM_USERS_PATH` — names no
+ * file and is refused, naming the variable. Taken as a path, it would be checked as the working
+ * directory while SQLite opened a temporary database somewhere else.
  */
-export function userStoreFile(url: string | undefined, sqlitePath: string = DEFAULT_SQLITE_PATH): string | null {
+export function userStoreFile(
+  url: string | undefined, sqlitePath: string = DEFAULT_SQLITE_PATH,
+): { file: string; variable: 'HOLDRIM_USERS' | 'HOLDRIM_USERS_PATH' } | null {
   const chosen = (url ?? '').trim();
-  const path = chosen === '' || chosen === 'sqlite' ? sqlitePath
-    : chosen.startsWith('sqlite:') ? sqlitePathOf(chosen) : null;
-  return path === ':memory:' ? null : path;
+  const named = chosen === '' || chosen === 'sqlite' ? { file: sqlitePath, variable: 'HOLDRIM_USERS_PATH' as const }
+    : chosen.startsWith('sqlite:') ? { file: sqlitePathOf(chosen), variable: 'HOLDRIM_USERS' as const } : null;
+  if (named === null || named.file === ':memory:') return null;
+  if (named.file.trim() === '') {
+    throw new Error(named.variable === 'HOLDRIM_USERS'
+      ? `HOLDRIM_USERS="${chosen}" names no file (use sqlite:<path>, or sqlite::memory: for a store kept in memory)`
+      : `HOLDRIM_USERS_PATH is empty and names no file (set a path, or unset it for ${DEFAULT_SQLITE_PATH})`);
+  }
+  return named;
 }
 
 /**
