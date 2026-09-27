@@ -229,6 +229,56 @@ expect "lock_baseline via POST /events → 400, even from a member" 400 "$(post 
 expect "an approval sent as text/plain → 415" 415 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: text/plain' -d '{"type":"approval","page":"D01","block":"D01.1.9","fingerprint":"forged"}' $B/api/events)"
 expect "and nothing was recorded"      1 "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=D01" | has 'forged'; echo $?)"
 
+echo "a block's own page, not the one a client sends beside it (holdrim#152):"
+# Since #33, permission is judged on the block's OWN page (`pageOfBlock`), never on `page` — so a
+# mismatch here gains nothing. What it used to do instead was get STORED under the wrong page, where
+# every reader that groups by `page` — the traffic light, the home, `holdrim list` — would never
+# find it. Every route that writes an event goes through `refusalOf` (recordEvent's one door), so one
+# mismatched pair proves the check for all of them, and one matched pair per route proves it refuses
+# nothing legitimate.
+expect "approval, mismatched page → 400"  400 "$(post $OWNER '{"type":"approval","page":"D09","block":"D01.5.1","fingerprint":"x"}')"
+expect "and the message names both pages" 0 "$(body $OWNER '{"type":"approval","page":"D09","block":"D01.5.1","fingerprint":"x"}' | has 'belongs to page D01, not D09'; echo $?)"
+expect "approval, matching page → 201"    201 "$(post $OWNER '{"type":"approval","page":"D01","block":"D01.5.1","fingerprint":"x"}')"
+expect "request, mismatched page → 400"   400 "$(post $REVIEWER '{"type":"request","page":"D09","block":"D01.5.2","text":"x"}')"
+# `new_request`, not `post`: a matching request that stays open would inflate `toTriage` below —
+# resolved right after, so this proves acceptance without leaking into that count.
+RID_MATCH=$(new_request $REVIEWER '{"type":"request","page":"D01","block":"D01.5.2","text":"x"}')
+require_id "$RID_MATCH" RID_MATCH
+post $OWNER "{\"type\":\"request_state\",\"page\":\"D01\",\"data\":{\"request\":\"$RID_MATCH\",\"state\":\"approved\"}}" >/dev/null
+expect "comment, mismatched page → 400"   400 "$(post $REVIEWER '{"type":"comment","page":"D09","block":"D01.5.3","text":"x"}')"
+expect "comment, matching page → 201"     201 "$(post $REVIEWER '{"type":"comment","page":"D01","block":"D01.5.3","text":"x"}')"
+expect "decision_reply, mismatched page → 400" 400 "$(post $REVIEWER '{"type":"decision_reply","page":"D09","block":"D01.5.4"}')"
+expect "…and the message names both pages too" 0 "$(body $REVIEWER '{"type":"decision_reply","page":"D09","block":"D01.5.4"}' | has 'belongs to page D01, not D09'; echo $?)"
+RID152=$(new_request $REVIEWER '{"type":"request","page":"D01","block":"D01.6.1","text":"holdrim#152 fixture"}')
+require_id "$RID152" RID152
+# `request_state` and `supplement` are neither refused nor trusted here: `decide_forged` and the
+# SCOPED fixture, both further down, already prove that a forged `block` on either changes no
+# permission answer (judged on the STORED request, not on `incoming`) — so refusing it in `refusalOf`
+# would gain nothing. But left as sent, it would still be APPENDED with the forged place, unreadable
+# from the request's own thread and misfiled onto whichever page the forgery named. `recordEvent`
+# overwrites `page`/`block` with the request's own right after it looks the request up: accepted,
+# and stored where the request's thread actually lives — never where the forgery pointed.
+finds() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=$1" \
+  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type===process.argv[2]&&x.data.request===process.argv[3]).pop();console.log(e?[e.page,e.block].join(' '):'none')})" "$1" "$2" "$3"; }
+expect "supplement naming a block of another page → 201" 201 \
+  "$(post $REVIEWER "{\"type\":\"supplement\",\"page\":\"D01\",\"block\":\"A01.1.1\",\"text\":\"x\",\"data\":{\"request\":\"$RID152\"}}")"
+expect "…stored under the request's OWN page and block, not the forged one" "D01 D01.6.1" \
+  "$(finds D01 supplement "$RID152")"
+expect "…and absent from the forged page's own history" 1 \
+  "$(curl -s -H \"X-Dev-Email: $OWNER\" \"$B/api/events?page=A01\" | has -F \"\\\"request\\\":\\\"$RID152\\\"\"; echo $?)"
+expect "request_state naming a block of another page → 201" 201 \
+  "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"D01\",\"block\":\"A01.1.1\",\"data\":{\"request\":\"$RID152\",\"state\":\"approved\"}}")"
+expect "…stored under the request's OWN page and block too" "D01 D01.6.1" \
+  "$(finds D01 request_state "$RID152")"
+expect "…and absent from the forged page's own history too" 1 \
+  "$(curl -s -H \"X-Dev-Email: $OWNER\" \"$B/api/events?page=A01\" | has -F \"\\\"request\\\":\\\"$RID152\\\"\"; echo $?)"
+# No block named at all — the "ask for a page" request has none — is unaffected whatever `page`
+# says. `new_request`, again, so the still-open request left by a bare `post` does not leak into
+# `toTriage` below.
+RID_NOBLOCK=$(new_request $REVIEWER '{"type":"request","page":"ZZ","text":"ask about a page","data":{"category":"page"}}')
+require_id "$RID_NOBLOCK" RID_NOBLOCK
+post $OWNER "{\"type\":\"request_state\",\"page\":\"ZZ\",\"data\":{\"request\":\"$RID_NOBLOCK\",\"state\":\"approved\"}}" >/dev/null
+
 echo "limits:"
 LARGE=$(node -e "console.log('x'.repeat(500))")
 expect "giant block → 400"             400 "$(post $OWNER "{\"type\":\"approval\",\"page\":\"D01\",\"block\":\"$LARGE\",\"fingerprint\":\"a\"}")"

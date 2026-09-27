@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
 import {
-  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, parseAgents, lockCoverage,
+  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, parseAgents, lockCoverage, pageOfBlock,
 } from '../core/roles.js';
 import { overLimit, validCommit, short, PAGE_FORMAT } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
@@ -382,6 +382,39 @@ function refusalOf(incoming: NewEvent, who: Who, say: (key: string, params?: Rec
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
   }
+  // Since #33, permission is judged on the block's OWN page (`pageOfBlock`), never on the `page` a
+  // caller sent beside it — a scope or a capability cannot be widened by lying about `page`. But
+  // gaining no permission is not the same as doing no harm: left unchecked, the event is still
+  // STORED under the client's `page`, so a ✓ or a request on `P03.2.1` could be filed under `P09`.
+  // Every reader that groups by `page` instead of re-deriving it — the traffic light, the home,
+  // `holdrim list` — would then look for it on the wrong page forever. Checked here, once, for every
+  // route: `refusalOf` is `recordEvent`'s only door, so a check added beside `overLimit` reaches the
+  // API and both of the home's forms alike, with no second copy to fall out of step with `pageOfBlock`.
+  //
+  // NOT asked of `request_state` or `supplement`: permission for both is judged on the STORED
+  // request's place, never on the page or block the event itself claims (`mayAddDetails` and
+  // `mayMove`, further down), so refusing a forged one here would gain nothing a reader is actually
+  // protected from — `decide_forged` and the SCOPED fixture in engine/test-contract.sh both post one
+  // on purpose, to prove that a forged place changes no answer, and a refusal here would turn both
+  // into a 400 neither asked for. But "changes no answer" is not "does no harm": the event is still
+  // APPENDED with whatever `page`/`block` it carries, and a reader who lists a page's own history
+  // (the panel, `GET /api/events?page=`) would misfile it exactly the way this whole issue is about.
+  // So these two are neither refused nor trusted: `recordEvent`, right after it looks the STORED
+  // request up, overwrites `incoming.page` and `incoming.block` with the request's own — the ONE
+  // other place, besides here, that a client-sent page or block reaches an event this route writes.
+  // `short`, not the raw values, in the message: neither `page` nor `block` is bounded yet at this
+  // point — `overLimit` runs further down — and an unbounded echo is how a giant field once became a
+  // giant error body (see the `category` comment below).
+  if (incoming.block && incoming.type !== 'request_state' && incoming.type !== 'supplement'
+      && incoming.page !== pageOfBlock(incoming.block)) {
+    return {
+      status: 400,
+      body: {
+        error: say('api.event.pageMismatch',
+          { block: short(incoming.block), page: short(incoming.page), expected: short(pageOfBlock(incoming.block)) }),
+      },
+    };
+  }
   // Checked before the feature gate below: `gatingFeatureOf` matches `data.category` by EXACT
   // string — `"Bug"` or `"page "` would silently side-step whichever toggle the real spelling would
   // have gated, because nothing else validates it is one of `cycle.json`'s own categories.
@@ -557,6 +590,21 @@ async function recordEvent(
     const ofPage = await events.list(incoming.page);
     const request = ofPage.find((e) => e.id === requestId && e.type === 'request');
     if (!request) return { status: 404, body: { error: say('api.request.notFound') } };
+    // Overwritten with the STORED request's own place — never trusted from what this event claims,
+    // and never merely refused either (holdrim#152, orchestrator decision): `mayAddDetails` and
+    // `mayMove`, right below, already judge permission on `request`, not on `incoming`, so a forged
+    // `block` here never widened what a caller could do — `decide_forged` and the SCOPED fixture in
+    // engine/test-contract.sh both post one on purpose to prove exactly that, and still have to pass
+    // unchanged. But the event is APPENDED with whatever `page` and `block` it carries at that point,
+    // and `GET /api/events?page=` reads a page's own history by that stored `page` alone — a
+    // supplement or a triage decision left with a forged `page` or `block` would write correctly,
+    // judge correctly, and then be unreadable from the request's own thread and misfiled onto
+    // whichever page the forgery named instead. `incoming.page` already has to equal `request.page`
+    // for the lookup just above to have found anything, so this line is a no-op for it in practice;
+    // `incoming.block` had no such guarantee, and this is what closes it — for both fields at once,
+    // so neither can drift from the other the next time one of them changes shape.
+    incoming.page = request.page;
+    incoming.block = request.block;
     const current = cycle.currentState(requestId, ofPage, authorCouldTriage(request, LOCK_BASELINE));
 
     if (incoming.type === 'supplement') {
