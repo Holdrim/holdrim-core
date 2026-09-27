@@ -180,9 +180,13 @@ Worth knowing before you run it:
 - **Exactly one owner**, and it comes from `HOLDRIM_OWNER`, never from a database column. Zero or
   two and the service refuses to start. Nobody but the owner resets or creates the owner's account.
 - **Authority comes from the deployment only.** The owner and the admins are read from
-  `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` and from nowhere else; a `holdrim.json` that names `owner`,
-  `admins` or `locks` refuses to start the service and to run the CLI. Otherwise anyone who can
-  commit to the repository — or an agent applying an approved request — could name a new owner.
+  `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` and from nowhere else; a `holdrim.json` that names any key in
+  `AUTHORITY_KEYS` (`engine/core/config.js`: `owner`, `admins`, `locks`, `agents`, `roles`, `grants`)
+  refuses to start the service and to run the CLI. Otherwise
+  anyone who can commit to the repository — or an agent applying an approved request — could name a
+  new owner. The one other source of what a person may do is the project's own roles: `triage`,
+  `approve`, `read`, `comment` and `request`, never `lock` or `people`, from events on `_roles` that
+  only the owner's routes write (`docs/ROLES.md`, section 5).
 - **The theme is untrusted input.** It lands inside CSS and HTML, so the brand colour is accepted
   only as hex and anything else is refused and logged.
 - **The sign-in screen runs only what the server wrote into it.** Its Content-Security-Policy
@@ -241,6 +245,11 @@ Worth knowing before you run it:
   every writer to agree, cross-process, on when the baseline exists, which no store here can promise
   without a lock this method does not have. It is closed by deployment discipline instead — move all
   traffic to the new revision first, the same step named above — not by a check this file's tests run.
+- **Whoever can write the event store directly can forge a project grant**, as they can forge any
+  other event there until events are signed (phase E). What it buys is bounded: a grant of `triage`
+  or `approve`, recorded like any other, and never `lock` or `people` — a stored definition holding
+  either reads as holding nothing. A stored grant naming an agent is ignored and logged rather than
+  refusing to start, so such a write cannot stop the service either.
 - Identity is password or an identity proxy. OIDC, Google and LDAP are not implemented.
 - **Wrong passwords are counted per address, in the user store, and nowhere else.** Five free
   attempts per address as typed, then a wait that doubles up to fifteen minutes; every instance

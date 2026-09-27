@@ -418,10 +418,10 @@ const ALLOWED = [
     why: 'the gate refusalOf reads to refuse an event — never roles, never a capability' },
   { file: 'engine/api/server.ts', text: 'const peopleScreenOn = () => project.features.peopleScreen;',
     why: 'the ONLY place features.peopleScreen is read; the /api/users* routes ask roles.can, never this' },
-  { file: 'engine/api/server.ts', text: 'if (!peopleScreenOn() || !byPassword || !managesPeople(viewer)) {',
+  { file: 'engine/api/server.ts', text: 'if (!peopleScreenOn() || !byPassword || !managesPeople(viewer, roles)) {',
     why: 'servePeople: hides the SCREEN with a redirect, decoration in front of routes that never ' +
       'asked this question' },
-  { file: 'engine/api/server.ts', text: 'canManagePeople: peopleScreenOn() && managesPeople(viewer),',
+  { file: 'engine/api/server.ts', text: 'canManagePeople: peopleScreenOn() && managesPeople(viewer, roles),',
     why: 'serveHome\'s nav prop — whether to draw the People link, never whether the routes answer' },
   { file: 'engine/api/server.ts', text: 'pageRequestsEnabled: project.features.pageRequests, ask,',
     why: 'serveHome\'s prop for the "ask for a page" form; the form\'s POST is refused, if at all, ' +
@@ -436,13 +436,13 @@ const ALLOWED = [
     text: 'features: { comments: project.features.comments, pageRequests: project.features.pageRequests, bugCategory: project.features.bugCategory },',
     why: '/api/me telling the PANEL which of its own controls to draw (docs/ROLES.md, "The front ' +
       'end obeys the server") — never peopleScreen or graph, which the panel does not render' },
-  { file: 'engine/api/server.ts', text: 'canManagePeople: peopleScreenOn() && managesPeople(viewer),',
+  { file: 'engine/api/server.ts', text: 'canManagePeople: peopleScreenOn() && managesPeople(viewer, roles),',
     why: 'serveSettings\'s nav prop (#36), the same text as serveHome\'s above and the same question: ' +
       'whether to draw the People link, never whether the routes answer. Two entries, since each ' +
       'excuses one line' },
   { file: 'engine/api/server.ts',
     text: 'features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,',
-    why: 'serveSettings (#36) handing the owner\'s read-only screen the values to SHOW — it renders ' +
+    why: 'serveSettings (#36) handing the owner\'s screen the values to SHOW — it renders ' +
       'them as text, and decides nothing from them' },
   { file: 'engine/api/settings-page.ts', text: 'features: Record<string, boolean>;',
     why: 'the settings screen\'s data type: the toggles it displays' },

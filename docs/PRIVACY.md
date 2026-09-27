@@ -53,20 +53,21 @@ pseudonymous data as personal data still. A random id whose row has been emptied
 
 ### 2. What an event means is decided when it is written
 
-Today, whether a ✓ is a lock is worked out every time it is read, by asking whether its author is
-the owner **now** — the server does it for the panel, `holdrim sync` does it for the repository, and
-the cycle does the same for "an admin's request starts triaged". So a fact recorded years ago can
-change meaning without a single event changing: the owner hands over, and every ✓ of theirs not yet
-synced stops being a lock, with nothing in the trail to say so. An anonymised person would lose it
-the same way.
+Worked out on every read, whether a ✓ is a lock would ask whether its author is the owner **now**
+— the server for the panel, `holdrim sync` for the repository, and the cycle the same for "an
+admin's request starts triaged". A fact recorded years ago could then change meaning without a single
+event changing: the owner hands over, and every ✓ of theirs not yet synced stops being a lock, with
+nothing in the trail to say so. An anonymised person would lose it the same way.
 
-So the author's authority is written on the event when the server records it — the role they acted
-under and, on a ✓, whether it is a lock — from the configuration in force at that moment, and every
-reader uses what is written. Which roles exist, and who may lock, is `docs/ROLES.md`.
-A ✓ given by the owner stays the owner's ✓ after they hand over, after they are removed, after
-anything. The owner is still named only by `HOLDRIM_OWNER`, and the server writes the role from it:
-what changes is that a role, once written on a fact, is part of the fact. What that rests on, and
-what it does not, is the next section.
+So the author's authority is written on the event when the server records it, from the
+configuration and the grants in force at that moment, and every reader uses what is written: on a ✓,
+whether it is a lock (`data.locks`), and on a request, whether its author could triage it
+(`data.authorCouldTriage`) — read by `isLocked` and `authorCouldTriage` in `engine/api/types.ts`. The
+role the author acted under is not written yet. Which roles exist, and who may lock, is
+`docs/ROLES.md`. A ✓ given by the owner stays the owner's lock after they hand over, after they are
+removed, after anything. The owner is still named only by `HOLDRIM_OWNER`, and the server writes the
+lock from it: what changes is that authority, once written on a fact, is part of the fact. What that
+rests on, and what it does not, is the next section.
 
 ### 3. Who can write the store
 
@@ -212,7 +213,8 @@ Said here so nobody promises it:
 | Events never altered or deleted (SQLite by trigger) | ✅ built |
 | People disabled, never deleted | ✅ built |
 | `author` as an opaque id, a people table in every mode, one resolver | ✅ built — a person gets their row the first time they act |
-| The author's role, and on a ✓ whether it is a lock, written on the event, never recomputed | ⬜ 0.1.0 |
+| On a ✓ whether it is a lock, and on a request whether its author could triage it, written on the event, never recomputed | ✅ built — `data.locks` and `data.authorCouldTriage`, read by `isLocked` and `authorCouldTriage` (`engine/api/types.ts`) |
+| The author's role written on the event | ⬜ 0.1.0 |
 | Free text and snapshot outside the event, salted hash inside, removals as events | ✅ built — `EventStore.removeText`, not reachable through `POST /events` yet |
 | Commits without `Requested-by:`, ids in logs | ✅ built |
 | Removing a person, documented procedure | ✅ built — section 5, run by hand |

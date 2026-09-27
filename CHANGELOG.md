@@ -251,15 +251,36 @@ who ran the engine from `main` before it.
 - **People, from the browser**, `/engine/people`, for the owner and admins with password sign-in:
   create an access, hand out a new password (shown once), take an access away and give it back.
   Nobody is ever deleted.
-- **Settings, read-only, for the owner**, `/engine/settings` (#36): the roles this version ships
+- **Settings, for the owner**, `/engine/settings` (#36): the roles this version ships
   and what each holds; who holds what and the variable it comes from — `HOLDRIM_OWNER`,
   `HOLDRIM_ADMINS`, `HOLDRIM_AGENTS`, and `HOLDRIM_LOCKS` with the pages each scope reaches; and
   `features` and `people.show`, with whether each value comes from `holdrim.json` or the default,
   and the snippet to commit to change them. A form composes a lock grant: it checks an address and a
   scope the way start checks `HOLDRIM_LOCKS` — the address, besides, of letters, digits and
   `._%+-` before the `@` and `.-` after it, so the line pastes safely into a shell — and answers
-  with the full `HOLDRIM_LOCKS='…'` line to set where Holdrim runs, then restart. The screen writes nothing, and no event; granting from it is
-  the next step. Anybody but the owner is sent home.
+  with the full `HOLDRIM_LOCKS='…'` line to set where Holdrim runs, then restart; composing writes
+  nothing. The project's own roles are defined and granted there too (next entry). Anybody but the
+  owner is sent home.
+- **The project's own roles, and grants of them, as events** (#36, `docs/ROLES.md` section 5). The
+  owner defines a role — a lower-case name and any of `read`, `comment`, `request`, `triage` and
+  `approve`, never `lock` or `people` — and grants it to a person, everywhere or within one page, page
+  family or block; defining a name again redefines it in place, and a grant is revoked by a later
+  event, with nothing erased. From the settings screen, or `POST /api/roles`, `POST /api/grants` and
+  `POST /api/grants/<id>/revoke`, the owner's alone — an admin is refused like anybody else. The owner,
+  the admins and the agents are never grantees. Each is an event on the reserved page `_roles`
+  (`role_defined`, `role_granted`, `grant_revoked`), naming the person by id, listable by anyone
+  signed in through `GET /api/events?page=_roles`, and refused by `POST /api/events`. A grant whose
+  scope reaches no page or block of the site is refused. Grants are read on every signed-in request,
+  as one query of `_roles` alone plus, when any grant is in force, one look-up of the viewer's person
+  id: one is in force from the next request after it is given, and gone from the next one after it
+  is revoked, and a store that cannot be read fails the request rather than answering as if no grant
+  existed. A ✓ given under a grant keeps what was written on it — never a lock. A request skips or
+  passes triage only by someone who may triage everywhere — the owner, an admin, or a grant with no
+  scope: a grantee limited to some pages files requests that start at triage, and never decides
+  their own. A stored grant that comes to
+  name an agent — an address `HOLDRIM_AGENTS` marks, or one holding an agent token — is ignored,
+  with a `role_grant_ignored` line in the log on the agent's first request, and the service still
+  starts.
 - **Ask for a new page, in plain words**, from the home (a form that needs no script) or from any
   block (the new `page` category). `holdrim apply` tells the agent to write one new page shaped like
   the one it was asked near, and to mark nothing as validated.
@@ -384,8 +405,8 @@ who ran the engine from `main` before it.
   credential is a later change.
 - **`holdrim.json` refuses `roles` and `grants` too**, alongside `owner`, `admins` and `locks`
   (`docs/ROLES.md`, "Authority comes from the deployment only"): a project's own roles, and who holds
-  them, are the owner's to define and grant from a settings screen — a later piece — never a file a
-  committer, or the agent applying an approved request, can edit.
+  them, are the owner's to define and grant from the settings screen, never a file a committer, or
+  the agent applying an approved request, can edit.
 - **`people.show`**, `holdrim.json`'s new setting for how a person appears next to a comment, a
   request or a ✓ (`docs/ROLES.md`, "How a person appears"): `name`, `email` (the default, today's
   behaviour), `role` or `id`. An unknown value refuses to start the service, like a misspelled

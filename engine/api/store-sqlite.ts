@@ -796,5 +796,21 @@ export class SqliteEventStore implements EventStore {
     return out;
   }
 
+  /**
+   * One SELECT, of one page: no transaction is needed to read one statement's rows consistently, and
+   * the people and texts tables `list` reads beside them are exactly what this leaves out. Ordered
+   * as `list` orders its rows, for the reason given there.
+   */
+  async listBare(page: string): Promise<Event[]> {
+    const rows = this.#db.prepare(
+      'SELECT id, type, page, block, fingerprint, author, happened_at, data FROM events WHERE page = ? ORDER BY happened_at, rowid',
+    ).all(page) as Record<string, any>[];
+    return rows.map((r) => ({
+      ...stored({ type: r.type, page: r.page, block: r.block, fingerprint: r.fingerprint,
+        data: r.data ? JSON.parse(r.data as string) : null }, r.id as string, r.author as string, r.happened_at as string),
+      authorId: r.author as string,
+    }));
+  }
+
   async close(): Promise<void> { this.#db.close(); }
 }

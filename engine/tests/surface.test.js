@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { CLI_COMMANDS, CLI_FLAGS } from './helpers/cli-source.js';
 import { EVENT_TYPES, stored, LOCK_BASELINE_TYPE, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD } from '../api/types.ts';
 import { AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED } from '../api/agent-tokens.ts';
+import { ROLE_DEFINED, ROLE_GRANTED, GRANT_REVOKED } from '../api/role-grants.ts';
 import { TAMPER_ACKNOWLEDGED } from '../api/tamper.ts';
 import { queue } from '../cli/requests.ts';
 import * as screens from '../core/screens.js';
@@ -146,9 +147,11 @@ test('the event types are the ones engine/surface.json lists', () => {
   // The two agent-token events the same way, for the same reason: only the owner's own routes write
   // them (agent-tokens.ts), and the guard that keeps them out of `POST /events` is the contract test's.
   // `TAMPER_ACKNOWLEDGED` the same way too: only its own route writes it (tamper.ts), and the guard
-  // that keeps it out of `POST /events` is the contract test's, not this one.
+  // that keeps it out of `POST /events` is the contract test's, not this one. And the three events of
+  // the project's roles (role-grants.ts), written only by the owner's own routes.
   sameAs('event types',
-    [...EVENT_TYPES, LOCK_BASELINE_TYPE, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED, TAMPER_ACKNOWLEDGED],
+    [...EVENT_TYPES, LOCK_BASELINE_TYPE, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED, TAMPER_ACKNOWLEDGED,
+      ROLE_DEFINED, ROLE_GRANTED, GRANT_REVOKED],
     SURFACE['event-types']);
 });
 

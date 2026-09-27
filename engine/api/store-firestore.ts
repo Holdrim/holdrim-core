@@ -1,4 +1,5 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
+import { byServerTime } from './firestore-order.ts';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
 import { noText, saltFields, textKey, withTextsRetrying, reportTampered, TEXT_REMOVED,
@@ -97,12 +98,11 @@ export class FirestoreEventStore implements EventStore {
     if (page != null) q = q.where('page', '==', page);
     const r = await q.get();
     const people = await this.#db.collection(LAYOUT.rows).get();
-    // By the server's timestamp itself, to the nanosecond: `when` is kept to the millisecond, and
-    // two events inside one would otherwise come back in document-id order, which is random.
+    // By the server's timestamp itself, to the nanosecond (`byServerTime`, firestore-order.ts).
     const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
     const peopleMap = new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null]));
     const events = withAuthors([...r.docs]
-      .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
+      .sort((a, b) => byServerTime(at(a), at(b)))
       .map((d) => this.#fromFirestore(d.id, d.data())),
     peopleMap);
     const textDocs = await this.#db.collection('texts').get();
@@ -122,6 +122,21 @@ export class FirestoreEventStore implements EventStore {
     for (const r of reports) reportTampered(r);
     found?.push(...reports);
     return out;
+  }
+
+  /**
+   * One query, of one page, ordered as `list` orders its documents; the `people` and `texts`
+   * collections `list` reads in full beside it are exactly what this leaves out.
+   */
+  async listBare(page: string): Promise<Event[]> {
+    const r = await this.#db.collection('events').where('page', '==', page).get();
+    const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
+    return [...r.docs]
+      .sort((a, b) => byServerTime(at(a), at(b)))
+      .map((d) => {
+        const { textHash: _t, snapshotHash: _s, ...e } = this.#fromFirestore(d.id, d.data());
+        return { ...e, text: null, snapshot: null, authorId: e.author };
+      });
   }
 
   // The people table, laid out as FIRESTORE_PEOPLE says: `people/{id}` holds the row, and
