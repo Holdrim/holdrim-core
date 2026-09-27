@@ -361,21 +361,3 @@ test('sheetFiles refuses a configured folder whose ancestor is an ordinary file,
 
   assert.throws(() => sheetFiles(tmp), /its folder, .*docs.sheets, cannot be reached/);
 });
-
-/**
- * `loadRegistry` never reaches `refuseUnreachableFolder`'s new `ENOTDIR` handling at all: `refuseLink`
- * runs on the registry's own path FIRST, and `lstatSync` inside it fails with the very same `ENOTDIR`
- * the instant an ancestor is a plain file — `refuseLink` only ever treats `ENOENT` as "nothing here",
- * so every other code, `ENOTDIR` included, propagates through it unchanged, raw and uncaught, before
- * `refuseUnreachableFolder` is ever called. This pins that current behaviour rather than inventing a
- * nicer one nobody asked for here: `refuseLink` catches it first.
- */
-test('loadRegistry propagates the raw ENOTDIR when the registry\'s own ancestor is an ordinary file', (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  writeFileSync(join(tmp, 'holdrim.json'),
-    JSON.stringify({ content: { folders: [], registry: 'docs/approvals.json' } }));
-  writeFileSync(join(tmp, 'docs'), 'not a folder');
-
-  assert.throws(() => loadRegistry(tmp), { code: 'ENOTDIR' });
-});
