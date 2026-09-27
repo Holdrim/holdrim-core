@@ -412,7 +412,10 @@ who ran the engine from `main` before it.
   `startsWith`, so a sibling folder whose name happens to start with the root's own (`/proj-other`
   against `/proj`) is refused rather than waved through. `insideRoot` replaces the theme's own
   hand-rolled version of the same check (`loadLogo`, engine/api/theme.ts) — one rule, not two that
-  could drift — with no change to what a bad logo path does (still a warning, never a boot refusal).
+  could drift. No path that escaped the root under the old check newly passes; the one behaviour
+  that DOES change is a root with a trailing separator (`HOLDRIM_SITE=/content/`, say) — the old
+  `target.startsWith(base + sep)` doubled the separator there and wrongly REJECTED a legitimate
+  logo under it, where `insideRoot`'s `path.relative` now accepts it, as it always should have.
   **A second gap, closed alongside it:** a WORKING symlinked ANCESTOR that resolves outside the
   project — `content.registry: "mnt/approvals.json"` with `mnt` a committed link to somewhere else —
   read as an ordinary nested path to that first check, which is lexical, on the string as written,

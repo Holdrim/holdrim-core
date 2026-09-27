@@ -217,6 +217,38 @@ test('loadRegistry still works when the PROJECT ROOT ITSELF is reached through a
   assert.deepEqual(loadRegistry(alias), {}, 'registry present, root itself is the symlink');
 });
 
+// ===================================================================== holdrim#161, round 3
+// `refuseEscapedFolder`'s own walk up to the deepest existing ancestor propagates any error but
+// ENOENT (`if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;`) — deleting that line still
+// leaves the whole suite green, because every EACCES test above spies on a path `refuseLink` or
+// `refuseUnreachableFolder` already probes, and one of THOSE throws first, before this walk ever
+// runs. When neither the registry's own path nor its immediate parent folder exists yet, the walk
+// climbs past both — each already probed, harmlessly, by the earlier guards — up to the PROJECT
+// ROOT itself, which nothing before `refuseEscapedFolder` ever calls `lstatSync` on: `readConfig`
+// reads `holdrim.json` with `readFileSync`, never stats the folder that holds it. So an EACCES there
+// is seen only by this walk's own catch, and only a working `throw e` surfaces it.
+
+test('loadRegistry propagates a real lstat error on the project root, seen only by refuseEscapedFolder\'s own walk', (t) => {
+  const tmp = nestedProject(t);
+  // No `docs` folder either — the walk climbs past the registry path and its parent, both already
+  // probed (harmlessly) by `refuseLink` and `refuseUnreachableFolder`, up to `tmp` itself.
+  spy(t, 'lstatSync', (real, p, ...rest) => {
+    if (p === tmp) throw Object.assign(new Error(`EACCES: permission denied, lstat '${p}'`), { code: 'EACCES' });
+    return real(p, ...rest);
+  });
+  assert.throws(() => loadRegistry(tmp), { code: 'EACCES' });
+});
+
+test('saveRegistry propagates a real lstat error on the project root, seen only by refuseEscapedFolder\'s own walk', (t) => {
+  const tmp = nestedProject(t);
+  spy(t, 'lstatSync', (real, p, ...rest) => {
+    if (p === tmp) throw Object.assign(new Error(`EACCES: permission denied, lstat '${p}'`), { code: 'EACCES' });
+    return real(p, ...rest);
+  });
+  assert.throws(() => saveRegistry(tmp, { z: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'zzz' } }),
+    { code: 'EACCES' });
+});
+
 test('exportSite propagates a real lstat error on `out`, rather than reading it as absent', (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
