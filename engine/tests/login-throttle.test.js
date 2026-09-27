@@ -264,11 +264,16 @@ test('a row still in its wait outlasts a flood of newer rows over the ceiling', 
   // attempts is never evicted before one that is not.
   const users = store();
   const id = new PasswordIdentity(users, { secure: false });
-  const right = await id.firstAccess('someone@example.org', 'Someone');
+  await id.firstAccess('someone@example.org', 'Someone');
   id.maxTracked = 50;
   for (let i = 0; i < 6; i++) await id.signIn('someone@example.org', 'wrong');
   for (let i = 0; i < 80; i++) await id.signIn(`invented-${i}@example.org`, 'wrong');
   assert.ok(await users.countSignInFailures() <= 50, 'the ceiling still holds');
-  assert.equal((await users.readSignInFailures('someone@example.org'))?.count, 6, 'the waiting row is kept');
-  assert.equal(await id.signIn('someone@example.org', right), null, 'and the wait still stands');
+  const kept = await users.readSignInFailures('someone@example.org');
+  assert.equal(kept?.count, 6, 'the waiting row is kept');
+  // Read off the row, not by signing in with the right password: eighty wrong passwords cost eighty scrypts, and
+  // on a slow runner that outlasts the five-second wait a count of six earns, so the sign-in would
+  // pass for a reason this test is not about. That a kept row still makes its address wait is proved
+  // by the tests above, on a count nothing evicts.
+  assert.equal(kept?.escalated, true, 'and it still counts towards a wait');
 });
