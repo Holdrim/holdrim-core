@@ -229,7 +229,37 @@ export interface UserStore {
   fromAgentToken(token: string | undefined): Promise<AgentToken | null>;
   /** Every address holding a token, ordered by address. No secret and no hash, ever: it goes to HTTP. */
   listAgentTokens(): Promise<AgentToken[]>;
+  /**
+   * The wrong passwords counted against an address as it was TYPED, known or not, or null when none
+   * are. The policy — how many are free, how long the wait is, when a count is forgotten — lives in
+   * `identity-password.ts`; a store only keeps the row, and answers for it after a restart.
+   */
+  readSignInFailures(email: string): Promise<SignInFailures | null>;
+  /**
+   * Replaces the address's row with what `next` makes of the current one, both in ONE transaction:
+   * two wrong passwords at once, on one instance or two, each count, and neither overwrites the
+   * other's. `next` is pure — a store may run it again when its transaction retries — and null
+   * from it deletes the row.
+   */
+  updateSignInFailures(
+    email: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void>;
+  /** Drops every row whose last wrong password is older than `lastBefore`, then all but the `keep` newest. */
+  pruneSignInFailures(lastBefore: string, keep: number): Promise<void>;
+  /** How many rows there are. Exists so a test can prove the ceiling holds, in every store. */
+  countSignInFailures(): Promise<number>;
   close(): Promise<void>;
+}
+
+/**
+ * One address's wrong passwords: how many, and when the last one came. The FACTS, not the wait
+ * they buy — the wait is computed from them when it is asked, so a row written under one policy is
+ * read under whichever policy the reader runs, and a clock that moves between the two cannot stretch
+ * a wait past what the policy allows (`identity-password.ts`, `#waitOf`).
+ */
+export interface SignInFailures {
+  count: number;
+  /** ISO string, like every timestamp here, so the prune compares the same way in every store. */
+  lastAt: string;
 }
 
 /**
@@ -341,6 +371,16 @@ export abstract class UserStoreBase implements UserStore {
   protected abstract readAllAgentTokens(): Promise<StoredAgentToken[]>;
   /** Deletes the address's token row; the public id of the row deleted, or null when there was none. */
   protected abstract deleteAgentToken(email: string): Promise<string | null>;
+  /**
+   * The sign-in failure rows, by KEY (`#failureKey`), never by address: the address is hashed here,
+   * once, so no store can keep it in the clear by mistake. `updateFailure` holds its read, `next`
+   * and its write in one transaction (see `updateSignInFailures` on the interface).
+   */
+  protected abstract readFailure(key: string): Promise<SignInFailures | null>;
+  protected abstract updateFailure(
+    key: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void>;
+  protected abstract pruneFailures(lastBefore: string, keep: number): Promise<void>;
+  protected abstract countFailures(): Promise<number>;
 
   abstract close(): Promise<void>;
 
@@ -620,6 +660,42 @@ export abstract class UserStoreBase implements UserStore {
 
   async listAgentTokens(): Promise<AgentToken[]> {
     return (await this.readAllAgentTokens()).map(tokenProfileOf);
+  }
+
+  // ------------------------------------------------------------- wrong passwords
+  /**
+   * The key a typed address is counted under: SHA-256 of the address, normalised.
+   *
+   * ⚠️ Never the address itself. The rows hold every address anybody TYPED at the sign-in form in the
+   * last hour or so — typos of a colleague's private address, whatever list an attacker is working
+   * through — and most of them belong to nobody with an account here, so no procedure in
+   * docs/PRIVACY.md would ever find them to remove. Hashed, the table cannot be read as a list of
+   * addresses; it can only confirm one somebody already holds, and only while its row lives. That is
+   * not anonymity — an address is guessable, and a dictionary of them finds its own hashes — and it
+   * is not meant to be: it is what keeps a copy of this database from handing over the list.
+   *
+   * No salt, on purpose: the key has to be the same on every instance and after every restart, or
+   * the count would not survive either, which is the whole reason it is in the store.
+   */
+  #failureKey(email: string): string {
+    return createHash('sha256').update(normalizeEmail(email), 'utf8').digest('hex');
+  }
+
+  readSignInFailures(email: string): Promise<SignInFailures | null> {
+    return this.readFailure(this.#failureKey(email));
+  }
+
+  updateSignInFailures(
+    email: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void> {
+    return this.updateFailure(this.#failureKey(email), next);
+  }
+
+  pruneSignInFailures(lastBefore: string, keep: number): Promise<void> {
+    return this.pruneFailures(lastBefore, keep);
+  }
+
+  countSignInFailures(): Promise<number> {
+    return this.countFailures();
   }
 }
 

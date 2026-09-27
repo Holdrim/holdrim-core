@@ -1527,6 +1527,11 @@ HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$HANDOVER HOLDRIM_ADMINS=$ADMIN HOL
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/handover.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 
+# Before anything else here: the member's eight refused attempts above bought a twenty-second wait,
+# and this restart must not have handed it back. Counted in memory instead, the right password gets
+# straight in on the new process.
+expect "the member's wait survived the restart → 401" 401 "$(mlogin "$NEW_PASSWORD")"
+
 expect "the new owner has no account yet" 1 "$(as_admin $B/api/users | has -F "$HANDOVER"; echo $?)"
 expect "and no first-access was printed" 0 "$(grep -c 'FIRST ACCESS' $WORK/handover.log)"
 expect "an admin still cannot create it → 409" 409 "$(code_admin -d "{\"email\":\"$HANDOVER\",\"name\":\"Taking Over\"}" $B/api/users)"

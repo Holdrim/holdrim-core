@@ -1,4 +1,6 @@
-import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
+import {
+  AddressInUse, UserStoreBase, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
+} from './users.ts';
 
 /**
  * People and sessions in Postgres: tables `users` and `sessions`.
@@ -89,6 +91,14 @@ export class UsersPostgres extends UserStoreBase {
         hash      BYTEA NOT NULL,
         issued_at TEXT NOT NULL
       )`);
+    // Wrong passwords per typed address, as in SQLite: users-sqlite.ts says what the table is for.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sign_in_failures (
+        key     TEXT PRIMARY KEY,
+        count   INTEGER NOT NULL CHECK (count > 0),
+        last_at TEXT NOT NULL
+      )`);
+    await pool.query('CREATE INDEX IF NOT EXISTS sign_in_failures_by_last ON sign_in_failures (last_at)');
 
     this.#pool = pool;
     return pool;
@@ -109,12 +119,17 @@ export class UsersPostgres extends UserStoreBase {
    * committed is enough under the lock: each statement after it sees what the previous holder
    * committed. The key is prefixed so it cannot collide with another lock taken on the same database.
    */
-  async #inAddressTurn<T>(email: string, body: (q: PgClient['query']) => Promise<T>): Promise<T> {
+  #inAddressTurn<T>(email: string, body: (q: PgClient['query']) => Promise<T>): Promise<T> {
+    return this.#inTurn(`holdrim:address:${email}`, body);
+  }
+
+  /** `body` in one transaction holding the advisory lock named `name` — see `#inAddressTurn`. */
+  async #inTurn<T>(name: string, body: (q: PgClient['query']) => Promise<T>): Promise<T> {
     const pool = this.#pool ?? await this.#ready;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`holdrim:address:${email}`]);
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [name]);
       const result = await body((text, values) => client.query(text, values));
       await client.query('COMMIT');
       return result;
@@ -236,6 +251,44 @@ export class UsersPostgres extends UserStoreBase {
     return (r?.token_id as string | undefined) ?? null;
   }
 
+  protected async readFailure(key: string): Promise<SignInFailures | null> {
+    const [r] = await this.#query('SELECT count, last_at FROM sign_in_failures WHERE key = $1', [key]);
+    return rowToFailure(r);
+  }
+
+  protected async updateFailure(
+    key: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void> {
+    // The key's own advisory lock, for the reason `#inAddressTurn` gives: a first wrong password has
+    // no row yet for `FOR UPDATE` to lock, and two at once would each insert a count of one.
+    await this.#inTurn(`holdrim:sign-in:${key}`, async (q) => {
+      const [r] = (await q('SELECT count, last_at FROM sign_in_failures WHERE key = $1', [key])).rows;
+      const row = next(rowToFailure(r));
+      if (row === null) {
+        await q('DELETE FROM sign_in_failures WHERE key = $1', [key]);
+        return;
+      }
+      await q(
+        'INSERT INTO sign_in_failures (key, count, last_at) VALUES ($1, $2, $3) '
+        + 'ON CONFLICT (key) DO UPDATE SET count = EXCLUDED.count, last_at = EXCLUDED.last_at',
+        [key, row.count, row.lastAt]);
+    });
+  }
+
+  protected async pruneFailures(lastBefore: string, keep: number): Promise<void> {
+    await this.#query('DELETE FROM sign_in_failures WHERE last_at < $1', [lastBefore]);
+    // Every row past the `keep` newest. `last_at` is an ISO string of one fixed shape, so it sorts
+    // as the instant it names under any collation, the same way `sessions.expires_at` is compared.
+    await this.#query(
+      'DELETE FROM sign_in_failures WHERE key IN (SELECT key FROM sign_in_failures '
+      + 'ORDER BY last_at DESC, key DESC OFFSET $1)', [keep]);
+  }
+
+  protected async countFailures(): Promise<number> {
+    const [r] = await this.#query('SELECT COUNT(*) AS n FROM sign_in_failures');
+    // bigint arrives as a string; `countUsers` says why the fallback.
+    return Number(r?.n ?? 0);
+  }
+
   async close(): Promise<void> {
     // Awaiting the connection first: closing a store whose pool is still being built would leave
     // the pool open behind us and hold the process alive.
@@ -264,4 +317,9 @@ function rowToToken(r: Record<string, unknown>): StoredAgentToken {
     email: r.email as string, kind: r.kind as 'agent', tokenId: r.token_id as string,
     hash: Buffer.from(r.hash as Uint8Array), issuedAt: r.issued_at as string,
   };
+}
+
+/** One row of `sign_in_failures`, or null for none. */
+function rowToFailure(r: Record<string, unknown> | undefined): SignInFailures | null {
+  return r ? { count: Number(r.count), lastAt: r.last_at as string } : null;
 }

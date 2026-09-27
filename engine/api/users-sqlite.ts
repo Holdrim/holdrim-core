@@ -2,7 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { SQLITE_BUSY_TIMEOUT_MS } from './store-sqlite.ts';
-import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
+import {
+  AddressInUse, UserStoreBase, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
+} from './users.ts';
 
 /**
  * People and sessions in SQLite, on the built-in `node:sqlite` — **no external dependency**.
@@ -58,6 +60,15 @@ export class UsersSqlite extends UserStoreBase {
         hash      BLOB NOT NULL,
         issued_at TEXT NOT NULL
       );
+      -- Wrong passwords per typed address, kept here so a restart does not hand out a fresh set
+      -- (identity-password.ts says why, and users.ts why the key is a hash and never the address).
+      -- No reference to users: an address nobody has is counted exactly like one somebody has.
+      CREATE TABLE IF NOT EXISTS sign_in_failures (
+        key     TEXT PRIMARY KEY,
+        count   INTEGER NOT NULL CHECK (count > 0),
+        last_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS sign_in_failures_by_last ON sign_in_failures (last_at);
     `);
   }
 
@@ -186,9 +197,51 @@ export class UsersSqlite extends UserStoreBase {
     this.#db.prepare('DELETE FROM sessions WHERE email = ? AND id != ?').run(email, keepSessionId);
   }
 
+  protected async readFailure(key: string): Promise<SignInFailures | null> {
+    return rowToFailure(this.#db.prepare('SELECT count, last_at FROM sign_in_failures WHERE key = ?').get(key));
+  }
+
+  protected async updateFailure(
+    key: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void> {
+    // In `BEGIN IMMEDIATE`: two instances on one file each reading the same count and each writing
+    // it plus one would count two wrong passwords as one.
+    this.#immediate(() => {
+      const current = rowToFailure(this.#db.prepare('SELECT count, last_at FROM sign_in_failures WHERE key = ?').get(key));
+      const row = next(current);
+      if (row === null) {
+        this.#db.prepare('DELETE FROM sign_in_failures WHERE key = ?').run(key);
+        return;
+      }
+      this.#db.prepare(
+        'INSERT INTO sign_in_failures (key, count, last_at) VALUES (?, ?, ?) '
+        + 'ON CONFLICT(key) DO UPDATE SET count = excluded.count, last_at = excluded.last_at',
+      ).run(key, row.count, row.lastAt);
+    });
+  }
+
+  protected async pruneFailures(lastBefore: string, keep: number): Promise<void> {
+    this.#db.prepare('DELETE FROM sign_in_failures WHERE last_at < ?').run(lastBefore);
+    // `LIMIT -1 OFFSET ?` is SQLite's "every row past the first ?": the newest `keep` stay.
+    this.#db.prepare(
+      'DELETE FROM sign_in_failures WHERE key IN '
+      + '(SELECT key FROM sign_in_failures ORDER BY last_at DESC, key DESC LIMIT -1 OFFSET ?)',
+    ).run(keep);
+  }
+
+  protected async countFailures(): Promise<number> {
+    return (this.#db.prepare('SELECT COUNT(*) AS n FROM sign_in_failures').get() as { n: number }).n;
+  }
+
   async close(): Promise<void> {
     this.#db.close();
   }
+}
+
+/** One row of `sign_in_failures`, or null for none. */
+function rowToFailure(r: unknown): SignInFailures | null {
+  if (!r) return null;
+  const row = r as { count: number; last_at: string };
+  return { count: Number(row.count), lastAt: row.last_at };
 }
 
 /**

@@ -402,6 +402,18 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **Wrong passwords are now counted in the user store, so a restart no longer hands out a fresh set
+  of free guesses, and every instance counts against the same number (#53).** Before, the count lived
+  in each process's memory: a deploy, a crash or a platform recycling an instance reset it, and N
+  instances allowed N times the guesses. The policy is unchanged — five free per address as typed,
+  then a wait that doubles up to fifteen minutes, forgotten an hour after the wait ends — and an
+  address with no account is counted exactly like one with an account, so how a wrong password is
+  answered still says nothing about who has one here. Each row is keyed by a SHA-256 of the address,
+  never the address, and the table keeps at most ten thousand rows. The user store gains a
+  `sign_in_failures` table (SQLite, Postgres) or collection (Firestore), created on start. Each
+  wrong password now costs a write. What an operator notices: restarting no longer lifts a wait
+  someone is kept in — emptying `sign_in_failures` does — and an edge rate limit on `POST
+  /api/sign-in` is still advised for a service on the internet.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY
