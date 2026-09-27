@@ -533,3 +533,15 @@ who ran the engine from `main` before it.
   Fsyncing the containing directory afterwards, where the platform allows it, is a durability step on
   top of an already successful save: a failure there is a warning, never a reason to report the save
   itself as failed.
+- **A registry whose folder cannot be reached is now refused, never read as empty (holdrim#155).**
+  `loadRegistry` read a missing `approvals.json` as `{}` on any `ENOENT`, which is right when the file
+  was simply never written and wrong when the FOLDER above it does not resolve — an ancestor that is
+  a dangling symlink (`docs -> /mnt/shared`, its volume unmounted) gives `existsSync` the exact same
+  "nothing here" a fresh project's registry gives it. Read as empty, `holdrim sync` used to start from
+  nothing, stamp seals onto every page as if newly approved, and only then fail loudly saving the
+  registry — leaving seals on disk that `holdrim check` reports as approvals with no trail. `sync`,
+  `check`, `restamp`, `lights`, `graph` and `if-i-touch` all read the registry through `loadRegistry`
+  and now refuse before touching a page: a missing registry is only ever read as `{}` once its own
+  folder is confirmed to exist, following links (so a working symlinked folder, a legitimate way to
+  mount shared content, still works) — a project that has genuinely never run sync is unaffected,
+  since its registry sits at its project's own root, which already resolved by the time this runs.
