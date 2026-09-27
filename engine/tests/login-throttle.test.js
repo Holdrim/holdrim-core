@@ -19,14 +19,21 @@ import { UsersSqlite } from '../api/users-sqlite.ts';
 const store = () => new UsersSqlite(':memory:');
 
 test('five wrong passwords cost nothing; the sixth starts costing', async () => {
-  const id = new PasswordIdentity(store(), { secure: false });
+  const users = store();
+  const id = new PasswordIdentity(users, { secure: false });
   await id.firstAccess('someone@example.org', 'Someone');
 
   for (let i = 0; i < 5; i++) assert.equal(await id.signIn('someone@example.org', 'wrong'), null);
   assert.equal(await id.remainingWait('someone@example.org'), 0, 'five is still free');
+  // The row is marked for the ceiling exactly where the wait starts, not one attempt early: a row
+  // still inside its free attempts guards nothing, and must not outrank one that does.
+  assert.equal((await users.readSignInFailures('someone@example.org'))?.escalated, false,
+    'five is not yet kept ahead of anything');
 
   assert.equal(await id.signIn('someone@example.org', 'wrong'), null);
   assert.ok(await id.remainingWait('someone@example.org') > 0, 'the sixth buys a wait');
+  assert.equal((await users.readSignInFailures('someone@example.org'))?.escalated, true,
+    'and from the sixth the row is kept ahead of those that are not');
 });
 
 test('while the wait is on, even the RIGHT password does not get in', async () => {
