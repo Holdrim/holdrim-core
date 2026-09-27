@@ -515,19 +515,6 @@ test('a page scope covers a block by the block\'s own page, whatever page the cl
   assert.deepEqual(whereOf({ page: 'P09', block: null }), { page: 'P09' });
 });
 
-/**
- * `pageOfBlock` is also the comparison `refusalOf` (engine/api/server.ts) refuses an event with,
- * before it is stored, when `page` and a block it names disagree (holdrim#152) — gaining no
- * permission either way (the test above), but filing the event where every reader that groups by
- * `page` instead of re-deriving it would never look for it. The HTTP-level refusal itself is proved
- * by the contract test, the one thing here that boots a real server; this is the derivation under
- * it, so a future `pageOfBlock` that stops splitting on the first `.` fails here first.
- */
-test('the comparison a mismatched page is refused by: a block\'s own page, not the one beside it', () => {
-  assert.notEqual(pageOfBlock('P03.2.1'), 'P09', 'P09 disagrees with the block\'s own page — refusalOf refuses this pair');
-  assert.equal(pageOfBlock('P03.2.1'), 'P03', 'P03 agrees — refusalOf accepts this pair');
-});
-
 test('a scoped grant never answers a question asked about everywhere; an unscoped one does', () => {
   for (const scope of ['P03', 'P0*', 'P03.2.1']) assert.equal(scopeCovers(scope, EVERYWHERE), false, scope);
   assert.equal(scopeCovers(null, EVERYWHERE), true);

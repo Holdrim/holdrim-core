@@ -247,6 +247,8 @@ require_id "$RID_MATCH" RID_MATCH
 post $OWNER "{\"type\":\"request_state\",\"page\":\"D01\",\"data\":{\"request\":\"$RID_MATCH\",\"state\":\"approved\"}}" >/dev/null
 expect "comment, mismatched page → 400"   400 "$(post $REVIEWER '{"type":"comment","page":"D09","block":"D01.5.3","text":"x"}')"
 expect "comment, matching page → 201"     201 "$(post $REVIEWER '{"type":"comment","page":"D01","block":"D01.5.3","text":"x"}')"
+expect "decision_reply, mismatched page → 400" 400 "$(post $REVIEWER '{"type":"decision_reply","page":"D09","block":"D01.5.4"}')"
+expect "…and the message names both pages too" 0 "$(body $REVIEWER '{"type":"decision_reply","page":"D09","block":"D01.5.4"}' | has 'belongs to page D01, not D09'; echo $?)"
 RID152=$(new_request $REVIEWER '{"type":"request","page":"D01","block":"D01.6.1","text":"holdrim#152 fixture"}')
 require_id "$RID152" RID152
 # `request_state` and `supplement` are neither refused nor trusted here: `decide_forged` and the
