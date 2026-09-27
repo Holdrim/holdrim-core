@@ -1938,6 +1938,28 @@ expect "and leaves it as it was"         left-by-an-earlier-first-access "$(cat 
 expect "and creates nobody"              0 "$(node -e "const {DatabaseSync}=require('node:sqlite');
   console.log(new DatabaseSync(process.argv[1]).prepare('SELECT count(*) AS n FROM users').get().n)" "$STALE/users.db")"
 rm -rf "$STALE"
+# Round 1 of #53's review: the site is served whole to anyone signed in, so a first-access file
+# inside it is the owner's password one URL away from every member. Refused before a password
+# exists, for HOLDRIM_FIRST_ACCESS_PATH and for the default beside a users store kept in the site.
+SERVED=$(mktemp -d); cp -r "$SITE/." "$SERVED"; SERVED_USERS=$(mktemp -d)
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory \
+  HOLDRIM_USERS_PATH=$SERVED_USERS/users.db HOLDRIM_FIRST_ACCESS_PATH=$SERVED/private/first-access-password \
+  HOLDRIM_SITE="$SERVED" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/served-first.log" 2>&1
+expect "a first-access file inside the served site → exits 1" 1 "$?"
+expect "and names the file and the site" 1 "$(grep -Fc -e "invalid configuration: the first-access password would go to $SERVED/private/first-access-password, inside the folder this server serves (HOLDRIM_SITE, $SERVED)" $WORK/served-first.log)"
+expect "and writes no password anywhere" 0 "$(find "$SERVED" "$SERVED_USERS" -name 'first-access-password' | wc -l | tr -d ' ')"
+expect "not even the folder for it"      1 "$([ -e "$SERVED/private" ]; echo $?)"
+expect "and no banner"                   0 "$(grep -c 'FIRST ACCESS' $WORK/served-first.log)"
+expect "and creates nobody"              0 "$(node -e "const {DatabaseSync}=require('node:sqlite');
+  console.log(new DatabaseSync(process.argv[1]).prepare('SELECT count(*) AS n FROM users').get().n)" "$SERVED_USERS/users.db")"
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory \
+  HOLDRIM_USERS_PATH=$SERVED/users.db HOLDRIM_SITE="$SERVED" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/served-default.log" 2>&1
+expect "the default beside a users store in the site → exits 1 too" 1 "$?"
+expect "and names that file"             1 "$(grep -Fc -e "would go to $SERVED/first-access-password, inside the folder this server serves" $WORK/served-default.log)"
+expect "and writes it nowhere"           0 "$(find "$SERVED" -name 'first-access-password' | wc -l | tr -d ' ')"
+rm -rf "$SERVED" "$SERVED_USERS"
 # On a disk nobody can read from outside the instance (K_SERVICE, Cloud Run), the default path is a
 # file nobody will open: the service comes up, says why at ERROR, and creates nobody until
 # HOLDRIM_FIRST_ACCESS_PATH names somewhere an operator reads.

@@ -236,7 +236,9 @@ that variable is required: the default there is a disk nobody can open from outs
 so the owner's account is **not created** — an `ERROR`, `first_access_not_created`, says so — until
 the variable names a file on a volume mounted into the service that only its operators read. On a
 first start, a file already at that path is never overwritten: the service refuses to start until
-it is removed. The file is removed when the owner changes the password.
+it is removed. Nor is it written anywhere inside `HOLDRIM_SITE`, which is served to everyone signed
+in: a path there, named or by default, refuses to start too. The file is removed when the owner
+changes the password.
 
 All three implementations are checked by **the same suite**,
 `engine/tests/users-conformance.test.js`. A store that does not pass it is not supported. In CI all

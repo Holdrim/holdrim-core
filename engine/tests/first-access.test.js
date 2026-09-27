@@ -9,25 +9,32 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { UsersSqlite } from '../api/users-sqlite.ts';
 import { PasswordIdentity } from '../api/identity-password.ts';
 import {
-  FIRST_ACCESS_FILE, FirstAccessFileExists, firstAccessPath, firstAccessRefusal, provisionFirstAccess,
-  retireFirstAccessFile,
+  FIRST_ACCESS_FILE, FirstAccessFileExists, FirstAccessFileServed, firstAccessPath, firstAccessRefusal,
+  provisionFirstAccess, retireFirstAccessFile, servedBySite,
 } from '../api/first-access.ts';
 
 const OWNER = 'owner@example.org';
 
-/** A scratch directory, the environment pointing the file into it, and a fresh identity. */
+/**
+ * A scratch directory with the data folder and the served site side by side, the environment
+ * pointing the file into the data folder, and a fresh identity.
+ */
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-first-access-'));
-  const env = { HOLDRIM_USERS_PATH: join(dir, 'users.db') };
+  const data = join(dir, 'data');
+  const site = join(dir, 'site');
+  mkdirSync(data);
+  mkdirSync(site);
+  const env = { HOLDRIM_USERS_PATH: join(data, 'users.db') };
   const identity = new PasswordIdentity(new UsersSqlite(':memory:'), { secure: false });
-  const file = join(dir, FIRST_ACCESS_FILE);
-  return { dir, env, identity, file, done: () => rmSync(dir, { recursive: true, force: true }) };
+  const file = join(data, FIRST_ACCESS_FILE);
+  return { dir, site, env, identity, file, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 /**
@@ -52,7 +59,7 @@ async function captured(run) {
 test('the first access writes the password nowhere in the log, and says where the file is', async () => {
   const t = setup();
   try {
-    const { result, text } = await captured(() => provisionFirstAccess(t.identity, OWNER, 'Owner', { env: t.env }));
+    const { result, text } = await captured(() => provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env: t.env }));
     assert.equal(result, 'created');
     const password = readFileSync(t.file, 'utf8');
     assert.ok(password.length >= 12, 'there has to be a password to look for');
@@ -77,7 +84,7 @@ for (const umask of [0o000, 0o277]) {
     try {
       const previous = process.umask(umask);
       try {
-        await provisionFirstAccess(t.identity, OWNER, 'Owner', { env: t.env, say: () => {} });
+        await provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env: t.env, say: () => {} });
       } finally { process.umask(previous); }
       assert.equal((statSync(t.file).mode & 0o777).toString(8), '600', 'the file must be mode 0600, whatever the umask');
       const password = readFileSync(t.file, 'utf8');
@@ -94,7 +101,7 @@ test('an existing file is never overwritten, and no account is created without a
   try {
     writeFileSync(t.file, 'left-by-an-earlier-first-access');
     await assert.rejects(
-      provisionFirstAccess(t.identity, OWNER, 'Owner', { env: t.env, say: () => {} }),
+      provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env: t.env, say: () => {} }),
       (error) => error instanceof FirstAccessFileExists && error.message.includes(resolve(t.file)));
     assert.equal(readFileSync(t.file, 'utf8'), 'left-by-an-earlier-first-access', 'the file was written over');
     assert.equal(await t.identity.users.isEmpty(), true,
@@ -107,10 +114,10 @@ test('a restart with somebody in the store touches no file', async () => {
   try {
     await t.identity.users.create(OWNER, 'Owner', 'a-password-already-chosen', false);
     writeFileSync(t.file, 'whatever-is-there');
-    assert.equal(await provisionFirstAccess(t.identity, OWNER, 'Owner', { env: t.env, say: () => {} }), 'none');
+    assert.equal(await provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env: t.env, say: () => {} }), 'none');
     assert.equal(readFileSync(t.file, 'utf8'), 'whatever-is-there');
     rmSync(t.file);
-    assert.equal(await provisionFirstAccess(t.identity, OWNER, 'Owner', { env: t.env, say: () => {} }), 'none');
+    assert.equal(await provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env: t.env, say: () => {} }), 'none');
     assert.equal(existsSync(t.file), false, 'an ordinary restart must not create the file');
   } finally { t.done(); }
 });
@@ -120,7 +127,7 @@ test('losing the race to another instance leaves no file behind', async () => {
   try {
     // Empty when asked, and already taken by the time the account is created: the other instance won.
     const racing = { users: { isEmpty: async () => true }, firstAccess: async () => null };
-    assert.equal(await provisionFirstAccess(racing, OWNER, 'Owner', { env: t.env, say: () => {} }), 'none');
+    assert.equal(await provisionFirstAccess(racing, OWNER, 'Owner', { site: t.site, env: t.env, say: () => {} }), 'none');
     assert.equal(existsSync(t.file), false, 'a password that opens nothing was left on the disk');
   } finally { t.done(); }
 });
@@ -129,7 +136,7 @@ test('an account that fails to be created leaves no file behind', async () => {
   const t = setup();
   try {
     const failing = { users: { isEmpty: async () => true }, firstAccess: async () => { throw new Error('store down'); } };
-    await assert.rejects(provisionFirstAccess(failing, OWNER, 'Owner', { env: t.env, say: () => {} }), /store down/);
+    await assert.rejects(provisionFirstAccess(failing, OWNER, 'Owner', { site: t.site, env: t.env, say: () => {} }), /store down/);
     assert.equal(existsSync(t.file), false, 'the next start would refuse over a password that never worked');
   } finally { t.done(); }
 });
@@ -151,7 +158,7 @@ test('on a disk nobody can read from outside, the first access waits for a path 
   try {
     const env = { ...t.env, K_SERVICE: 'holdrim' };
     assert.match(firstAccessRefusal(env), /HOLDRIM_FIRST_ACCESS_PATH/);
-    const { result } = await captured(() => provisionFirstAccess(t.identity, OWNER, 'Owner', { env, say: () => {} }));
+    const { result } = await captured(() => provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env, say: () => {} }));
     assert.equal(result, 'refused');
     assert.equal(await t.identity.users.isEmpty(), true, 'an account whose password nobody can read was created');
     assert.equal(existsSync(t.file), false);
@@ -164,12 +171,40 @@ test('on a disk nobody can read from outside, the first access waits for a path 
 test('the file is removed once the owner changes the password, and a missing one is no failure', async () => {
   const t = setup();
   try {
-    await provisionFirstAccess(t.identity, OWNER, 'Owner', { env: t.env, say: () => {} });
+    await provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env: t.env, say: () => {} });
     assert.equal(existsSync(t.file), true);
     const { result, text } = await captured(() => retireFirstAccessFile(t.env));
     assert.equal(result, 'removed');
     assert.equal(existsSync(t.file), false, 'the first-access file outlived the password it held');
     assert.ok(text.includes('first_access_file_removed'), 'and the log says it went');
     assert.equal(await retireFirstAccessFile(t.env), 'absent', 'a later change finds nothing to remove');
+  } finally { t.done(); }
+});
+
+test('a file the site would serve is refused before a password exists, by real path', async () => {
+  const t = setup();
+  try {
+    // Inside the site, straight: named by the variable, or the default beside a users store kept there.
+    for (const env of [
+      { ...t.env, HOLDRIM_FIRST_ACCESS_PATH: join(t.site, 'secret', 'first') },
+      { HOLDRIM_USERS_PATH: join(t.site, 'users.db') },
+      { ...t.env, HOLDRIM_FIRST_ACCESS_PATH: join(t.site, 'first') },
+    ]) {
+      await assert.rejects(provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env, say: () => {} }),
+        (error) => error instanceof FirstAccessFileServed && error.message.includes(resolve(t.site))
+          && error.message.includes(resolve(firstAccessPath(env))));
+    }
+    // Through a link: a folder outside the site by name that is the site's own folder on disk.
+    symlinkSync(t.site, join(t.dir, 'looks-outside'));
+    const linked = { ...t.env, HOLDRIM_FIRST_ACCESS_PATH: join(t.dir, 'looks-outside', 'first') };
+    assert.equal(servedBySite(linked.HOLDRIM_FIRST_ACCESS_PATH, t.site), true, 'a link hid the site from the check');
+    await assert.rejects(provisionFirstAccess(t.identity, OWNER, 'Owner', { site: t.site, env: linked, say: () => {} }),
+      FirstAccessFileServed);
+    assert.equal(await t.identity.users.isEmpty(), true, 'an account was created with its password nowhere');
+    assert.equal(existsSync(join(t.site, 'first')), false);
+    assert.equal(existsSync(join(t.site, 'secret')), false, 'nothing may be written in the site, not even a folder');
+    // A sibling whose name starts with the site's is NOT inside it: a raw prefix check would say it is.
+    assert.equal(servedBySite(join(`${t.site}-other`, 'first'), t.site), false);
+    assert.equal(servedBySite(t.file, t.site), false, 'the data folder beside the site is fine');
   } finally { t.done(); }
 });

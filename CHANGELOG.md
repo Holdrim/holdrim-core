@@ -416,7 +416,8 @@ who ran the engine from `main` before it.
   (`K_SERVICE`, Cloud Run), set `HOLDRIM_FIRST_ACCESS_PATH` to a file on a mounted volume only the
   operators read — without it the owner's account is not created, and an `ERROR` says why, since
   a file on that disk is one nobody can open. On a first start, a file already at the path stops the
-  service until it is removed by hand.
+  service until it is removed by hand, and so does a path inside `HOLDRIM_SITE` — named, or the
+  default beside a users store kept there — since the site is served to everyone signed in.
 - **Wrong passwords are now counted in the user store, so a restart no longer hands out a fresh set
   of free guesses, and every instance counts against the same number (#53).** Before, the count lived
   in each process's memory: a deploy, a crash or a platform recycling an instance reset it, and N

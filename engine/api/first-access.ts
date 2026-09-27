@@ -1,5 +1,7 @@
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, open, unlink } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { insideRoot } from '../core/paths.js';
 import {
   DEFAULT_SQLITE_PATH, generatePassword, isFileBackedUserStore, looksEphemeral, sqlitePathOf,
 } from './users.ts';
@@ -67,6 +69,42 @@ export function firstAccessRefusal(env: Env = process.env): string | null {
 /** The file is already there: an earlier first access left it, and it is never overwritten. */
 export class FirstAccessFileExists extends Error {}
 
+/** The file would land in the folder this server serves, where a URL reads it. */
+export class FirstAccessFileServed extends Error {}
+
+/**
+ * The real path of `path`, resolved through its deepest ancestor that exists: the folders not
+ * created yet cannot be links, and the ones that exist can — a `data` inside the site that is a link
+ * to somewhere else, or a path outside it that is a link back in, are exactly what a string
+ * comparison would get wrong in each direction.
+ */
+function realThroughExisting(path: string): string {
+  let existing = resolve(path);
+  const rest: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    rest.unshift(basename(existing));
+    existing = parent;
+  }
+  return join(realpathSync(existing), ...rest);
+}
+
+/**
+ * Whether the file's folder is the served site's root or anywhere under it, compared by REAL path.
+ *
+ * `serveStatic` (server.ts) hands out any file under `HOLDRIM_SITE` to whoever is signed in, so a
+ * password written there is the owner's credential one URL away from every member — the leak this
+ * file exists to close, moved from the log to the site. The folder, not the file: the file does not
+ * exist yet, and whatever folder holds it is served whole. `insideRoot` (engine/core/paths.js) is
+ * strict, so the root itself is checked on its own.
+ */
+export function servedBySite(file: string, site: string): boolean {
+  const folder = realThroughExisting(dirname(resolve(file)));
+  const root = realpathSync(resolve(site));
+  return folder === root || insideRoot(root, folder);
+}
+
 /** What the first access needs of the identity, and no more — so a test can race it. */
 export interface FirstAccessIdentity {
   users: { isEmpty(): Promise<boolean> };
@@ -103,7 +141,7 @@ export async function provisionFirstAccess(
   identity: FirstAccessIdentity,
   owner: string,
   name: string,
-  options: { env?: Env; say?: (line: string) => void } = {},
+  options: { site: string; env?: Env; say?: (line: string) => void },
 ): Promise<'created' | 'none' | 'refused'> {
   const env = options.env ?? process.env;
   // ⚠️ console.log, and deliberately not through `log`: this is a banner for whoever is watching the
@@ -111,6 +149,17 @@ export async function provisionFirstAccess(
   const say = options.say ?? ((line: string) => console.log(line));
   // Asked before anything else is touched, so an ordinary restart never so much as looks at the file.
   if (!(await identity.users.isEmpty())) return 'none';
+
+  // ⚠️ Before anything is generated or written, and for the default location as much as for
+  // HOLDRIM_FIRST_ACCESS_PATH: a users store configured inside the site puts the default file there
+  // too. Checked only when a file is about to be written, not on every start: this is the only code
+  // that ever writes one, so a store that already has people has no such file to protect.
+  if (servedBySite(firstAccessPath(env), options.site)) {
+    throw new FirstAccessFileServed(
+      `the first-access password would go to ${resolve(firstAccessPath(env))}, inside the folder this `
+      + `server serves (HOLDRIM_SITE, ${resolve(options.site)}), where anyone signed in could read it `
+      + 'at its URL. Set HOLDRIM_FIRST_ACCESS_PATH to a file outside it, and start again.');
+  }
 
   const refusal = firstAccessRefusal(env);
   if (refusal) {

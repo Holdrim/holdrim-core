@@ -293,10 +293,11 @@ if (identityKind === 'password') {
   // being called "Owner" — and a review history where every approval is signed by a job title
   // instead of a person is a history that answers "who said this?" with "the owner did".
   //
-  // A file that cannot be written, or one already there, refuses to start: with no file there is no
-  // password anybody holds, and the account is not created until there is.
+  // A file that cannot be written, one already there, or one the site would serve refuses to start:
+  // with no file there is no password anybody holds, and the account is not created until there is.
   try {
-    await provisionFirstAccess(byPassword, cfg.owner!, process.env.HOLDRIM_OWNER_NAME || 'Owner');
+    await provisionFirstAccess(byPassword, cfg.owner!, process.env.HOLDRIM_OWNER_NAME || 'Owner',
+      { site: cfg.site });
   } catch (error) {
     refuseToStart(error);
   }
