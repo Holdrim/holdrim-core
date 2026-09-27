@@ -471,7 +471,14 @@ who ran the engine from `main` before it.
   already uses; before, it silently read as an empty folder — no pages, no error. holdrim#155 made
   the identical call for the registry: an unmounted shared volume must not read as "nothing here",
   because the two look the same to whoever is staring at an empty page list. A folder that was
-  simply never created (no `sync` has run yet) is unaffected and still reads as empty. Nothing to
+  simply never created (no `sync` has run yet) is unaffected and still reads as empty. **A third
+  round found the same gap for an ordinary FILE standing where a folder was configured** —
+  `content.folders: ["docs/sheets"]` with `docs` itself a plain file — which `refuseUnreachableFolder`
+  had never been asked about and let through as the filesystem's own raw `ENOTDIR`, unrefused, from
+  wherever `readdirSync` first tried to descend into it; the same walk now catches it and refuses
+  with the same "cannot be reached" message a dangling symlink already gets. `loadRegistry` is
+  unaffected — `refuseLink`, which it runs on the registry's own path before this walk ever starts,
+  already failed first with that same raw `ENOTDIR`, and still does. Nothing to
   change for a project whose `content.folders` already names ordinary paths inside its own folder.
   **Left open, and not this
   fix's to close:** `sheetFiles` never recurses into a configured folder's own subfolders, so a

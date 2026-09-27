@@ -70,10 +70,18 @@ export function refuseLink(path: string, what: string): void {
  * ancestor would look identical to one plainly missing, and the walk could never refuse it. Only the
  * symlink target itself is read with `statSync`, exactly once it is known to be a link.
  *
- * No check that a non-symlink component is a directory rather than a file: a component that is a
- * plain FILE makes `lstatSync` on `path` ITSELF fail with `ENOTDIR`, not `ENOENT`, in `refuseLink`,
- * two lines above this is ever called — that case never reaches here at all, so adding a check for it
- * here would be a branch nothing can ever drive.
+ * A component that is a plain FILE, not a folder, makes the NEXT `lstatSync` in this walk fail with
+ * `ENOTDIR`, not `ENOENT` — caught below and refused with the same "cannot be reached" message a
+ * dangling symlink gets, because to whoever configured the folder the two look identical: nothing
+ * usable sits where they pointed it. This used to be true only by accident, never by a check: a
+ * plain file directly behind `path` itself made `refuseLink`, which every caller ran before this,
+ * fail first with the same code — so this walk never saw one. That held for `loadRegistry`, which
+ * still runs `refuseLink` on the registry's own path first and so still never reaches this case. It
+ * stopped holding once `sheetFiles` (holdrim#164, engine/cli/pages.ts) started calling this function
+ * directly, on a probe path inside each configured folder, without ever calling `refuseLink` on the
+ * folder itself: a `content.folders` entry sitting behind an ordinary file (`docs` a file, `docs/
+ * sheets` configured) reached `lstatSync` here first, and its raw `ENOTDIR` went straight to whoever
+ * ran `holdrim sync`, unrefused and unexplained.
  */
 export function refuseUnreachableFolder(root: string, path: string, what: string): void {
   const dir = dirname(path);
@@ -87,7 +95,9 @@ export function refuseUnreachableFolder(root: string, path: string, what: string
     try {
       st = lstatSync(cur);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; // not created yet — genuinely absent
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return; // not created yet — genuinely absent
+      if (code === 'ENOTDIR') throw new Error(`refusing to ${what}: its folder, ${cur}, cannot be reached`);
       throw e;
     }
     if (!st.isSymbolicLink()) continue; // an ordinary folder here: keep walking down
