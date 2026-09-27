@@ -402,6 +402,16 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **`content.registry` can no longer name a file outside the project (#161).** `registryPath`
+  (engine/cli/validation.ts) joins the value onto the project root with a plain `join` and nothing
+  checked the result stayed there: `"../other/approvals.json"`, or an absolute path, was read — and
+  later WRITTEN, by `holdrim sync` — wherever that landed, never necessarily inside the project a
+  committer of `holdrim.json` can see. `readConfig` now refuses, at load, a `content.registry` whose
+  resolved path escapes the root, an absolute path outright, and a value equal to the root itself or
+  empty; checked with `path.relative`, not a raw `startsWith`, so a sibling folder whose name happens
+  to start with the root's own (`/proj-other` against `/proj`) is refused rather than waved through.
+  Nothing to change for a project whose `content.registry` already names an ordinary path inside its
+  own folder.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY

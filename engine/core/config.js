@@ -20,6 +20,7 @@
  * @module
  */
 
+import { join, relative, isAbsolute, sep } from 'node:path';
 import { HOME_SCREEN } from './screens.js';
 import { readFeatures } from './features.js';
 import { readPeopleShow } from './people-show.js';
@@ -73,6 +74,56 @@ function readGlossary(configured, root) {
     }
   });
   return configured;
+}
+
+/**
+ * `content.registry`'s own limit: `registryPath` (engine/cli/validation.ts) joins this value onto
+ * the project root and, until now, nothing checked the result stayed there — `"../other/approvals.json"`
+ * or an absolute path would be read, and later WRITTEN (`saveRegistry`), wherever that landed, never
+ * necessarily inside the project whoever committed `holdrim.json` can see. Refused here, at load, the
+ * same way `readGlossary` above refuses a bad `content.glossary`: one place every reader of the file
+ * already goes through, so `registryPath` itself stays a plain join, trusting a value this function
+ * has already cleared.
+ *
+ * Checked by RESOLUTION, with `path.relative`, never by scanning the string for `".."` or by
+ * `startsWith` on the two raw paths: `relative` folds `"a/../../x"` and a leading `"./"` down to
+ * what they actually resolve to, where a string search would have to reinvent that folding to catch
+ * the first and would wrongly flag the second; and `startsWith(root)` alone would wave a SIBLING
+ * folder through as if it were inside — `/proj-other` passes a raw `"/proj"` prefix check the way
+ * `/proj/…` does, exactly the classic bug this function exists not to repeat.
+ *
+ * An absolute value is refused outright, before resolution: `join(root, ...value.split('/'))`
+ * happens to fold a leading `/` away and land back inside `root` on this platform, but a value
+ * written as an absolute path says something different from what it does, and a project that wrote
+ * one meant an absolute path — silently reinterpreting it as relative is its own kind of surprise.
+ *
+ * Lexical only, like every other read of this value: a symlink INSIDE the root that points
+ * elsewhere is a different failure, already refused where the registry is loaded and saved
+ * (`refuseLink` / `refuseUnreachableFolder`, holdrim#150/#155) — duplicating that check on the
+ * string alone here would only be a second, weaker copy of it.
+ *
+ * @param {unknown} configured  `file.content.registry`, or undefined
+ * @param {string} root
+ * @returns {string}
+ */
+function readRegistry(configured, root) {
+  const value = configured ?? 'approvals.json';
+  if (typeof value !== 'string' || value.length < 1) {
+    throw new Error(`${root}/holdrim.json's "content.registry" must be a non-empty string.`);
+  }
+  if (isAbsolute(value)) {
+    throw new Error(
+      `${root}/holdrim.json's "content.registry" ("${value}") is an absolute path — it must name a ` +
+      'file inside the project, relative to its root.');
+  }
+  const joined = join(root, ...value.split('/'));
+  const rel = relative(root, joined);
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+    throw new Error(
+      `${root}/holdrim.json's "content.registry" ("${value}") resolves outside the project root — ` +
+      'it must name a file inside the project.');
+  }
+  return value;
 }
 
 /**
@@ -188,7 +239,7 @@ export function readConfig(root, io, env = {}) {
     // The defaults below are an example of shape, not a rule: one folder of pages next to the file
     // that records their approvals.
     sheetFolders: content.folders ?? ['pages'],
-    registry: content.registry ?? 'approvals.json',
+    registry: readRegistry(content.registry, root),
     // Where `/` leads. The engine's own home by default: every page with its light and every open
     // request, which is the first thing a person needs after signing in. A project that would rather
     // open on one of its pages names it here.

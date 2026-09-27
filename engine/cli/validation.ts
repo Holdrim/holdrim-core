@@ -47,6 +47,11 @@ export interface Registry {
 /**
  * Where the approval registry lives. It comes from `holdrim.json` (`content.registry`), not from
  * the code: a fixed file name would be one project's decision, written inside the engine.
+ *
+ * A plain join, with no containment check of its own: `ofProject` reads the value through
+ * `readConfig` (engine/core/config.js), which already refused a `content.registry` whose join onto
+ * `root` would land outside it — `"../other/approvals.json"`, an absolute path — before this ever
+ * runs (holdrim#161). Checking it again here would be the same value, checked the same way, twice.
  */
 const registryPath = (root: string) =>
   join(root, ...ofProject(root)
