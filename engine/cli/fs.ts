@@ -78,7 +78,9 @@ export function refuseUnreachableFolder(root: string, path: string, what: string
   const dir = dirname(path);
   const nested = relative(root, dir);
   let cur = root;
-  for (const part of nested === '' ? [] : nested.split(sep)) {
+  // A registry at the root gives `nested` as '', one empty part: `cur` stays `root`, which already
+  // resolved, so that single step passes. No special case for it: one would change nothing.
+  for (const part of nested.split(sep)) {
     cur = join(cur, part);
     let st;
     try {
