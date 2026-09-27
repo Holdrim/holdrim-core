@@ -2745,6 +2745,19 @@ expect "and marked ignored on the screen"        0 \
   "$(t_owner $B/engine/settings | has -F "<td>$TOKENED <span class=\"holdrim-alert holdrim-alert--warn settings-ignored\">$(say_en settings.grants.ignored)</span>"; echo $?)"
 # Revoked again, so the token list below reads as it did before this: the bot's tokens alone.
 expect "(its token is revoked)"                  200 "$(t_owner -o /dev/null -w '%{http_code}' -X POST $B/api/agent-tokens/$TOKENED/revoke)"
+# A triager limited to some pages is never offered the decision on their own request, on the home
+# either — here with password sign-in and a name, the case where the home shows the author by name.
+expect "(the owner defines a triage role)"       201 "$(t_owner -o /dev/null -w '%{http_code}' -d '{"role":"page triage","capabilities":["triage"]}' $B/api/roles)"
+expect "(and grants it to the member on A01)"    201 "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$T_MEMBER\",\"role\":\"page triage\",\"scope\":\"A01\"}" $B/api/grants)"
+T_OWN=$(t_member -d '{"type":"request","page":"A01","block":"A01.1.4","text":"the member asks, named","data":{"category":"text"}}' $B/api/events | jfield id)
+T_OTHERS=$(as_bot -d '{"type":"request","page":"A01","block":"A01.2.1","text":"somebody else asks","data":{"category":"text"}}' $B/api/events | jfield id)
+require_id "$T_OWN" T_OWN; require_id "$T_OTHERS" T_OTHERS
+T_MEMBER_HOME=$(t_member $B/engine/home)
+expect "(the home shows the member's own request by their name)" 0 "$(echo "$T_MEMBER_HOME" | has -F 'A Member'; echo $?)"
+expect "(the home offers them somebody else's request on A01 to decide)" 0 \
+  "$(echo "$T_MEMBER_HOME" | has -F "name=\"request\" value=\"$T_OTHERS\""; echo $?)"
+expect "the home offers a scoped triager no decision on their own request, named or not" 1 \
+  "$(echo "$T_MEMBER_HOME" | has -F "name=\"request\" value=\"$T_OWN\""; echo $?)"
 # The tamper banner (issue #107) is not in TOKEN_READS, and its acknowledgement is not in
 # TOKEN_WRITES: neither route existed when TOKEN_READS was written, and an allowlist stays closed
 # to a route it never named — the acknowledgement stays refused before `mayAcknowledge` is even

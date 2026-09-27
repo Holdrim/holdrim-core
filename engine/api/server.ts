@@ -1881,10 +1881,13 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
     (email) => displays.get(email) ?? email);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the
   // same one the panel draws its buttons from, filtered by `statusFor` on the request's own place.
-  // Nobody is offered a form the server refuses.
+  // Nobody is offered a form the server refuses. Asked of the request as STORED, never of the row:
+  // the row's `author` is already what the viewer is shown — their own name, on their own request —
+  // and `statusFor` has to recognise the request as theirs by the author the server does.
   if (viewer) {
+    const stored = new Map(all.filter((e) => e.type === 'request').map((e) => [e.id, e]));
     for (const r of requests) {
-      const { triage, requiresReason } = statusFor(roles, viewer, r, cycle.status(r.state));
+      const { triage, requiresReason } = statusFor(roles, viewer, stored.get(r.id)!, cycle.status(r.state));
       if (triage.length) Object.assign(r, { triage, requiresReason });
     }
   }
