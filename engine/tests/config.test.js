@@ -89,6 +89,74 @@ test('readConfig reads the theme, and falls back to the project name', () => {
   assert.deepEqual(plain.theme, { brand: null, logo: null, name: 'Handbook' });
 });
 
+// ---------------------------------------------------------------- content.registry stays inside the root
+
+/**
+ * `registryPath` (engine/cli/validation.ts) joins `content.registry` onto the project root with a
+ * plain `join`, trusting `readConfig` to have already refused anything that would land outside it
+ * (holdrim#161). These pin that refusal at the one place it happens, so `registryPath` never needs
+ * a containment check of its own.
+ */
+test('content.registry defaults to approvals.json, and a legitimate nested path is kept as written', () => {
+  assert.equal(readConfig('/p', file({})).registry, 'approvals.json');
+  assert.equal(readConfig('/p', file({ content: { registry: 'data/approvals.json' } })).registry,
+    'data/approvals.json');
+  // "./approvals.json" resolves inside the root exactly like "approvals.json" — a leading "./" is
+  // not traversal, and folding it away is `path.relative`'s job, not a reason to refuse it.
+  assert.equal(readConfig('/p', file({ content: { registry: './approvals.json' } })).registry,
+    './approvals.json');
+});
+
+test('content.registry refuses a value that climbs out of the project root', () => {
+  assert.throws(() => readConfig('/p', file({ content: { registry: '..' } })),
+    /content\.registry.*resolves outside the project root/);
+  assert.throws(() => readConfig('/p', file({ content: { registry: '../other/approvals.json' } })),
+    /content\.registry.*resolves outside the project root/);
+  // Two levels up from a path already one level down still leaves the root entirely.
+  assert.throws(() => readConfig('/p', file({ content: { registry: 'a/../../x' } })),
+    /content\.registry.*resolves outside the project root/);
+});
+
+test('content.registry refuses an absolute path outright, even though the join would tame it', () => {
+  // `join(root, ...'/etc/passwd'.split('/'))` folds the leading slash away and lands back inside
+  // `root` on this platform — so this is refused for what the value SAYS, not for where the join
+  // would actually put it: a project that wrote an absolute path meant an absolute path, and
+  // silently reinterpreting it as relative is a surprise of its own.
+  assert.throws(() => readConfig('/p', file({ content: { registry: '/etc/passwd' } })),
+    /content\.registry.*is an absolute path/);
+});
+
+test('content.registry refuses a value equal to the root itself, or an empty string', () => {
+  assert.throws(() => readConfig('/p', file({ content: { registry: '.' } })),
+    /content\.registry.*resolves outside the project root/);
+  assert.throws(() => readConfig('/p', file({ content: { registry: '' } })),
+    /content\.registry.*must be a non-empty string/);
+});
+
+/**
+ * `typeof value !== 'string'` on its own, never exercised by any of the tests above: every one of
+ * them passes a string, so a mutant that narrows the guard to `value.length < 1` — dropping the
+ * `typeof` half entirely — would still leave every other test in this file green (`123.length` and
+ * `{}.length` are both `undefined`, neither `< 1`), and the guard would silently accept a number or
+ * an object where the rest of `readRegistry` expects a string.
+ */
+test('content.registry refuses a value that is not a string at all', () => {
+  assert.throws(() => readConfig('/p', file({ content: { registry: 123 } })),
+    /content\.registry.*must be a non-empty string/);
+  assert.throws(() => readConfig('/p', file({ content: { registry: {} } })),
+    /content\.registry.*must be a non-empty string/);
+});
+
+/**
+ * The classic prefix bug: `/proj-other` starts with the string `/proj`, so a raw `startsWith` check
+ * would wave a SIBLING folder through as if it were inside the root. `path.relative` is not fooled —
+ * it says `"../proj-other/x"`, which begins with `".."`, not with nothing.
+ */
+test('content.registry refuses a sibling folder whose name starts with the root\'s own name', () => {
+  assert.throws(() => readConfig('/proj', file({ content: { registry: '../proj-other/x' } })),
+    /content\.registry.*resolves outside the project root/);
+});
+
 test('a file that is not JSON counts as no file, not as a crash', () => {
   // A broken `holdrim.json` is a developer's mistake, and the service saying "Documentation" on a
   // screen is a better clue than a stack trace on a port nobody is listening to.

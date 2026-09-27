@@ -20,9 +20,11 @@
  * @module
  */
 
+import { join, isAbsolute } from 'node:path';
 import { HOME_SCREEN } from './screens.js';
 import { readFeatures } from './features.js';
 import { readPeopleShow } from './people-show.js';
+import { insideRoot } from './paths.js';
 
 /** `content.glossary`'s own limits — generous enough for a real vocabulary, small enough that a
  *  request text built from it (`holdrim propose-deps`, engine/cli/propose.ts) cannot itself become
@@ -73,6 +75,56 @@ function readGlossary(configured, root) {
     }
   });
   return configured;
+}
+
+/**
+ * `content.registry`'s own limit: `registryPath` (engine/cli/validation.ts) joins this value onto
+ * the project root and, until now, nothing checked the result stayed there — `"../other/approvals.json"`
+ * or an absolute path would be read, and later WRITTEN (`saveRegistry`), wherever that landed, never
+ * necessarily inside the project whoever committed `holdrim.json` can see. Refused here, at load, the
+ * same way `readGlossary` above refuses a bad `content.glossary`: one place every reader of the file
+ * already goes through, so `registryPath` itself stays a plain join, trusting a value this function
+ * has already cleared.
+ *
+ * The containment check itself is `insideRoot` (engine/core/paths.js), shared with the theme's own
+ * logo path (`loadLogo`, engine/api/theme.ts) rather than a second hand-rolled comparison here —
+ * see that module for why it resolves by `path.relative` and never a raw `startsWith`.
+ *
+ * An absolute value is refused outright, before `insideRoot` ever runs: `join(root,
+ * ...value.split('/'))` happens to fold a leading `/` away and land back inside `root` on this
+ * platform, but a value written as an absolute path says something different from what it does, and
+ * a project that wrote one meant an absolute path — silently reinterpreting it as relative is its
+ * own kind of surprise.
+ *
+ * ⚠️ Lexical only, on the STRING as written — nothing here touches the filesystem, so a symlinked
+ * ANCESTOR that resolves outside the root (`content.registry: "mnt/approvals.json"`, `mnt` a
+ * committed, working symlink to somewhere else) reads as contained right here, string-wise, and is
+ * not this function's to catch: `refuseEscapedFolder` (engine/cli/fs.ts, holdrim#161 round 2) does,
+ * with `fs.realpathSync`, at the moment the registry is actually loaded or saved — the one place a
+ * link's real target is knowable, which a string never is. What this function alone rules out is a
+ * value that could never stay inside no matter what the filesystem holds: `".."`, an absolute path,
+ * the root itself.
+ *
+ * @param {unknown} configured  `file.content.registry`, or undefined
+ * @param {string} root
+ * @returns {string}
+ */
+function readRegistry(configured, root) {
+  const value = configured ?? 'approvals.json';
+  if (typeof value !== 'string' || value.length < 1) {
+    throw new Error(`${root}/holdrim.json's "content.registry" must be a non-empty string.`);
+  }
+  if (isAbsolute(value)) {
+    throw new Error(
+      `${root}/holdrim.json's "content.registry" ("${value}") is an absolute path — it must name a ` +
+      'file inside the project, relative to its root.');
+  }
+  if (!insideRoot(root, join(root, ...value.split('/')))) {
+    throw new Error(
+      `${root}/holdrim.json's "content.registry" ("${value}") resolves outside the project root — ` +
+      'it must name a file inside the project.');
+  }
+  return value;
 }
 
 /**
@@ -188,7 +240,7 @@ export function readConfig(root, io, env = {}) {
     // The defaults below are an example of shape, not a rule: one folder of pages next to the file
     // that records their approvals.
     sheetFolders: content.folders ?? ['pages'],
-    registry: content.registry ?? 'approvals.json',
+    registry: readRegistry(content.registry, root),
     // Where `/` leads. The engine's own home by default: every page with its light and every open
     // request, which is the first thing a person needs after signing in. A project that would rather
     // open on one of its pages names it here.

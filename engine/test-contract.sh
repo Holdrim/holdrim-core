@@ -1902,6 +1902,19 @@ expect "two owners in the variable → exits 1" 1 "$?"
 expect "and says it needs exactly one"        0 "$(grep -q 'exactly one e-mail (got 2)' $WORK/two-owners.log; echo $?)"
 rm -rf "$TWO"
 
+# holdrim#161: `content.registry` climbing out of the project root, proved through a real boot, not
+# only through `readConfig`'s own unit tests (engine/tests/config.test.js) — the same reason the
+# owner-in-the-file case above boots a real server rather than trusting the unit test alone.
+ESCAPE=$(mktemp -d); cp -r "$SITE/." "$ESCAPE"
+node -e "const f=process.argv[1]+'/holdrim.json', c=JSON.parse(require('fs').readFileSync(f,'utf8'));
+  c.content.registry='../outside.json'; require('fs').writeFileSync(f, JSON.stringify(c))" "$ESCAPE"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_SITE="$ESCAPE" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/registry-escape.log" 2>&1
+expect "a content.registry that climbs out of the project → exits 1" 1 "$?"
+expect "and says it resolves outside the project root" 0 \
+  "$(grep -qE 'invalid configuration: .*content\.registry.*resolves outside the project root' $WORK/registry-escape.log; echo $?)"
+rm -rf "$ESCAPE"
+
 # Firestore is optional: configured but not installed, the boot has to fail and name the package,
 # not come up half-working or die in a module-resolution stack. The forbid-optional hook stands in
 # for "not installed" — it refuses the package exactly the way a missing one would.

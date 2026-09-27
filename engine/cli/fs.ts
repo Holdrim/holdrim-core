@@ -1,5 +1,6 @@
-import { lstatSync, statSync } from 'node:fs';
+import { lstatSync, statSync, realpathSync } from 'node:fs';
 import { dirname, relative, join, sep } from 'node:path';
+import { insideRoot } from '../core/paths.js';
 
 /**
  * Filesystem guards shared by more than one CLI command, so a rule like "refuse a symlink" is
@@ -96,5 +97,67 @@ export function refuseUnreachableFolder(root: string, path: string, what: string
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
       throw new Error(`refusing to ${what}: its folder, ${cur}, cannot be reached`);
     }
+  }
+}
+
+/**
+ * Refuses `path` when its REAL location — every symlink between here and the filesystem followed —
+ * is not strictly inside the project's REAL root (holdrim#161, round 2).
+ *
+ * `readConfig`'s own check on `content.registry` (engine/core/config.js) is lexical, on the STRING
+ * as written, so it cannot see this: `content.registry: "mnt/approvals.json"`, with `mnt` a
+ * committed, WORKING symlink to somewhere outside the project, reads as an ordinary nested path —
+ * `refuseLink` only ever looks at `path`'s own last component, never an ancestor, and
+ * `refuseUnreachableFolder` only ever refuses a DANGLING ancestor, never a working one that resolves
+ * outside the root. All three checks pass, and `loadRegistry` and `saveRegistry` would read and
+ * WRITE the owner's registry wherever `mnt` actually points.
+ *
+ * `path` itself may well not exist yet — the very first `sync` of a project, before its registry has
+ * ever been written — so this walks UP from it, `lstatSync` component by component, to the DEEPEST
+ * ancestor that IS there: nothing further down can have been substituted by a link if nothing
+ * further down exists yet. That ancestor, and `root`, are each resolved with `realpathSync` — BOTH
+ * sides, not only the target: a project checked out through its own symlinked path (`~/work ->
+ * /real/project`, say) would otherwise see the target's fully-resolved real path compared against
+ * `root` exactly as the caller spelled it, unresolved, and refuse a project that never left itself
+ * at all. Whatever of `path` is past the deepest existing ancestor is joined back onto that
+ * ancestor's real location before the comparison, so a component that does not exist yet is judged
+ * by where its parent really is, never silently accepted for having nothing concrete to check.
+ *
+ * Only `ENOENT` walks up a level; every other error (`EACCES`, …) propagates, exactly as
+ * `refuseLink` and `refuseUnreachableFolder` already treat it — a real failure reading the
+ * filesystem is not "not there yet".
+ *
+ * Called AFTER `refuseUnreachableFolder` wherever both run on the same path (`loadRegistry`): a
+ * DANGLING ancestor must still get that check's own, more specific message — `realpathSync` on a
+ * dangling symlink fails with a plain `ENOENT` naming the link itself, which would read here as a
+ * confusing, unrelated error rather than the "its folder … cannot be reached" a caller already
+ * knows to look for. By the time this runs, `refuseUnreachableFolder` has already ruled out a
+ * dangling ancestor (or the caller took the "the file already exists" branch, where `existsSync`
+ * itself could not have returned true through a dangling link in the first place), so nothing
+ * dangling reaches this function's own `realpathSync` calls.
+ *
+ * Lexical containment beyond this point is `insideRoot`'s (engine/core/paths.js): once both sides
+ * are real paths, a symlink can no longer hide behind either of them, and comparing them is the same
+ * string comparison `content.registry`'s own check already makes.
+ */
+export function refuseEscapedFolder(root: string, path: string, what: string): void {
+  const realRoot = realpathSync(root);
+  let existing = path;
+  for (;;) {
+    try {
+      lstatSync(existing);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      const up = dirname(existing);
+      if (up === existing) break; // reached the filesystem root without finding anything real
+      existing = up;
+    }
+  }
+  const realExisting = realpathSync(existing);
+  const tail = relative(existing, path);
+  const realTarget = tail ? join(realExisting, tail) : realExisting;
+  if (!insideRoot(realRoot, realTarget)) {
+    throw new Error(`refusing to ${what}: it resolves to ${realTarget}, outside the project root ${realRoot}`);
   }
 }

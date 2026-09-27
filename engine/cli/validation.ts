@@ -13,7 +13,7 @@ import { Source } from './remote.ts';
 import { isLocked, earliestLockBaseline } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
 import { warnOfTampering, refuseToActOnBrokenGuards } from './requests.ts';
-import { refuseLink, refuseUnreachableFolder } from './fs.ts';
+import { refuseLink, refuseUnreachableFolder, refuseEscapedFolder } from './fs.ts';
 
 /**
  * The validation lock: an approved block does not change without permission, and no approval mark
@@ -47,6 +47,13 @@ export interface Registry {
 /**
  * Where the approval registry lives. It comes from `holdrim.json` (`content.registry`), not from
  * the code: a fixed file name would be one project's decision, written inside the engine.
+ *
+ * A plain join, with no containment check of its own: `ofProject` reads the value through
+ * `readConfig` (engine/core/config.js), which already refused, LEXICALLY, a `content.registry`
+ * whose join onto `root` would land outside it — `"../other/approvals.json"`, an absolute path —
+ * before this ever runs (holdrim#161). What that check cannot see is a symlinked ANCESTOR that
+ * resolves outside the root at the filesystem's own level: `loadRegistry` and `saveRegistry` guard
+ * that themselves, with `refuseEscapedFolder`, at the moment the path below is actually used.
  */
 const registryPath = (root: string) =>
   join(root, ...ofProject(root)
@@ -63,7 +70,13 @@ export function loadRegistry(root: string): Registry {
   // unmounted shared volume, say, which `existsSync` reads as "nothing here", the same as a registry
   // simply never written yet) is refused too, rather than silently read as an empty registry.
   refuseLink(p, `load ${p}`);
-  if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'));
+  if (existsSync(p)) {
+    // The path resolves all the way to a real file — no dangling ancestor could have let `existsSync`
+    // return true — so `refuseEscapedFolder` here only ever has a WORKING chain to resolve: a
+    // symlinked ancestor that resolves OUTSIDE the project (holdrim#161, round 2) is what it catches.
+    refuseEscapedFolder(root, p, `load ${p}`);
+    return JSON.parse(readFileSync(p, 'utf8'));
+  }
   // NOTHING under this exact name — but that reads as "never written" only when nothing further up
   // stops it from ever being written, not when an ANCESTOR is a dangling symlink (`docs ->
   // /mnt/shared`, unmounted): that gives the exact same ENOENT `existsSync` just read above, so left
@@ -73,6 +86,10 @@ export function loadRegistry(root: string): Registry {
   // rather than asking one `statSync` that fails ENOENT on both alike (round 1 of this fix did, and
   // wrongly refused a project that had simply never run sync).
   refuseUnreachableFolder(root, p, `load ${p}`);
+  // Only reached once `refuseUnreachableFolder` has already ruled out a dangling ancestor, so nothing
+  // dangling reaches `refuseEscapedFolder`'s own `realpathSync` calls — a WORKING ancestor that
+  // resolves outside the project is the one thing left for it to catch here.
+  refuseEscapedFolder(root, p, `load ${p}`);
   return {};
 }
 
@@ -123,6 +140,12 @@ export function saveRegistry(root: string, registry: Registry, interrupt: () => 
   // because a page turning the registry file into a symlink mid-run is exactly the kind of surprise
   // this refusal exists to catch, not assume away.
   refuseLink(path, `save ${path}`);
+  // Beside it, for the same reason: a WORKING symlinked ANCESTOR that resolves outside the project
+  // (holdrim#161, round 2) is invisible to `refuseLink`, which only ever looks at `path`'s own last
+  // component — `loadRegistry` already ran this on the same path before `sync` wrote a single page,
+  // repeated here for the same reason `refuseLink` is: an ancestor turned into an escaping symlink
+  // mid-run is exactly the kind of surprise this exists to catch, not assume away.
+  refuseEscapedFolder(root, path, `save ${path}`);
   // Safe now: `refuseLink` just ruled out a symlink, so whatever `existsSync` finds here (or
   // doesn't) is an ordinary file, never a link whose target existing or not would say something else.
   const existing = existsSync(path);
