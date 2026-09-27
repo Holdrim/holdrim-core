@@ -1,5 +1,7 @@
 import { lstatSync, statSync, realpathSync } from 'node:fs';
-import { dirname, relative, join, resolve, sep } from 'node:path';
+import { dirname, relative, join, resolve, basename, sep } from 'node:path';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
 import { insideRoot } from '../core/paths.js';
 
 /**
@@ -252,4 +254,42 @@ export function realStoreFolder(file: string): string {
  */
 export function insideStoreFolder(storeFolders: readonly string[], realTarget: string): boolean {
   return storeFolders.some((folder) => insideRoot(folder, realTarget));
+}
+
+/**
+ * Where `holdrim index` (`rebuildIndex`, engine/cli/validation.ts) keeps its SQLite database when
+ * neither `--db` nor `HOLDRIM_EVENTS_PATH` names one: a per-user cache, never inside the project.
+ *
+ * It used to default to `<root>/data/events.db` — generated, and sitting inside the very folder a
+ * documentation project usually serves and commits (holdrim#170 already refuses to let the SERVER
+ * serve its own stores; the index is not a server store, but the same reasoning applies: a rebuilt
+ * snapshot has no business inside content people commit and a site publishes). One default,
+ * defined here and nowhere else, so the CLI's `--help` text, `rebuildIndex` and anything that
+ * later needs to find the same file all agree without a second copy of this rule to drift from it.
+ *
+ * `XDG_CACHE_HOME`, falling back to `~/.cache` — this is a rebuildable cache, exactly what that
+ * variable is for, never `~/.local/share` or a dotfile at the project root, which would put a
+ * generated file back where a project's tooling (`.gitignore`, a linter, a backup job) has to know
+ * to skip it.
+ *
+ * The folder name mixes the project's own basename in for a human skimming the cache directory —
+ * `~/.cache/holdrim/` otherwise fills with nothing but hashes — with the first 12 hex characters of
+ * a sha256 of the project's REAL, symlink-resolved path, so that two projects that happen to share
+ * a folder name (two clones both called `docs`) never share an index, and one project reached
+ * through more than one symlink still lands on the same cache entry instead of a fresh, empty one
+ * each time. `realpathSync`, not the path as given: a lexical hash would let `~/work/docs` and its
+ * real target `/srv/docs` collide with an unrelated `~/other/docs -> /srv/other-docs` only by
+ * coincidence of spelling, and would treat the same project as two different ones the moment it is
+ * reached through a different link.
+ *
+ * ⚠️ `HOLDRIM_EVENTS_PATH` is also what the SERVER reads for its own, unrelated events store
+ * (`engine/api/store-sqlite.ts`) — one variable naming two different files for two different
+ * commands is confusing enough to be worth a report, but changing it is its own decision, not a
+ * side effect of moving this default; `rebuildIndex` keeps reading it exactly as before.
+ */
+export function defaultIndexPath(root: string): string {
+  const real = realpathSync(root);
+  const cacheHome = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
+  const hash = createHash('sha256').update(real).digest('hex').slice(0, 12);
+  return join(cacheHome, 'holdrim', `${basename(real)}-${hash}`, 'index.db');
 }
