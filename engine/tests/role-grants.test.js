@@ -74,6 +74,21 @@ test('a grant gives its capabilities to its person, where its scope reaches, and
   assert.equal(roles.can('comment', CAL, { block: 'A01.1.1' }), true, 'while everybody keeps what member holds');
 });
 
+// ---------------------------------------------------------------- #153: read is not yet scopable
+/**
+ * `read` is grantable (`PROJECT_CAPABILITIES` includes it), so the owner can scope a grant of it to
+ * one page — but that grant sits BESIDE the unscoped `read` every member already holds
+ * (`ROLE_CAPABILITIES`, engine/core/roles.js), never in place of it: `can` answers `.some(...)` across
+ * every grant a person holds, so the base member entry alone is enough to say yes anywhere. Read
+ * cannot be narrowed this way today, which is why `/impact-radius`, `/fingerprints` and `/graph`
+ * (engine/api/server.ts) may still answer about every block unfiltered (issue #153's premise).
+ */
+test('#153: a scoped read grant only adds — it cannot narrow the read every member already holds', () => {
+  const roles = deployment.withProjectGrants([grant(BEA, ['read'], 'A01')]);
+  assert.equal(roles.can('read', BEA, { block: 'Z99.1.1' }), true, 'outside the grant\'s scope, still read as a member');
+  assert.equal(roles.can('read', BEA, EVERYWHERE), true, 'read stays unscoped for a signed-in member, grant or not');
+});
+
 test('the grants in force are replaced, never added to: a grant left out is gone', () => {
   const granted = deployment.withProjectGrants([grant(BEA, ['triage'])]);
   assert.equal(granted.can('triage', BEA, EVERYWHERE), true);
