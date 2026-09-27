@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readConfig } from '../core/config.js';
@@ -168,13 +168,31 @@ export function sheetFiles(root: string): string[] {
     // to whoever is looking at an empty page list and has no idea their content folder never mounted.
     refuseUnreachableFolder(root, join(folder, '.holdrim-reachability-probe'), `scan pages in ${folder}`);
     refuseEscapedFolder(root, folder, `scan pages in ${folder}`);
+    let entries: Dirent[];
     try {
-      // By number, as a person counts: a plain sort puts A10 before A9, and so would the home,
-      // which lists pages in the order they arrive here.
-      for (const name of readdirSync(folder).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))) {
-        if (name.endsWith('.html') && !name.startsWith('_')) out.push(join(folder, name));
-      }
-    } catch { /* folder that does not exist in this project */ }
+      entries = readdirSync(folder, { withFileTypes: true });
+    } catch { continue; /* folder that does not exist in this project */ }
+    // By number, as a person counts: a plain sort puts A10 before A9, and so would the home,
+    // which lists pages in the order they arrive here.
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }))) {
+      const { name } = entry;
+      if (!name.endsWith('.html') || name.startsWith('_')) continue;
+      const path = join(folder, name);
+      // Only a page whose REAL location is inside the project is scanned. The folder's check above
+      // sees the folder, not a page FILE inside it that is a link, and every `readFileSync`
+      // downstream (readBlocks, fingerprintsByPage, scanBlocks) follows links. Only a link is
+      // resolved: an entry that is not one lives exactly where its folder does, and the folder was
+      // just proven inside — so a project of plain files, which the server rescans on every home,
+      // pays nothing for this.
+      // Refused by throwing, as the folder is, never skipped with a warning: a page that silently
+      // drops out of the scan drops out of review and out of `holdrim check` with it, a green that
+      // says nothing about a file sitting in the repository — and a skip here would be the one place
+      // this function forgives a path that leaves the project, where the folder's check does not.
+      // Outside the `try` above for the folder's own reason: that catch reads anything as "no such
+      // folder", and would swallow the refusal with it.
+      if (entry.isSymbolicLink()) refuseEscapedFolder(root, path, `scan the page ${path}`);
+      out.push(path);
+    }
   }
   return out;
 }

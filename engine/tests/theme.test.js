@@ -14,23 +14,27 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createI18n } from '../core/i18n.js';
+import { insideRoot } from '../core/paths.js';
 import { readConfig } from '../core/config.js';
 import { renderLoginPage } from '../api/login-page.ts';
 import {
-  ENGINE_BRAND, ENGINE_NAME, ENGINE_THEME, contrast, isBrandColor, loadTheme, readableInk, themeCss,
+  ENGINE_BRAND, ENGINE_NAME, ENGINE_THEME, contrast, isBrandColor, loadTheme, readableInk, themeCss, DISK_THEME_IO,
 } from '../api/theme.ts';
 
 const i18n = createI18n({ en: { 'language.name': 'English' } }, 'en');
 const encoder = new TextEncoder();
 
-/** A disk that has exactly the files it is told about. */
+/** A disk that has exactly the files it is told about, and no links: every path is where it is written. */
 const disk = (files) => ({
   readBinary(path) {
     if (!(path in files)) throw new Error(`no such file: ${path}`);
     return files[path];
   },
+  realContainment: (root, path) => ({ inside: insideRoot(root, path), realTarget: path }),
 });
 
 // --------------------------------------------------------------- the default
@@ -192,6 +196,63 @@ test('a missing logo file does not stop anyone from signing in', () => {
   assert.equal(theme.logo, null);
   assert.equal(theme.brand, ENGINE_BRAND);
   assert.match(warnings.join(' '), /could not be read/);
+});
+
+// ------------------------------------------------------- a logo that is a link
+// The theme embeds only a logo whose REAL location is inside the project, on the real disk and
+// through `DISK_THEME_IO`, exactly what the server passes at boot. Each project is a throwaway temp
+// folder; the one file outside it is written by the test itself.
+
+const SVG = '<svg xmlns="http://www.w3.org/2000/svg"></svg>';
+
+/** A throwaway project with a `theme` folder, removed when the test ends. */
+function themedProject(t) {
+  const root = mkdtempSync(join(tmpdir(), 'holdrim-theme-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'theme'));
+  return root;
+}
+
+test('a logo that is a link staying inside the project is embedded', (t) => {
+  const root = themedProject(t);
+  writeFileSync(join(root, 'theme', 'mark.svg'), SVG);
+  symlinkSync(join(root, 'theme', 'mark.svg'), join(root, 'theme', 'logo.svg'));
+
+  const { theme, warnings } = loadTheme(root, { logo: 'theme/logo.svg' }, DISK_THEME_IO);
+  assert.deepEqual(warnings, []);
+  assert.equal(theme.logo, `data:image/svg+xml;base64,${Buffer.from(SVG).toString('base64')}`);
+});
+
+test('a logo that is a link whose real location is outside the project is ignored, with a warning', (t) => {
+  const root = themedProject(t);
+  const outside = mkdtempSync(join(tmpdir(), 'holdrim-theme-outside-'));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  // A valid logo, readable, and within the size limit: the only way it stays out is the refusal.
+  writeFileSync(join(outside, 'mark.svg'), SVG);
+  symlinkSync(join(outside, 'mark.svg'), join(root, 'theme', 'logo.svg'));
+
+  const { theme, warnings } = loadTheme(root, { logo: 'theme/logo.svg' }, DISK_THEME_IO);
+  assert.equal(theme.logo, null);
+  assert.match(warnings.join(' '), /resolves outside the project/);
+});
+
+test('a logo that is a link to nothing is ignored, with a warning, and never throws', (t) => {
+  const root = themedProject(t);
+  symlinkSync(join(root, 'theme', 'never-written.svg'), join(root, 'theme', 'logo.svg'));
+
+  const { theme, warnings } = loadTheme(root, { logo: 'theme/logo.svg' }, DISK_THEME_IO);
+  assert.equal(theme.logo, null);
+  assert.match(warnings.join(' '), /could not be read/);
+});
+
+test('a logo that is a link is typed by the file it leads to, not by its own name', (t) => {
+  const root = themedProject(t);
+  writeFileSync(join(root, 'theme', 'notes.txt'), SVG);
+  symlinkSync(join(root, 'theme', 'notes.txt'), join(root, 'theme', 'logo.svg'));
+
+  const { theme, warnings } = loadTheme(root, { logo: 'theme/logo.svg' }, DISK_THEME_IO);
+  assert.equal(theme.logo, null);
+  assert.match(warnings.join(' '), /not one of/);
 });
 
 // ---------------------------------------------------- the whole page, served

@@ -26,7 +26,8 @@ import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js'
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { graphOf } from '../cli/graph.ts';
-import { loadTheme } from './theme.ts';
+import { realContainment } from '../cli/fs.ts';
+import { loadTheme, DISK_THEME_IO } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
 import { provisionFirstAccess, retireFirstAccessFile } from './first-access.ts';
@@ -101,9 +102,7 @@ const languageOf = (req: IncomingMessage) =>
  * was refused is that the value looked like an injection attempt, that is the line an operator
  * needs to find.
  */
-const { theme: projectTheme, warnings: themeWarnings } = loadTheme(
-  projectRoot, project.theme, { readBinary: (p: string) => readFileSync(p) },
-);
+const { theme: projectTheme, warnings: themeWarnings } = loadTheme(projectRoot, project.theme, DISK_THEME_IO);
 for (const warning of themeWarnings) log('WARNING', 'theme_rejected', { reason: warning });
 
 const cfg = {
@@ -1608,13 +1607,29 @@ async function serveStatic(url: URL, res: ServerResponse, lang: string) {
   if (!target.startsWith(normalize(cfg.site) + sep)) {
     return json(res, 403, { error: i18n.t(lang, 'site.pathOutside') });
   }
+  // One answer for "not there", written once, so the two places that give it cannot drift apart.
+  const notFound = () => {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
+    res.end(i18n.t(lang, 'site.notFound'));
+  };
   try {
+    // Only a file whose REAL location is inside the site is served, and a link whose real location
+    // leaves the site is indistinguishable from a file that is not there: the same 404, the same
+    // body, the same headers. The check above reads the path as a STRING, while `stat` and
+    // `readFile` below follow links, so without this what is served would be decided by where a
+    // link leads rather than by where the site is. Not the 403 the check above gives: that one
+    // answers the URL alone and says nothing about the disk, while any answer here that differed
+    // from "not there" would say something about what lies outside the site. A link that stays
+    // inside keeps working; a dangling link throws here, into the same catch.
+    // The site root is resolved on every request, not once at boot: it is not the engine's to hold
+    // still — a release that re-points a symlinked site at new content is an ordinary deployment,
+    // and a real root remembered from before it would refuse the whole site until a restart.
+    if (!realContainment(cfg.site, target).inside) return notFound();
     const info = await stat(target);
     if (info.isDirectory()) return serveStatic(new URL(url.href.replace(/\/?$/, '/index.html')), res, lang);
     return serveFile(target, res, path);
   } catch {
-    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS });
-    res.end(i18n.t(lang, 'site.notFound'));
+    notFound();
   }
 }
 
