@@ -344,6 +344,24 @@ test('sheetFiles refuses a configured folder whose ANCESTOR is a dangling symlin
   assert.throws(() => sheetFiles(tmp), /its folder, .*docs, cannot be reached/);
 });
 
+/**
+ * Round 3 of #164's review: `docs` an ordinary FILE, not a symlink at all, one level above the
+ * configured folder. `refuseUnreachableFolder`'s own walk never calls `refuseLink` on `folder`
+ * itself — only `loadRegistry` does that, on the registry's own path, before this walk ever runs —
+ * so a file where an ancestor should be a directory reached `lstatSync` here first and threw the
+ * filesystem's raw `ENOTDIR`, with no "cannot be reached" message at all, exactly the gap the two
+ * dangling-symlink tests above already close for a link instead of a file.
+ */
+test('sheetFiles refuses a configured folder whose ancestor is an ordinary file, "cannot be reached"', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['docs/sheets'], registry: 'r.json' } }));
+  // `docs` is a plain file: nothing can ever sit "inside" it, so `docs/sheets` can never be reached.
+  writeFileSync(join(tmp, 'docs'), 'not a folder');
+
+  assert.throws(() => sheetFiles(tmp), /its folder, .*docs.sheets, cannot be reached/);
+});
+
 // ===================================================================== a page file that is a link
 // `sheetFiles` scans only pages whose REAL location is inside the project. The folder's own check
 // above sees the folder, never a page FILE inside it that is a link, and every read downstream

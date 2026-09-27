@@ -29,7 +29,11 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { UsersSqlite } from '../api/users-sqlite.ts';
 import { AGENT_TOKEN_FORMAT, AddressInUse } from '../api/users.ts';
+import { PasswordIdentity } from '../api/identity-password.ts';
 import { randomBytes, createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { freshFirestoreProject } from './helpers/firestore.js';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
@@ -46,9 +50,21 @@ const skipped = [];
 const closers = [];
 
 // --------------------------------------------------------------------- SQLite: always available
+/*
+ * `durable()` hands back an `open` that reaches the SAME data every time it is called, and a `done`
+ * that cleans up after it: what a test needs to close a store and open it again, which is the only
+ * honest way to show that something survives a restart. `:memory:` cannot — it is gone at `close`.
+ */
 stores.push({
   name: 'sqlite',
   open: async () => new UsersSqlite(':memory:'),
+  durable: () => {
+    const dir = mkdtempSync(join(tmpdir(), 'holdrim-users-'));
+    return {
+      open: async () => new UsersSqlite(join(dir, 'users.db')),
+      done: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  },
 });
 
 // --------------------------------------------------------------------- Postgres: needs a server
@@ -62,13 +78,27 @@ try {
   await withTimeout(admin.connect(), 5000, 'connecting to Postgres');
   closers.push(() => admin.end());
 
+  const openEmpty = async () => {
+    const store = new UsersPostgres(PG_URL);
+    await store.isEmpty();                       // forces the connection and creates the schema
+    await admin.query('TRUNCATE sessions, users, agent_tokens, sign_in_failures, store_values');
+    return store;
+  };
   stores.push({
     name: 'postgres',
-    open: async () => {
-      const store = new UsersPostgres(PG_URL);
-      await store.isEmpty();                       // forces the connection and creates the schema
-      await admin.query('TRUNCATE sessions, users, agent_tokens');
-      return store;
+    open: openEmpty,
+    // Emptied on the first open only: every later one has to find what the first one left.
+    durable: () => {
+      let opened = false;
+      return {
+        open: async () => {
+          if (!opened) return (opened = true, openEmpty());
+          const store = new UsersPostgres(PG_URL);
+          await store.isEmpty();
+          return store;
+        },
+        done: () => {},
+      };
     },
   });
 } catch (error) {
@@ -96,6 +126,11 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
     // a count or a "this session is gone" assertion would pass or fail for the wrong reason. A fresh
     // random project has nothing to wipe, because nothing has ever written to it before.
     open: async () => new UsersFirestore(freshFirestoreProject('holdrim-conformance')),
+    // One fresh project, reopened by a new client each time: `close` terminates the old one.
+    durable: () => {
+      const project = freshFirestoreProject('holdrim-conformance');
+      return { open: async () => new UsersFirestore(project), done: () => {} };
+    },
   });
 } else {
   skipped.push({
@@ -888,4 +923,141 @@ forEachStore('a token row of another kind opens nothing, on a store with no cons
     .then(() => true, () => false);
   assert.equal(await s.fromAgentToken(`holdrim_agent_${tokenId}_${secret}`), null,
     `a row of kind session opened as an agent's (written: ${written})`);
+});
+
+// ===================================================================== wrong passwords
+forEachStore('a sign-in failure row is read back as written, and null deletes it', async (s) => {
+  assert.equal(await s.readSignInFailures('x@example.org'), null, 'nothing counted before anything failed');
+  const lastAt = new Date().toISOString();
+  await s.updateSignInFailures('x@example.org', (current) => {
+    assert.equal(current, null);
+    return { count: 3, lastAt, escalated: false };
+  });
+  // The same address as it might be typed next time: one key, however it is spelled.
+  assert.deepEqual(await s.readSignInFailures('  X@Example.ORG '), { count: 3, lastAt, escalated: false });
+  await s.updateSignInFailures('x@example.org', (current) => ({ count: current.count + 1, lastAt, escalated: true }));
+  assert.equal((await s.readSignInFailures('x@example.org'))?.escalated, true, 'escalated is read back as written');
+  assert.equal((await s.readSignInFailures('x@example.org'))?.count, 4, 'next sees what is there');
+  assert.equal(await s.readSignInFailures('y@example.org'), null, 'and nobody else is counted');
+  await s.updateSignInFailures('x@example.org', () => null);
+  assert.equal(await s.readSignInFailures('x@example.org'), null, 'null removed the row');
+});
+
+forEachStore('wrong passwords arriving at once each count', async (s) => {
+  // Read, add one, write, outside one transaction: two at once both read 0 and both write 1, and an
+  // attacker who sends guesses in parallel gets them at a fraction of the count.
+  const lastAt = new Date().toISOString();
+  await Promise.all(Array.from({ length: 12 }, () => s.updateSignInFailures('x@example.org',
+    (current) => ({ count: (current?.count ?? 0) + 1, lastAt, escalated: false }))));
+  assert.equal((await s.readSignInFailures('x@example.org'))?.count, 12);
+}, { firestoreTimeout: 30_000 });
+
+forEachStore('the prune drops what is stale, then keeps only the newest', async (s) => {
+  const at = (minutes) => new Date(Date.UTC(2026, 0, 1, 12, minutes)).toISOString();
+  for (let i = 0; i < 6; i++) {
+    await s.updateSignInFailures(`n${i}@example.org`, () => ({ count: 1, lastAt: at(i), escalated: false }));
+  }
+  // Before minute 1: only n0 is stale. Then three stay, the three most recent: n3, n4, n5.
+  await s.pruneSignInFailures(at(1), 3);
+  assert.equal(await s.countSignInFailures(), 3);
+  const kept = [];
+  for (let i = 0; i < 6; i++) if (await s.readSignInFailures(`n${i}@example.org`)) kept.push(i);
+  assert.deepEqual(kept, [3, 4, 5], 'the ones that went are the oldest');
+});
+
+forEachStore('past the ceiling, escalated rows go last, and oldest first once only they are left', async (s) => {
+  const at = (minutes) => new Date(Date.UTC(2026, 0, 1, 12, minutes)).toISOString();
+  // e0 and e1 escalated and the OLDEST rows there are; n2..n5 newer and not escalated.
+  await s.updateSignInFailures('e0@example.org', () => ({ count: 9, lastAt: at(0), escalated: true }));
+  await s.updateSignInFailures('e1@example.org', () => ({ count: 9, lastAt: at(1), escalated: true }));
+  for (let i = 2; i < 6; i++) {
+    await s.updateSignInFailures(`n${i}@example.org`, () => ({ count: 1, lastAt: at(i), escalated: false }));
+  }
+  const present = async () => {
+    const names = [];
+    for (const n of ['e0', 'e1', 'n2', 'n3', 'n4', 'n5']) if (await s.readSignInFailures(`${n}@example.org`)) names.push(n);
+    return names;
+  };
+  await s.pruneSignInFailures(at(0), 3);
+  assert.deepEqual(await present(), ['e0', 'e1', 'n5'], 'the rows not escalated went first, oldest first');
+  await s.pruneSignInFailures(at(0), 1);
+  assert.deepEqual(await present(), ['e1'], 'and with only escalated rows over it, the oldest of those');
+});
+
+forEachStore('the failure key is not the plain SHA-256 of the address, and two deployments disagree on it', async (s, name) => {
+  // A plain hash is the same for every Holdrim there is: one table computed once reads them all. The
+  // salt is per store, so a second, fresh store keys the same address differently.
+  const key = await s.failureKey('x@example.org');
+  assert.notEqual(key, createHash('sha256').update('x@example.org').digest('hex'));
+  assert.equal(await s.failureKey(' X@Example.ORG '), key, 'one key however the address is spelled');
+  const other = await stores.find((st) => st.name === name).open();
+  try {
+    assert.notEqual(await other.failureKey('x@example.org'), key, 'a second deployment has its own salt');
+  } finally {
+    await other.close();
+  }
+});
+
+/**
+ * Registers a test for every store that can be closed and opened again on the same data. `body`
+ * gets `open`, and closes every store it opens.
+ */
+function forEachDurableStore(title, body) {
+  for (const store of stores) {
+    const options = store.name === 'firestore' ? { timeout: 30_000 } : {};
+    test(`[${store.name}] ${title}`, options, async () => {
+      const durable = store.durable();
+      try {
+        await body(durable.open);
+      } finally {
+        await durable.done();
+      }
+    });
+  }
+  for (const s of skipped) {
+    test(`[${s.name}] ${title}`, { skip: s.why }, () => {});
+  }
+}
+
+forEachDurableStore('a wrong-password wait survives the store being closed and opened again', async (open) => {
+  // The restart is real: the first store is closed, and nothing it held in memory reaches the second.
+  // A store that kept the count anywhere but its database passes every test above and fails here.
+  const before = await open();
+  let right;
+  try {
+    right = await before.create('x@example.org', 'X', 'a-long-enough-password', false);
+    const id = new PasswordIdentity(before, { secure: false });
+    for (let i = 0; i < 6; i++) await id.signIn('x@example.org', 'wrong');
+    assert.ok(await id.remainingWait('x@example.org') > 0);
+  } finally {
+    await before.close();
+  }
+
+  const after = await open();
+  try {
+    const id = new PasswordIdentity(after, { secure: false });
+    assert.ok(await id.remainingWait('x@example.org') > 0, 'the wait came back with the store');
+    assert.equal(await id.signIn('x@example.org', right), null, 'and the right password still waits');
+    assert.equal((await after.readSignInFailures('x@example.org'))?.count, 7, 'counting on from six');
+  } finally {
+    await after.close();
+  }
+});
+
+forEachDurableStore('the failure key comes back the same after the store is closed and opened again', async (open) => {
+  // Keys drawn from a salt that did not survive the restart would find none of the rows written
+  // before it, and every wait would be lifted by the restart exactly as if the count were in memory.
+  const before = await open();
+  let key;
+  try {
+    key = await before.failureKey('x@example.org');
+  } finally {
+    await before.close();
+  }
+  const after = await open();
+  try {
+    assert.equal(await after.failureKey('x@example.org'), key);
+  } finally {
+    await after.close();
+  }
 });

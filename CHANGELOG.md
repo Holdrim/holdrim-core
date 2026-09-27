@@ -402,6 +402,29 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **Wrong passwords are now counted in the user store, so a restart no longer hands out a fresh set
+  of free guesses, and every instance counts against the same number (#53).** Before, the count lived
+  in each process's memory: a deploy, a crash or a platform recycling an instance reset it, and N
+  instances allowed N times the guesses. The policy is unchanged — five free per address as typed,
+  then a wait that doubles up to fifteen minutes, forgotten an hour after the wait ends — and an
+  address with no account is counted exactly like one with an account, so how a wrong password is
+  answered still says nothing about who has one here. Each row is keyed by scrypt of the address
+  with a salt generated once per deployment, never by the address, and the table keeps at most ten
+  thousand rows, never evicting a row still counting towards a wait before one that is not. The
+  user store gains two tables (SQLite, Postgres) or collections (Firestore), created on start:
+  `sign_in_failures`, and `store_values`, which holds that salt. Leave `store_values` alone: a salt
+  removed under running instances leaves them keying one address two different ways. Each wrong password now costs a write and a small scrypt
+  (about a sixteenth of the password check's). What an operator notices: restarting no longer lifts a wait
+  someone is kept in — emptying `sign_in_failures` does — and an edge rate limit on `POST
+  /api/sign-in` is still advised for a service on the internet.
+- **Every answer outside Development now carries `Strict-Transport-Security: max-age=31536000`
+  (#53).** Without it, the first request of a visit typed as `http://` crossed the network in the
+  clear, where whoever sat on it could answer instead. It is sent on the same decision that already
+  makes the session cookie `Secure`, never in Development, and never because of an
+  `X-Forwarded-Proto` a client sent. No `includeSubDomains` and no `preload`: both reach names the
+  deployment may not own. What to check: a deployment outside Development has to be reached over
+  TLS, which its `Secure` cookies already required; a browser that has seen the header refuses plain
+  HTTP to that host for a year.
 - **`content.registry` can no longer name a file outside the project (#161).** `registryPath`
   (engine/cli/validation.ts) joins the value onto the project root with a plain `join` and nothing
   checked the result stayed there: `"../other/approvals.json"`, or an absolute path, was read — and
@@ -448,7 +471,14 @@ who ran the engine from `main` before it.
   already uses; before, it silently read as an empty folder — no pages, no error. holdrim#155 made
   the identical call for the registry: an unmounted shared volume must not read as "nothing here",
   because the two look the same to whoever is staring at an empty page list. A folder that was
-  simply never created (no `sync` has run yet) is unaffected and still reads as empty. Nothing to
+  simply never created (no `sync` has run yet) is unaffected and still reads as empty. **A third
+  round found the same gap for an ordinary FILE standing where a folder was configured** —
+  `content.folders: ["docs/sheets"]` with `docs` itself a plain file — which `refuseUnreachableFolder`
+  had never been asked about and let through as the filesystem's own raw `ENOTDIR`, unrefused, from
+  wherever `readdirSync` first tried to descend into it; the same walk now catches it and refuses
+  with the same "cannot be reached" message a dangling symlink already gets. `loadRegistry` is
+  unaffected — `refuseLink`, which it runs on the registry's own path before this walk ever starts,
+  already failed first with that same raw `ENOTDIR`, and still does. Nothing to
   change for a project whose `content.folders` already names ordinary paths inside its own folder.
   **Left open, and not this fix's to close:** `sheetFiles` never recurses into a configured folder's
   own subfolders, so a symlinked subfolder inside one is not walked into by this check either — see
