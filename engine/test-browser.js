@@ -46,40 +46,59 @@ async function must(what, action) {
   }
 }
 
-// The sign-in screen gets a second server, on the next port. Its guard sits here with the first
-// one, before any folder is made or process started: checked any later, a refusal would exit with
-// the first server still running and the temp folder left behind — the leftover this guard exists
-// to prevent.
-const SIGN_IN = `http://localhost:${PORT + 1}`;
-if (await fetch(`${SIGN_IN}/api/health`).then(() => true, () => false)) {
-  console.log(`port ${PORT + 1} is already in use — the test would run against ANOTHER server.`);
-  process.exit(1);
+/**
+ * Whether `url`'s health check answers, refuses (nobody is there) or hangs — a socket someone
+ * else bound without ever serving it, which is what a process that lost an earlier EADDRINUSE race
+ * can leave behind. A plain `fetch(...).then(() => true, () => false)` cannot tell that shape from
+ * "the port is free": both are a promise that never settles on their own, so without a timeout the
+ * hang is the caller's, not the probe's. Two seconds is far more than a real health check ever
+ * takes; `AbortSignal.timeout` turns that silence into a distinct, reportable outcome instead of a
+ * script that never gets past this line.
+ */
+async function portProbe(url) {
+  try {
+    await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(2000) });
+    return 'answering';
+  } catch (e) {
+    return e.name === 'TimeoutError' ? 'bound' : 'free';
+  }
 }
+
+/**
+ * Refuses to start against `port` when something is already answering there, or holding it bound
+ * without answering: checked before any folder is made or process started, so a refusal here exits
+ * with nothing yet to clean up. "Already in use" alone would read the same for a stale test-browser
+ * server left running and for a foreign process that happens to hold the port; naming `name` says
+ * which server this run needed it for.
+ */
+async function refuseIfPortUnusable(url, port, name) {
+  const status = await portProbe(url);
+  if (status === 'answering') {
+    console.log(`port ${port} is already in use — ${name} would run against ANOTHER server.`);
+    process.exit(1);
+  } else if (status === 'bound') {
+    console.log(`port ${port} is bound but never answered its health check — ${name} could not start there.`);
+    process.exit(1);
+  }
+}
+
+// The sign-in screen gets a second server, on the next port.
+const SIGN_IN = `http://localhost:${PORT + 1}`;
+await refuseIfPortUnusable(SIGN_IN, PORT + 1, 'the sign-in server');
 
 // A third server, with the panel's own toggles off, so a browser can prove what only a browser can:
-// that the bundle the page actually loads draws no control the server has turned off. The same
-// guard, the same reason.
+// that the bundle the page actually loads draws no control the server has turned off.
 const TOGGLES_OFF = `http://127.0.0.1:${PORT + 2}`;
-if (await fetch(`${TOGGLES_OFF}/api/health`).then(() => true, () => false)) {
-  console.log(`port ${PORT + 2} is already in use — the test would run against ANOTHER server.`);
-  process.exit(1);
-}
+await refuseIfPortUnusable(TOGGLES_OFF, PORT + 2, 'the feature-toggles server');
 
 // A fourth, on SQLite, for the tampered-text banner (issue #107): a text is only ever tampered with
-// by writing to the store outside the product, and a file is the store a test can write to. The
-// same guard, the same reason.
+// by writing to the store outside the product, and a file is the store a test can write to.
 const TAMPERED = `http://127.0.0.1:${PORT + 3}`;
-if (await fetch(`${TAMPERED}/api/health`).then(() => true, () => false)) {
-  console.log(`port ${PORT + 3} is already in use — the test would run against ANOTHER server.`);
-  process.exit(1);
-}
+await refuseIfPortUnusable(TAMPERED, PORT + 3, 'the tampered-events server');
 
 // The same guard as the contract test, for the same reason: a port already taken means the old
 // server keeps answering, and the whole run tests the previous build without saying so.
-if (await fetch(`${BASE}/api/health`).then(() => true, () => false)) {
-  console.log(`port ${PORT} is already in use — the test would run against ANOTHER server.`);
-  process.exit(1);
-}
+await refuseIfPortUnusable(BASE, PORT, 'the main server');
 
 // A throwaway site: the hello world as it ships, and the template next to it.
 const site = mkdtempSync(join(tmpdir(), 'holdrim-browser-'));
@@ -218,13 +237,50 @@ const PAGES = [
   return { kind, code, path, root, numbered };
 });
 
-const server = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
-  env: {
-    ...process.env, PORT: String(PORT), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
-    HOLDRIM_OWNER: OWNER, HOLDRIM_ADMINS: LEAD, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'memory', HOLDRIM_SITE: site,
-  },
-  stdio: ['ignore', 'ignore', 'inherit'],
-});
+/**
+ * `spawn`, with stderr always piped so a failure can be reported with what the server actually
+ * said instead of only where the symptom later showed up: `waitForHealth`, below, reads
+ * `proc.recentStderr` when a server exits early or never answers. `echoStderr` keeps today's live
+ * console output for the servers that used to run with `stdio: 'inherit'`; the tampered-events
+ * server keeps its silence (every read of a tampered text logs a CRITICAL line there, on purpose,
+ * and this run reads one many times) — captured for a failure, never printed on its own.
+ */
+function spawnServer(args, env, echoStderr) {
+  const proc = spawn(process.execPath, args, { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  proc.recentStderr = '';
+  proc.stderr.on('data', (chunk) => {
+    proc.recentStderr = (proc.recentStderr + chunk).slice(-4000);
+    if (echoStderr) process.stderr.write(chunk);
+  });
+  return proc;
+}
+
+/**
+ * Waits for `name` at `url` to answer its health check, or fails loudly and by name instead of
+ * leaving the caller to hit a confusing failure several steps later, far from the real cause: a
+ * server that lost the port to EADDRINUSE exits almost at once, and forty silent tries at 250ms
+ * apiece is ten seconds spent finding nothing wrong, followed by a `page.goto` that fails as if the
+ * PANEL were broken. Checking `proc`'s own exit on every try turns that into an immediate, named
+ * failure that carries the exit code and whatever the server wrote to stderr.
+ */
+async function waitForHealth(name, url, proc, tries = 40, everyMs = 250) {
+  for (let i = 0; i < tries; i++) {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      throw new Error(`${name} (port ${new URL(url).port}) exited before it answered its health check — ` +
+        `code ${proc.exitCode}, signal ${proc.signalCode}` +
+        (proc.recentStderr ? `:\n${proc.recentStderr}` : ' (nothing on stderr)'));
+    }
+    if (await fetch(`${url}/api/health`).then((r) => r.ok, () => false)) return;
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+  throw new Error(`${name} (port ${new URL(url).port}, pid ${proc.pid}) never answered its health check after ` +
+    `${tries * everyMs}ms, and is still running` + (proc.recentStderr ? `:\n${proc.recentStderr}` : ''));
+}
+
+const server = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
+  ...process.env, PORT: String(PORT), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
+  HOLDRIM_OWNER: OWNER, HOLDRIM_ADMINS: LEAD, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'memory', HOLDRIM_SITE: site,
+}, true);
 
 // A second server with the real sign-in screen, which the dev-mode one above never shows. It is the
 // page with the strictest Content-Security-Policy in the engine — only scripts and styles carrying
@@ -235,15 +291,12 @@ const firstAccessFile = join(mkdtempSync(join(tmpdir(), 'holdrim-browser-first-'
 // Its users store in a folder of its own, outside the site: the server refuses to start when a
 // store it writes would be served by the site.
 const signInData = mkdtempSync(join(tmpdir(), 'holdrim-browser-sign-in-'));
-const signInServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
-  env: {
-    ...process.env, PORT: String(PORT + 1), HOLDRIM_ENVIRONMENT: 'Production', HOLDRIM_IDENTITY: 'password',
-    HOLDRIM_OWNER: OWNER, HOLDRIM_EVENTS: 'memory', HOLDRIM_USERS_PATH: join(signInData, 'users.db'), HOLDRIM_SITE: site,
-    // Outside the site: the server refuses to write the owner's password where the site serves it.
-    HOLDRIM_FIRST_ACCESS_PATH: firstAccessFile,
-  },
-  stdio: ['ignore', 'ignore', 'inherit'],
-});
+const signInServer = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
+  ...process.env, PORT: String(PORT + 1), HOLDRIM_ENVIRONMENT: 'Production', HOLDRIM_IDENTITY: 'password',
+  HOLDRIM_OWNER: OWNER, HOLDRIM_EVENTS: 'memory', HOLDRIM_USERS_PATH: join(signInData, 'users.db'), HOLDRIM_SITE: site,
+  // Outside the site: the server refuses to write the owner's password where the site serves it.
+  HOLDRIM_FIRST_ACCESS_PATH: firstAccessFile,
+}, true);
 
 // A third server, on its own copy of the site, with the three toggles the panel itself draws a
 // control for turned off (docs/ROLES.md, section 7). Its own project, not a flag on the one above:
@@ -254,26 +307,20 @@ cpSync(site, offSite, { recursive: true });
 const offConfig = JSON.parse(readFileSync(join(offSite, 'holdrim.json'), 'utf8'));
 offConfig.features = { comments: false, pageRequests: false, bugCategory: false };
 writeFileSync(join(offSite, 'holdrim.json'), JSON.stringify(offConfig, null, 2));
-const toggleServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
-  env: {
-    ...process.env, PORT: String(PORT + 2), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
-    HOLDRIM_OWNER: OWNER, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'memory', HOLDRIM_SITE: offSite,
-  },
-  stdio: ['ignore', 'ignore', 'inherit'],
-});
+const toggleServer = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
+  ...process.env, PORT: String(PORT + 2), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
+  HOLDRIM_OWNER: OWNER, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'memory', HOLDRIM_SITE: offSite,
+}, true);
 
 const tamperedData = mkdtempSync(join(tmpdir(), 'holdrim-browser-tampered-'));
 const tamperedEvents = join(tamperedData, 'events.db');
-const tamperedServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
-  env: {
-    ...process.env, PORT: String(PORT + 3), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
-    HOLDRIM_OWNER: OWNER, HOLDRIM_ADMINS: LEAD, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'sqlite',
-    HOLDRIM_EVENTS_PATH: tamperedEvents, HOLDRIM_SITE: site,
-  },
-  // stderr ignored as well: every read of a tampered text logs a CRITICAL line there, on purpose,
-  // and this run reads one many times.
-  stdio: ['ignore', 'ignore', 'ignore'],
-});
+// echoStderr false: every read of a tampered text logs a CRITICAL line there, on purpose, and this
+// run reads one many times — still captured, for a failure, just never printed live.
+const tamperedServer = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
+  ...process.env, PORT: String(PORT + 3), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
+  HOLDRIM_OWNER: OWNER, HOLDRIM_ADMINS: LEAD, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'sqlite',
+  HOLDRIM_EVENTS_PATH: tamperedEvents, HOLDRIM_SITE: site,
+}, false);
 
 let browser;
 const cleanUp = async () => {
@@ -290,9 +337,7 @@ const cleanUp = async () => {
 };
 
 try {
-  for (let i = 0; i < 40 && !(await fetch(`${BASE}/api/health`).then((r) => r.ok, () => false)); i++) {
-    await new Promise((r) => setTimeout(r, 250));
-  }
+  await waitForHealth('the main server', BASE, server);
   const channel = process.env.HOLDRIM_BROWSER_CHANNEL;
   browser = await chromium.launch(channel ? { channel } : {});
 
@@ -954,9 +999,7 @@ try {
   }
 
   console.log('the panel obeys the project\'s feature toggles:');
-  for (let i = 0; i < 40 && !(await fetch(`${TOGGLES_OFF}/api/health`).then((r) => r.ok, () => false)); i++) {
-    await new Promise((r) => setTimeout(r, 250));
-  }
+  await waitForHealth('the feature-toggles server', TOGGLES_OFF, toggleServer);
   {
     // comments, pageRequests and bugCategory are OFF on this server (docs/ROLES.md, section 7):
     // `/api/me` sends the panel exactly these three, and `Panel.jsx` must draw no control for one
@@ -991,9 +1034,7 @@ try {
 
   console.log('a text that reads as tampered: the banner (issue #107):');
   {
-    for (let i = 0; i < 40 && !(await fetch(`${TAMPERED}/api/health`).then((r) => r.ok, () => false)); i++) {
-      await new Promise((r) => setTimeout(r, 250));
-    }
+    await waitForHealth('the tampered-events server', TAMPERED, tamperedServer);
     /** A direct writer, on the file the server has open: what tampering is. */
     const directly = (sql, ...values) => { const db = new DatabaseSync(tamperedEvents); db.prepare(sql).run(...values); db.close(); };
     const url = `${TAMPERED}/pages/A01.html`;
@@ -1077,9 +1118,7 @@ try {
   }
 
   console.log('the sign-in screen, under its own policy:');
-  for (let i = 0; i < 40 && !(await fetch(`${SIGN_IN}/api/health`).then((r) => r.ok, () => false)); i++) {
-    await new Promise((r) => setTimeout(r, 250));
-  }
+  await waitForHealth('the sign-in server', SIGN_IN, signInServer);
   const context = await browser.newContext();
   context.setDefaultTimeout(5000);
   const page = await context.newPage();
