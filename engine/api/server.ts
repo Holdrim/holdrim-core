@@ -7,7 +7,7 @@ import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
 import {
   rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, parseAgents, lockCoverage, pageOfBlock,
-  isValidRoleName, isValidScope, projectCapabilitiesOf, PROJECT_CAPABILITIES, MAX_ROLE_NAME, type Roles,
+  isValidRoleName, isValidScope, projectCapabilitiesOf, PROJECT_CAPABILITIES, MAX_ROLE_NAME, type Roles, type Identity,
 } from '../core/roles.js';
 import { overLimit, validCommit, short, PAGE_FORMAT } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
@@ -22,7 +22,7 @@ import { renderLoginPage, signInPolicy, screenPolicy } from './login-page.ts';
 import { withPanelNonce, pagePolicy, FILE_POLICY } from './content-policy.ts';
 import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
 import { renderPeoplePage } from './people-page.ts';
-import { renderSettingsPage, composeLock, type SettingsData } from './settings-page.ts';
+import { renderSettingsPage, composeLock, ROLE_ACTIONS, isRoleAction, type SettingsData } from './settings-page.ts';
 import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js';
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
@@ -42,7 +42,7 @@ import { personAs } from '../core/people-show.js';
 import { resolveRemovedBy, type Removed, type TamperReport } from './texts.ts';
 import { issuedEvent, revokedEvent } from './agent-tokens.ts';
 import {
-  ROLES_PAGE, projectRolesOf, grantsOfPerson, definedEvent, grantedEvent, revokedGrantEvent,
+  ROLES_PAGE, projectRolesOf, grantsOfPerson, definedEvent, grantedEvent, revokedGrantEvent, type ProjectRoles,
 } from './role-grants.ts';
 import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
 import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn } from './here.ts';
@@ -148,20 +148,28 @@ const identityKind = process.env.HOLDRIM_IDENTITY
   ?? (cfg.environment === 'Development' ? 'dev' : process.env.HOLDRIM_AUDIENCE ? 'iap' : 'password');
 
 /**
- * The roles the DEPLOYMENT grants — `HOLDRIM_OWNER`, `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` and
- * `HOLDRIM_AGENTS`, read once, at start. Asked directly only for who someone IS (the owner, an admin,
- * a lock-holder, an agent), which no grant moves. What someone may DO is asked of the roles in force
- * for the request (`rolesAt`), which add the project's own grants, read from the store each time: a
- * `can` asked of this one would answer as if no grant had ever been given, or revoked.
+ * Who someone IS, as the DEPLOYMENT says — `HOLDRIM_OWNER`, `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` and
+ * `HOLDRIM_AGENTS`, read once, at start: the owner, an admin, a lock-holder, an agent. No grant moves
+ * any of it. Typed without `can` on purpose: what someone may DO is asked of the roles in force for
+ * the request (`rolesAt`), which add the project's own grants, and a `can` asked here would answer
+ * as if no grant had ever been given or revoked. Without `can`, the type checker refuses both
+ * `deployment.can(…)` and handing `deployment` to anything that asks it (`here.ts`, `refusalOf`, …).
  */
-let deployment: Roles;
+let deployment: Identity;
+/**
+ * The same roles with every question, `can` included, before any project grant: read by `rolesAt`
+ * alone, which is the one place a request's roles are built. `engine/tests/role-grants.test.js`
+ * holds that nothing else in this file names it.
+ */
+let rolesBeforeGrants: Roles;
 let iap: IapIdentity | null = null;
 const cycle = createCycle(JSON.parse(readFileSync(new URL('../cycle.json', import.meta.url), 'utf8')));
 
 try {
   // No default, on purpose: in a distributed package, an e-mail of ours here would make anyone who
   // forgot to configure it start a service with OUR owner.
-  deployment = rolesOf(project);
+  rolesBeforeGrants = rolesOf(project);
+  deployment = rolesBeforeGrants;
   // The proxy identity is only built when it is the one in charge: demanding its audience from
   // someone logging in with a password would block the "start it and use it" case, which is the
   // whole point of password identity.
@@ -388,40 +396,70 @@ type Who = string | ReturnType<typeof agentByToken>;
 const ignoredGrantsLogged = new Set<string>();
 
 /**
+ * The `_roles` events as they add up NOW (`projectRolesOf`, role-grants.ts). Read with `listBare`,
+ * one page and nothing joined: this runs on every signed-in request, and `list` would read the whole
+ * people and texts tables beside it each time. A store that cannot be read fails the request — the
+ * 500 every other read gives — rather than answering as though no grant existed, which for a
+ * revocation would be the wrong way round. Each request reads it at most once: `rolesAt` takes what
+ * was read, and the routes that write a grant or a revocation check against the same reading.
+ */
+async function projectRolesNow(): Promise<ProjectRoles> {
+  return projectRolesOf(await events.listBare(ROLES_PAGE));
+}
+
+/**
+ * Whether an address is an agent's, as a grant is concerned with it: marked by `HOLDRIM_AGENTS`, or
+ * holding an agent token in the user store (docs/ROLES.md, section 4, "an address is a person's or
+ * an agent's, never both"). One question, asked by the grant route's refusal and by the settings
+ * screen's "ignored" mark, so the two cannot disagree about who is an agent. The tokens are listed
+ * once per call, so a caller asking about many addresses asks the store once.
+ */
+async function agentAddresses(): Promise<(address: string) => boolean> {
+  const tokens = new Set(byPassword ? (await byPassword.users.listAgentTokens()).map((t) => t.email) : []);
+  return (address) => deployment.isAgent(address) || tokens.has(address);
+}
+
+/**
  * The roles in force for one request (docs/ROLES.md, sections 1 and 2): the deployment's, plus the
- * project's own grants naming `who`, folded from the `_roles` events as the store holds them NOW.
- * Read per request and never cached, so a grant is in force from the next request after the owner
- * gives it, and gone from the next request after the owner revokes it, on every instance at once —
- * a cache would need every instance told, and one that missed the news would go on answering a
- * revoked grant. Nothing about a ✓ already given is read here: its `locks` was written when it was
- * given (`recordEvent`), and no grant can reach `lock` anyway.
+ * project's own grants naming `who`, from `state` — the `_roles` events as this request read them.
+ * Never cached across requests, so a grant is in force from the next request after the owner gives
+ * it, and gone from the next request after the owner revokes it, on every instance at once — a cache
+ * would need every instance told, and one that missed the news would go on answering a revoked
+ * grant. Nothing about a ✓ already given is read here: its `locks` was written when it was given
+ * (`recordEvent`), and no grant can reach `lock` anyway.
  *
  * A grant is matched to `who` by person id, the only way an event names anybody: the address is
  * looked up in the people table, never written into the event (role-grants.ts).
  *
- * A grant naming an agent is ignored, and said so in the log, once per grant (the owner's decision
- * on #36): whoever can write the store could otherwise stop the service by writing one, which is why
- * it does not refuse to start as `HOLDRIM_OWNER` or `HOLDRIM_ADMINS` naming an agent does. `can`
- * refuses an agent `AGENT_NEVER` before any grant is read anyway; this makes the rest of the grant
- * inert too, and leaves a line for whoever deploys to find.
+ * A grant naming an agent is ignored, and said so in the log, once per grant, on the agent's first
+ * request that reads it (the owner's decision on #36): whoever can write the store could otherwise
+ * stop the service by writing one, which is why it does not refuse to start as `HOLDRIM_OWNER` or
+ * `HOLDRIM_ADMINS` naming an agent does. Asked before anything about what the grants hold, so a grant
+ * whose role holds nothing is logged too. `can` refuses an agent `AGENT_NEVER` before any grant is
+ * read anyway; this makes the rest of the grant inert too, and leaves a line for whoever deploys.
  */
-async function rolesAt(who: Who | null): Promise<Roles> {
-  if (who === null) return deployment;
-  const state = projectRolesOf(await events.list(ROLES_PAGE));
-  if (state.grants.length === 0) return deployment;
+async function rolesAt(who: Who | null, state: ProjectRoles): Promise<Roles> {
+  if (who === null || state.grants.length === 0) return rolesBeforeGrants;
   const email = addressOf(who);
   const person = await events.personOf(email);
-  if (!person) return deployment;
-  const held = grantsOfPerson(state, person, email);
-  if (held.length === 0) return deployment;
-  if (deployment.isAgent(who)) {
+  if (!person) return rolesBeforeGrants;
+  if (rolesBeforeGrants.isAgent(who)) {
     for (const g of state.grants.filter((x) => x.person === person && !ignoredGrantsLogged.has(x.id))) {
       ignoredGrantsLogged.add(g.id);
       log('WARNING', 'role_grant_ignored', { grant: g.id, role: g.role, person, reason: 'names an agent' });
     }
-    return deployment;
+    return rolesBeforeGrants;
   }
-  return deployment.withProjectGrants(held);
+  const held = grantsOfPerson(state, person, email);
+  return held.length === 0 ? rolesBeforeGrants : rolesBeforeGrants.withProjectGrants(held);
+}
+
+/** Nothing on `_roles`: what a request with nobody signed in is answered with, unread. */
+const NO_PROJECT_ROLES = projectRolesOf([]);
+
+/** `rolesAt`, with the `_roles` events read for it: for a request that needs nothing else of them. */
+async function rolesFor(who: Who | null): Promise<Roles> {
+  return rolesAt(who, who === null ? NO_PROJECT_ROLES : await projectRolesNow());
 }
 
 const json = (res: ServerResponse, code: number, body: unknown) => {
@@ -780,9 +818,11 @@ async function recordEvent(
     const locks = roles.can('lock', who, whereOf({ block: incoming.block }));
     incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(locks) };
   } else if (incoming.type === 'request') {
-    // The block when it names one, the page it was asked on when it names none (a page request) —
-    // the same place its triage is judged on later (`mayMove`, engine/api/here.ts).
-    const couldTriage = roles.can('triage', who, whereOf(incoming));
+    // EVERYWHERE, never the request's own place: a request skips triage only when its author could
+    // have triaged it wherever it may reach — the owner, an admin, or a grant with no scope. A grant
+    // limited to some pages or blocks files requests that wait at triage like anybody's, for
+    // someone who may decide them (docs/ROLES.md, section 2).
+    const couldTriage = roles.can('triage', who, EVERYWHERE);
     incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(couldTriage) };
   }
   // Every event, not only the ones an agent may not write: the trail has to say an agent closed an
@@ -843,20 +883,27 @@ async function defineRole(who: Who, asked: { role: unknown; capabilities: unknow
  * agent — `HOLDRIM_AGENTS`, or an address holding an agent token — is never granted anything a
  * person is (docs/ROLES.md, section 4), which is also why a stored grant that comes to name one is
  * ignored (`rolesAt`). A grant already in force for the same role and scope is refused rather than
- * written twice, since a second copy would outlive the first one's revocation.
+ * written twice, since a second copy would outlive the first one's revocation. A scope that reaches
+ * no page and no block of the site is refused too, measured as the lock composer measures one
+ * (`lockCoverage`): a grant over nothing is a typo found out only the day it starts matching.
+ *
+ * `state` is the `_roles` events as this request read them (`projectRolesNow`), never read again.
  */
-async function grantRole(who: Who, asked: { email: unknown; role: unknown; scope: unknown }): Promise<RoleOutcome> {
+async function grantRole(
+  who: Who, asked: { email: unknown; role: unknown; scope: unknown }, state: ProjectRoles,
+): Promise<RoleOutcome> {
   const address = normalizeEmail(typeof asked.email === 'string' ? asked.email : '');
   if (!isEmailAddress(address)) return { status: 400, key: 'api.users.emailInvalid', params: { email: short(asked.email ?? '') } };
   const role = typeof asked.role === 'string' ? asked.role.trim() : '';
   const typed = typeof asked.scope === 'string' ? asked.scope.trim() : '';
   const scope = typed === '' ? null : typed;
   if (scope !== null && !isValidScope(scope)) return { status: 400, key: 'api.grants.scopeInvalid' };
+  if (scope !== null && lockCoverage([{ scope }], (await readBlocks(projectRoot)).keys())[0]!.reaches.length === 0) {
+    return { status: 400, key: 'api.grants.scopeReachesNothing', params: { scope } };
+  }
   if (deployment.isOwner(address)) return { status: 409, key: 'api.grants.notForTheOwner' };
   if (deployment.admins.includes(address)) return { status: 409, key: 'api.grants.notForAnAdmin', params: { email: address } };
-  const holdsToken = byPassword !== null && (await byPassword.users.listAgentTokens()).some((t) => t.email === address);
-  if (deployment.isAgent(address) || holdsToken) return { status: 409, key: 'api.grants.notForAnAgent', params: { email: address } };
-  const state = projectRolesOf(await events.list(ROLES_PAGE));
+  if ((await agentAddresses())(address)) return { status: 409, key: 'api.grants.notForAnAgent', params: { email: address } };
   if (!state.roles.get(role)?.capabilities.length) return { status: 404, key: 'api.grants.roleUnknown', params: { role: short(role) } };
   const known = await events.personOf(address);
   if (known && state.grants.some((g) => g.person === known && g.role === role && g.scope === scope)) {
@@ -873,9 +920,9 @@ async function grantRole(who: Who, asked: { email: unknown; role: unknown; scope
 /**
  * Revokes one grant, by the id of the event that gave it. The grant stays in the trail; the
  * revocation is a later event naming it, and `projectRolesOf` stops reading the grant as in force.
+ * `state` as `grantRole` takes it.
  */
-async function revokeGrant(who: Who, grant: string): Promise<RoleOutcome> {
-  const state = projectRolesOf(await events.list(ROLES_PAGE));
+async function revokeGrant(who: Who, grant: string, state: ProjectRoles): Promise<RoleOutcome> {
   if (state.ended.some((g) => g.id === grant)) return { status: 409, key: 'api.grants.alreadyRevoked' };
   const found = state.grants.find((g) => g.id === grant);
   if (!found) return { status: 404, key: 'api.grants.notFound' };
@@ -910,7 +957,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   }
   // Read once for the whole request, and before any route: every answer below about what `who` may
   // do comes from these, so a grant given or revoked a moment ago is in force on the next request.
-  const roles = await rolesAt(who);
+  // The grant and revoke routes check against this same reading rather than making a second one.
+  const projectRoles = await projectRolesNow();
+  const roles = await rolesAt(who, projectRoles);
 
   // ---------------------------------------------------------------- in and out (password identity)
   if (byPassword && req.method === 'POST' && route === '/sign-out') {
@@ -1181,13 +1230,13 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   if (req.method === 'POST' && route === '/grants') {
     if (!roles.isOwner(who)) return ownerOnly();
     const body = await jsonBody(req);
-    return answered(await grantRole(who, { email: body.email, role: body.role, scope: body.scope }));
+    return answered(await grantRole(who, { email: body.email, role: body.role, scope: body.scope }, projectRoles));
   }
   // The id as every event id is shaped (`ONE_EVENT_ROUTE`).
   const revoking = route.match(/^\/grants\/([A-Za-z0-9_-]+)\/revoke$/);
   if (revoking && req.method === 'POST') {
     if (!roles.isOwner(who)) return ownerOnly();
-    return answered(await revokeGrant(who, revoking[1]!));
+    return answered(await revokeGrant(who, revoking[1]!, projectRoles));
   }
 
   if (req.method === 'POST' && route === '/events') {
@@ -1629,7 +1678,7 @@ function screenHeaders(nonce: string, script: boolean) {
 
 async function servePeople(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
-  const roles = await rolesAt(viewer);
+  const roles = await rolesFor(viewer);
   // Somebody who may not manage people is sent home rather than shown a refusal: the navigation
   // never offered them this screen, so they got here by typing the address. A project that turned
   // the screen off sends EVERYONE home the same way, owner included — the routes behind it (above)
@@ -1672,16 +1721,19 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
   if (asked && !sameOrigin(req)) return json(res, 403, { error: i18n.t(lang, 'api.crossSite') });
   const form = asked ? new URLSearchParams(await rawBody(req)) : null;
   const action = form?.get('action') ?? '';
+  // Read once: a write below redirects, and a refusal wrote nothing, so this reading is what the
+  // screen draws either way.
+  const state = await projectRolesNow();
   let edit: SettingsData['edit'];
   let status = 200;
   if (form && isRoleAction(action)) {
     const outcome = action === 'define'
       ? await defineRole(viewer, { role: form.get('role'), capabilities: form.getAll('capability') })
       : action === 'grant'
-        ? await grantRole(viewer, { email: form.get('email'), role: form.get('role'), scope: form.get('scope') })
-        : await revokeGrant(viewer, form.get('grant') ?? '');
+        ? await grantRole(viewer, { email: form.get('email'), role: form.get('role'), scope: form.get('scope') }, state)
+        : await revokeGrant(viewer, form.get('grant') ?? '', state);
     if (outcome.event) {
-      res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}#${ROLE_ACTION_SECTION[action]}` });
+      res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}#${ROLE_ACTIONS[action]}` });
       return res.end();
     }
     edit = {
@@ -1691,8 +1743,7 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
     };
     status = outcome.status;
   }
-  // Read after any write above, so what is drawn is what the next request will be answered by.
-  const roles = await rolesAt(viewer);
+  const roles = await rolesAt(viewer, state);
   const composing = asked && !isRoleAction(action);
   const email = composing ? form!.get('email') ?? '' : '';
   const scope = composing ? form!.get('scope') ?? '' : '';
@@ -1701,7 +1752,7 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
   // As the panel, the home and the API show a person to the owner — never a second way of spelling
   // an address on this one screen.
   const shown = (address: string) => personDisplay(address, undefined, viewer, roles, lang);
-  const state = projectRolesOf(await events.list(ROLES_PAGE));
+  const isAgentAddress = await agentAddresses();
   const grants = await Promise.all(state.grants.map(async (g) => {
     // A person forgotten (docs/PRIVACY.md, section 5) keeps the id and loses the address: the id is
     // what is shown then, and no address can make the grant apply again.
@@ -1709,7 +1760,7 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
     return {
       id: g.id, role: g.role, scope: g.scope, when: g.when,
       who: address ? await shown(address) : g.person,
-      ignored: address !== null && deployment.isAgent(address),
+      ignored: address !== null && isAgentAddress(address),
     };
   }));
   const done = url.searchParams.get('done') ?? '';
@@ -1734,11 +1785,6 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
     features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,
   }, projectTheme, nonce));
 }
-
-/** The settings screen's forms that write, and the section each one lands back on. */
-const ROLE_ACTION_SECTION = { define: 'settings-project-roles', grant: 'settings-grants', revoke: 'settings-grants' } as const;
-type RoleAction = keyof typeof ROLE_ACTION_SECTION;
-const isRoleAction = (action: string): action is RoleAction => Object.hasOwn(ROLE_ACTION_SECTION, action);
 
 /**
  * Whether a form post came from a page this server served.
@@ -1771,7 +1817,7 @@ async function homeForm(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
   if (!viewer) return json(res, 401, { error: say('api.notAuthenticated') });
   if (!sameOrigin(req)) return json(res, 403, { error: say('api.crossSite') });
-  const roles = await rolesAt(viewer);
+  const roles = await rolesFor(viewer);
   const form = new URLSearchParams(await rawBody(req));
 
   if (form.get('action') === 'triage') {
@@ -1783,7 +1829,7 @@ async function homeForm(req: IncomingMessage, res: ServerResponse) {
     const outcome = await recordEvent(incoming, viewer, roles, say, 'home');
     if (!outcome.event) {
       return serveHome(req, res, { triage: { problem: String(outcome.body.error), request: form.get('request') ?? '',
-        reason: form.get('reason') ?? '' } }, outcome.status);
+        reason: form.get('reason') ?? '' } }, outcome.status, roles);
     }
     // The fragment lands the person on the confirmation. Without it the browser opens the home at
     // the top, and on a phone the sentence saying it worked is a screen and a half below.
@@ -1798,13 +1844,14 @@ async function homeForm(req: IncomingMessage, res: ServerResponse) {
   const outcome = await recordEvent(incoming, viewer, roles, say, 'home');
   if (!outcome.event) {
     return serveHome(req, res, { problem: String(outcome.body.error), draft: incoming.text ?? '', near: incoming.page },
-      outcome.status);
+      outcome.status, roles);
   }
   res.writeHead(303, { location: `${HOME_SCREEN}?asked=1#${HOME_SECTION.ask}` });
   res.end();
 }
 
-async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOutcome = {}, status = 200) {
+/** `known`: the roles the caller already read for this viewer, so a refused form reads `_roles` once. */
+async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOutcome = {}, status = 200, known?: Roles) {
   const lang = languageOf(req);
   const all = await events.list(null);
   // Only a ✓ from someone who holds `lock` can become one, so only those are worth counting as
@@ -1814,7 +1861,7 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
     (path) => readFileSync(path, 'utf8'));
   const threads = cycle.threadsOf(all);
   const viewer = await viewerOf(req);
-  const roles = await rolesAt(viewer);
+  const roles = known ?? await rolesFor(viewer);
   // Resolved once for every request on the home, not once per row: `requestsInProgress` only reads
   // this for `type: "request"` events, so those are all `authorDisplaysFor` ever needs to look at.
   const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, roles, lang);

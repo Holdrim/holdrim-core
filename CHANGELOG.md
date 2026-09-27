@@ -269,11 +269,17 @@ who ran the engine from `main` before it.
   `POST /api/grants/<id>/revoke`, the owner's alone — an admin is refused like anybody else. The owner,
   the admins and the agents are never grantees. Each is an event on the reserved page `_roles`
   (`role_defined`, `role_granted`, `grant_revoked`), naming the person by id, listable by anyone
-  signed in through `GET /api/events?page=_roles`, and refused by `POST /api/events`. Grants are read
-  on every request: one is in force from the next request after it is given, and gone from the next
-  one after it is revoked, and a ✓ given under a grant keeps what was written on it — never a lock.
-  A stored grant that comes to name an agent is ignored, with a `role_grant_ignored` line in the log,
-  and the service still starts.
+  signed in through `GET /api/events?page=_roles`, and refused by `POST /api/events`. A grant whose
+  scope reaches no page or block of the site is refused. Grants are read on every signed-in request,
+  as one query of `_roles` alone plus, when any grant is in force, one look-up of the viewer's person
+  id: one is in force from the next request after it is given, and gone from the next one after it
+  is revoked, and a store that cannot be read fails the request rather than answering as if no grant
+  existed. A ✓ given under a grant keeps what was written on it — never a lock. A request skips
+  triage only when its author may triage everywhere: the owner, an admin, or a grant with no scope;
+  a grantee limited to some pages files requests that wait at triage. A stored grant that comes to
+  name an agent — an address `HOLDRIM_AGENTS` marks, or one holding an agent token — is ignored,
+  with a `role_grant_ignored` line in the log on the agent's first request, and the service still
+  starts.
 - **Ask for a new page, in plain words**, from the home (a form that needs no script) or from any
   block (the new `page` category). `holdrim apply` tells the agent to write one new page shaped like
   the one it was asked near, and to mark nothing as validated.

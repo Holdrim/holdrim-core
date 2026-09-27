@@ -2388,11 +2388,31 @@ expect "nor an admin → 409"                      409 "$(r_code $OWNER grants "
 expect "nor an agent → 409"                      "$(r_say api.grants.notForAnAgent email=$AGENT)" "$(r_body $OWNER grants "$(grant_json $AGENT)" | jfield error)"
 expect "nor a role nobody defined → 404"         404 "$(r_code $OWNER grants "$(grant_json $GRANTEE triager)")"
 expect "nor a scope of no known shape → 400"     400 "$(r_code $OWNER grants "$(grant_json $GRANTEE reviewer 'P*')")"
+# Well shaped, and reaching nothing on this site (A01 and A02 are its pages): measured as the lock
+# composer measures a scope, since a grant over nothing only starts counting the day a page moves in.
+expect "nor a family that reaches no page of this site → 400" 400 "$(r_code $OWNER grants "$(grant_json $GRANTEE reviewer 'Z0*')")"
+expect "and is told so"                          "$(r_say api.grants.scopeReachesNothing 'scope=Z0*')" \
+  "$(r_body $OWNER grants "$(grant_json $GRANTEE reviewer 'Z0*')" | jfield error)"
+expect "nor a block this site does not have → 400" 400 "$(r_code $OWNER grants "$(grant_json $GRANTEE reviewer 'A01.9.9')")"
 expect "nor something that is not an address → 400" 400 "$(r_code $OWNER grants "$(grant_json not-an-address)")"
 expect "and still only the definition is on _roles" "role_defined" "$(roles_events $OWNER)"
 
 # A grant is in force from the next request (`rolesAt`, read per request), and only where its scope reaches.
+# Two requests by the member, one on each page, for the grantee to act on below: every route that asks
+# what they may do has to ask the roles built for the request, not the deployment's alone.
+ASKED_A01=$(new_request $REVIEWER '{"type":"request","page":"A01","block":"A01.1.3","fingerprint":"x","text":"asked on A01"}')
+ASKED_A02=$(new_request $REVIEWER '{"type":"request","page":"A02","block":"A02.1.3","fingerprint":"x","text":"asked on A02"}')
+ASKED_HOME=$(new_request $REVIEWER '{"type":"request","page":"A01","block":"A01.1.2","fingerprint":"x","text":"decided from the home"}')
+require_id "$ASKED_A01" ASKED_A01; require_id "$ASKED_A02" ASKED_A02; require_id "$ASKED_HOME" ASKED_HOME
+detail_json() { echo "{\"type\":\"supplement\",\"page\":\"$1\",\"text\":\"one more thing\",\"data\":{\"request\":\"$2\"}}"; }
+triage_json() { echo "{\"type\":\"request_state\",\"page\":\"$1\",\"text\":\"a question\",\"data\":{\"request\":\"$2\",\"state\":\"question\"}}"; }
+# The triage destinations the panel is sent for request $2 on page $1, as $3 reads the page.
+triage_offered() { curl -s -H "X-Dev-Email: $3" "$B/api/events?page=$1" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log((JSON.parse(s).find(e=>e.id===process.argv[1])?.status?.triage ?? []).length))" "$2"; }
+# Whether the graph lets $1 act on block $2.
+may_act() { curl -s -H "X-Dev-Email: $1" "$B/api/graph" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).nodes.find(n=>n.id===process.argv[1])?.mayAct))" "$2"; }
 expect "before the grant, the person may not approve on A01" "false false" "$(may_on $GRANTEE A01 A01.1.1)"
+expect "nor add details to somebody else's request there → 403" 403 "$(post $GRANTEE "$(detail_json A01 $ASKED_A01)")"
+expect "nor act on it in the graph"              false "$(may_act $GRANTEE A01.1.3)"
 approve_json() { echo "{\"type\":\"approval\",\"page\":\"${1%%.*}\",\"block\":\"$1\",\"fingerprint\":\"abc123\"}"; }
 expect "and a ✓ from them is refused → 403"      403 "$(post $GRANTEE "$(approve_json A01.1.1)")"
 GRANTED=$(r_body $OWNER grants "$(grant_json $GRANTEE reviewer A01)")
@@ -2409,8 +2429,13 @@ expect "(the member comments, and so has a person id)" 201 "$(post $REVIEWER '{"
 expect "and nobody else was granted it"          "false false" "$(may_on $REVIEWER A01 A01.1.1)"
 expect "and /api/me still reads them as a member" member "$(curl -s -H "X-Dev-Email: $GRANTEE" $B/api/me | jfield role)"
 expect "the same grant again → 409"              409 "$(r_code $OWNER grants "$(grant_json $GRANTEE reviewer A01)")"
+expect "approve lets them add details to somebody else's request on A01 → 201" 201 "$(post $GRANTEE "$(detail_json A01 $ASKED_A01)")"
+expect "and not on A02 → 403"                    403 "$(post $GRANTEE "$(detail_json A02 $ASKED_A02)")"
+expect "the graph lets them act on A01"          true "$(may_act $GRANTEE A01.1.3)"
+expect "and not on A02"                          false "$(may_act $GRANTEE A02.1.2)"
 GRANTED_APPROVAL=$(body $GRANTEE "$(approve_json A01.1.1)")
 GRANTED_APPROVAL_ID=$(echo "$GRANTED_APPROVAL" | jfield id)
+expect "the next request: their ✓ on A01 is taken" approval "$(echo "$GRANTED_APPROVAL" | jfield type)"
 require_id "$GRANTED_APPROVAL_ID" GRANTED_APPROVAL_ID
 expect "their ✓ is recorded, and written as no lock: a grant never reaches lock" false "$(echo "$GRANTED_APPROVAL" | jfield data.locks)"
 expect "on A02 their ✓ is still refused → 403"   403 "$(post $GRANTEE "$(approve_json A02.1.1)")"
@@ -2421,6 +2446,18 @@ expect "a member lists the definition and the grant on _roles" "role_defined rol
 expect "the owner redefines the role → 201"      201 "$(r_code $OWNER roles '{"role":"reviewer","capabilities":["triage"]}')"
 expect "the grant now holds what the latest says: triage, and no more approve" "true false" "$(may_on $GRANTEE A01 A01.1.1)"
 expect "and both definitions stay on _roles"     "role_defined role_granted role_defined" "$(roles_events $REVIEWER)"
+# Triage, now held on A01: every door that decides a request, and every screen that offers to.
+expect "the panel is offered triage on the A01 request" 3 "$(triage_offered A01 $ASKED_A01 $GRANTEE)"
+expect "and none on the A02 one"                 0 "$(triage_offered A02 $ASKED_A02 $GRANTEE)"
+expect "the home offers them the A01 request to decide" 0 \
+  "$(curl -s -H "X-Dev-Email: $GRANTEE" $B/engine/home | has -F "name=\"request\" value=\"$ASKED_HOME\""; echo $?)"
+expect "they decide the A01 request through the API → 201" 201 "$(post $GRANTEE "$(triage_json A01 $ASKED_A01)")"
+expect "and not the A02 one → 403"               403 "$(post $GRANTEE "$(triage_json A02 $ASKED_A02)")"
+expect "they decide from the home → 303, back to it" 0 \
+  "$(curl -s -D- -o /dev/null -H "X-Dev-Email: $GRANTEE" -H "Origin: $B" --data-urlencode action=triage --data-urlencode "request=$ASKED_HOME" \
+      --data-urlencode page=A01 --data-urlencode block=A01.1.2 --data-urlencode state=rejected --data-urlencode 'reason=not now' $B/engine/home \
+    | tr -d '\r' | has -F 'location: /engine/home?decided=1'; echo $?)"
+expect "and it is decided"                       rejected "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$ASKED_HOME" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status.state))")"
 r_code $OWNER roles '{"role":"reviewer","capabilities":["approve"]}' >/dev/null
 
 # Revoking: the owner's alone, a later event, and in force from the next request.
@@ -2431,6 +2468,7 @@ expect "an id that names no grant → 404"         404 "$(r_revoke $OWNER $GRANT
 expect "the owner revokes → 201"                 201 "$(r_revoke $OWNER $GRANT_ID)"
 expect "the next request: they may not approve on A01" "false false" "$(may_on $GRANTEE A01 A01.1.1)"
 expect "and a ✓ from them is refused again → 403" 403 "$(post $GRANTEE "$(approve_json A01.1.1)")"
+expect "nor may they decide a request there → 403" 403 "$(post $GRANTEE "$(triage_json A01 $ASKED_A01)")"
 expect "revoking again → 409"                    409 "$(r_revoke $OWNER $GRANT_ID)"
 expect "the grant itself is still on _roles, the revocation after it" \
   "role_defined role_granted role_defined role_defined grant_revoked" "$(roles_events $OWNER)"
@@ -2462,24 +2500,62 @@ expect "the owner revokes from the screen → 303" 0 \
   "$(settings_post $OWNER --data-urlencode action=revoke --data-urlencode "grant=$SCREEN_GRANT" | has -F 'location: /engine/settings?done=revoke#settings-grants'; echo $?)"
 expect "and it is gone from the next request"    "false false" "$(may_on $GRANTEE A02 A02.1.1)"
 
+# A request skips triage only when its author could have triaged it wherever it may reach: the
+# owner, an admin (both proved above), or a grant with no scope. A grant limited to some pages files
+# requests that wait at triage like anybody's — from the panel and from the home's form alike.
+request_state_of() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$1" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status?.state ?? 'none'))"; }
+expect "(the owner grants triage on A02 alone)"  201 "$(r_code $OWNER grants "$(grant_json $GRANTEE 'legal review' A02)")"
+expect "(and it is in force there)"              "true false" "$(may_on $GRANTEE A02 A02.1.1)"
+SCOPED_REQUEST=$(new_request $GRANTEE '{"type":"request","page":"A02","block":"A02.1.1","fingerprint":"x","text":"from a scoped grant"}')
+require_id "$SCOPED_REQUEST" SCOPED_REQUEST
+expect "a request filed on a block inside a scoped triage grant waits at triage" open "$(request_state_of "$SCOPED_REQUEST")"
+expect "(a page asked for from the home, near a page inside the scope → 303)" 303 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $GRANTEE" -H "Origin: $B" --data-urlencode page=A02 --data-urlencode 'text=a page from a scoped grant' $B/engine/home)"
+SCOPED_PAGE_REQUEST=$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A02" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.type==='request'&&e.text==='a page from a scoped grant')?.id ?? ''))")
+require_id "$SCOPED_PAGE_REQUEST" SCOPED_PAGE_REQUEST
+expect "and so does a page request from the home" open "$(request_state_of "$SCOPED_PAGE_REQUEST")"
+WIDE=wide@example.org
+expect "(the owner grants triage everywhere to somebody else)" 201 "$(r_code $OWNER grants "$(grant_json $WIDE 'legal review')")"
+WIDE_REQUEST=$(new_request $WIDE '{"type":"request","page":"A01","block":"A01.1.2","fingerprint":"x","text":"from a grant with no scope"}')
+require_id "$WIDE_REQUEST" WIDE_REQUEST
+expect "a grant with no scope files as an admin does: decided already" approved "$(request_state_of "$WIDE_REQUEST")"
+# A grant is refused as present only when the person, the role AND the scope are all the same.
+expect "(the grantee holds legal review on A02)" "true false" "$(may_on $GRANTEE A02 A02.1.1)"
+expect "the same person and role on another scope is a new grant → 201" 201 "$(r_code $OWNER grants "$(grant_json $GRANTEE 'legal review' A01)")"
+expect "the same person and scope with another role is a new grant → 201" 201 "$(r_code $OWNER grants "$(grant_json $GRANTEE reviewer A02)")"
+expect "the same role and scope for another person is a new grant → 201" 201 "$(r_code $OWNER grants "$(grant_json $WIDE 'legal review' A02)")"
+
 # Decision 6: a stored grant that comes to name an agent — the address marked by HOLDRIM_AGENTS after
 # the grant was given — is ignored and logged, and the service still starts: refusing would let
 # anyone who can write the store stop it.
 LATER_GRANT=$(r_body $OWNER grants "$(grant_json $LATER reviewer)" | jfield id)
 require_id "$LATER_GRANT" LATER_GRANT
 expect "(granted while a person, they may approve)" "false true" "$(may_on $LATER A01 A01.1.1)"
+# And one whose role comes to hold nothing, by a definition a direct writer stored: logged all the
+# same, since the log says the grant names an agent, not that it would have handed anything over.
+EMPTIED=emptied@example.org
+expect "(a role for it)"                         201 "$(r_code $OWNER roles '{"role":"watcher","capabilities":["approve"]}')"
+EMPTIED_GRANT=$(r_body $OWNER grants "$(grant_json $EMPTIED watcher)" | jfield id)
+require_id "$EMPTIED_GRANT" EMPTIED_GRANT
 # And one more, for a person forgotten below while the service is down.
 FORGOT=forgot@example.org
 expect "(another person is granted the role)"    201 "$(r_code $OWNER grants "$(grant_json $FORGOT reviewer)")"
 expect "(and may approve)"                       "false true" "$(may_on $FORGOT A01 A01.1.1)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
-start_roles_server "$AGENT;$LATER"
+node --no-warnings --input-type=module -e "
+  const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
+  const store = new SqliteEventStore(process.argv[1]);
+  await store.append({ type: 'role_defined', page: '_roles', block: null, data: { role: 'watcher', capabilities: 'lock' } }, process.argv[2]);
+  await store.close();" "$ROLES_DIR/events.db" "$OWNER"
+start_roles_server "$AGENT;$LATER;$EMPTIED"
 expect "the address marked as an agent at the next start: the service still comes up" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
 expect "and the grant hands the agent nothing"   "false false" "$(may_on $LATER A01 A01.1.1)"
 expect "not even a ✓ → 403"                      403 "$(post $LATER "$(approve_json A01.1.1)")"
 may_on $LATER A01 A01.1.1 >/dev/null
-expect "the log says which grant was ignored, and why, once" "1 $LATER_GRANT" \
-  "$(grep -c '"event":"role_grant_ignored"' $RLOG) $(log_field $RLOG role_grant_ignored grant)"
+expect "the log says which grant was ignored, and why, once" 1 "$(grep '"event":"role_grant_ignored"' $RLOG | grep -c "\"grant\":\"$LATER_GRANT\"")"
+expect "(the other agent's role holds nothing now)" "false false" "$(may_on $EMPTIED A01 A01.1.1)"
+expect "and a grant whose role holds nothing is logged all the same" 1 \
+  "$(grep '"event":"role_grant_ignored"' $RLOG | grep -c "\"grant\":\"$EMPTIED_GRANT\"")"
 expect "without the agent's address"             1 "$(grep '"event":"role_grant_ignored"' $RLOG | has -F "$LATER"; echo $?)"
 expect "and the screen marks it ignored"         0 \
   "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/settings | has -F "$(r_say settings.grants.ignored)"; echo $?)"
@@ -2491,7 +2567,7 @@ FORGOT_ID=$(node --no-warnings --input-type=module -e "
   const store = new SqliteEventStore(process.argv[1]); const id = await store.personOf(process.argv[2]);
   await store.forget(id); await store.close(); console.log(id);" "$ROLES_DIR/events.db" "$FORGOT")
 require_id "$FORGOT_ID" FORGOT_ID
-start_roles_server "$AGENT;$LATER"
+start_roles_server "$AGENT;$LATER;$EMPTIED"
 ROLES_SCREEN=$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/settings)
 expect "the screen shows the forgotten person's grant by id, never the address" "0 1" \
   "$(echo "$ROLES_SCREEN" | has -F "<tr><td>$FORGOT_ID</td>"; echo $?) $(echo "$ROLES_SCREEN" | has -F "$FORGOT"; echo $?)"
@@ -2641,6 +2717,20 @@ expect "nor define a role → 403"                 403 "$(bot_code -d '{"role":"
 expect "(the owner defines a role)"              201 "$(t_owner -o /dev/null -w '%{http_code}' -d '{"role":"reviewer","capabilities":["approve"]}' $B/api/roles)"
 expect "an address holding an agent token is never granted it → 409" 409 \
   "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$BOT\",\"role\":\"reviewer\"}" $B/api/grants)"
+# The other way round: granted first, issued a token after. The grant is an agent's from then on:
+# ignored when the token is used, and marked so on the screen, as HOLDRIM_AGENTS would mark it.
+TOKENED=tokened@example.org
+TOKENED_GRANT=$(t_owner -d "{\"email\":\"$TOKENED\",\"role\":\"reviewer\"}" $B/api/grants | jfield id)
+require_id "$TOKENED_GRANT" TOKENED_GRANT
+TOKENED_TOKEN=$(t_owner -d "{\"email\":\"$TOKENED\"}" $B/api/agent-tokens | jfield token)
+require_id "$TOKENED_TOKEN" TOKENED_TOKEN
+expect "(the token works)"                       200 "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKENED_TOKEN" $B/api/me)"
+expect "and the grant it holds is logged as ignored" 1 \
+  "$(grep '"event":"role_grant_ignored"' $TLOG | grep -c "\"grant\":\"$TOKENED_GRANT\"")"
+expect "and marked ignored on the screen"        0 \
+  "$(t_owner $B/engine/settings | has -F "<td>$TOKENED <span class=\"holdrim-alert holdrim-alert--warn settings-ignored\">$(say_en settings.grants.ignored)</span>"; echo $?)"
+# Revoked again, so the token list below reads as it did before this: the bot's tokens alone.
+expect "(its token is revoked)"                  200 "$(t_owner -o /dev/null -w '%{http_code}' -X POST $B/api/agent-tokens/$TOKENED/revoke)"
 # The tamper banner (issue #107) is not in TOKEN_READS, and its acknowledgement is not in
 # TOKEN_WRITES: neither route existed when TOKEN_READS was written, and an allowlist stays closed
 # to a route it never named — the acknowledgement stays refused before `mayAcknowledge` is even

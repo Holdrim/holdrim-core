@@ -60,10 +60,10 @@ export function revokedGrantEvent(grant: string, asAgent: boolean): NewEvent {
 }
 
 /** A role as its latest definition says. `capabilities` is empty when that definition does not read. */
-export interface RoleDefinition { role: string; capabilities: string[]; id: string; by: string; when: string }
+export interface RoleDefinition { role: string; capabilities: string[]; id: string; when: string }
 
 /** A grant in force: never revoked, and well formed. */
-export interface Grant { id: string; role: string; person: string; scope: string | null; by: string; when: string }
+export interface Grant { id: string; role: string; person: string; scope: string | null; when: string }
 
 /** What the `_roles` events add up to, at the moment they were read. */
 export interface ProjectRoles {
@@ -88,7 +88,8 @@ const text = (data: Event['data'], key: string): string | undefined => {
  * the settings screen — so the screen never shows a grant the server does not apply, or the reverse.
  *
  * Read in the order the store returns them, which is the order they were recorded in every store
- * (`engine/tests/events-conformance.test.js`), so "latest" means the last one written.
+ * (`engine/tests/events-conformance.test.js`, `list` and `listBare` alike), so "latest" means the
+ * last one written. Nothing here reads an event's author or text, which `listBare` leaves unresolved.
  *
  * Everything is checked again on the way in, and fails closed. The routes never write a malformed
  * event, so one here came from somewhere else — a direct writer to the store (docs/ROLES.md, section
@@ -110,14 +111,14 @@ export function projectRolesOf(events: readonly Event[]): ProjectRoles {
       if (!isValidRoleName(role)) continue;
       const listed = text(e.data, 'capabilities');
       const capabilities = listed === undefined ? null : projectCapabilitiesOf(listed.split(CAPABILITY_SEPARATOR));
-      roles.set(role!, { role: role!, capabilities: capabilities ?? [], id: e.id, by: e.author, when: e.when });
+      roles.set(role!, { role: role!, capabilities: capabilities ?? [], id: e.id, when: e.when });
     } else if (e.type === ROLE_GRANTED) {
       const role = text(e.data, 'role');
       const person = text(e.data, 'person');
       const scope = text(e.data, 'scope');
       if (!isValidRoleName(role) || !person || !PERSON_ID.test(person)) continue;
       if (scope === undefined || (scope !== '' && !isValidScope(scope))) continue;
-      given.push({ id: e.id, role: role!, person, scope: scope || null, by: e.author, when: e.when });
+      given.push({ id: e.id, role: role!, person, scope: scope || null, when: e.when });
     } else if (e.type === GRANT_REVOKED) {
       const grant = text(e.data, 'grant');
       if (grant) revoked.add(grant);

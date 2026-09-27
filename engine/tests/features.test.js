@@ -442,7 +442,7 @@ const ALLOWED = [
       'excuses one line' },
   { file: 'engine/api/server.ts',
     text: 'features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,',
-    why: 'serveSettings (#36) handing the owner\'s read-only screen the values to SHOW — it renders ' +
+    why: 'serveSettings (#36) handing the owner\'s screen the values to SHOW — it renders ' +
       'them as text, and decides nothing from them' },
   { file: 'engine/api/settings-page.ts', text: 'features: Record<string, boolean>;',
     why: 'the settings screen\'s data type: the toggles it displays' },

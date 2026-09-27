@@ -4,7 +4,7 @@ import { engineNav } from './people-page.ts';
 import { SETTINGS_SCREEN } from '../core/screens.js';
 import {
   CAPABILITIES, AGENT_NEVER, SHIPPED_ROLES, PROJECT_CAPABILITIES, MAX_ROLE_NAME, capabilitiesOf, isValidScope,
-  parseLocks, lockCoverage, refuseGrantsToAgents, type Roles,
+  parseLocks, lockCoverage, refuseGrantsToAgents, type Identity,
 } from '../core/roles.js';
 import { PEOPLE_SHOW_VALUES } from '../core/people-show.js';
 
@@ -70,6 +70,7 @@ export const SETTINGS_KEYS = [
   'settings.grants.revoke', 'settings.grants.email', 'settings.grants.scopeHint', 'settings.grants.submit',
   'settings.grants.defineFirst', 'settings.grants.ended', 'settings.grants.granted', 'settings.grants.revoked',
   'api.roles.nameInvalid', 'api.roles.capabilitiesInvalid', 'api.users.emailInvalid', 'api.grants.scopeInvalid',
+  'api.grants.scopeReachesNothing',
   'api.grants.notForTheOwner', 'api.grants.notForAnAdmin', 'api.grants.notForAnAgent', 'api.grants.roleUnknown',
   'api.grants.present', 'api.grants.notFound', 'api.grants.alreadyRevoked',
 ];
@@ -122,7 +123,7 @@ function lineSafe(address: string): boolean {
  */
 export function composeLock(
   existing: readonly LockEntry[], asked: { email: string; scope: string },
-  blockIds: Iterable<string>, roles: Roles,
+  blockIds: Iterable<string>, roles: Identity,
 ): Composed {
   const email = asked.email.trim();
   if (!lineSafe(email)) return { error: 'settings.compose.error.characters' };
@@ -153,8 +154,16 @@ export function composeLock(
   return { line: `HOLDRIM_LOCKS='${value}'`, entry, reaches };
 }
 
-/** One of the screen's forms that writes: which, and what was typed into it. */
-export type RoleAction = 'define' | 'grant' | 'revoke';
+/**
+ * The screen's forms that write, each by the value its `action` field posts, and the id of the
+ * section it sits in — which is also where the redirect after it lands. One table, read by the
+ * template and by the server (`serveSettings`), so a form and its landing place cannot drift apart.
+ */
+export const ROLE_ACTIONS = Object.freeze({
+  define: 'settings-project-roles', grant: 'settings-grants', revoke: 'settings-grants',
+} as const);
+export type RoleAction = keyof typeof ROLE_ACTIONS;
+export const isRoleAction = (action: string): action is RoleAction => Object.hasOwn(ROLE_ACTIONS, action);
 
 /** Everything the screen shows, resolved by the server; nothing here reads the environment. */
 export interface SettingsData {
@@ -265,7 +274,7 @@ ${definedRows}
     + (g.ignored ? ` <span class="holdrim-alert holdrim-alert--warn settings-ignored">${t('settings.grants.ignored')}</span>` : '')
     + `</td><td>${code(g.role)}</td><td>${g.scope ? code(g.scope) : t('settings.grants.everywhere')}</td>`
     + `<td>${forHtml(g.when)}</td><td>`
-    + `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#settings-grants">`
+    + `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#${ROLE_ACTIONS.revoke}">`
     + `<input type="hidden" name="action" value="revoke"><input type="hidden" name="grant" value="${forHtml(g.id)}">`
     + `<button class="holdrim-button" type="submit">${t('settings.grants.revoke')}</button></form></td></tr>`).join('\n');
   const grantTable = grants.length ? `<table class="holdrim-table holdrim-table--stack">
@@ -279,7 +288,7 @@ ${grantRows}
   const granting = typed('grant');
   const roleOptions = defined.filter((d) => d.capabilities.length).map((d) => `<option value="${forHtml(d.role)}"`
     + `${granting?.role === d.role ? ' selected' : ''}>${forHtml(d.role)}</option>`).join('');
-  const grantForm = roleOptions ? `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#settings-grants" class="settings-compose settings-grant">
+  const grantForm = roleOptions ? `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#${ROLE_ACTIONS.grant}" class="settings-compose settings-grant">
       <input type="hidden" name="action" value="grant">
       <label class="holdrim-field"><span class="holdrim-label">${t('settings.grants.email')}</span>
         <input class="holdrim-input" name="email" type="email" required autocomplete="off" value="${forHtml(granting?.email ?? '')}"></label>
@@ -361,13 +370,13 @@ ${roleRows}
     <p class="holdrim-alert holdrim-alert--warn">${t('settings.holders.lockNotRead')}</p>
   </section>
 
-  <section aria-labelledby="settings-project-roles">
-    <h2 id="settings-project-roles">${t('settings.projectRoles.heading')}</h2>
+  <section aria-labelledby="${ROLE_ACTIONS.define}">
+    <h2 id="${ROLE_ACTIONS.define}">${t('settings.projectRoles.heading')}</h2>
     <p class="holdrim-muted">${t('settings.projectRoles.lede')}</p>
     ${confirmed(['define'], 'settings.projectRoles.done')}
     ${definedTable}
     ${refusal('define')}
-    <form method="post" action="${forHtml(SETTINGS_SCREEN)}#settings-project-roles" class="settings-define">
+    <form method="post" action="${forHtml(SETTINGS_SCREEN)}#${ROLE_ACTIONS.define}" class="settings-define">
       <input type="hidden" name="action" value="define">
       <label class="holdrim-field"><span class="holdrim-label">${t('settings.projectRoles.name')}</span>
         <input class="holdrim-input" name="role" required maxlength="${MAX_ROLE_NAME}" autocomplete="off" spellcheck="false" aria-describedby="settings-role-name" value="${forHtml(defining?.role ?? '')}"></label>
@@ -380,8 +389,8 @@ ${capabilityBoxes}
     <p class="holdrim-muted">${t('settings.projectRoles.never')}</p>
   </section>
 
-  <section aria-labelledby="settings-grants">
-    <h2 id="settings-grants">${t('settings.grants.heading')}</h2>
+  <section aria-labelledby="${ROLE_ACTIONS.grant}">
+    <h2 id="${ROLE_ACTIONS.grant}">${t('settings.grants.heading')}</h2>
     <p class="holdrim-muted">${t('settings.grants.lede')}</p>
     ${confirmed(['grant'], 'settings.grants.granted')}${confirmed(['revoke'], 'settings.grants.revoked')}
     ${grantTable}

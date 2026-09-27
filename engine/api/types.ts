@@ -153,6 +153,15 @@ export interface EventStore extends PeopleTable {
    */
   list(page?: string | null, found?: TamperReport[]): Promise<Event[]>;
   /**
+   * One page's events and nothing joined to them, in the order they were recorded, as `list` orders
+   * them: `author` (and `authorId`) is what the row holds — the person's id, never resolved to an
+   * address — and `text` and `snapshot` are null, since the texts table is not read and nothing is
+   * checked for tampering. `list` reads the whole people and texts tables on every call; this reads
+   * the one page. For a page whose events carry no text and whose readers match people by id, such
+   * as `_roles` (role-grants.ts), which the server reads on every request.
+   */
+  listBare(page: string): Promise<Event[]>;
+  /**
    * Removes one field's text — the row in the texts table, and only that — and records the removal
    * as a new event of type `text_removed` (engine/api/texts.ts, `TEXT_REMOVED`), `by` as its author.
    * The two happen together, or neither does: a text gone with no removal event, or a removal event

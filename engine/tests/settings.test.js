@@ -239,7 +239,7 @@ test('a grant in force shows who, the role, the scope and a revoke form naming i
   assert.match(grants, /<input type="hidden" name="action" value="revoke"><input type="hidden" name="grant" value="g_1">/);
   assert.match(grants, new RegExp(`<td>${BOT} <span[^>]*>${dictionaries.en['settings.grants.ignored']}</span></td><td><code class="holdrim-code">clinical lead</code></td><td>everywhere</td>`));
   assert.equal((grants.match(/settings-ignored/g) ?? []).length, 1, 'only the grant naming an agent is marked');
-  assert.ok(grants.includes('2 revoked, each still in the trail.'));
+  assert.ok(grants.includes('Revoked: 2, all still in the trail.'));
 });
 
 test('a refused write is drawn with its reason and what was typed, escaped, and never run', () => {

@@ -91,10 +91,14 @@ test('no grant reaches people or lock, whatever it was read from', () => {
   assert.equal(roles.can('lock', OWNER, { block: 'A01.1.1' }), true, 'lock stays the owner\'s');
 });
 
-test('a grant with a scope that does not read is dropped, never read as everywhere', () => {
+test('a grant\'s scope is everywhere only when it is null: an empty or unshaped one reaches nothing', () => {
+  // `scopeCovers` answers this, not `withProjectGrants`: a scope that fits none of the three shapes
+  // falls through all three branches, and only null reads as everywhere.
   const roles = deployment.withProjectGrants([grant(BEA, ['approve'], 'P*'), grant(CAL, ['approve'], '')]);
   assert.equal(roles.can('approve', BEA, { block: 'P01.1.1' }), false);
-  assert.equal(roles.can('approve', CAL, { block: 'P01.1.1' }), false, 'an empty scope is not everywhere here');
+  assert.equal(roles.can('approve', CAL, { block: 'P01.1.1' }), false, 'an empty scope is not everywhere');
+  assert.equal(deployment.withProjectGrants([grant(CAL, ['approve'], null)]).can('approve', CAL, { block: 'P01.1.1' }), true,
+    'setup: null is');
 });
 
 test('an agent is refused what AGENT_NEVER names before any grant is read, token or address', () => {
@@ -142,7 +146,7 @@ test('the latest definition is the role, and a grant holds what it says now', ()
     ev(grantedEvent('lead', BEA_ID, 'A01', false), 'g1'),
     ev(definedEvent('lead', ['triage'], false), 'd2'),
   ]);
-  assert.deepEqual(state.roles.get('lead'), { role: 'lead', capabilities: ['triage'], id: 'd2', by: OWNER, when: state.roles.get('lead').when });
+  assert.deepEqual(state.roles.get('lead'), { role: 'lead', capabilities: ['triage'], id: 'd2', when: state.roles.get('lead').when });
   assert.deepEqual(grantsOfPerson(state, BEA_ID, BEA), [{ email: BEA, capabilities: ['triage'], scope: 'A01' }]);
   const roles = deployment.withProjectGrants(grantsOfPerson(state, BEA_ID, BEA));
   assert.equal(roles.can('triage', BEA, { block: 'A01.1.1' }), true);
@@ -183,6 +187,13 @@ test('a revocation takes its grant away wherever it sits, since taking away cann
   assert.deepEqual(state.grants, []);
 });
 
+test('a stored definition whose name does not read defines nothing', () => {
+  const forged = (role, id) => ev({ type: ROLE_DEFINED, page: ROLES_PAGE, block: null, data: { role, capabilities: 'approve' } }, id);
+  const state = projectRolesOf([forged('admin', 'd1'), forged('Lead', 'd2'), forged('owner', 'd3'), forged(undefined, 'd4')]);
+  assert.equal(state.roles.size, 0);
+  assert.equal(projectRolesOf([forged('lead', 'd5')]).roles.size, 1, 'setup: the same definition, well named, does');
+});
+
 test('a grant that does not read is left out: its role, its person or its scope', () => {
   const grantWith = (data, id) => ev({ type: ROLE_GRANTED, page: ROLES_PAGE, block: null, data }, id);
   const state = projectRolesOf([
@@ -216,11 +227,23 @@ test('events of any other type on the page change nothing', () => {
 });
 
 // ---------------------------------------------------------------- the server asks the request's roles
-test('the server asks `can` of the roles in force for the request, never of the deployment\'s alone', () => {
-  // `deployment` answers as if no grant had ever been given or revoked; `rolesAt` is what adds them.
-  // A text scan, as `roles-boundary.test.js` is: there is no single call to intercept instead. The
-  // contract test is the live proof that a grant is in force on the routes that matter.
+test('the server asks what someone may do only of the roles built for the request', () => {
+  // `deployment` answers who someone IS, and is typed without `can`, so the type checker refuses a
+  // capability question asked of it or anything handed it that asks one. The one object with `can`
+  // and no project grant, `rolesBeforeGrants`, is read by `rolesAt` alone: handed anywhere else, it
+  // would answer as if no grant had ever been given or revoked. A text scan, as
+  // `roles-boundary.test.js` is: there is no single call to intercept instead. The contract test is
+  // the live proof, route by route.
   const text = readFileSync(`${ROOT}engine/api/server.ts`, 'utf8');
-  assert.ok(text.includes('deployment.withProjectGrants('), 'setup: the server builds the request\'s roles');
-  assert.doesNotMatch(text, /\bdeployment\.can\(/);
+  const identity = /@typedef \{Pick<Roles, ([^>]+)>\} Identity/.exec(readFileSync(`${ROOT}engine/core/roles.js`, 'utf8'))?.[1];
+  assert.ok(identity, 'setup: the identity-only type is where the scan expects it');
+  assert.doesNotMatch(identity, /'can'|'withProjectGrants'/, 'deployment answers no capability question');
+  assert.match(text, /^let deployment: Identity;$/m);
+  const start = text.indexOf('async function rolesAt(');
+  const end = text.indexOf('\n}\n', start);
+  assert.ok(start > 0 && end > start, 'setup: rolesAt is where the scan expects it');
+  const outside = (text.slice(0, start) + text.slice(end)).split('\n')
+    .filter((line) => /\brolesBeforeGrants\b/.test(line) && !/^\s*(\/\/|\*)/.test(line)).map((line) => line.trim());
+  assert.deepEqual(outside, ['let rolesBeforeGrants: Roles;', 'rolesBeforeGrants = rolesOf(project);', 'deployment = rolesBeforeGrants;'],
+    'rolesBeforeGrants is declared, assigned, and read by rolesAt alone');
 });

@@ -117,12 +117,10 @@ test('mutating what capabilitiesOf returns changes nothing the next caller reads
   assert.equal(roles.can('lock', 'ana@example.org', EVERYWHERE), false, 'an admin\'s ✓ must not have just become a lock');
 });
 
-// ------------------------------------------------------------------ #29: the validation core, kept
-// ready for the settings screen. `isValidScope`'s tests prove the grammar directly because
-// `HOLDRIM_LOCKS` (below) is a real caller of it today; a project role's own name format has no
-// caller until the settings screen exists, so it is not built ahead of one any more — round 2 of
-// #29's review (finding 11): a format nothing calls is untested by construction, whatever a test
-// that calls it directly says.
+// ------------------------------------------------------------------ #29: the validation core.
+// `isValidScope`'s tests prove the grammar directly because `HOLDRIM_LOCKS` (below) and the project's
+// own grants are real callers of it. A project role's own name format is `isValidRoleName`, proved in
+// engine/tests/role-grants.test.js next to the routes and the reader that call it.
 
 test('isValidScope accepts exactly the three shapes docs/ROLES.md describes', () => {
   assert.equal(isValidScope('P03'), true, 'an exact page');

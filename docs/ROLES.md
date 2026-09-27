@@ -90,6 +90,13 @@ about roles.
 A request on a block that depends on another page is decided by whoever may triage **the block the
 request is on**. The lights already tell the other page's people that something moved under them.
 
+**A request skips triage only when its author could have triaged it wherever it may reach** — that
+is, when they may triage everywhere: the owner, an admin, or a project grant with no scope. A grant
+limited to some pages or blocks lets its holder decide other people's requests there, and files
+their own requests at triage like anybody's, even on a page inside the scope, from the panel and
+from the home's form alike. The starting state is written from `can('triage', author, EVERYWHERE)`
+when the request is filed (section 3).
+
 ### 3. The lock
 
 The invariant "only the owner's ✓ becomes a lock" becomes:
@@ -142,10 +149,9 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
 - **Written at the moment, read forever after.** When the server records a ✓, it writes on the event
   the author's authority at that moment: their role, and whether this ✓ is a lock for this block.
   The same holds for a request: the state it starts in — at triage, or already decided because its
-  author could triage that block at that moment — is written on the request when it is filed, and
-  never recomputed from what its author may do later. Today it is recomputed on every read
-  (`engine/core/cycle.js`), so granting someone triage would silently decide every open request of
-  theirs, with no triage event written. A request filed before the field existed reads as at triage:
+  author could triage everywhere at that moment (section 2) — is written on the request when it is filed, and
+  never recomputed from what its author may do later: recomputed on every read, granting someone
+  triage would silently decide every open request of theirs, with no triage event written. A request filed before the field existed reads as at triage:
 missing, the field fails closed, and no request's starting state is derived from its author's
 current authority after 0.1.0. The
   panel, the home and `holdrim sync` read what was written and never recompute it — this is
@@ -239,16 +245,25 @@ the settings screen's forms, which call the same functions — and by nothing el
   agent are never grantees: the owner is not a role, an admin already holds everything a project
   role could add, and an agent is never granted what a person is.
 - **Revoking is a later event** naming the grant; the grant itself stays. Nothing is erased.
-- **Read per request.** The server folds the `_roles` events on every request (`rolesAt`,
+- **A scope reaches something.** A grant's scope is refused when it reaches no page and no block of
+  the site, measured as the lock composer measures one (`lockCoverage`).
+- **Read per request.** The server folds the `_roles` events on every signed-in request (`rolesAt`,
   `engine/api/server.ts`) and asks `can` with those grants in force, so a grant counts from the next
   request after it is given, and stops from the next request after it is revoked, on every instance
-  at once. What a ✓ or a request was given under is written on it at that moment (section 3) and never
+  at once. Each request reads the page once, with `listBare`: one query of that page alone, with no
+  people or texts joined, plus one look-up of the viewer's person id when any grant is in force —
+  the cost every signed-in request pays, growing with the number of `_roles` events, not with the
+  rest of the store. It fails closed: a store that cannot be read answers the request with a 500,
+  never as though no grant existed, which for a revocation would be the wrong way round. What a ✓ or a request was given under is written on it at that moment (section 3) and never
   re-read from the grants: a ✓ given under a grant stays exactly what it was written as — never a
   lock, since no grant reaches `lock` — after the grant is revoked.
-- **A stored grant naming an agent is ignored and logged**, once per grant (`role_grant_ignored`),
-  and the service starts anyway: it comes about by a restart that marks the address as an agent
-  after the grant, by an agent token issued for the address later, or by a direct write, and refusing
-  to start would let anyone able to write the store stop the service. `can` refuses an agent `AGENT_NEVER` before any grant is read anyway.
+- **A stored grant naming an agent is ignored and logged** — an address `HOLDRIM_AGENTS` marks, or
+  one holding an agent token. It is logged once per grant (`role_grant_ignored`), on the agent's first
+  request after start that reads it, not at start itself, and whether or not its role holds anything;
+  the settings screen marks it ignored. The service starts anyway: such a grant comes about by a
+  restart that marks the address as an agent after the grant, by an agent token issued for the
+  address later, or by a direct write, and refusing to start would let anyone able to write the
+  store stop the service. `can` refuses an agent `AGENT_NEVER` before any grant is read anyway.
 - **Listable by anyone signed in**, through `GET /api/events?page=_roles`, as the agent tokens'
   events are on `_agent_tokens`: who may do what is not a secret from the people it applies to.
 
@@ -325,7 +340,8 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | A client posts a `role_granted` naming itself | `POST /api/events` refuses the three event types of roles, as it refuses `text_removed` |
 | A direct writer to the store forges a grant | Buys a role without `lock` or `people`; closed by signed events |
 | A direct writer stores a grant naming an agent, to stop the service at its next start | The grant is ignored and logged, and the service starts; `can` refuses the agent `AGENT_NEVER` before any grant is read |
-| A grant is revoked, and a server goes on answering it | Grants are read from the store on every request, never cached |
+| A grant is revoked, and a server goes on answering it | Grants are read from the store on every request, never cached; a store that cannot be read fails the request |
+| A grant limited to some pages is used to skip triage | A request skips triage only when its author may triage everywhere; a scoped grantee's own requests wait at triage |
 | An agent approves its own text | An identity `HOLDRIM_AGENTS` names, and anyone who comes in with an agent token, is refused any ✓ and any lock by `can`, before any grant is read; a ✓ sent with a token is refused outright, whatever its address. Reuse of a person's session, and an agent signing in with a password under an unlisted address, are the open gaps in section 4 |
 | An admin issues an agent token and acts through it | Only the owner issues or revokes one; `people` does not reach it |
 | A disabled person's address keeps writing through a token, or an admin gives the agent's address a password | An address is a person's or an agent's, never both: issuing refuses an address with an account, creating an account refuses an address holding a token, both decided in the store's per-address turn (`AddressInUse`, `engine/api/users.ts`) |

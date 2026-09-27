@@ -124,6 +124,21 @@ export class FirestoreEventStore implements EventStore {
     return out;
   }
 
+  /**
+   * One query, of one page, ordered as `list` orders its documents; the `people` and `texts`
+   * collections `list` reads in full beside it are exactly what this leaves out.
+   */
+  async listBare(page: string): Promise<Event[]> {
+    const r = await this.#db.collection('events').where('page', '==', page).get();
+    const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
+    return [...r.docs]
+      .sort((a, b) => (at(a)?.seconds ?? 0) - (at(b)?.seconds ?? 0) || (at(a)?.nanoseconds ?? 0) - (at(b)?.nanoseconds ?? 0))
+      .map((d) => {
+        const { textHash: _t, snapshotHash: _s, ...e } = this.#fromFirestore(d.id, d.data());
+        return { ...e, text: null, snapshot: null, authorId: e.author };
+      });
+  }
+
   // The people table, laid out as FIRESTORE_PEOPLE says: `people/{id}` holds the row, and
   // `people_by_email/{address}` points an
   // address that is still held at its row. The pointer is what makes find-or-create safe: `create`

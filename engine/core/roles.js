@@ -262,8 +262,9 @@ export function scopeCovers(scope, where) {
   // it a family would read the length of a page that is not there, and throw. The dropped
   // `typeof scope !== 'string'` needs no replacement either: every caller hands `scopeCovers` either
   // `null` or a scope `isValidScope` already accepted — `parseLocks` throws on anything else before a
-  // scope reaches here, and `withProjectGrants` drops a grant whose scope it refuses — so a scope of
-  // the wrong type never arrives to be guarded against.
+  // scope reaches here, and a project grant's scope was checked by `isValidScope` when it was written
+  // and again when it was read (`projectRolesOf`) — so a scope of the wrong type never arrives to be
+  // guarded against, and one that did would fall through every branch below to false.
   const { page, block } = /** @type {{page?: string, block?: string}} */ (where);
   // The block's own page, never the `page` a caller put beside it: see `pageOfBlock`.
   const onPage = block ? pageOfBlock(block) : page;
@@ -524,6 +525,14 @@ export function addressOf(who) {
  */
 
 /**
+ * Who someone IS, as the deployment names them, and nothing they may DO: `Roles` without `can` and
+ * without `withProjectGrants`. What the server holds for the deployment (`engine/api/server.ts`), so
+ * the type checker refuses a capability question asked of it — that one is asked of the roles built
+ * for the request, with the project's grants in force.
+ * @typedef {Pick<Roles, 'owner'|'admins'|'isOwner'|'isAgent'|'isLockHolder'|'roleOf'>} Identity
+ */
+
+/**
  * @param {string|undefined|null} owner  ONE e-mail. Zero or more than one is a config error.
  * @param {string|undefined|null} admins comma-separated e-mails; may be empty.
  * @param {string|undefined|null} [locksRaw] `HOLDRIM_LOCKS`, in `parseLocks`'s format
@@ -677,19 +686,19 @@ export function createRoles(owner, admins, locksRaw, agentsRaw) {
        * grants this view held rather than adding to them, so a revoked grant is gone the moment the
        * caller stops passing it: nothing here remembers a grant between requests.
        *
-       * Each grant is checked again here, and one that does not read is dropped whole: its
-       * capabilities through `projectCapabilitiesOf`, so no caller can hand a person `people` or
-       * `lock` through a grant whatever it read them from, and its scope through `isValidScope`.
-       * The order inside `can` is untouched: an agent is refused `AGENT_NEVER` before any of these
-       * is read, and `lock` is answered by `isOwner` alone.
+       * Each grant's capabilities are checked again here, and a grant whose list does not read is
+       * dropped whole (`projectCapabilitiesOf`), so no caller can hand a person `people` or `lock`
+       * through a grant whatever it read them from. Its scope is not checked again: `scopeCovers`
+       * already answers false for one that fits none of the three shapes, and only null reads as
+       * everywhere. The order inside `can` is untouched: an agent is refused `AGENT_NEVER` before
+       * any of these is read, and `lock` is answered by `isOwner` alone.
        * @param {readonly ProjectGrant[]} grants
        * @returns {Roles}
        */
       withProjectGrants: (grants) => view(Object.freeze(grants.flatMap((g) => {
         const capabilities = projectCapabilitiesOf(g.capabilities);
-        const scope = g.scope ?? null;
-        if (!capabilities || (scope !== null && !isValidScope(scope))) return [];
-        return [Object.freeze({ email: normalized(g.email), capabilities: Object.freeze(capabilities), scope })];
+        if (!capabilities) return [];
+        return [Object.freeze({ email: normalized(g.email), capabilities: Object.freeze(capabilities), scope: g.scope ?? null })];
       }))),
     };
     return roles;
@@ -724,7 +733,7 @@ export function rolesOf(config) {
  *
  * Called by `rolesOf`, the one way from configuration to roles for the server's boot and every CLI
  * command, so both refuse alike.
- * @param {ReturnType<typeof createRoles>} roles
+ * @param {Identity} roles  who the deployment names; no capability is asked
  * @param {string|undefined|null} locksRaw
  */
 export function refuseGrantsToAgents(roles, locksRaw) {
