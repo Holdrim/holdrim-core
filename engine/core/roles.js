@@ -21,15 +21,13 @@
  * a grant may be limited to some pages or blocks (docs/ROLES.md, section 2), and an answer given
  * without a place would be the unscoped one.
  *
- * A project's OWN roles, and who holds them, are NOT read here yet, and never from `holdrim.json`
- * (docs/ROLES.md, "Authority comes from the deployment only"; `engine/core/config.js`'s
- * `AUTHORITY_KEYS` refuses the file the moment it names `roles` or `grants`). They come from the
- * owner, through events at the settings screen (read-only today); granting from it is not built, and
- * defining a project role there will need its own name grammar then, not before: a format with no
- * caller is untested by construction, whatever a unit test that calls it directly says — the grammar
- * comes with the screen's first role definition, not sooner.
- * `isValidScope` below is different: `HOLDRIM_LOCKS` (`parseLocks`) is a real caller of it TODAY, so
- * its grammar is proved against the tier this change actually ships.
+ * A project's OWN roles, and who holds them, never come from `holdrim.json` (docs/ROLES.md,
+ * "Authority comes from the deployment only"; `engine/core/config.js`'s `AUTHORITY_KEYS` refuses the
+ * file the moment it names `roles` or `grants`). They come from the owner, as events on the reserved
+ * page `_roles` (`engine/api/role-grants.ts`), which the server reads on every request and hands to
+ * `withProjectGrants`, below. What a project role may hold (`PROJECT_CAPABILITIES`) and how it may be
+ * named (`isValidRoleName`) are decided here, next to the list they are cut from, so the route that
+ * writes a definition and the reader that trusts one ask the same question.
  *
  * `HOLDRIM_LOCKS` (below, `parseLocks`) is different: who holds `lock` besides the owner is read from
  * the environment, same as `owner` and `admins`, because a forged lock is the one thing signed events
@@ -62,6 +60,51 @@ export const CAPABILITIES = Object.freeze([
 const GRANTABLE = Object.freeze(CAPABILITIES.filter((c) => c !== 'lock'));
 
 /**
+ * What a role the PROJECT defines may hold: every grantable capability but `people` (the owner's
+ * decision on #36). A holder of `people` creates accounts and resets passwords, so a project role
+ * holding it would let whoever the owner granted it to hand out the very accounts other grants
+ * trust — an approver's among them — and make them an admin in all but name, without
+ * `HOLDRIM_ADMINS` naming them. `lock` is out for the reason `CAPABILITIES` gives.
+ */
+export const PROJECT_CAPABILITIES = Object.freeze(GRANTABLE.filter((c) => c !== 'people'));
+
+/**
+ * A project role's name: lower-case words of letters, digits and `-`, one space between words
+ * ("clinical lead"), at most `MAX_ROLE_NAME` characters. Narrow on purpose: a name lands in HTML
+ * and in every reader's list of `_roles` events, and one spelling per role means "Lead" and "lead"
+ * can never be two roles that look like one.
+ */
+const ROLE_NAME_FORMAT = /^[a-z][a-z0-9-]*(?: [a-z0-9-]+)*$/;
+export const MAX_ROLE_NAME = 32;
+
+/**
+ * Whether `name` may name a project role. The three shipped names are refused: `admin` defined by the
+ * project would read, on every screen that shows a role, as the admins `HOLDRIM_ADMINS` names, and
+ * `owner` as the one person nothing grants.
+ * @param {unknown} name
+ */
+export function isValidRoleName(name) {
+  return typeof name === 'string' && name.length <= MAX_ROLE_NAME && ROLE_NAME_FORMAT.test(name)
+    && !(/** @type {readonly string[]} */ (SHIPPED_ROLES)).includes(name);
+}
+
+/**
+ * The capabilities a project role is defined with, in `PROJECT_CAPABILITIES`'s order, or null when
+ * the list is not one a project role may hold: empty, a repeat, or anything outside that list —
+ * `lock` and `people` included. Null, never the part that reads: a definition is taken whole or not
+ * at all, since a role quietly holding less than the owner chose is found out only when someone is
+ * refused.
+ * @param {unknown} list
+ * @returns {string[]|null}
+ */
+export function projectCapabilitiesOf(list) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  if (new Set(list).size !== list.length) return null;
+  if (!list.every((c) => typeof c === 'string' && PROJECT_CAPABILITIES.includes(c))) return null;
+  return PROJECT_CAPABILITIES.filter((c) => list.includes(c));
+}
+
+/**
  * The capabilities each of the three shipped roles holds, as ARRAYS — never a `Set`: `Object.freeze`
  * on a `Set` freezes the BINDING, not its contents, so a frozen `Set` still accepts `.add()` and
  * `.delete()` without a complaint, in or out of strict mode. `capabilitiesOf` copies one of these
@@ -69,8 +112,8 @@ const GRANTABLE = Object.freeze(CAPABILITIES.filter((c) => c !== 'lock'));
  * — `capabilitiesOf('admin').add('lock')` — would otherwise reach into this table itself, and every
  * `can()` call for the rest of the process would read it too.
  *
- * A project-defined role, once the settings screen (read-only today) can define one, will extend this
- * shape rather than replace it: the same kind of array, held in the store instead of written here.
+ * A project-defined role extends this shape rather than replacing it: the same kind of array, held
+ * in the store instead of written here, and handed to `withProjectGrants` per request.
  *
  * `owner` is included for `capabilitiesOf` and the mapping test to read from one table, not two,
  * even though the owner is not a role a project can hold or grant (see the module comment) — its
@@ -219,8 +262,8 @@ export function scopeCovers(scope, where) {
   // it a family would read the length of a page that is not there, and throw. The dropped
   // `typeof scope !== 'string'` needs no replacement either: every caller hands `scopeCovers` either
   // `null` or a scope `isValidScope` already accepted — `parseLocks` throws on anything else before a
-  // scope reaches here, and `grantsOf`'s scope is `null` today — so a scope of the wrong type never
-  // arrives to be guarded against.
+  // scope reaches here, and `withProjectGrants` drops a grant whose scope it refuses — so a scope of
+  // the wrong type never arrives to be guarded against.
   const { page, block } = /** @type {{page?: string, block?: string}} */ (where);
   // The block's own page, never the `page` a caller put beside it: see `pageOfBlock`.
   const onPage = block ? pageOfBlock(block) : page;
@@ -461,6 +504,26 @@ export function addressOf(who) {
 }
 
 /**
+ * One of the project's own grants, as `withProjectGrants` takes it: the address it names, what its
+ * role holds, and where — a scope `isValidScope` accepts, or null for everywhere.
+ * @typedef {{email: string, capabilities: readonly string[], scope: string|null}} ProjectGrant
+ */
+
+/**
+ * What `createRoles` answers, and `withProjectGrants` answers again. Written out because the second
+ * returns the first's own type, which an inferred type cannot say.
+ * @typedef {object} Roles
+ * @property {string} owner
+ * @property {string[]} admins
+ * @property {(e: unknown) => boolean} isOwner
+ * @property {(e: unknown) => boolean} isLockHolder
+ * @property {(e: unknown) => boolean} isAgent
+ * @property {(e: unknown) => 'owner'|'admin'|'member'} roleOf
+ * @property {(capability: string, e: unknown, where: unknown) => boolean} can
+ * @property {(grants: readonly ProjectGrant[]) => Roles} withProjectGrants
+ */
+
+/**
  * @param {string|undefined|null} owner  ONE e-mail. Zero or more than one is a config error.
  * @param {string|undefined|null} admins comma-separated e-mails; may be empty.
  * @param {string|undefined|null} [locksRaw] `HOLDRIM_LOCKS`, in `parseLocks`'s format
@@ -470,6 +533,7 @@ export function addressOf(who) {
  * (`refuseGrantsToAgents`), and `can` denies it again here on its own. Two layers, each proved by a
  * test that fails when that layer alone is removed — a refusal inside this function would make the
  * second layer impossible to construct, and so impossible to prove.
+ * @returns {Roles}
  */
 export function createRoles(owner, admins, locksRaw, agentsRaw) {
   const split = (s) => String(s ?? '').split(',').map(normalizeEmail).filter(Boolean);
@@ -527,75 +591,111 @@ export function createRoles(owner, admins, locksRaw, agentsRaw) {
   const roleOf = (e) => (isOwner(e) ? 'owner'
     : !byToken(e) && everyone.has(normalized(addressOf(e))) ? 'admin' : 'member');
   /**
-   * What `e` holds, as grants: capabilities, each set limited to a scope or to none (docs/ROLES.md,
-   * section 2). Today every grant is one of the three shipped roles, unscoped — `HOLDRIM_OWNER` and
-   * `HOLDRIM_ADMINS` name no pages — so this is one grant per person. It is the shape `can` reads so
-   * that a project's own scoped grants, once the owner can make them, are one more entry here and
-   * not a second way of answering.
-   * @returns {{capabilities: Set<string>, scope: string|null}[]}
+   * The roles as asked with a set of the project's own grants in force (docs/ROLES.md, section 2) —
+   * none, as `createRoles` returns them; the ones `withProjectGrants` was handed otherwise. Every
+   * answer but `can`'s is the same whatever the grants: who the owner, an admin, a lock-holder or an
+   * agent is comes from the deployment alone, and no grant moves it.
+   * @param {readonly ProjectGrant[]} projectGrants
+   * @returns {Roles}
    */
-  const grantsOf = (e) => [{ capabilities: capabilitiesOf(roleOf(e)), scope: null }];
+  function view(projectGrants) {
+    /**
+     * What `e` holds, as grants: capabilities, each set limited to a scope or to none. First the
+     * shipped role, unscoped — `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` name no pages — then each of the
+     * project's grants naming `e`'s address, with its scope. One shape, so a project's scoped grant
+     * is one more entry `can` reads and not a second way of answering.
+     * @returns {{capabilities: Set<string>, scope: string|null}[]}
+     */
+    const grantsOf = (e) => [
+      { capabilities: capabilitiesOf(roleOf(e)), scope: null },
+      ...projectGrants.filter((g) => g.email === normalized(addressOf(e)))
+        .map((g) => ({ capabilities: new Set(g.capabilities), scope: g.scope })),
+    ];
+    /** @type {Roles} */
+    const roles = {
+      owner: ownerEmail,
+      admins: [...everyone],
+      /**
+       * Whether `e` is THE owner — an identity check, not a capability: resetting or creating the
+       * owner's account, and disabling nobody's, belong to the owner alone and to no capability any
+       * role can hold (docs/ROLES.md, "The owner is not a role"). Every other decision asks `can`.
+       */
+      isOwner,
+      /**
+       * Whether `e` is named in `HOLDRIM_LOCKS` — an identity check, like `isOwner`, never a
+       * capability. This is the ONE function `engine/api/server.ts`'s account guards (create, reset,
+       * disable and re-enable) and any future lock check both ask, so a rule added for one reaches the
+       * other (docs/ROLES.md, section 3, "One parser, one question").
+       *
+       * Not yet read by `can('lock', …)` — see the comment there for why.
+       */
+      isLockHolder: (e) => lockHolders.has(normalized(addressOf(e))),
+      /**
+       * Whether `e` is an agent — named in `HOLDRIM_AGENTS`, or come in with an agent token — who they
+       * ARE, not what they may do. `can` asks it first, and `recordEvent` (engine/api/server.ts)
+       * writes its answer onto every event, so the trail says an agent wrote it however the agent's
+       * grants later change.
+       */
+      isAgent,
+      /** The role `e` holds, for display only — the people screen's column, `/api/me`'s `role` field.
+       *  Never compared against a string by a caller: that is exactly the check `can` replaces. */
+      roleOf,
+      /**
+       * Whether `e` may `capability` — the one question every caller outside this file asks. Throws
+       * on an unknown capability rather than silently answering false, for the same reason an unknown
+       * `holdrim.json` key refuses to start: a typo that answered "no" would look exactly like a real
+       * refusal.
+       *
+       * `'lock'` is answered straight from `isOwner`, never from `capabilitiesOf` and never from
+       * `isLockHolder` — not merely because `ROLE_CAPABILITIES` happens to leave `lock` out today, but
+       * because making a `HOLDRIM_LOCKS` entry actually lock needs docs/ROLES.md section 3's rule: a ✓
+       * is a lock only when the session that gave it opened with a credential the PERSON set
+       * themselves, after the latest issuance made by the OWNER. That test reads the account's whole
+       * credential history, which nothing here does yet. Without it, an admin who reset a
+       * soon-to-be-lock-holder's account before their address reached `HOLDRIM_LOCKS`, and kept the
+       * session open across the restart that added it, could give a ✓ in that person's name at the
+       * moment it starts reading as a lock — the exact forgery section 3 exists to close. `isOwner`
+       * alone has no such gap, so `lock` stays exactly that, in this change.
+       */
+      can: (capability, e, where) => {
+        if (!CAPABILITIES.includes(capability)) {
+          throw new Error(`"${capability}" is not a capability engine/core/roles.js knows: ${CAPABILITIES.join(', ')}.`);
+        }
+        // `where` is required, and checked before anything is answered: a caller that forgot it would
+        // otherwise get the unscoped answer, which is exactly what a scoped grant must never give.
+        checkWhere(where);
+        // FIRST, before `isOwner` and before any role's capabilities: an agent is refused these on
+        // who it is, so no grant — the owner's, `HOLDRIM_ADMINS`, a future role — is ever consulted
+        // for them. Asked after a grant, the grant would already have answered.
+        if (AGENT_NEVER.includes(capability) && isAgent(e)) return false;
+        if (capability === 'lock') return isOwner(e);
+        return grantsOf(e).some((g) => g.capabilities.has(capability) && scopeCovers(g.scope, where));
+      },
+      /**
+       * These roles with `grants` in force — the project's own grants, as the server resolved them
+       * from the `_roles` events on this request (`engine/api/role-grants.ts`). Replaces whatever
+       * grants this view held rather than adding to them, so a revoked grant is gone the moment the
+       * caller stops passing it: nothing here remembers a grant between requests.
+       *
+       * Each grant is checked again here, and one that does not read is dropped whole: its
+       * capabilities through `projectCapabilitiesOf`, so no caller can hand a person `people` or
+       * `lock` through a grant whatever it read them from, and its scope through `isValidScope`.
+       * The order inside `can` is untouched: an agent is refused `AGENT_NEVER` before any of these
+       * is read, and `lock` is answered by `isOwner` alone.
+       * @param {readonly ProjectGrant[]} grants
+       * @returns {Roles}
+       */
+      withProjectGrants: (grants) => view(Object.freeze(grants.flatMap((g) => {
+        const capabilities = projectCapabilitiesOf(g.capabilities);
+        const scope = g.scope ?? null;
+        if (!capabilities || (scope !== null && !isValidScope(scope))) return [];
+        return [Object.freeze({ email: normalized(g.email), capabilities: Object.freeze(capabilities), scope })];
+      }))),
+    };
+    return roles;
+  }
 
-  return {
-    owner: ownerEmail,
-    admins: [...everyone],
-    /**
-     * Whether `e` is THE owner — an identity check, not a capability: resetting or creating the
-     * owner's account, and disabling nobody's, belong to the owner alone and to no capability any
-     * role can hold (docs/ROLES.md, "The owner is not a role"). Every other decision asks `can`.
-     */
-    isOwner,
-    /**
-     * Whether `e` is named in `HOLDRIM_LOCKS` — an identity check, like `isOwner`, never a
-     * capability. This is the ONE function `engine/api/server.ts`'s account guards (create, reset,
-     * disable and re-enable) and any future lock check both ask, so a rule added for one reaches the
-     * other (docs/ROLES.md, section 3, "One parser, one question").
-     *
-     * Not yet read by `can('lock', …)` — see the comment there for why.
-     */
-    isLockHolder: (e) => lockHolders.has(normalized(addressOf(e))),
-    /**
-     * Whether `e` is an agent — named in `HOLDRIM_AGENTS`, or come in with an agent token — who they
-     * ARE, not what they may do. `can` asks it first, and `recordEvent` (engine/api/server.ts)
-     * writes its answer onto every event, so the trail says an agent wrote it however the agent's
-     * grants later change.
-     */
-    isAgent,
-    /** The role `e` holds, for display only — the people screen's column, `/api/me`'s `role` field.
-     *  Never compared against a string by a caller: that is exactly the check `can` replaces. */
-    roleOf,
-    /**
-     * Whether `e` may `capability` — the one question every caller outside this file asks. Throws
-     * on an unknown capability rather than silently answering false, for the same reason an unknown
-     * `holdrim.json` key refuses to start: a typo that answered "no" would look exactly like a real
-     * refusal.
-     *
-     * `'lock'` is answered straight from `isOwner`, never from `capabilitiesOf` and never from
-     * `isLockHolder` — not merely because `ROLE_CAPABILITIES` happens to leave `lock` out today, but
-     * because making a `HOLDRIM_LOCKS` entry actually lock needs docs/ROLES.md section 3's rule: a ✓
-     * is a lock only when the session that gave it opened with a credential the PERSON set
-     * themselves, after the latest issuance made by the OWNER. That test reads the account's whole
-     * credential history, which nothing here does yet. Without it, an admin who reset a
-     * soon-to-be-lock-holder's account before their address reached `HOLDRIM_LOCKS`, and kept the
-     * session open across the restart that added it, could give a ✓ in that person's name at the
-     * moment it starts reading as a lock — the exact forgery section 3 exists to close. `isOwner`
-     * alone has no such gap, so `lock` stays exactly that, in this change.
-     */
-    can: (capability, e, where) => {
-      if (!CAPABILITIES.includes(capability)) {
-        throw new Error(`"${capability}" is not a capability engine/core/roles.js knows: ${CAPABILITIES.join(', ')}.`);
-      }
-      // `where` is required, and checked before anything is answered: a caller that forgot it would
-      // otherwise get the unscoped answer, which is exactly what a scoped grant must never give.
-      checkWhere(where);
-      // FIRST, before `isOwner` and before any role's capabilities: an agent is refused these on
-      // who it is, so no grant — the owner's, `HOLDRIM_ADMINS`, a future role — is ever consulted
-      // for them. Asked after a grant, the grant would already have answered.
-      if (AGENT_NEVER.includes(capability) && isAgent(e)) return false;
-      if (capability === 'lock') return isOwner(e);
-      return grantsOf(e).some((g) => g.capabilities.has(capability) && scopeCovers(g.scope, where));
-    },
-  };
+  return view([]);
 }
 
 /**

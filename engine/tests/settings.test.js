@@ -13,7 +13,7 @@ import {
   composeLock, locksValue, renderSettingsPage, SETTINGS_KEYS,
 } from '../api/settings-page.ts';
 import { engineNav } from '../api/people-page.ts';
-import { createRoles, parseLocks, capabilitiesOf, SHIPPED_ROLES } from '../core/roles.js';
+import { createRoles, parseLocks, capabilitiesOf, SHIPPED_ROLES, PROJECT_CAPABILITIES } from '../core/roles.js';
 import { FEATURE_DEFAULTS } from '../core/features.js';
 import { readConfig } from '../core/config.js';
 import { createI18n } from '../core/i18n.js';
@@ -106,6 +106,7 @@ const data = (extra = {}) => ({
   projectName: 'P', canManagePeople: true,
   holders: { owner: 'The Owner', admins: [], agents: [BOT], locks: [{ who: 'Ana', scope: 'A0*', reaches: ['A01', 'A02'] }] },
   features: { ...FEATURE_DEFAULTS }, peopleShow: 'email', namedInFile: { features: [], peopleShow: false },
+  projectRoles: { roles: [], grants: [], ended: 0 },
   ...extra,
 });
 const render = (extra, lang = 'en') => renderSettingsPage(i18n, lang, data(extra), ENGINE_THEME, 'n0nce');
@@ -204,4 +205,62 @@ test('the Settings link is offered to the owner alone', () => {
   assert.doesNotMatch(engineNav(i18n, 'en', 'home', true), /\/engine\/settings/, 'not unless the caller says owner');
   assert.doesNotMatch(engineNav(i18n, 'en', 'home', true, false), /\/engine\/settings/);
   assert.match(engineNav(i18n, 'en', 'settings', false, true), /href="\/engine\/settings" aria-current="page"/);
+});
+
+// ---------------------------------------------------------------- the project's roles (#36, PR 2)
+const LEAD = { role: 'clinical lead', capabilities: ['triage', 'approve'], when: '2026-09-27T10:00:00.000Z' };
+const GRANT = { id: 'g_1', who: 'Bea', role: 'clinical lead', scope: 'A0*', when: '2026-09-27T10:01:00.000Z', ignored: false };
+const withRoles = (projectRoles, extra = {}) => render({ projectRoles: { roles: [], grants: [], ended: 0, ...projectRoles }, ...extra });
+
+test('a role is defined with the capabilities a project role may hold, and never with lock or people', () => {
+  const roles = section(render(), 'settings-project-roles');
+  const offered = [...roles.matchAll(/name="capability" value="([a-z]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(offered, [...PROJECT_CAPABILITIES], 'one box per capability PROJECT_CAPABILITIES names, in its order');
+  assert.deepEqual(offered.filter((c) => c === 'lock' || c === 'people'), [], 'no box for lock or people');
+  assert.match(roles, /<form method="post" action="\/engine\/settings#settings-project-roles"[^>]*>\s*<input type="hidden" name="action" value="define">/);
+  assert.ok(roles.includes(dictionaries.en['settings.projectRoles.none']), 'no role yet, said so');
+});
+
+test('each role shows its latest definition, and a grant form offers only the roles that hold something', () => {
+  const html = withRoles({ roles: [LEAD, { role: 'unread', capabilities: [], when: LEAD.when }] });
+  assert.match(section(html, 'settings-project-roles'),
+    /<td><code class="holdrim-code">clinical lead<\/code><\/td><td><code class="holdrim-code">triage<\/code> <code class="holdrim-code">approve<\/code><\/td>/);
+  const grants = section(html, 'settings-grants');
+  assert.deepEqual([...grants.matchAll(/<option value="([^"]*)"/g)].map((m) => m[1]), ['clinical lead'],
+    'a definition that did not read holds nothing, and is not offered');
+  assert.doesNotMatch(section(render(), 'settings-grants'), /name="action" value="grant"/, 'no role, no grant form');
+  assert.ok(section(render(), 'settings-grants').includes(dictionaries.en['settings.grants.defineFirst']));
+});
+
+test('a grant in force shows who, the role, the scope and a revoke form naming it; one naming an agent says it is ignored', () => {
+  const grants = section(withRoles({ roles: [LEAD], grants: [GRANT, { ...GRANT, id: 'g_2', who: BOT, scope: null, ignored: true }], ended: 2 }),
+    'settings-grants');
+  assert.match(grants, /<td>Bea<\/td><td><code class="holdrim-code">clinical lead<\/code><\/td><td><code class="holdrim-code">A0\*<\/code><\/td>/);
+  assert.match(grants, /<input type="hidden" name="action" value="revoke"><input type="hidden" name="grant" value="g_1">/);
+  assert.match(grants, new RegExp(`<td>${BOT} <span[^>]*>${dictionaries.en['settings.grants.ignored']}</span></td><td><code class="holdrim-code">clinical lead</code></td><td>everywhere</td>`));
+  assert.equal((grants.match(/settings-ignored/g) ?? []).length, 1, 'only the grant naming an agent is marked');
+  assert.ok(grants.includes('2 revoked, each still in the trail.'));
+});
+
+test('a refused write is drawn with its reason and what was typed, escaped, and never run', () => {
+  const hostile = '"><script>alert(1)</script>';
+  const html = withRoles({ roles: [LEAD] }, { edit: { action: 'grant', key: 'api.grants.roleUnknown', params: { role: hostile },
+    values: { role: hostile, email: hostile, scope: hostile, capabilities: [] } } });
+  assert.doesNotMatch(html, /<script/);
+  const grants = section(html, 'settings-grants');
+  assert.ok(grants.includes('no role is defined as &quot;&quot;&gt;&lt;script&gt;'), 'the reason, with the typed role escaped inside it');
+  assert.match(grants, /name="email" type="email" required autocomplete="off" value="&quot;&gt;&lt;script&gt;/);
+  const defined = withRoles({}, { edit: { action: 'define', key: 'api.roles.capabilitiesInvalid', params: { capabilities: 'x' },
+    values: { role: 'lead', email: '', scope: '', capabilities: ['approve'] } } });
+  const roles = section(defined, 'settings-project-roles');
+  assert.match(roles, /name="role" required[^>]*value="lead"/, 'the name typed is put back');
+  assert.match(roles, /value="approve" checked/, 'and the boxes ticked');
+  assert.doesNotMatch(roles, /value="triage" checked/);
+  assert.doesNotMatch(section(defined, 'settings-grants'), /holdrim-alert--danger/, 'the refusal is drawn on its own form only');
+});
+
+test('a write that went through is confirmed where its form is', () => {
+  assert.ok(section(withRoles({}, { done: 'define' }), 'settings-project-roles').includes('Role defined.'));
+  assert.ok(section(withRoles({}, { done: 'revoke' }), 'settings-grants').includes('Grant revoked.'));
+  assert.doesNotMatch(section(withRoles({}, { done: 'revoke' }), 'settings-project-roles'), /holdrim-alert--ok/);
 });

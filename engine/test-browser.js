@@ -678,7 +678,7 @@ try {
     expect('and nothing failed', '', owner.problems.join(' | '));
   }
 
-  console.log('the settings screen, the owner\'s and read-only (#36):');
+  console.log('the settings screen, the owner\'s (#36):');
   {
     const owner = await person(OWNER);
     await owner.page.goto(`${BASE}/engine/home`);
@@ -699,6 +699,41 @@ try {
     const reader = await person(READER);
     await reader.page.goto(`${BASE}/engine/settings`);
     expect('somebody who is not the owner is sent home', `${BASE}/engine/home`, reader.page.url());
+
+    // The project's own roles (#36): defined and granted on this screen, and in force on the panel
+    // from the next request — the panel draws its ✓ from what the server answers for the block.
+    const GRANTED = 'granted@example.org';
+    const offersApprove = async () => {
+      const granted = await person(GRANTED);
+      await granted.page.goto(`${BASE}/pages/A01.html`);
+      await settled(granted.page);
+      await block(granted.page, 'A01.1.3').click();
+      await must('the panel opens for them', () => granted.page.locator('.rv-panel[open]').waitFor());
+      await settled(granted.page);
+      const offered = await granted.page.locator('.rv-panel').getByRole('button', { name: /^(✓ )?Approve/ }).count();
+      expect('and nothing failed on their screen', '', granted.problems.join(' | '));
+      return offered;
+    };
+    expect('before any grant, they are offered no Approve', 0, await offersApprove());
+    await owner.page.goto(`${BASE}/engine/settings`);
+    await owner.page.locator('.settings-define input[name="role"]').fill('page lead');
+    await owner.page.locator('.settings-define input[name="capability"][value="approve"]').check();
+    await owner.page.locator('.settings-define button[type="submit"]').click();
+    await must('the owner defines a role, and is told so',
+      () => owner.page.locator('.holdrim-alert--ok', { hasText: 'Role defined.' }).waitFor());
+    await owner.page.locator('.settings-grant input[name="email"]').fill(GRANTED);
+    await owner.page.locator('.settings-grant select[name="role"]').selectOption('page lead');
+    await owner.page.locator('.settings-grant input[name="scope"]').fill('A01');
+    await owner.page.locator('.settings-grant button[type="submit"]').click();
+    await must('grants it on A01, and is told so', () => owner.page.locator('.holdrim-alert--ok', { hasText: 'Role granted.' }).waitFor());
+    expect('the grant is listed, with who, the role and the scope', 1,
+      await owner.page.locator('section[aria-labelledby="settings-grants"] tr', { hasText: GRANTED })
+        .filter({ hasText: 'page lead' }).filter({ hasText: 'A01' }).count());
+    expect('on their next page, they are offered Approve', 1, await offersApprove());
+    await owner.page.locator('tr', { hasText: GRANTED }).getByRole('button', { name: 'Revoke' }).click();
+    await must('the owner revokes it, and is told so', () => owner.page.locator('.holdrim-alert--ok', { hasText: 'Grant revoked.' }).waitFor());
+    expect('and on their next page, Approve is gone again', 0, await offersApprove());
+    expect('and nothing on the settings screen was refused, blocked or thrown', '', owner.problems.join(' | '));
   }
 
   console.log('deciding a request from the home, with no script:');

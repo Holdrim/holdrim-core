@@ -3,32 +3,34 @@ import { themeCss, type Theme } from './theme.ts';
 import { engineNav } from './people-page.ts';
 import { SETTINGS_SCREEN } from '../core/screens.js';
 import {
-  CAPABILITIES, AGENT_NEVER, SHIPPED_ROLES, capabilitiesOf, isValidScope, parseLocks, lockCoverage,
-  refuseGrantsToAgents, type createRoles,
+  CAPABILITIES, AGENT_NEVER, SHIPPED_ROLES, PROJECT_CAPABILITIES, MAX_ROLE_NAME, capabilitiesOf, isValidScope,
+  parseLocks, lockCoverage, refuseGrantsToAgents, type Roles,
 } from '../core/roles.js';
 import { PEOPLE_SHOW_VALUES } from '../core/people-show.js';
 
 /**
  * The settings screen (`/engine/settings`, issue #36): who holds what in this deployment, where each
- * answer comes from, and what to set to change it. The owner's alone, and READ-ONLY on purpose.
+ * answer comes from, what to set to change it, and the project's own roles. The owner's alone.
  *
- * Every source of authority it shows is the deployment's — `HOLDRIM_OWNER`, `HOLDRIM_ADMINS`,
- * `HOLDRIM_AGENTS`, `HOLDRIM_LOCKS` — and none of them may be set from a screen (docs/ROLES.md,
- * "Authority comes from the deployment only"). So the one form here, the lock-grant composer, writes
- * nothing: it answers with the line to set where Holdrim runs, checked by the same functions start
- * runs on that variable, so a line this screen hands out is one the service boots with. A composer
- * that stored the grant instead would be a second source of `lock`, reachable by whoever gets a
- * session as the owner — the forgery docs/ROLES.md section 3 exists to close.
+ * Two kinds of authority, told apart on purpose. The deployment's — `HOLDRIM_OWNER`,
+ * `HOLDRIM_ADMINS`, `HOLDRIM_AGENTS`, `HOLDRIM_LOCKS` — is only SHOWN here: none of it may be set from
+ * a screen (docs/ROLES.md, "Authority comes from the deployment only"). So the lock-grant composer
+ * writes nothing: it answers with the line to set where Holdrim runs, checked by the same functions
+ * start runs on that variable, so a line this screen hands out is one the service boots with. A
+ * composer that stored the grant instead would be a second source of `lock`, reachable by whoever
+ * gets a session as the owner — the forgery docs/ROLES.md section 3 exists to close.
+ *
+ * The project's own roles are the owner's to define and grant from here (docs/ROLES.md, section 5):
+ * each form writes one event on `_roles`, through the function its API route calls, and none of
+ * them can reach `lock` or `people` (`PROJECT_CAPABILITIES`).
  *
  * ## No script
  *
- * The composer is a plain form posted back to this address, and the page carries no script at
- * all: its policy (`screenPolicy(nonce, { script: false })`) runs nothing, and the one style block
- * carries the response's nonce. A POST although composing changes nothing: as a GET, the address
- * typed would travel in the URL, and stay in the browser's history and in any proxy's access log.
+ * Every form is a plain form posted back to this address, and the page carries no script at all:
+ * its policy (`screenPolicy(nonce, { script: false })`) runs nothing, and the one style block carries
+ * the response's nonce. A POST even to compose, which changes nothing: as a GET, the address typed
+ * would travel in the URL, and stay in the browser's history and in any proxy's access log.
  */
-
-type Roles = ReturnType<typeof createRoles>;
 
 /** A `HOLDRIM_LOCKS` entry, as `parseLocks` returns it. */
 export interface LockEntry { email: string; scope: string }
@@ -60,6 +62,16 @@ export const SETTINGS_KEYS = [
   'settings.project.heading', 'settings.project.lede', 'settings.project.setting', 'settings.project.value',
   'settings.project.source', 'settings.project.default', 'settings.project.snippet', 'settings.project.peopleShow',
   'people.role.owner', 'people.role.admin', 'people.role.member',
+  'settings.projectRoles.heading', 'settings.projectRoles.lede', 'settings.projectRoles.role', 'settings.projectRoles.holds',
+  'settings.projectRoles.defined', 'settings.projectRoles.none', 'settings.projectRoles.name', 'settings.projectRoles.nameHint',
+  'settings.projectRoles.submit', 'settings.projectRoles.never', 'settings.projectRoles.done',
+  'settings.grants.heading', 'settings.grants.lede', 'settings.grants.who', 'settings.grants.role', 'settings.grants.scope',
+  'settings.grants.given', 'settings.grants.everywhere', 'settings.grants.none', 'settings.grants.ignored',
+  'settings.grants.revoke', 'settings.grants.email', 'settings.grants.scopeHint', 'settings.grants.submit',
+  'settings.grants.defineFirst', 'settings.grants.ended', 'settings.grants.granted', 'settings.grants.revoked',
+  'api.roles.nameInvalid', 'api.roles.capabilitiesInvalid', 'api.users.emailInvalid', 'api.grants.scopeInvalid',
+  'api.grants.notForTheOwner', 'api.grants.notForAnAdmin', 'api.grants.notForAnAgent', 'api.grants.roleUnknown',
+  'api.grants.present', 'api.grants.notFound', 'api.grants.alreadyRevoked',
 ];
 
 /** `HOLDRIM_LOCKS`'s value for these entries: `;`-separated, as `parseLocks` splits it. */
@@ -141,6 +153,9 @@ export function composeLock(
   return { line: `HOLDRIM_LOCKS='${value}'`, entry, reaches };
 }
 
+/** One of the screen's forms that writes: which, and what was typed into it. */
+export type RoleAction = 'define' | 'grant' | 'revoke';
+
 /** Everything the screen shows, resolved by the server; nothing here reads the environment. */
 export interface SettingsData {
   projectName: string;
@@ -153,6 +168,24 @@ export interface SettingsData {
   };
   /** What was typed into the composer and what it answered, or nothing when nobody asked. */
   compose?: { email: string; scope: string; result: Composed };
+  /**
+   * The project's own roles as the `_roles` events add up to now (`projectRolesOf`): each role's
+   * latest definition, and each grant in force with the person as the owner is shown them — or
+   * their id, once forgotten — and whether it is ignored for naming an agent. `ended` counts the
+   * revoked ones, which stay in the trail.
+   */
+  projectRoles: {
+    roles: { role: string; capabilities: string[]; when: string }[];
+    grants: { id: string; who: string; role: string; scope: string | null; when: string; ignored: boolean }[];
+    ended: number;
+  };
+  /** A write that was refused: which form, the sentence's key, and what was typed, to put back. */
+  edit?: {
+    action: RoleAction; key: string; params?: Record<string, string | number>;
+    values: { role: string; email: string; scope: string; capabilities: string[] };
+  };
+  /** A write that went through, on the redirect after it. */
+  done?: RoleAction;
   features: Record<string, boolean>;
   peopleShow: string;
   /** Which of the two the project's `holdrim.json` names (`namedInFile`, engine/core/config.js). */
@@ -206,6 +239,59 @@ ${lockRows}
       <p>${t('settings.compose.restart')}</p>
     </div>`;
 
+  // The project's own roles. What was typed goes back into a refused form, as the composer's does.
+  const edit = data.edit;
+  const typed = (action: RoleAction) => (edit?.action === action ? edit.values : undefined);
+  const refusal = (action: RoleAction) => (edit?.action === action
+    ? `<p class="holdrim-alert holdrim-alert--danger" role="alert">${t(edit.key, edit.params)}</p>` : '');
+  const confirmed = (actions: RoleAction[], key: string) => (data.done && actions.includes(data.done)
+    ? `<p class="holdrim-alert holdrim-alert--ok" role="status">${t(key)}</p>` : '');
+  const { roles: defined, grants, ended } = data.projectRoles;
+  const definedRows = defined.map((d) => `<tr><td>${code(d.role)}</td>`
+    + `<td>${d.capabilities.map((c) => code(c)).join(' ')}</td><td>${forHtml(d.when)}</td></tr>`).join('\n');
+  const definedTable = defined.length ? `<table class="holdrim-table holdrim-table--stack">
+      <thead><tr><th scope="col">${t('settings.projectRoles.role')}</th><th scope="col">${t('settings.projectRoles.holds')}</th>`
+    + `<th scope="col">${t('settings.projectRoles.defined')}</th></tr></thead>
+      <tbody>
+${definedRows}
+      </tbody>
+    </table>` : `<p class="holdrim-muted">${t('settings.projectRoles.none')}</p>`;
+  const defining = typed('define');
+  const capabilityBoxes = PROJECT_CAPABILITIES.map((c: string) => `<label class="settings-check">`
+    + `<input type="checkbox" name="capability" value="${forHtml(c)}"${defining?.capabilities.includes(c) ? ' checked' : ''}> `
+    + `${code(c)} <span class="holdrim-muted">${t(`settings.capability.${c}`)}</span></label>`).join('\n');
+
+  const grantRows = grants.map((g) => `<tr><td>${forHtml(g.who)}`
+    + (g.ignored ? ` <span class="holdrim-alert holdrim-alert--warn settings-ignored">${t('settings.grants.ignored')}</span>` : '')
+    + `</td><td>${code(g.role)}</td><td>${g.scope ? code(g.scope) : t('settings.grants.everywhere')}</td>`
+    + `<td>${forHtml(g.when)}</td><td>`
+    + `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#settings-grants">`
+    + `<input type="hidden" name="action" value="revoke"><input type="hidden" name="grant" value="${forHtml(g.id)}">`
+    + `<button class="holdrim-button" type="submit">${t('settings.grants.revoke')}</button></form></td></tr>`).join('\n');
+  const grantTable = grants.length ? `<table class="holdrim-table holdrim-table--stack">
+      <thead><tr><th scope="col">${t('settings.grants.who')}</th><th scope="col">${t('settings.grants.role')}</th>`
+    + `<th scope="col">${t('settings.grants.scope')}</th><th scope="col">${t('settings.grants.given')}</th>`
+    + `<th scope="col"><span class="holdrim-visually-hidden">${t('settings.grants.revoke')}</span></th></tr></thead>
+      <tbody>
+${grantRows}
+      </tbody>
+    </table>` : `<p class="holdrim-muted">${t('settings.grants.none')}</p>`;
+  const granting = typed('grant');
+  const roleOptions = defined.filter((d) => d.capabilities.length).map((d) => `<option value="${forHtml(d.role)}"`
+    + `${granting?.role === d.role ? ' selected' : ''}>${forHtml(d.role)}</option>`).join('');
+  const grantForm = roleOptions ? `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#settings-grants" class="settings-compose settings-grant">
+      <input type="hidden" name="action" value="grant">
+      <label class="holdrim-field"><span class="holdrim-label">${t('settings.grants.email')}</span>
+        <input class="holdrim-input" name="email" type="email" required autocomplete="off" value="${forHtml(granting?.email ?? '')}"></label>
+      <label class="holdrim-field"><span class="holdrim-label">${t('settings.grants.role')}</span>
+        <select class="holdrim-input" name="role" required>${roleOptions}</select></label>
+      <label class="holdrim-field"><span class="holdrim-label">${t('settings.grants.scope')}</span>
+        <input class="holdrim-input" name="scope" autocomplete="off" spellcheck="false" aria-describedby="settings-grant-scope" value="${forHtml(granting?.scope ?? '')}"></label>
+      <button class="holdrim-button holdrim-button--primary" type="submit">${t('settings.grants.submit')}</button>
+    </form>
+    <p id="settings-grant-scope" class="holdrim-muted">${t('settings.grants.scopeHint')}</p>`
+    : `<p class="holdrim-muted">${t('settings.grants.defineFirst')}</p>`;
+
   const featureRows = Object.entries(data.features).map(([key, on]) => `<tr><td>${code(`features.${key}`)}</td>`
     + `<td>${code(String(on))}</td><td>${data.namedInFile.features.includes(key) ? code('holdrim.json') : t('settings.project.default')}</td></tr>`)
     .join('\n');
@@ -233,6 +319,9 @@ ${themeCss(theme)}
   background: var(--holdrim-surface-raised); border: 1px solid var(--holdrim-line); border-radius: var(--holdrim-radius-md); }
 .settings-line code { font-family: var(--holdrim-font-mono); user-select: all; white-space: pre; }
 .settings-answer p { margin: var(--holdrim-space-2) 0; }
+.settings-caps { border: 0; margin: 0; padding: 0; display: grid; gap: var(--holdrim-space-2); }
+.settings-check { display: flex; gap: var(--holdrim-space-2); align-items: baseline; }
+.settings-ignored { display: inline-block; margin: var(--holdrim-space-2) 0 0; }
 </style>
 </head>
 <body class="holdrim-screen">
@@ -270,6 +359,35 @@ ${roleRows}
     <h3 id="settings-locks">${t('settings.holders.locks')} · ${code('HOLDRIM_LOCKS')}</h3>
     ${locks}
     <p class="holdrim-alert holdrim-alert--warn">${t('settings.holders.lockNotRead')}</p>
+  </section>
+
+  <section aria-labelledby="settings-project-roles">
+    <h2 id="settings-project-roles">${t('settings.projectRoles.heading')}</h2>
+    <p class="holdrim-muted">${t('settings.projectRoles.lede')}</p>
+    ${confirmed(['define'], 'settings.projectRoles.done')}
+    ${definedTable}
+    ${refusal('define')}
+    <form method="post" action="${forHtml(SETTINGS_SCREEN)}#settings-project-roles" class="settings-define">
+      <input type="hidden" name="action" value="define">
+      <label class="holdrim-field"><span class="holdrim-label">${t('settings.projectRoles.name')}</span>
+        <input class="holdrim-input" name="role" required maxlength="${MAX_ROLE_NAME}" autocomplete="off" spellcheck="false" aria-describedby="settings-role-name" value="${forHtml(defining?.role ?? '')}"></label>
+      <p id="settings-role-name" class="holdrim-muted">${t('settings.projectRoles.nameHint', { max: MAX_ROLE_NAME })}</p>
+      <fieldset class="settings-caps"><legend class="holdrim-label">${t('settings.projectRoles.holds')}</legend>
+${capabilityBoxes}
+      </fieldset>
+      <p><button class="holdrim-button holdrim-button--primary" type="submit">${t('settings.projectRoles.submit')}</button></p>
+    </form>
+    <p class="holdrim-muted">${t('settings.projectRoles.never')}</p>
+  </section>
+
+  <section aria-labelledby="settings-grants">
+    <h2 id="settings-grants">${t('settings.grants.heading')}</h2>
+    <p class="holdrim-muted">${t('settings.grants.lede')}</p>
+    ${confirmed(['grant'], 'settings.grants.granted')}${confirmed(['revoke'], 'settings.grants.revoked')}
+    ${grantTable}
+    ${ended ? `<p class="holdrim-muted">${t('settings.grants.ended', { count: ended })}</p>` : ''}
+    ${refusal('grant')}${refusal('revoke')}
+    ${grantForm}
   </section>
 
   <section aria-labelledby="settings-compose">

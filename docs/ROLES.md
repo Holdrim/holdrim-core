@@ -57,6 +57,13 @@ what it means today: the people it names hold `admin`. It is a grant made by the
 `HOLDRIM_OWNER` — the one grant that is not the owner's to make on a screen, because it exists before
 anyone can sign in.
 
+A role the **project** defines holds any of them but `lock` and `people` (`PROJECT_CAPABILITIES`,
+`engine/core/roles.js`). `lock` for the reason above. `people` because its holder creates accounts and
+resets passwords: a project role holding it would let whoever the owner granted it to hand out the
+very accounts other grants trust, and be an admin in all but name without `HOLDRIM_ADMINS` naming
+them. Its name is lower-case words of letters, digits and `-`, never one of the three this version
+ships (`isValidRoleName`).
+
 **Authority comes from the deployment only.** `HOLDRIM_OWNER`, `HOLDRIM_ADMINS` and the lock-holders
 of section 3 are read from the environment and from nowhere else. Today the owner and the admins fall
 back to `holdrim.json` when the variable is unset; that fallback goes, and a `holdrim.json` that names
@@ -217,10 +224,39 @@ way arrives as whoever it borrowed from. So:
 | Grants of the project's roles | events, from the settings screen | the owner | a click, with a trail |
 | How a person appears, feature toggles | `holdrim.json` | the repository | decide nothing about authority |
 
-Roles and grants as events carry `docs/PRIVACY.md` section 3's caveat: a direct writer to the store
-can forge one. What that buys is bounded — a role or grant without `lock`, so a recorded, attributed
-decision that is never a lock, and never `people` over a lock-holder's account. Signed events
-(phase E) close it.
+Roles and grants are events on the reserved page `_roles` (`engine/api/role-grants.ts`), written by
+the owner's own routes — `POST /api/roles`, `POST /api/grants` and `POST /api/grants/<id>/revoke`, and
+the settings screen's forms, which call the same functions — and by nothing else: `role_defined`,
+`role_granted` and `grant_revoked` are not in `EVENT_TYPES`, so `POST /api/events` refuses all three.
+
+- **Only the owner** defines, grants and revokes: not an admin, and not a holder of `people`, who
+  could otherwise make themselves or an accomplice an approver. Only the owner opens the screen.
+- **Redefined in place.** Defining a role that exists replaces it: the latest `role_defined` is the
+  role, every grant of it holds the new capabilities from the next request, and every earlier
+  definition stays in the trail.
+- **A grant names a person by id**, never by address (`docs/PRIVACY.md`, section 1), with one role
+  and one scope — a page, a family or a block — or none, for everywhere. The owner, an admin and an
+  agent are never grantees: the owner is not a role, an admin already holds everything a project
+  role could add, and an agent is never granted what a person is.
+- **Revoking is a later event** naming the grant; the grant itself stays. Nothing is erased.
+- **Read per request.** The server folds the `_roles` events on every request (`rolesAt`,
+  `engine/api/server.ts`) and asks `can` with those grants in force, so a grant counts from the next
+  request after it is given, and stops from the next request after it is revoked, on every instance
+  at once. What a ✓ or a request was given under is written on it at that moment (section 3) and never
+  re-read from the grants: a ✓ given under a grant stays exactly what it was written as — never a
+  lock, since no grant reaches `lock` — after the grant is revoked.
+- **A stored grant naming an agent is ignored and logged**, once per grant (`role_grant_ignored`),
+  and the service starts anyway: it comes about by a restart that marks the address as an agent
+  after the grant, by an agent token issued for the address later, or by a direct write, and refusing
+  to start would let anyone able to write the store stop the service. `can` refuses an agent `AGENT_NEVER` before any grant is read anyway.
+- **Listable by anyone signed in**, through `GET /api/events?page=_roles`, as the agent tokens'
+  events are on `_agent_tokens`: who may do what is not a secret from the people it applies to.
+
+They carry `docs/PRIVACY.md` section 3's caveat: a direct writer to the store can forge one. What
+that buys is bounded — a role or grant without `lock` or `people`, since the reader checks every
+definition again and a forged one holding either reads as holding nothing; so a recorded, attributed
+decision that is never a lock, and never `people` over anyone's account. Signed events (phase E)
+close it.
 
 ### 6. How a person appears
 
@@ -237,7 +273,9 @@ applies it before the data leaves: a reader who may not see names never receives
 | `role` | the person's current role — Owner, Admin or Member — looked up the same way `roles.roleOf` answers it anywhere else; localized for the panel and the home, the raw English key for the CLI |
 | `id` | the opaque id — for audits that must not see names |
 
-Nothing writes the role an event's author acted under onto the event itself, so `role` reads a
+Only the three shipped roles are shown: a project role a person holds through a grant is not, since
+it may hold only on some pages, and one word next to a comment could not say where. Nothing writes
+the role an event's author acted under onto the event itself, so `role` reads a
 person's role today, not the one they held at the time — a promotion or a demotion changes what
 every past event of theirs is shown as. Once an event carries that role, `role` will read it from
 there instead.
@@ -283,7 +321,11 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | An admin disables a lock-holder to silence their ✓ right when it would matter | The same four routes: disabling one is the owner's alone too |
 | An admin probes candidate addresses to reconstruct the `HOLDRIM_LOCKS` list from which ones 409 | Not stopped, and not meant to be: the 409 itself already shows an address is reserved. What the refusal withholds is only the MECHANISM — that the reservation is `HOLDRIM_LOCKS` specifically — which is acceptable because the lock markers already in the event history name the holders anyway |
 | Someone with `people` makes themselves or an accomplice an approver | Only the owner grants roles |
-| A direct writer to the store forges a grant | Buys a role without `lock`, never `people` over a lock-holder; closed by signed events |
+| The owner grants a project role holding `people`, and its holder hands out approvers' accounts | A project role cannot hold `people`: refused when it is defined, and read as holding nothing if one is stored anyway |
+| A client posts a `role_granted` naming itself | `POST /api/events` refuses the three event types of roles, as it refuses `text_removed` |
+| A direct writer to the store forges a grant | Buys a role without `lock` or `people`; closed by signed events |
+| A direct writer stores a grant naming an agent, to stop the service at its next start | The grant is ignored and logged, and the service starts; `can` refuses the agent `AGENT_NEVER` before any grant is read |
+| A grant is revoked, and a server goes on answering it | Grants are read from the store on every request, never cached |
 | An agent approves its own text | An identity `HOLDRIM_AGENTS` names, and anyone who comes in with an agent token, is refused any ✓ and any lock by `can`, before any grant is read; a ✓ sent with a token is refused outright, whatever its address. Reuse of a person's session, and an agent signing in with a password under an unlisted address, are the open gaps in section 4 |
 | An admin issues an agent token and acts through it | Only the owner issues or revokes one; `people` does not reach it |
 | A disabled person's address keeps writing through a token, or an admin gives the agent's address a password | An address is a person's or an agent's, never both: issuing refuses an address with an account, creating an account refuses an address holding a token, both decided in the store's per-address turn (`AddressInUse`, `engine/api/users.ts`) |
@@ -318,16 +360,16 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Capabilities instead of role names (`can(capability, who, where)`) | built |
 | Owner and admins, from configuration | built |
 | The closed capability list, and roles as sets of it | built — `engine/core/roles.js`, `CAPABILITIES` and `capabilitiesOf` |
-| The scope grammar a grant, and `HOLDRIM_LOCKS`, will be checked against | built (#29) — `isValidScope`, `engine/core/roles.js`, proved both by `HOLDRIM_LOCKS`'s own real use and by its tests. A project role's own NAME grammar is not built ahead of its first caller any more: a format nothing calls is untested by construction, so it waits for the settings screen below |
+| The scope grammar a grant, and `HOLDRIM_LOCKS`, will be checked against | built (#29) — `isValidScope`, `engine/core/roles.js`, proved both by `HOLDRIM_LOCKS`'s own real use and by its tests. A project role's own NAME grammar came with its first caller, the settings screen below (`isValidRoleName`) |
 | `holdrim.json` refusing `roles` and `grants`, like `owner`, `admins` and `locks` | built (#29) — `engine/core/config.js`'s `AUTHORITY_KEYS`. Authority comes from the deployment only; a project's own roles are the owner's to define and grant, from the settings screen below, never a file a committer or the applying agent can edit |
 | `HOLDRIM_LOCKS`, parsed and validated at start | built (#29) — `engine/core/roles.js`'s `parseLocks`, validating the address with the same `isEmailAddress` account creation uses (`engine/core/email.js`) |
 | Lock-holders' accounts guarded like the owner's, on all four routes | built (#29) — `roles.isLockHolder`, asked by `engine/api/server.ts`'s create, reset, disable and re-enable routes, none of the four messages naming who holds a lock; proved end to end in `engine/test-contract.sh` |
 | `can('lock', …)` actually trusting a `HOLDRIM_LOCKS` entry | not built — stays owner-only until the rule below exists; see the comment on `can` |
 | The session-and-credential-history rule (a lock only from a session opened with a credential the person set after the owner's latest issuance) | not built |
-| The settings screen, read-only | built (#36) — `/engine/settings` (`engine/api/settings-page.ts`), the owner's alone: the shipped roles from `SHIPPED_ROLES` and `capabilitiesOf`, who holds what with the variable it comes from and each `HOLDRIM_LOCKS` scope's `lockCoverage`, `features` and `people.show` with their source, and a composer, posted as a form, that answers the full `HOLDRIM_LOCKS` line to set, single-quoted, checked by `isValidScope`, `parseLocks`, `lockCoverage` and `refuseGrantsToAgents` as start checks it, and holding the address to plain characters so the line pastes safely into a shell. It writes nothing and records no event |
-| Roles and grants as events, from a settings screen, by the owner | not built — the next step: the screen above, made to grant |
-| Scopes actually consulted by `can`, with a page or block in hand | built (#33) — `can(capability, who, where)` refuses to answer without `where` (a page, a block, or `EVERYWHERE`), and reads grants through `scopeCovers` (`engine/core/roles.js`): a page covers its blocks by each block's own page, a family `P0*` the prefix and exactly one character more, a block id that block alone, and a scoped grant never answers `EVERYWHERE`. Every check in `engine/api/server.ts` asks with the place (`engine/api/here.ts`): a ✓ by its block, triage and adding details by the stored request's. `POST /api/here` answers per page and for each block the panel names on it (`blocksAsked`), and the panel draws its ✓, its triage and its "Add details" from it. Every grant is still unscoped today — owner, admins and members name no pages — until the settings screen grants a project's own roles; `HOLDRIM_LOCKS` scopes are logged at start and refused when they match no page, and `lock` stays owner-only |
-| The lock written on the event, never recomputed | not built — `docs/PRIVACY.md` section 2 |
+| The settings screen | built (#36) — `/engine/settings` (`engine/api/settings-page.ts`), the owner's alone: the shipped roles from `SHIPPED_ROLES` and `capabilitiesOf`, who holds what with the variable it comes from and each `HOLDRIM_LOCKS` scope's `lockCoverage`, `features` and `people.show` with their source, the project's own roles and grants (below), and a composer, posted as a form, that answers the full `HOLDRIM_LOCKS` line to set, single-quoted, checked by `isValidScope`, `parseLocks`, `lockCoverage` and `refuseGrantsToAgents` as start checks it, and holding the address to plain characters so the line pastes safely into a shell. The composer writes nothing |
+| Roles and grants as events, from the settings screen, by the owner | built (#36) — section 5: `role_defined`, `role_granted` and `grant_revoked` on `_roles` (`engine/api/role-grants.ts`), the owner's routes and the screen's forms, `PROJECT_CAPABILITIES` and `isValidRoleName` (`engine/core/roles.js`), and `rolesAt` handing `withProjectGrants` the grants in force on every request. Lock grants from the screen are not part of it (#54) |
+| Scopes actually consulted by `can`, with a page or block in hand | built (#33) — `can(capability, who, where)` refuses to answer without `where` (a page, a block, or `EVERYWHERE`), and reads grants through `scopeCovers` (`engine/core/roles.js`): a page covers its blocks by each block's own page, a family `P0*` the prefix and exactly one character more, a block id that block alone, and a scoped grant never answers `EVERYWHERE`. Every check in `engine/api/server.ts` asks with the place (`engine/api/here.ts`): a ✓ by its block, triage and adding details by the stored request's. `POST /api/here` answers per page and for each block the panel names on it (`blocksAsked`), and the panel draws its ✓, its triage and its "Add details" from it. The shipped roles are unscoped — owner, admins and members name no pages — and a project's own grant carries its scope (section 5); `HOLDRIM_LOCKS` scopes are logged at start and refused when they match no page, and `lock` stays owner-only |
+| The lock written on the event, never recomputed | built — `data.locks`, written by `recordEvent` and read by `isLocked` (`engine/api/types.ts`); the author's role is not written yet (`docs/PRIVACY.md` section 2) |
 | Agents marked by the deployment (`HOLDRIM_AGENTS`), refused `triage`, `approve`, `lock` and `people` before any grant is read | built (#30) — `engine/core/roles.js`'s `parseAgents`, `isAgent`, `AGENT_NEVER` and `can` |
 | A grant naming an agent refusing to start, on the server and in the CLI | built (#30) — `refuseGrantsToAgents`, called by `rolesOf`; `holdrim.json` refuses `agents` too |
 | Every event marked with whether its author was an agent | built (#30) — `data.asAgent`, written by `recordEvent` (`engine/api/server.ts`), on every event, the CLI's included since it writes through the server (#122) |

@@ -6,7 +6,8 @@ import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
 import {
-  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, parseAgents, lockCoverage, pageOfBlock,
+  rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, parseAgents, lockCoverage, pageOfBlock,
+  isValidRoleName, isValidScope, projectCapabilitiesOf, PROJECT_CAPABILITIES, MAX_ROLE_NAME, type Roles,
 } from '../core/roles.js';
 import { overLimit, validCommit, short, PAGE_FORMAT } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
@@ -21,7 +22,7 @@ import { renderLoginPage, signInPolicy, screenPolicy } from './login-page.ts';
 import { withPanelNonce, pagePolicy, FILE_POLICY } from './content-policy.ts';
 import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
 import { renderPeoplePage } from './people-page.ts';
-import { renderSettingsPage, composeLock } from './settings-page.ts';
+import { renderSettingsPage, composeLock, type SettingsData } from './settings-page.ts';
 import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js';
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
@@ -40,6 +41,9 @@ import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } 
 import { personAs } from '../core/people-show.js';
 import { resolveRemovedBy, type Removed, type TamperReport } from './texts.ts';
 import { issuedEvent, revokedEvent } from './agent-tokens.ts';
+import {
+  ROLES_PAGE, projectRolesOf, grantsOfPerson, definedEvent, grantedEvent, revokedGrantEvent,
+} from './role-grants.ts';
 import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
 import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn } from './here.ts';
 
@@ -143,14 +147,21 @@ const servedOverTls = cfg.environment !== 'Development';
 const identityKind = process.env.HOLDRIM_IDENTITY
   ?? (cfg.environment === 'Development' ? 'dev' : process.env.HOLDRIM_AUDIENCE ? 'iap' : 'password');
 
-let roles: ReturnType<typeof createRoles>;
+/**
+ * The roles the DEPLOYMENT grants — `HOLDRIM_OWNER`, `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` and
+ * `HOLDRIM_AGENTS`, read once, at start. Asked directly only for who someone IS (the owner, an admin,
+ * a lock-holder, an agent), which no grant moves. What someone may DO is asked of the roles in force
+ * for the request (`rolesAt`), which add the project's own grants, read from the store each time: a
+ * `can` asked of this one would answer as if no grant had ever been given, or revoked.
+ */
+let deployment: Roles;
 let iap: IapIdentity | null = null;
 const cycle = createCycle(JSON.parse(readFileSync(new URL('../cycle.json', import.meta.url), 'utf8')));
 
 try {
   // No default, on purpose: in a distributed package, an e-mail of ours here would make anyone who
   // forgot to configure it start a service with OUR owner.
-  roles = rolesOf(project);
+  deployment = rolesOf(project);
   // The proxy identity is only built when it is the one in charge: demanding its audience from
   // someone logging in with a password would block the "start it and use it" case, which is the
   // whole point of password identity.
@@ -273,7 +284,7 @@ const events: EventStore = await (async () => {
  * version — never for one that predates it, which is a store from before this mechanism existed and
  * could hold whatever a client's own POST body once put in `data`.
  */
-const LOCK_BASELINE = await ensureLockBaseline(events, roles.owner);
+const LOCK_BASELINE = await ensureLockBaseline(events, deployment.owner);
 
 /** Wraps `idForLog`/`actedOn` (engine/api/people.ts) around this server's own store. */
 const idForLog = (email: string) => peopleIdForLog(events, email);
@@ -370,6 +381,49 @@ const storeFolders = (() => {
  */
 type Who = string | ReturnType<typeof agentByToken>;
 
+/**
+ * The grants already logged as ignored, by id, so a grant naming an agent is said once per process
+ * rather than on every request that agent makes.
+ */
+const ignoredGrantsLogged = new Set<string>();
+
+/**
+ * The roles in force for one request (docs/ROLES.md, sections 1 and 2): the deployment's, plus the
+ * project's own grants naming `who`, folded from the `_roles` events as the store holds them NOW.
+ * Read per request and never cached, so a grant is in force from the next request after the owner
+ * gives it, and gone from the next request after the owner revokes it, on every instance at once —
+ * a cache would need every instance told, and one that missed the news would go on answering a
+ * revoked grant. Nothing about a ✓ already given is read here: its `locks` was written when it was
+ * given (`recordEvent`), and no grant can reach `lock` anyway.
+ *
+ * A grant is matched to `who` by person id, the only way an event names anybody: the address is
+ * looked up in the people table, never written into the event (role-grants.ts).
+ *
+ * A grant naming an agent is ignored, and said so in the log, once per grant (the owner's decision
+ * on #36): whoever can write the store could otherwise stop the service by writing one, which is why
+ * it does not refuse to start as `HOLDRIM_OWNER` or `HOLDRIM_ADMINS` naming an agent does. `can`
+ * refuses an agent `AGENT_NEVER` before any grant is read anyway; this makes the rest of the grant
+ * inert too, and leaves a line for whoever deploys to find.
+ */
+async function rolesAt(who: Who | null): Promise<Roles> {
+  if (who === null) return deployment;
+  const state = projectRolesOf(await events.list(ROLES_PAGE));
+  if (state.grants.length === 0) return deployment;
+  const email = addressOf(who);
+  const person = await events.personOf(email);
+  if (!person) return deployment;
+  const held = grantsOfPerson(state, person, email);
+  if (held.length === 0) return deployment;
+  if (deployment.isAgent(who)) {
+    for (const g of state.grants.filter((x) => x.person === person && !ignoredGrantsLogged.has(x.id))) {
+      ignoredGrantsLogged.add(g.id);
+      log('WARNING', 'role_grant_ignored', { grant: g.id, role: g.role, person, reason: 'names an agent' });
+    }
+    return deployment;
+  }
+  return deployment.withProjectGrants(held);
+}
+
 const json = (res: ServerResponse, code: number, body: unknown) => {
   const text = JSON.stringify(body);
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', ...API_HEADERS });
@@ -449,8 +503,9 @@ function gatingFeatureOf(incoming: NewEvent): keyof typeof project.features | nu
  * these checks, written for a form, is how that form would one day accept the 500 KB text the API
  * refuses.
  */
-function refusalOf(incoming: NewEvent, who: Who, say: (key: string, params?: Record<string, string | number>) => string):
-  { status: number; body: Record<string, unknown> } | null {
+function refusalOf(
+  incoming: NewEvent, who: Who, roles: Roles, say: (key: string, params?: Record<string, string | number>) => string,
+): { status: number; body: Record<string, unknown> } | null {
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
   }
@@ -552,7 +607,7 @@ function refusalOf(incoming: NewEvent, who: Who, say: (key: string, params?: Rec
  * request from before this whole mechanism existed could hold a client-forged `authorCouldTriage`
  * `recordEvent` never wrote, back when it stored whatever `data` a client sent.
  */
-const withStatus = (e: Event, thread: Event[], viewer: Who | null) => ({
+const withStatus = (e: Event, thread: Event[], viewer: Who | null, roles: Roles) => ({
   ...e,
   // Triage destinations only for a viewer who may triage THIS request, where it was filed (`statusFor`):
   // the panel draws its triage buttons from this list alone.
@@ -568,8 +623,8 @@ const withStatus = (e: Event, thread: Event[], viewer: Who | null) => ({
  * same way — falling back to `legacyLock` against `LOCK_BASELINE` for one that predates it, or holds
  * nothing at all. The one implementation this file and validation.ts (`holdrim sync`) both call.
  */
-const asRead = (e: Event, threads: Map<string, Event[]>, viewer: Who | null) => {
-  if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? [], viewer);
+const asRead = (e: Event, threads: Map<string, Event[]>, viewer: Who | null, roles: Roles) => {
+  if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? [], viewer, roles);
   if (e.type === 'approval') return { ...e, locks: isLocked(e, LOCK_BASELINE) };
   return e;
 };
@@ -586,7 +641,9 @@ const asRead = (e: Event, threads: Map<string, Event[]>, viewer: Who | null) => 
  * resolved to an address — so this never has to ask the store a second time for what the first read
  * already had in hand.
  */
-async function personDisplay(subject: string, id: string | undefined, viewer: Who | null, lang: string): Promise<string> {
+async function personDisplay(
+  subject: string, id: string | undefined, viewer: Who | null, roles: Roles, lang: string,
+): Promise<string> {
   const alwaysNamed = viewer !== null && (subject === addressOf(viewer) || roles.can('people', viewer, EVERYWHERE));
   // Only asked when the answer could actually change: `alwaysNamed` and `people.show: "name"` are
   // the only two paths `personAs` reads `name` on at all, and behind no password there is no account
@@ -604,12 +661,12 @@ async function personDisplay(subject: string, id: string | undefined, viewer: Wh
  * page's history repeats the same few people, and a busy home page many more.
  */
 async function authorDisplaysFor(
-  events: { author: string; authorId?: string }[], viewer: Who | null, lang: string,
+  events: { author: string; authorId?: string }[], viewer: Who | null, roles: Roles, lang: string,
 ): Promise<Map<string, string>> {
   const distinct = new Map<string, string | undefined>();
   for (const e of events) if (!distinct.has(e.author)) distinct.set(e.author, e.authorId);
   const entries = await Promise.all(
-    [...distinct].map(async ([email, id]) => [email, await personDisplay(email, id, viewer, lang)] as const),
+    [...distinct].map(async ([email, id]) => [email, await personDisplay(email, id, viewer, roles, lang)] as const),
   );
   return new Map(entries);
 }
@@ -649,11 +706,11 @@ function removalSubjectsOf(
  * @param through  where it came from, for the log only
  */
 async function recordEvent(
-  incoming: NewEvent, who: Who, say: (key: string, params?: Record<string, string | number>) => string,
+  incoming: NewEvent, who: Who, roles: Roles, say: (key: string, params?: Record<string, string | number>) => string,
   through = 'api',
 ): Promise<{ status: number; body: Record<string, unknown>; event?: Event }> {
   const email = addressOf(who);
-  const refusal = refusalOf(incoming, who, say);
+  const refusal = refusalOf(incoming, who, roles, say);
   if (refusal) return refusal;
 
   if (incoming.type === 'request_state' || incoming.type === 'supplement') {
@@ -747,6 +804,86 @@ async function recordEvent(
   return { status: 201, body: e as unknown as Record<string, unknown>, event: e };
 }
 
+// ---------------------------------------------------------------- the project's roles (docs/ROLES.md)
+//
+// Defining a role, granting one, revoking a grant: the owner's alone (the owner's decisions on #36 —
+// not a holder of `people`, who could otherwise make themselves or an accomplice an approver, and not
+// an admin). Two doors lead to each: the API routes (`POST /api/roles`, `/api/grants` and
+// `/api/grants/<id>/revoke`) and the settings screen's forms. Each door asks whether it is the owner
+// before it reads what was sent; what follows is the one set of checks both then share, so the
+// screen cannot accept what the API refuses.
+
+/** What a role operation answered: the event it wrote, or the sentence that says why not. */
+interface RoleOutcome { status: number; event?: Event; key?: string; params?: Record<string, string | number> }
+
+/**
+ * Defines a role, or redefines it in place: the latest `role_defined` is the role, every grant of it
+ * holds what the new definition says from the next request on, and every earlier definition stays
+ * in the trail (the owner's decision on #36). The name by `isValidRoleName`, which refuses the three
+ * the engine ships; the capabilities by `projectCapabilitiesOf`, which refuses `lock` and `people`
+ * with everything else outside `PROJECT_CAPABILITIES`.
+ */
+async function defineRole(who: Who, asked: { role: unknown; capabilities: unknown }): Promise<RoleOutcome> {
+  const role = typeof asked.role === 'string' ? asked.role.trim() : '';
+  if (!isValidRoleName(role)) return { status: 400, key: 'api.roles.nameInvalid', params: { max: MAX_ROLE_NAME } };
+  const capabilities = projectCapabilitiesOf(asked.capabilities);
+  if (!capabilities) {
+    return { status: 400, key: 'api.roles.capabilitiesInvalid', params: { capabilities: PROJECT_CAPABILITIES.join(', ') } };
+  }
+  const { author, event } = await recordAuthored(events, definedEvent(role, capabilities, deployment.isAgent(who)), addressOf(who));
+  log('INFO', 'role_defined', { id: event.id, role, capabilities: capabilities.join(','), by: author });
+  return { status: 201, event };
+}
+
+/**
+ * Grants a defined role to one person, everywhere or within one scope (docs/ROLES.md, section 2).
+ *
+ * Nobody the deployment already names is a grantee: the owner holds everything and is not a role;
+ * an admin comes from `HOLDRIM_ADMINS` alone and holds everything a project role could add; and an
+ * agent — `HOLDRIM_AGENTS`, or an address holding an agent token — is never granted anything a
+ * person is (docs/ROLES.md, section 4), which is also why a stored grant that comes to name one is
+ * ignored (`rolesAt`). A grant already in force for the same role and scope is refused rather than
+ * written twice, since a second copy would outlive the first one's revocation.
+ */
+async function grantRole(who: Who, asked: { email: unknown; role: unknown; scope: unknown }): Promise<RoleOutcome> {
+  const address = normalizeEmail(typeof asked.email === 'string' ? asked.email : '');
+  if (!isEmailAddress(address)) return { status: 400, key: 'api.users.emailInvalid', params: { email: short(asked.email ?? '') } };
+  const role = typeof asked.role === 'string' ? asked.role.trim() : '';
+  const typed = typeof asked.scope === 'string' ? asked.scope.trim() : '';
+  const scope = typed === '' ? null : typed;
+  if (scope !== null && !isValidScope(scope)) return { status: 400, key: 'api.grants.scopeInvalid' };
+  if (deployment.isOwner(address)) return { status: 409, key: 'api.grants.notForTheOwner' };
+  if (deployment.admins.includes(address)) return { status: 409, key: 'api.grants.notForAnAdmin', params: { email: address } };
+  const holdsToken = byPassword !== null && (await byPassword.users.listAgentTokens()).some((t) => t.email === address);
+  if (deployment.isAgent(address) || holdsToken) return { status: 409, key: 'api.grants.notForAnAgent', params: { email: address } };
+  const state = projectRolesOf(await events.list(ROLES_PAGE));
+  if (!state.roles.get(role)?.capabilities.length) return { status: 404, key: 'api.grants.roleUnknown', params: { role: short(role) } };
+  const known = await events.personOf(address);
+  if (known && state.grants.some((g) => g.person === known && g.role === role && g.scope === scope)) {
+    return { status: 409, key: 'api.grants.present', params: { email: address, role } };
+  }
+  // The row made here, before the event, so the grant names an id the person will be found by when
+  // they next ask — the same order `recordAuthored` keeps for an event's author.
+  const person = await events.personFor(address);
+  const { author, event } = await recordAuthored(events, grantedEvent(role, person, scope, deployment.isAgent(who)), addressOf(who));
+  log('INFO', 'role_granted', { id: event.id, role, scope, person, by: author });
+  return { status: 201, event };
+}
+
+/**
+ * Revokes one grant, by the id of the event that gave it. The grant stays in the trail; the
+ * revocation is a later event naming it, and `projectRolesOf` stops reading the grant as in force.
+ */
+async function revokeGrant(who: Who, grant: string): Promise<RoleOutcome> {
+  const state = projectRolesOf(await events.list(ROLES_PAGE));
+  if (state.ended.some((g) => g.id === grant)) return { status: 409, key: 'api.grants.alreadyRevoked' };
+  const found = state.grants.find((g) => g.id === grant);
+  if (!found) return { status: 404, key: 'api.grants.notFound' };
+  const { author, event } = await recordAuthored(events, revokedGrantEvent(grant, deployment.isAgent(who)), addressOf(who));
+  log('INFO', 'grant_revoked', { id: event.id, grant, role: found.role, person: found.person, by: author });
+  return { status: 201, event };
+}
+
 /**
  * What a request that came in with an agent token may reach: the events, and what reading them
  * needs, and nothing else. Every account route — sign-out, a password, people, tokens — is out of
@@ -771,6 +908,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   if (byToken(who) && !tokenMayReach(req.method, route)) {
     return json(res, 403, { error: i18n.t(languageOf(req), 'api.token.routeRefused') });
   }
+  // Read once for the whole request, and before any route: every answer below about what `who` may
+  // do comes from these, so a grant given or revoked a moment ago is in force on the next request.
+  const roles = await rolesAt(who);
 
   // ---------------------------------------------------------------- in and out (password identity)
   if (byPassword && req.method === 'POST' && route === '/sign-out') {
@@ -846,7 +986,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   // the user store. The two are different questions: the store answers "does this person have a
   // way in", the configuration answers "what may they do". Putting the role in the row would
   // create a second truth, and on the day they disagree nobody can say which one is the service.
-  if (byPassword && (await userRoutes(req, res, route, who, byPassword.users, languageOf(req)))) return;
+  if (byPassword && (await userRoutes(req, res, route, who, roles, byPassword.users, languageOf(req)))) return;
 
   // What this person may do on one page, and on each block the panel names on it (`hereOf`,
   // `blocksAsked`, engine/api/here.ts) — asked per page, since a grant may be limited to some. There
@@ -871,7 +1011,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     const all = await events.list(page);
     const threads = cycle.threadsOf(all);
     const lang = languageOf(req);
-    const displays = await authorDisplaysFor(all, who, lang);
+    const displays = await authorDisplaysFor(all, who, roles, lang);
     // `own`, never a raw address the panel could compare `me` against: `author` below is already
     // whatever `people.show` says this viewer may see, which for anyone but the viewer themselves is
     // not necessarily an e-mail at all — docs/ROLES.md, "The front end obeys the server" (the panel
@@ -880,7 +1020,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // it there), so `displays` already has their entry — no second resolve, and no raw address left
     // inside `Removed` for a viewer `author` itself already hides it from.
     return json(res, 200, all.map((e) => ({
-      ...asRead(e, threads, who), author: displays.get(e.author) ?? e.author,
+      ...asRead(e, threads, who, roles), author: displays.get(e.author) ?? e.author,
       textRemoved: resolveRemovedBy(e.textRemoved, displays), snapshotRemoved: resolveRemovedBy(e.snapshotRemoved, displays),
       own: e.author === email,
     })));
@@ -894,9 +1034,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     const lang = languageOf(req);
     // Unlike the list route above, `all` here spans every page, so `[found]` alone would miss the
     // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
-    const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], who, lang);
+    const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], who, roles, lang);
     return json(res, 200, {
-      ...asRead(found, cycle.threadsOf(all), who), author: displays.get(found.author) ?? found.author,
+      ...asRead(found, cycle.threadsOf(all), who, roles), author: displays.get(found.author) ?? found.author,
       textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
       own: found.author === email,
     });
@@ -1023,6 +1163,33 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     return json(res, 201, e);
   }
 
+  // The project's roles: the owner's alone, each asked before the body is read — a refusal must not
+  // depend on, or reveal, what was sent. A token never gets here (`tokenMayReach`), and `isOwner` is
+  // false for one anyway. One check per route, not one shared by the three: a route added beside them
+  // later would otherwise have to remember to join a condition written for somebody else.
+  const ownerOnly = () => json(res, 403, { error: i18n.t(languageOf(req), 'api.roles.ownerOnly') });
+  const answered = (outcome: RoleOutcome) => {
+    if (!outcome.event) return json(res, outcome.status, { error: i18n.t(languageOf(req), outcome.key!, outcome.params) });
+    res.setHeader('location', `/api/events/${outcome.event.id}`);
+    return json(res, outcome.status, outcome.event);
+  };
+  if (req.method === 'POST' && route === '/roles') {
+    if (!roles.isOwner(who)) return ownerOnly();
+    const body = await jsonBody(req);
+    return answered(await defineRole(who, { role: body.role, capabilities: body.capabilities }));
+  }
+  if (req.method === 'POST' && route === '/grants') {
+    if (!roles.isOwner(who)) return ownerOnly();
+    const body = await jsonBody(req);
+    return answered(await grantRole(who, { email: body.email, role: body.role, scope: body.scope }));
+  }
+  // The id as every event id is shaped (`ONE_EVENT_ROUTE`).
+  const revoking = route.match(/^\/grants\/([A-Za-z0-9_-]+)\/revoke$/);
+  if (revoking && req.method === 'POST') {
+    if (!roles.isOwner(who)) return ownerOnly();
+    return answered(await revokeGrant(who, revoking[1]!));
+  }
+
   if (req.method === 'POST' && route === '/events') {
     const incoming = (await jsonBody(req)) as NewEvent;
     // The sentences on this path are for the person looking at the panel, so they come out of the
@@ -1030,7 +1197,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // contract, and a value that changes with the reader's locale is a value nobody can match on.
     const say = (key: string, params?: Record<string, string | number>) =>
       i18n.t(languageOf(req), key, params);
-    const outcome = await recordEvent(incoming, who, say);
+    const outcome = await recordEvent(incoming, who, roles, say);
     if (outcome.event) res.setHeader('location', `/api/events/${outcome.event.id}`);
     return json(res, outcome.status, outcome.body);
   }
@@ -1054,7 +1221,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
  * password with a much wider audience than the account it opens.
  */
 async function userRoutes(
-  req: IncomingMessage, res: ServerResponse, route: string, who: Who,
+  req: IncomingMessage, res: ServerResponse, route: string, who: Who, roles: Roles,
   users: UserStore, lang: string,
 ): Promise<boolean> {
   // `api` never lets a token identity this far (`tokenMayReach`); every guard below still asks `who`,
@@ -1425,7 +1592,7 @@ async function apiViewerOf(req: IncomingMessage): Promise<{ who: Who } | { refus
   // restart on, the token opens nothing: `isOwner` is false for a token identity anyway, and this
   // makes the owner's address unusable through a script at all, not merely stripped of the owner's
   // powers.
-  if (roles.isOwner(agent.email)) {
+  if (deployment.isOwner(agent.email)) {
     log('WARNING', 'agent_token_refused', { reason: 'issued for the address that is now the owner\'s' });
     return { refused: 'api.token.invalid' };
   }
@@ -1437,7 +1604,8 @@ async function apiViewerOf(req: IncomingMessage): Promise<{ who: Who } | { refus
  * serves the screen and the home that links to it — a link to a screen that then sends you away is
  * a door painted on a wall. Password sign-in only: behind a proxy, people live in the proxy.
  */
-const managesPeople = (viewer: string | null) => Boolean(byPassword && viewer && roles.can('people', viewer, EVERYWHERE));
+const managesPeople = (viewer: string | null, roles: Roles) =>
+  Boolean(byPassword && viewer && roles.can('people', viewer, EVERYWHERE));
 
 /**
  * Whether the people SCREEN (and its link in the nav) is reachable at all — `features.peopleScreen`.
@@ -1461,11 +1629,12 @@ function screenHeaders(nonce: string, script: boolean) {
 
 async function servePeople(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
+  const roles = await rolesAt(viewer);
   // Somebody who may not manage people is sent home rather than shown a refusal: the navigation
   // never offered them this screen, so they got here by typing the address. A project that turned
   // the screen off sends EVERYONE home the same way, owner included — the routes behind it (above)
   // never asked this question and are not asked it here either.
-  if (!peopleScreenOn() || !byPassword || !managesPeople(viewer)) {
+  if (!peopleScreenOn() || !byPassword || !managesPeople(viewer, roles)) {
     return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
   }
   const nonce = randomBytes(16).toString('base64');
@@ -1481,51 +1650,95 @@ async function servePeople(req: IncomingMessage, res: ServerResponse) {
 
 /**
  * The settings screen (engine/api/settings-page.ts): the owner's, and nobody else's — not an admin's,
- * since it shows who holds `lock` and composes grants of it, and `lock` is the one thing the
- * deployment decides for the owner alone. Anybody else is sent home, as `servePeople` sends whoever
- * may not manage people: the nav never offered them the link. `viewerOf` reads the session only, so
- * an agent token never reaches here, whatever it carries.
+ * since it shows who holds `lock`, composes grants of it, and gives the project's own roles, all of
+ * which are the owner's alone (the owner's decisions on #36). Anybody else is sent home, as
+ * `servePeople` sends whoever may not manage people: the nav never offered them the link. `viewerOf`
+ * reads the session only, so an agent token never reaches here, whatever it carries.
  *
- * It writes nothing, on any method: the composer's answer is a line of text, and every value shown
- * is read from what start already parsed (`project`, `roles`, `lockScopes`). The composer posts, so
- * the address typed stays out of the URL, and its post is refused from anywhere but this server's own
- * page, as the home's forms are (`sameOrigin`). The site's blocks are read afresh, and only when a
- * scope needs measuring against them — the pages a commit moved since start are what the owner is
- * asking about.
+ * Its forms post back here, and are refused from anywhere but this server's own page, as the home's
+ * forms are (`sameOrigin`). Three of them write, each through the same function its API route calls
+ * (`defineRole`, `grantRole`, `revokeGrant`), and answer with a redirect back, so a reload posts
+ * nothing twice; a refusal draws the screen again with the reason, what was typed, and the status
+ * the API would have answered. The fourth, the lock composer, writes nothing: its answer is a line of
+ * text, and every value it reads is what start already parsed (`project`, `lockScopes`). The site's
+ * blocks are read afresh, and only when a scope needs measuring against them — the pages a commit
+ * moved since start are what the owner is asking about.
  */
-async function serveSettings(req: IncomingMessage, res: ServerResponse) {
+async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL) {
   const viewer = await viewerOf(req);
-  if (!viewer || !roles.isOwner(viewer)) return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
+  if (!viewer || !deployment.isOwner(viewer)) return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
   const lang = languageOf(req);
   const asked = req.method === 'POST';
   if (asked && !sameOrigin(req)) return json(res, 403, { error: i18n.t(lang, 'api.crossSite') });
   const form = asked ? new URLSearchParams(await rawBody(req)) : null;
-  const email = form?.get('email') ?? null;
-  const scope = form?.get('scope') ?? null;
-  const blockIds = lockScopes.length || asked ? [...(await readBlocks(projectRoot)).keys()] : [];
+  const action = form?.get('action') ?? '';
+  let edit: SettingsData['edit'];
+  let status = 200;
+  if (form && isRoleAction(action)) {
+    const outcome = action === 'define'
+      ? await defineRole(viewer, { role: form.get('role'), capabilities: form.getAll('capability') })
+      : action === 'grant'
+        ? await grantRole(viewer, { email: form.get('email'), role: form.get('role'), scope: form.get('scope') })
+        : await revokeGrant(viewer, form.get('grant') ?? '');
+    if (outcome.event) {
+      res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}#${ROLE_ACTION_SECTION[action]}` });
+      return res.end();
+    }
+    edit = {
+      action, key: outcome.key!, params: outcome.params,
+      values: { role: form.get('role') ?? '', email: form.get('email') ?? '', scope: form.get('scope') ?? '',
+        capabilities: form.getAll('capability') },
+    };
+    status = outcome.status;
+  }
+  // Read after any write above, so what is drawn is what the next request will be answered by.
+  const roles = await rolesAt(viewer);
+  const composing = asked && !isRoleAction(action);
+  const email = composing ? form!.get('email') ?? '' : '';
+  const scope = composing ? form!.get('scope') ?? '' : '';
+  const blockIds = lockScopes.length || composing ? [...(await readBlocks(projectRoot)).keys()] : [];
   const reach = lockCoverage(lockScopes, blockIds);
   // As the panel, the home and the API show a person to the owner — never a second way of spelling
   // an address on this one screen.
-  const shown = (address: string) => personDisplay(address, undefined, viewer, lang);
+  const shown = (address: string) => personDisplay(address, undefined, viewer, roles, lang);
+  const state = projectRolesOf(await events.list(ROLES_PAGE));
+  const grants = await Promise.all(state.grants.map(async (g) => {
+    // A person forgotten (docs/PRIVACY.md, section 5) keeps the id and loses the address: the id is
+    // what is shown then, and no address can make the grant apply again.
+    const address = (await events.person(g.person))?.email ?? null;
+    return {
+      id: g.id, role: g.role, scope: g.scope, when: g.when,
+      who: address ? await shown(address) : g.person,
+      ignored: address !== null && deployment.isAgent(address),
+    };
+  }));
+  const done = url.searchParams.get('done') ?? '';
   const nonce = randomBytes(16).toString('base64');
-  res.writeHead(200, screenHeaders(nonce, false));
+  res.writeHead(status, screenHeaders(nonce, false));
   res.end(renderSettingsPage(i18n, lang, {
     projectName: project.name,
-    canManagePeople: peopleScreenOn() && managesPeople(viewer),
+    canManagePeople: peopleScreenOn() && managesPeople(viewer, roles),
     holders: {
-      owner: await shown(roles.owner),
-      admins: await Promise.all(roles.admins.filter((a) => !roles.isOwner(a)).map(shown)),
+      owner: await shown(deployment.owner),
+      admins: await Promise.all(deployment.admins.filter((a) => !deployment.isOwner(a)).map(shown)),
       agents: await Promise.all(parseAgents(project.agents).map(shown)),
       locks: await Promise.all(lockScopes.map(async (l, i) => ({ who: await shown(l.email), scope: l.scope,
         reaches: reach[i].reaches }))),
     },
-    compose: asked ? {
-      email: email ?? '', scope: scope ?? '',
-      result: composeLock(lockScopes, { email: email ?? '', scope: scope ?? '' }, blockIds, roles),
-    } : undefined,
+    projectRoles: {
+      roles: [...state.roles.values()].map((d) => ({ role: d.role, capabilities: d.capabilities, when: d.when })),
+      grants, ended: state.ended.length,
+    },
+    edit, done: isRoleAction(done) && !asked ? done : undefined,
+    compose: composing ? { email, scope, result: composeLock(lockScopes, { email, scope }, blockIds, deployment) } : undefined,
     features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,
   }, projectTheme, nonce));
 }
+
+/** The settings screen's forms that write, and the section each one lands back on. */
+const ROLE_ACTION_SECTION = { define: 'settings-project-roles', grant: 'settings-grants', revoke: 'settings-grants' } as const;
+type RoleAction = keyof typeof ROLE_ACTION_SECTION;
+const isRoleAction = (action: string): action is RoleAction => Object.hasOwn(ROLE_ACTION_SECTION, action);
 
 /**
  * Whether a form post came from a page this server served.
@@ -1558,6 +1771,7 @@ async function homeForm(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
   if (!viewer) return json(res, 401, { error: say('api.notAuthenticated') });
   if (!sameOrigin(req)) return json(res, 403, { error: say('api.crossSite') });
+  const roles = await rolesAt(viewer);
   const form = new URLSearchParams(await rawBody(req));
 
   if (form.get('action') === 'triage') {
@@ -1566,7 +1780,7 @@ async function homeForm(req: IncomingMessage, res: ServerResponse) {
       text: form.get('reason')?.trim() || null,
       data: { request: form.get('request') ?? '', state: form.get('state') ?? '' },
     };
-    const outcome = await recordEvent(incoming, viewer, say, 'home');
+    const outcome = await recordEvent(incoming, viewer, roles, say, 'home');
     if (!outcome.event) {
       return serveHome(req, res, { triage: { problem: String(outcome.body.error), request: form.get('request') ?? '',
         reason: form.get('reason') ?? '' } }, outcome.status);
@@ -1581,7 +1795,7 @@ async function homeForm(req: IncomingMessage, res: ServerResponse) {
     type: 'request', page: form.get('page') ?? '', block: null, text: form.get('text') ?? '',
     data: { category: 'page' },
   };
-  const outcome = await recordEvent(incoming, viewer, say, 'home');
+  const outcome = await recordEvent(incoming, viewer, roles, say, 'home');
   if (!outcome.event) {
     return serveHome(req, res, { problem: String(outcome.body.error), draft: incoming.text ?? '', near: incoming.page },
       outcome.status);
@@ -1600,9 +1814,10 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
     (path) => readFileSync(path, 'utf8'));
   const threads = cycle.threadsOf(all);
   const viewer = await viewerOf(req);
+  const roles = await rolesAt(viewer);
   // Resolved once for every request on the home, not once per row: `requestsInProgress` only reads
   // this for `type: "request"` events, so those are all `authorDisplaysFor` ever needs to look at.
-  const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, lang);
+  const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, roles, lang);
   const requests = requestsInProgress(all,
     (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)),
     new Map(pages.map((p) => [p.page, p.href])),
@@ -1625,7 +1840,7 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   res.writeHead(status, screenHeaders(nonce, project.features.graph));
   res.end(renderHomePage(i18n, lang, {
     projectName: project.name, pages, requests,
-    canManagePeople: peopleScreenOn() && managesPeople(viewer),
+    canManagePeople: peopleScreenOn() && managesPeople(viewer, roles),
     pageRequestsEnabled: project.features.pageRequests, ask,
     graphEnabled: project.features.graph,
     isOwner: viewer !== null && roles.isOwner(viewer),
@@ -1875,7 +2090,7 @@ const server = createServer(async (req, res) => {
         : await serveHome(req, res, { asked: url.searchParams.has('asked'), decided: url.searchParams.has('decided') });
     }
     if (url.pathname === PEOPLE_SCREEN) return await servePeople(req, res);
-    if (url.pathname === SETTINGS_SCREEN) return await serveSettings(req, res);
+    if (url.pathname === SETTINGS_SCREEN) return await serveSettings(req, res, url);
 
     return await serveStatic(url, res, languageOf(req));
   } catch (error) {
