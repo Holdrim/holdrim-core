@@ -451,6 +451,39 @@ who ran the engine from `main` before it.
   inside the second. A working symlinked folder that resolves INSIDE the project keeps working, at
   any depth, exactly as before. Nothing to change for a project whose `content.registry` already
   names an ordinary path inside its own folder.
+- **`content.folders` can no longer name a folder outside the project, the same gap #161 closed for
+  `content.registry` (#164).** `sheetFolders` (engine/cli/pages.ts) joined each entry onto the
+  project root with a plain `join`, and `sheetFiles` then `readdirSync`'d whatever that produced:
+  `"../other-project/pages"`, or an absolute path, made the engine scan, fingerprint and SERVE pages
+  belonging to a different project. `readConfig` now refuses, at load, a `content.folders` that is
+  not an array, and any entry that is not a non-empty string, is absolute, or resolves outside the
+  root or to the root itself — with the same `insideRoot` (engine/core/paths.js) `content.registry`
+  already uses, never a second comparison. **A second gap, closed alongside it:** a WORKING symlinked
+  folder that resolves outside the project — `content.folders: ["mnt"]` with `mnt` a committed link
+  to somewhere else — read as an ordinary nested path to that lexical check. `sheetFiles`, the one
+  place a configured folder is actually opened, now runs `refuseEscapedFolder` (engine/cli/fs.ts,
+  holdrim#161) on each folder first, resolving its real location and the project's real root with
+  `fs.realpathSync` before ever reading it. A working symlinked folder that resolves INSIDE the
+  project keeps working, at any depth, exactly as before. **A behaviour change found in review:** a
+  configured folder that is unreachable through a DANGLING symlink — the folder itself, or an
+  ancestor of it — now refuses to start the read, naming the folder that "cannot be reached", the
+  same message and the same `refuseUnreachableFolder` (engine/cli/fs.ts, holdrim#155) the registry
+  already uses; before, it silently read as an empty folder — no pages, no error. holdrim#155 made
+  the identical call for the registry: an unmounted shared volume must not read as "nothing here",
+  because the two look the same to whoever is staring at an empty page list. A folder that was
+  simply never created (no `sync` has run yet) is unaffected and still reads as empty. **A third
+  round found the same gap for an ordinary FILE standing where a folder was configured** —
+  `content.folders: ["docs/sheets"]` with `docs` itself a plain file — which `refuseUnreachableFolder`
+  had never been asked about and let through as the filesystem's own raw `ENOTDIR`, unrefused, from
+  wherever `readdirSync` first tried to descend into it; the same walk now catches it and refuses
+  with the same "cannot be reached" message a dangling symlink already gets. `loadRegistry` is
+  unaffected — `refuseLink`, which it runs on the registry's own path before this walk ever starts,
+  already failed first with that same raw `ENOTDIR`, and still does. Nothing to
+  change for a project whose `content.folders` already names ordinary paths inside its own folder.
+  **Left open, and not this
+  fix's to close:** `sheetFiles` never recurses into a configured folder's own subfolders, so a
+  symlinked subfolder or page FILE inside one is not walked into by this check either — see the pull
+  request for the recommendation.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY

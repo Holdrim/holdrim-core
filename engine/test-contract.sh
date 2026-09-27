@@ -1919,6 +1919,19 @@ expect "and says it resolves outside the project root" 0 \
   "$(grep -qE 'invalid configuration: .*content\.registry.*resolves outside the project root' $WORK/registry-escape.log; echo $?)"
 rm -rf "$ESCAPE"
 
+# holdrim#164: `content.folders` has the same shape as `content.registry` and the same gap — proved
+# the same way, through a real boot, not only through `readConfig`'s own unit tests
+# (engine/tests/config.test.js).
+FOLDERS_ESCAPE=$(mktemp -d); cp -r "$SITE/." "$FOLDERS_ESCAPE"
+node -e "const f=process.argv[1]+'/holdrim.json', c=JSON.parse(require('fs').readFileSync(f,'utf8'));
+  c.content.folders=['../outside']; require('fs').writeFileSync(f, JSON.stringify(c))" "$FOLDERS_ESCAPE"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_SITE="$FOLDERS_ESCAPE" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/folders-escape.log" 2>&1
+expect "a content.folders entry that climbs out of the project → exits 1" 1 "$?"
+expect "and says it resolves outside the project root" 0 \
+  "$(grep -qE 'invalid configuration: .*content\.folders\[0\].*resolves outside the project root' $WORK/folders-escape.log; echo $?)"
+rm -rf "$FOLDERS_ESCAPE"
+
 # Firestore is optional: configured but not installed, the boot has to fail and name the package,
 # not come up half-working or die in a module-resolution stack. The forbid-optional hook stands in
 # for "not installed" — it refuses the package exactly the way a missing one would.
