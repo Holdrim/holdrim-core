@@ -60,6 +60,7 @@
   "api.token.routeRefused": "um token de agente alcança os eventos e mais nada; entre com sua conta para fazer isso",
   "api.token.withSession": "este pedido traz uma sessão e um token de agente ao mesmo tempo; envie um ou outro",
   "api.triage.ownerOnly": "só owner e admin fazem a triagem",
+  "api.triage.notOwn": "o seu próprio pedido é decidido por quem pode fazer a triagem em todo lugar: a sua triagem é para os pedidos das outras pessoas",
   "api.users.adminOnly": "só o dono e os administradores gerenciam quem pode entrar",
   "api.users.emailInvalid": "\"{email}\" não é um endereço de e-mail",
   "api.users.emailTaken": "{email} já tem acesso aqui",

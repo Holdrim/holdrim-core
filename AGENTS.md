@@ -86,8 +86,9 @@ Each has a test. If you change the code around one, run the contract test and re
 
 - **Exactly one owner**, and it comes from `HOLDRIM_OWNER`, never from a database column and never
   from `holdrim.json`: the admins likewise, from `HOLDRIM_ADMINS`. Zero or two owners and the service
-  refuses to start; a `holdrim.json` naming `owner`, `admins` or `locks` refuses too, on the server
-  and in the CLI, because whoever commits to the file is not whoever deploys.
+  refuses to start; a `holdrim.json` naming any key in `AUTHORITY_KEYS` (`owner`, `admins`, `locks`,
+  `agents`, `roles`, `grants`) refuses too, on the server and in the CLI, because whoever commits to
+  the file is not whoever deploys.
   (`engine/core/roles.js`, `engine/core/config.js`)
 - **Nobody but the owner resets or creates the owner's account.** Both routes are guarded, because
   guarding only one leaves the other open — an admin could create the owner's account during a
@@ -124,8 +125,9 @@ Each has a test. If you change the code around one, run the contract test and re
   `POST /api/roles`, `/api/grants`, `/api/grants/<id>/revoke` and the settings screen — and `POST
   /events` refuses `role_defined`, `role_granted` and `grant_revoked`. A project role never holds
   `people` or `lock`: refused when it is written, dropped when it is read. A grant names a person by
-  id, never an address, and is read on every request; a request skips triage only when its author
-  may triage everywhere (`engine/api/role-grants.ts`, `engine/core/roles.js`, `engine/api/server.ts`).
+  id, never an address, and is read on every request. A request skips or passes triage only by
+  someone who may triage everywhere, so a scoped triager never decides their own
+  (`engine/api/role-grants.ts`, `engine/core/roles.js`, `engine/api/server.ts`, `engine/api/here.ts`).
 - **The theme is untrusted input.** It lands inside CSS and HTML. Colours are validated against a
   known format; interpolating a raw string lets `red; } body { display:none } /*` through.
 

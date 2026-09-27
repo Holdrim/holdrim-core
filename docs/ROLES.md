@@ -90,12 +90,15 @@ about roles.
 A request on a block that depends on another page is decided by whoever may triage **the block the
 request is on**. The lights already tell the other page's people that something moved under them.
 
-**A request skips triage only when its author could have triaged it wherever it may reach** — that
-is, when they may triage everywhere: the owner, an admin, or a project grant with no scope. A grant
-limited to some pages or blocks lets its holder decide other people's requests there, and files
-their own requests at triage like anybody's, even on a page inside the scope, from the panel and
-from the home's form alike. The starting state is written from `can('triage', author, EVERYWHERE)`
-when the request is filed (section 3).
+**A request skips or passes triage only by someone who could have triaged it wherever it may
+reach; a scoped triager never decides their own.** Could-have-triaged-it-anywhere means may triage
+everywhere: the owner, an admin, or a project grant with no scope. A grant limited to some pages or
+blocks lets its holder decide other people's requests there, while their own requests — even on a
+page inside the scope, from the panel or from the home's form — start at triage like anybody's and
+wait for someone else to decide them. Two checks hold it: the starting state is written from
+`can('triage', author, EVERYWHERE)` when the request is filed (section 3), and deciding a request
+that is the asker's own asks `triage` everywhere too (`mayTriage`, `engine/api/here.ts`), which also
+leaves the panel and the home offering them nothing to press on it.
 
 ### 3. The lock
 
@@ -250,7 +253,8 @@ the settings screen's forms, which call the same functions — and by nothing el
 - **Read per request.** The server folds the `_roles` events on every signed-in request (`rolesAt`,
   `engine/api/server.ts`) and asks `can` with those grants in force, so a grant counts from the next
   request after it is given, and stops from the next request after it is revoked, on every instance
-  at once. Each request reads the page once, with `listBare`: one query of that page alone, with no
+  at once. Each request reads the page once — a grant reads it once more, right before it writes, to
+  narrow the window in which two identical grants both pass — with `listBare`: one query of that page alone, with no
   people or texts joined, plus one look-up of the viewer's person id when any grant is in force —
   the cost every signed-in request pays, growing with the number of `_roles` events, not with the
   rest of the store. It fails closed: a store that cannot be read answers the request with a 500,
@@ -341,7 +345,7 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | A direct writer to the store forges a grant | Buys a role without `lock` or `people`; closed by signed events |
 | A direct writer stores a grant naming an agent, to stop the service at its next start | The grant is ignored and logged, and the service starts; `can` refuses the agent `AGENT_NEVER` before any grant is read |
 | A grant is revoked, and a server goes on answering it | Grants are read from the store on every request, never cached; a store that cannot be read fails the request |
-| A grant limited to some pages is used to skip triage | A request skips triage only when its author may triage everywhere; a scoped grantee's own requests wait at triage |
+| A grant limited to some pages is used to skip triage | A request skips or passes triage only by someone who may triage everywhere; a scoped triager's own requests start at triage and are decided by someone else |
 | An agent approves its own text | An identity `HOLDRIM_AGENTS` names, and anyone who comes in with an agent token, is refused any ✓ and any lock by `can`, before any grant is read; a ✓ sent with a token is refused outright, whatever its address. Reuse of a person's session, and an agent signing in with a password under an unlisted address, are the open gaps in section 4 |
 | An admin issues an agent token and acts through it | Only the owner issues or revokes one; `people` does not reach it |
 | A disabled person's address keeps writing through a token, or an admin gives the agent's address a password | An address is a person's or an agent's, never both: issuing refuses an address with an account, creating an account refuses an address holding a token, both decided in the store's per-address turn (`AddressInUse`, `engine/api/users.ts`) |

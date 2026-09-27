@@ -2514,6 +2514,20 @@ expect "(a page asked for from the home, near a page inside the scope → 303)" 
 SCOPED_PAGE_REQUEST=$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A02" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(e=>e.type==='request'&&e.text==='a page from a scoped grant')?.id ?? ''))")
 require_id "$SCOPED_PAGE_REQUEST" SCOPED_PAGE_REQUEST
 expect "and so does a page request from the home" open "$(request_state_of "$SCOPED_PAGE_REQUEST")"
+# And nobody decides it who could not have triaged it wherever it may reach: a triager limited to
+# some pages never decides their own request, through the API or the home, and is offered nothing to.
+expect "the grantee is offered no triage on their own request" 0 "$(triage_offered A02 $SCOPED_REQUEST $GRANTEE)"
+expect "their own request, decided through the API → 403" 403 "$(post $GRANTEE "$(triage_json A02 $SCOPED_REQUEST)")"
+expect "and told it is theirs to be decided, not to decide" "$(r_say api.triage.notOwn)" \
+  "$(r_body $GRANTEE events "$(triage_json A02 $SCOPED_REQUEST)" | jfield error)"
+expect "their own page request, decided from the home → 403" 403 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $GRANTEE" -H "Origin: $B" --data-urlencode action=triage \
+      --data-urlencode "request=$SCOPED_PAGE_REQUEST" --data-urlencode page=A02 --data-urlencode block= \
+      --data-urlencode state=approved $B/engine/home)"
+expect "and both still wait at triage"           "open open" "$(request_state_of "$SCOPED_REQUEST") $(request_state_of "$SCOPED_PAGE_REQUEST")"
+OTHERS_A02=$(new_request $REVIEWER '{"type":"request","page":"A02","block":"A02.1.1","fingerprint":"x","text":"somebody else asks on A02"}')
+require_id "$OTHERS_A02" OTHERS_A02
+expect "somebody else's request on the same page is theirs to decide → 201" 201 "$(post $GRANTEE "$(triage_json A02 $OTHERS_A02)")"
 WIDE=wide@example.org
 expect "(the owner grants triage everywhere to somebody else)" 201 "$(r_code $OWNER grants "$(grant_json $WIDE 'legal review')")"
 WIDE_REQUEST=$(new_request $WIDE '{"type":"request","page":"A01","block":"A01.1.2","fingerprint":"x","text":"from a grant with no scope"}')

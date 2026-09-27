@@ -45,7 +45,7 @@ import {
   ROLES_PAGE, projectRolesOf, grantsOfPerson, definedEvent, grantedEvent, revokedGrantEvent, type ProjectRoles,
 } from './role-grants.ts';
 import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
-import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn } from './here.ts';
+import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn, isOwnRequest } from './here.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -400,8 +400,9 @@ const ignoredGrantsLogged = new Set<string>();
  * one page and nothing joined: this runs on every signed-in request, and `list` would read the whole
  * people and texts tables beside it each time. A store that cannot be read fails the request — the
  * 500 every other read gives — rather than answering as though no grant existed, which for a
- * revocation would be the wrong way round. Each request reads it at most once: `rolesAt` takes what
- * was read, and the routes that write a grant or a revocation check against the same reading.
+ * revocation would be the wrong way round. Each request reads it once for its roles (`rolesAt`
+ * takes what was read), and a revocation checks against that same reading; a grant alone reads it a
+ * second time, right before it writes (`grantRole` says why).
  */
 async function projectRolesNow(): Promise<ProjectRoles> {
   return projectRolesOf(await events.listBare(ROLES_PAGE));
@@ -788,10 +789,13 @@ async function recordEvent(
       const target = incoming.data?.state as string | undefined;
       if (!target) return { status: 400, body: { error: say('api.state.required') } };
       if (!cycle.exists(target)) return { status: 400, body: { error: say('api.state.unknown') } };
-      // `triage` on the STORED request's place, and the agent's own states for an agent — see
-      // `mayMove` (engine/api/here.ts) for why each half is there.
+      // `triage` on the STORED request's place — everywhere, on the asker's own request — and the
+      // agent's own states for an agent: see `mayTriage` and `mayMove` (engine/api/here.ts). A
+      // triager refused only because the request is their own is told that, not that they may not
+      // triage at all.
       if (!mayMove(roles, who, request, target, { agentStates: cycle.agentStates, localMode: Boolean(iap?.localMode) })) {
-        return { status: 403, body: { error: say('api.triage.ownerOnly') } };
+        const ownOnly = isOwnRequest(who, request) && roles.can('triage', who, whereOf(request));
+        return { status: 403, body: { error: say(ownOnly ? 'api.triage.notOwn' : 'api.triage.ownerOnly') } };
       }
       if (cycle.requiresReason(target) && !incoming.text?.trim()) {
         return { status: 400, body: { error: say('api.reason.required') } };
@@ -818,10 +822,11 @@ async function recordEvent(
     const locks = roles.can('lock', who, whereOf({ block: incoming.block }));
     incoming.data = { ...incoming.data, [LOCKS_FIELD]: String(locks) };
   } else if (incoming.type === 'request') {
-    // EVERYWHERE, never the request's own place: a request skips triage only when its author could
-    // have triaged it wherever it may reach — the owner, an admin, or a grant with no scope. A grant
-    // limited to some pages or blocks files requests that wait at triage like anybody's, for
-    // someone who may decide them (docs/ROLES.md, section 2).
+    // EVERYWHERE, never the request's own place: a request skips or passes triage only by someone
+    // who could have triaged it wherever it may reach — the owner, an admin, or a grant with no
+    // scope. A grant limited to some pages or blocks files requests that start at triage like
+    // anybody's, and `mayTriage` (engine/api/here.ts) keeps its holder from deciding them
+    // (docs/ROLES.md, section 2).
     const couldTriage = roles.can('triage', who, EVERYWHERE);
     incoming.data = { ...incoming.data, [AUTHOR_COULD_TRIAGE_FIELD]: String(couldTriage) };
   }
@@ -887,11 +892,15 @@ async function defineRole(who: Who, asked: { role: unknown; capabilities: unknow
  * no page and no block of the site is refused too, measured as the lock composer measures one
  * (`lockCoverage`): a grant over nothing is a typo found out only the day it starts matching.
  *
- * `state` is the `_roles` events as this request read them (`projectRolesNow`), never read again.
+ * Whether the role is defined, and whether the same grant is already in force, are checked against
+ * `_roles` read afresh, after every slower check above them and right before the write — not against
+ * the reading the request's roles were built from, which is older by a body, a site scan and a token
+ * list. That narrows the window in which two grants posted at once both pass; it does not close it.
+ * The stores append and never write conditionally, so two such posts can still both land, and the
+ * second copy is the one a revocation of the first leaves in force — visible on the settings screen,
+ * and the owner's own doing.
  */
-async function grantRole(
-  who: Who, asked: { email: unknown; role: unknown; scope: unknown }, state: ProjectRoles,
-): Promise<RoleOutcome> {
+async function grantRole(who: Who, asked: { email: unknown; role: unknown; scope: unknown }): Promise<RoleOutcome> {
   const address = normalizeEmail(typeof asked.email === 'string' ? asked.email : '');
   if (!isEmailAddress(address)) return { status: 400, key: 'api.users.emailInvalid', params: { email: short(asked.email ?? '') } };
   const role = typeof asked.role === 'string' ? asked.role.trim() : '';
@@ -904,6 +913,7 @@ async function grantRole(
   if (deployment.isOwner(address)) return { status: 409, key: 'api.grants.notForTheOwner' };
   if (deployment.admins.includes(address)) return { status: 409, key: 'api.grants.notForAnAdmin', params: { email: address } };
   if ((await agentAddresses())(address)) return { status: 409, key: 'api.grants.notForAnAgent', params: { email: address } };
+  const state = await projectRolesNow();
   if (!state.roles.get(role)?.capabilities.length) return { status: 404, key: 'api.grants.roleUnknown', params: { role: short(role) } };
   const known = await events.personOf(address);
   if (known && state.grants.some((g) => g.person === known && g.role === role && g.scope === scope)) {
@@ -957,7 +967,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   }
   // Read once for the whole request, and before any route: every answer below about what `who` may
   // do comes from these, so a grant given or revoked a moment ago is in force on the next request.
-  // The grant and revoke routes check against this same reading rather than making a second one.
+  // The revoke route checks against this same reading; the grant route reads again before it writes.
   const projectRoles = await projectRolesNow();
   const roles = await rolesAt(who, projectRoles);
 
@@ -1230,7 +1240,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   if (req.method === 'POST' && route === '/grants') {
     if (!roles.isOwner(who)) return ownerOnly();
     const body = await jsonBody(req);
-    return answered(await grantRole(who, { email: body.email, role: body.role, scope: body.scope }, projectRoles));
+    return answered(await grantRole(who, { email: body.email, role: body.role, scope: body.scope }));
   }
   // The id as every event id is shaped (`ONE_EVENT_ROUTE`).
   const revoking = route.match(/^\/grants\/([A-Za-z0-9_-]+)\/revoke$/);
@@ -1721,8 +1731,8 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
   if (asked && !sameOrigin(req)) return json(res, 403, { error: i18n.t(lang, 'api.crossSite') });
   const form = asked ? new URLSearchParams(await rawBody(req)) : null;
   const action = form?.get('action') ?? '';
-  // Read once: a write below redirects, and a refusal wrote nothing, so this reading is what the
-  // screen draws either way.
+  // Read once for the screen: a write below redirects, and a refusal wrote nothing, so this reading
+  // is what the screen draws either way. A grant reads again right before it writes (`grantRole`).
   const state = await projectRolesNow();
   let edit: SettingsData['edit'];
   let status = 200;
@@ -1730,7 +1740,7 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
     const outcome = action === 'define'
       ? await defineRole(viewer, { role: form.get('role'), capabilities: form.getAll('capability') })
       : action === 'grant'
-        ? await grantRole(viewer, { email: form.get('email'), role: form.get('role'), scope: form.get('scope') }, state)
+        ? await grantRole(viewer, { email: form.get('email'), role: form.get('role'), scope: form.get('scope') })
         : await revokeGrant(viewer, form.get('grant') ?? '', state);
     if (outcome.event) {
       res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}#${ROLE_ACTIONS[action]}` });

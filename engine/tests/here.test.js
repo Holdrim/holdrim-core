@@ -150,3 +150,32 @@ test('mayActOn, for the shipped roles: owner and admin may act everywhere, a mem
   // (engine/core/roles.js) — an agent's graph has to empty out exactly like a member's.
   assert.equal(mayActOn(roles, 'agent@example.org', 'A01.1.1'), false, 'an agent, named in HOLDRIM_AGENTS');
 });
+
+// ------------------------------------------------------------------ a triager's own request (#36)
+// A request passes triage only by someone who could have triaged it wherever it may reach: on their
+// own request, a triager is asked `triage` everywhere, and one limited to some pages never decides it.
+const WIDE = 'wide@example.org';
+const withWide = {
+  ...stub,
+  can(capability, who, where) {
+    if (who === WIDE) return capability === 'triage';
+    return stub.can(capability, who, where);
+  },
+};
+
+test('a triager limited to some pages never moves their own request, there or anywhere', () => {
+  const own = { page: 'P03', block: 'P03.2.1', author: TRIAGER };
+  assert.equal(mayMove(stub, TRIAGER, own, 'approved', OPTS), false);
+  assert.equal(mayMove(stub, TRIAGER, own, 'rejected', OPTS), false);
+  assert.equal(mayMove(stub, TRIAGER, { ...own, author: 'x@example.org' }, 'approved', OPTS), true,
+    'setup: the same request, somebody else\'s, is theirs to decide');
+  const status = { triage: ['approved', 'rejected'], requiresReason: ['rejected'] };
+  assert.deepEqual(statusFor(stub, TRIAGER, own, status).triage, [], 'and the panel is offered nothing to press');
+});
+
+test('a triager who may triage everywhere moves their own request as before', () => {
+  assert.equal(mayMove(withWide, WIDE, { page: 'P03', block: 'P03.2.1', author: WIDE }, 'approved', OPTS), true);
+  const owner = createRoles('owner@example.org', '');
+  assert.equal(mayMove(owner, 'owner@example.org', { page: 'A01', block: 'A01.1.1', author: 'owner@example.org' }, 'rejected', OPTS), true,
+    'the owner, whose own requests start decided anyway');
+});

@@ -72,6 +72,7 @@
   "api.token.routeRefused": "an agent token reaches the events and nothing else; sign in to do this",
   "api.token.withSession": "this request carries both a session and an agent token; send one or the other",
   "api.triage.ownerOnly": "only owner and admin triage",
+  "api.triage.notOwn": "a request is decided by someone who may triage everywhere when it is your own: your triage is for other people's requests",
   "api.users.adminOnly": "only owner and admin manage the people who can sign in",
   "api.users.emailInvalid": "\"{email}\" is not an e-mail address",
   "api.users.emailTaken": "{email} already has an access here",

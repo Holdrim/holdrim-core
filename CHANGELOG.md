@@ -274,9 +274,10 @@ who ran the engine from `main` before it.
   as one query of `_roles` alone plus, when any grant is in force, one look-up of the viewer's person
   id: one is in force from the next request after it is given, and gone from the next one after it
   is revoked, and a store that cannot be read fails the request rather than answering as if no grant
-  existed. A ✓ given under a grant keeps what was written on it — never a lock. A request skips
-  triage only when its author may triage everywhere: the owner, an admin, or a grant with no scope;
-  a grantee limited to some pages files requests that wait at triage. A stored grant that comes to
+  existed. A ✓ given under a grant keeps what was written on it — never a lock. A request skips or
+  passes triage only by someone who may triage everywhere — the owner, an admin, or a grant with no
+  scope: a grantee limited to some pages files requests that start at triage, and never decides
+  their own. A stored grant that comes to
   name an agent — an address `HOLDRIM_AGENTS` marks, or one holding an agent token — is ignored,
   with a `role_grant_ignored` line in the log on the agent's first request, and the service still
   starts.
