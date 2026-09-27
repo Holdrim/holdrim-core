@@ -533,3 +533,10 @@ who ran the engine from `main` before it.
   Fsyncing the containing directory afterwards, where the platform allows it, is a durability step on
   top of an already successful save: a failure there is a warning, never a reason to report the save
   itself as failed.
+- **An event naming a block is now refused if `page` is not that block's own page (holdrim#152).**
+  Since #33, permission was already judged on the block's own page, never on `page`, so this gained
+  no permission either way — but the event was still STORED under whatever `page` the client sent,
+  so a ✓ or a request on `P03.2.1` could be filed under `P09`, and every reader that groups by `page`
+  instead of re-deriving it — the traffic light, the home, `holdrim list` — would look for it in the
+  wrong place. A client that sends a mismatched `page` is now refused with 400, on every route that
+  writes an event. An event naming no block is unaffected.

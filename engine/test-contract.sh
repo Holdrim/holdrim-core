@@ -229,6 +229,43 @@ expect "lock_baseline via POST /events → 400, even from a member" 400 "$(post 
 expect "an approval sent as text/plain → 415" 415 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: text/plain' -d '{"type":"approval","page":"D01","block":"D01.1.9","fingerprint":"forged"}' $B/api/events)"
 expect "and nothing was recorded"      1 "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=D01" | has 'forged'; echo $?)"
 
+echo "a block's own page, not the one a client sends beside it (holdrim#152):"
+# Since #33, permission is judged on the block's OWN page (`pageOfBlock`), never on `page` — so a
+# mismatch here gains nothing. What it used to do instead was get STORED under the wrong page, where
+# every reader that groups by `page` — the traffic light, the home, `holdrim list` — would never
+# find it. Every route that writes an event goes through `refusalOf` (recordEvent's one door), so one
+# mismatched pair proves the check for all of them, and one matched pair per route proves it refuses
+# nothing legitimate.
+expect "approval, mismatched page → 400"  400 "$(post $OWNER '{"type":"approval","page":"D09","block":"D01.5.1","fingerprint":"x"}')"
+expect "and the message names both pages" 0 "$(body $OWNER '{"type":"approval","page":"D09","block":"D01.5.1","fingerprint":"x"}' | has 'belongs to page D01, not D09'; echo $?)"
+expect "approval, matching page → 201"    201 "$(post $OWNER '{"type":"approval","page":"D01","block":"D01.5.1","fingerprint":"x"}')"
+expect "request, mismatched page → 400"   400 "$(post $REVIEWER '{"type":"request","page":"D09","block":"D01.5.2","text":"x"}')"
+# `new_request`, not `post`: a matching request that stays open would inflate `toTriage` below —
+# resolved right after, so this proves acceptance without leaking into that count.
+RID_MATCH=$(new_request $REVIEWER '{"type":"request","page":"D01","block":"D01.5.2","text":"x"}')
+require_id "$RID_MATCH" RID_MATCH
+post $OWNER "{\"type\":\"request_state\",\"page\":\"D01\",\"data\":{\"request\":\"$RID_MATCH\",\"state\":\"approved\"}}" >/dev/null
+expect "comment, mismatched page → 400"   400 "$(post $REVIEWER '{"type":"comment","page":"D09","block":"D01.5.3","text":"x"}')"
+expect "comment, matching page → 201"     201 "$(post $REVIEWER '{"type":"comment","page":"D01","block":"D01.5.3","text":"x"}')"
+RID152=$(new_request $REVIEWER '{"type":"request","page":"D01","block":"D01.6.1","text":"holdrim#152 fixture"}')
+require_id "$RID152" RID152
+# `request_state` and `supplement` are deliberately NOT asked this: permission for both is judged on
+# the STORED request's place, never on the page or block the event itself claims — see "the server
+# judges triage and details on the STORED request's place (#33)" further down, and `decide_forged`
+# above, both of which post a block from a DIFFERENT page than the request they act on and expect
+# that pairing to change no answer. Refusing it here first would turn both into a 400 instead — a
+# mismatched pair still reaches the request lookup and the 403/201 those sections already prove.
+expect "supplement naming a block of another page → 201, still judged on the request" 201 \
+  "$(post $REVIEWER "{\"type\":\"supplement\",\"page\":\"D01\",\"block\":\"A01.1.1\",\"text\":\"x\",\"data\":{\"request\":\"$RID152\"}}")"
+expect "request_state naming a block of another page → 201, still judged on the request" 201 \
+  "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"D01\",\"block\":\"A01.1.1\",\"data\":{\"request\":\"$RID152\",\"state\":\"approved\"}}")"
+# No block named at all — the "ask for a page" request has none — is unaffected whatever `page`
+# says. `new_request`, again, so the still-open request left by a bare `post` does not leak into
+# `toTriage` below.
+RID_NOBLOCK=$(new_request $REVIEWER '{"type":"request","page":"ZZ","text":"ask about a page","data":{"category":"page"}}')
+require_id "$RID_NOBLOCK" RID_NOBLOCK
+post $OWNER "{\"type\":\"request_state\",\"page\":\"ZZ\",\"data\":{\"request\":\"$RID_NOBLOCK\",\"state\":\"approved\"}}" >/dev/null
+
 echo "limits:"
 LARGE=$(node -e "console.log('x'.repeat(500))")
 expect "giant block → 400"             400 "$(post $OWNER "{\"type\":\"approval\",\"page\":\"D01\",\"block\":\"$LARGE\",\"fingerprint\":\"a\"}")"

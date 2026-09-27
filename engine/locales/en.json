@@ -27,6 +27,7 @@
   "api.credentials.invalid": "e-mail or password do not match",
   "api.crossSite": "This form only takes posts from its own page.",
   "api.event.notFound": "event not found",
+  "api.event.pageMismatch": "block {block} belongs to page {expected}, not {page}",
   "api.event.unknownType": "unknown event type",
   "api.feature.disabled": "this project has turned {feature} off",
   "api.internal": "Something went wrong on the server. Quote {id} to whoever runs it.",

@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
 import { radiusOf } from '../core/validity.js';
 import {
-  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, lockCoverage,
+  createRoles, rolesOf, agentByToken, byToken, addressOf, EVERYWHERE, whereOf, parseLocks, lockCoverage, pageOfBlock,
 } from '../core/roles.js';
 import { overLimit, validCommit, short, PAGE_FORMAT } from '../core/limits.js';
 import { createI18n } from '../core/i18n.js';
@@ -380,6 +380,39 @@ function refusalOf(incoming: NewEvent, who: Who, say: (key: string, params?: Rec
   { status: number; body: Record<string, unknown> } | null {
   if (!EVENT_TYPES.has(incoming.type)) {
     return { status: 400, body: { error: say('api.event.unknownType'), type: incoming.type } };
+  }
+  // Since #33, permission is judged on the block's OWN page (`pageOfBlock`), never on the `page` a
+  // caller sent beside it — a scope or a capability cannot be widened by lying about `page`. But
+  // gaining no permission is not the same as doing no harm: left unchecked, the event is still
+  // STORED under the client's `page`, so a ✓ or a request on `P03.2.1` could be filed under `P09`.
+  // Every reader that groups by `page` instead of re-deriving it — the traffic light, the home,
+  // `holdrim list` — would then look for it on the wrong page forever. Checked here, once, for every
+  // route: `refusalOf` is `recordEvent`'s only door, so a check added beside `overLimit` reaches the
+  // API and both of the home's forms alike, with no second copy to fall out of step with `pageOfBlock`.
+  //
+  // NOT asked of `request_state` or `supplement`: their own `block` names nothing a reader groups
+  // by — `threadsOf` (engine/core/cycle.js) gathers a request's events by `data.request` alone, and
+  // permission for both is judged on the STORED request's place, never on the page or block the
+  // event itself claims (the code right below this comment, and `mayAddDetails`'s caller further
+  // down). Two contract tests already stand on a client being free to send an unrelated block
+  // here: `decide_forged` (engine/test-contract.sh, "the owner naming another block → decided"),
+  // and the SCOPED fixture under "the server judges triage and details on the STORED request's
+  // place (#33)", which posts `page: A01` alongside `block: A02.1.1` on purpose, to prove that
+  // pairing changes no answer. Refusing that pairing here would turn both into a 400 no test asked
+  // for, silently narrowing what those tests prove. Left for whoever planned this to decide: adding
+  // the same refusal to these two types means rewriting both first.
+  // `short`, not the raw values, in the message: neither `page` nor `block` is bounded yet at this
+  // point — `overLimit` runs further down — and an unbounded echo is how a giant field once became a
+  // giant error body (see the `category` comment below).
+  if (incoming.block && incoming.type !== 'request_state' && incoming.type !== 'supplement'
+      && incoming.page !== pageOfBlock(incoming.block)) {
+    return {
+      status: 400,
+      body: {
+        error: say('api.event.pageMismatch',
+          { block: short(incoming.block), page: short(incoming.page), expected: short(pageOfBlock(incoming.block)) }),
+      },
+    };
   }
   // Checked before the feature gate below: `gatingFeatureOf` matches `data.category` by EXACT
   // string — `"Bug"` or `"page "` would silently side-step whichever toggle the real spelling would
