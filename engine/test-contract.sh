@@ -1852,6 +1852,69 @@ expect "no owner anywhere → exits 1"   1 "$?"
 expect "and says what's missing"       0 "$(grep -qi 'HOLDRIM_OWNER' $WORK/no-config.log; echo $?)"
 rmdir $EMPTY
 
+echo "the server refuses to start when a store it writes would be served by the site:"
+# Each store in turn, placed in a `data` folder inside a copy of the site that has no such folder
+# yet: opening the store would create it, so an empty find afterwards is what shows the refusal came
+# BEFORE the store was opened, not after. engine/tests/fs.test.js holds the rule itself (a folder
+# equal to the root, a link, a sibling named like the site); this proves the server asks it at boot.
+IN_SITE=$(mktemp -d); cp -r "$SITE/." "$IN_SITE"
+# Both ways of naming the users store's file: the path variable, and a `sqlite:` URL.
+for USERS_AT in "HOLDRIM_USERS_PATH=$IN_SITE/data/users.db" "HOLDRIM_USERS=sqlite:$IN_SITE/data/users.db"; do
+  VARIABLE=${USERS_AT%%=*}
+  HOLDRIM_ENVIRONMENT=Production HOLDRIM_IDENTITY=password HOLDRIM_OWNER=$OWNER HOLDRIM_EVENTS=memory \
+    HOLDRIM_SITE="$IN_SITE" PORT=$PORT \
+    run_for 15 env "$USERS_AT" node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/users-in-site.log" 2>&1
+  expect "the users store inside the site, by $VARIABLE → exits 1"  1 "$?"
+  expect "and names the store and the site"                   0 \
+    "$(has -F "the users store ($VARIABLE), $IN_SITE/data/users.db, would be served by the site" "$WORK/users-in-site.log"; echo $?)"
+  expect "and no database file was created inside the site"   "" "$(find "$IN_SITE" -name data -o -name '*.db*')"
+  expect "and no first-access password was printed"           1 "$(has 'FIRST ACCESS' "$WORK/users-in-site.log"; echo $?)"
+done
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$IN_SITE/data/events.db" HOLDRIM_SITE="$IN_SITE" PORT=$PORT \
+  run_for 15 node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/events-in-site.log" 2>&1
+expect "the events store inside the site → exits 1"         1 "$?"
+expect "and names the store and the site"                   0 \
+  "$(has -F "the events store (HOLDRIM_EVENTS_PATH), $IN_SITE/data/events.db, would be served by the site" "$WORK/events-in-site.log"; echo $?)"
+expect "and no database file was created inside the site"   "" "$(find "$IN_SITE" -name data -o -name '*.db*')"
+# A store that writes no file is not asked: the same path inside the site, with events in memory,
+# comes up — and still creates nothing there.
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=memory \
+  HOLDRIM_EVENTS_PATH="$IN_SITE/data/events.db" HOLDRIM_SITE="$IN_SITE" PORT=$PORT \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/memory-in-site.log" 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "events in memory, the path inside the site: it comes up" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+expect "and nothing was created inside the site"            "" "$(find "$IN_SITE" -name data -o -name '*.db*')"
+rm -rf "$IN_SITE"
+# A store variable that names no file is refused by name, rather than read as the working directory.
+for EMPTY_AT in "HOLDRIM_USERS=sqlite:" "HOLDRIM_EVENTS_PATH="; do
+  VARIABLE=${EMPTY_AT%%=*}
+  HOLDRIM_ENVIRONMENT=Production HOLDRIM_IDENTITY=password HOLDRIM_OWNER=$OWNER HOLDRIM_EVENTS=sqlite \
+    HOLDRIM_USERS_PATH="$WORK/empty-store/users.db" HOLDRIM_EVENTS_PATH="$WORK/empty-store/events.db" \
+    HOLDRIM_SITE="$SITE" PORT=$PORT \
+    run_for 15 env "$EMPTY_AT" node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/empty-store.log" 2>&1
+  expect "$EMPTY_AT, naming no file → exits 1"               1 "$?"
+  expect "and says which variable names no file"              0 "$(has "^invalid configuration: $VARIABLE.* names no file" "$WORK/empty-store.log"; echo $?)"
+  expect "and opened no store"                                1 "$([ -e "$WORK/empty-store" ]; echo $?)"
+done
+# The local runner serves the engine's own folder by default, where both stores' default `./data`
+# lies — and it still comes up, because it opens neither store as a file. Only the stores a boot
+# will open are asked; asking the others would refuse the documented way to run it locally.
+env -u HOLDRIM_EVENTS_PATH -u HOLDRIM_USERS -u HOLDRIM_USERS_PATH HOLDRIM_OWNER=$OWNER PORT=$PORT \
+  bash engine/run-local.sh >"$WORK/runner-default.log" 2>&1 & RUNNER_PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "the local runner on the engine's own folder comes up"  200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+kill $RUNNER_PID 2>/dev/null; wait $RUNNER_PID 2>/dev/null
+# SQLite with no file (`:memory:`) is not a file store either, even with the site on the working
+# directory that a path would be resolved against.
+env -u HOLDRIM_SITE HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=:memory: PORT=$PORT \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/sqlite-memory.log" 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "events in SQLite's memory, on the engine's own folder: it comes up" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
 echo "authority comes from the deployment only:"
 # The owner and the admins come from HOLDRIM_OWNER and HOLDRIM_ADMINS, never from holdrim.json: a
 # committer, or the agent applying an approved request, could otherwise name a new owner by editing
@@ -2535,6 +2598,28 @@ expect "and nothing of the file it leads to is sent"                    1 "$(sit
 expect "a missing file is still → 404"                                  404 "$(site_code /pages/nothing-here.html)"
 # A link to nothing has no real location to judge: it is a missing file, answered as one.
 expect "and so is a link that leads nowhere → 404"                      404 "$(site_code /pages/leads-nowhere.txt)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+echo "the server never serves a store it writes, even with the site re-pointed after start:"
+# The site is a link, re-pointed after boot at a folder that holds the events store — the start
+# check saw the site as it was, so what refuses here is the per-request one. A harmless file beside
+# the store answers 200 first, so the 404 after it is the store kept out, not a re-point that failed.
+REPOINT="$WORK/repoint"
+mkdir -p "$REPOINT/after"
+cp -r "$SITE" "$REPOINT/before"
+echo 'written by the contract test, beside the store' >"$REPOINT/after/note.txt"
+MSYS=winsymlinks:nativestrict ln -s "$REPOINT/before" "$REPOINT/current"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+  HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH="$REPOINT/after/data/events.db" HOLDRIM_SITE="$REPOINT/current" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/repoint.log 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "a store outside the site at start: it comes up"   200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+rm "$REPOINT/current"; MSYS=winsymlinks:nativestrict ln -s "$REPOINT/after" "$REPOINT/current"
+expect "the fixture: the site re-pointed, the store on disk" 0 \
+  "$([ -L "$REPOINT/current" ] && [ -f "$REPOINT/after/data/events.db" ]; echo $?)"
+expect "the re-pointed site serves what it holds → 200"   200 "$(site_code /note.txt)"
+expect "and not the store it now holds → 404"             404 "$(site_code /data/events.db)"
+expect "and nothing of it is sent"                        1 "$(site_get $B/data/events.db | has 'SQLite format'; echo $?)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

@@ -232,10 +232,13 @@ const server = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')
 // real browser running the page's script can tell. `localhost`, not 127.0.0.1: the session cookie
 // is `Secure`, and that is the name Chrome treats as a secure origin over plain http.
 let firstAccess = '';
+// Its users store in a folder of its own, outside the site: the server refuses to start when a
+// store it writes would be served by the site.
+const signInData = mkdtempSync(join(tmpdir(), 'holdrim-browser-sign-in-'));
 const signInServer = spawn(process.execPath, [join(ROOT, 'engine', 'api', 'server.ts')], {
   env: {
     ...process.env, PORT: String(PORT + 1), HOLDRIM_ENVIRONMENT: 'Production', HOLDRIM_IDENTITY: 'password',
-    HOLDRIM_OWNER: OWNER, HOLDRIM_EVENTS: 'memory', HOLDRIM_USERS_PATH: join(site, 'users.db'), HOLDRIM_SITE: site,
+    HOLDRIM_OWNER: OWNER, HOLDRIM_EVENTS: 'memory', HOLDRIM_USERS_PATH: join(signInData, 'users.db'), HOLDRIM_SITE: site,
   },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
@@ -282,6 +285,7 @@ const cleanUp = async () => {
   tamperedServer.kill();
   rmSync(site, { recursive: true, force: true });
   rmSync(tamperedData, { recursive: true, force: true });
+  rmSync(signInData, { recursive: true, force: true });
   rmSync(offSite, { recursive: true, force: true });
 };
 

@@ -1,5 +1,5 @@
 import { lstatSync, statSync, realpathSync } from 'node:fs';
-import { dirname, relative, join, sep } from 'node:path';
+import { dirname, relative, join, resolve, sep } from 'node:path';
 import { insideRoot } from '../core/paths.js';
 
 /**
@@ -114,10 +114,11 @@ export function refuseUnreachableFolder(root: string, path: string, what: string
  * Where `path` REALLY is, where `root` REALLY is — every symlink between here and the filesystem
  * followed, on both — and whether the first lies strictly inside the second. The one place that
  * question is answered: `refuseEscapedFolder` below turns a "no" into a refusal for the CLI,
- * `serveStatic` (engine/api/server.ts) into the 404 of a file that is not there, and `loadLogo`
- * (engine/api/theme.ts) into a logo ignored with a warning, so the CLI that scans a page, the server
- * that serves it and the theme that embeds a logo read one answer about where a file is, never
- * comparisons that drift apart.
+ * `serveStatic` (engine/api/server.ts) into the 404 of a file that is not there, `loadLogo`
+ * (engine/api/theme.ts) into a logo ignored with a warning, and `refuseServedStore` below into a
+ * server that does not start, so the CLI that scans a page, the server that serves it, the theme
+ * that embeds a logo and the check on where a store lives read one answer about where a file is,
+ * never comparisons that drift apart.
  *
  * `path` itself may well not exist yet — the very first `sync` of a project, before its registry has
  * ever been written, or a page nobody has created that a reader asks for anyway — so this walks UP
@@ -190,4 +191,65 @@ export function refuseEscapedFolder(root: string, path: string, what: string): v
   if (!inside) {
     throw new Error(`refusing to ${what}: it resolves to ${realTarget}, outside the project root ${realRoot}`);
   }
+}
+
+/**
+ * Refuses a store the server writes — a SQLite `file`, named by `what` in the message — when the
+ * site would serve it: when the REAL location of the FOLDER the file sits in is inside the site's
+ * REAL root, or is that root itself, or when the file is a link whose real location is. Every file
+ * whose real location is inside the site is served to whoever is signed in (`serveStatic`,
+ * engine/api/server.ts), so a store there is served along with the pages.
+ *
+ * The folder, not only the file: SQLite keeps `-wal` and `-shm` files beside the database, and
+ * creates them after this check runs, so a check on the database's own name alone would pass a
+ * store whose siblings the site then serves. "Or is that root": `realContainment`'s answer is
+ * STRICTLY inside, which is right for a page and wrong here — a folder equal to the site root holds
+ * the store's files directly under the site. The file too, by where it REALLY is: a database file
+ * that is a link is written wherever the link leads, whatever folder the link itself sits in.
+ *
+ * `realContainment` answers where each side REALLY is — a store folder reached through a link that
+ * lands inside the site is refused, and one that does not exist yet is judged by its deepest existing
+ * ancestor — so this and `serveStatic` read one answer about what the site contains, never two
+ * comparisons that drift apart. A relative `file` is resolved against the working directory, as
+ * SQLite resolves it. A site that cannot be resolved — one that does not exist yet, say — is refused
+ * too, never waved through: nothing can say whether the store is inside it, and the store's own
+ * folder, created first, could become part of it.
+ */
+export function refuseServedStore(site: string, file: string, what: string): void {
+  const absolute = resolve(file);
+  for (const path of [dirname(absolute), absolute]) {
+    let where;
+    try {
+      where = realContainment(site, path);
+    } catch (e) {
+      throw new Error(`${what}, ${file}, cannot be checked against the site, ${site}: ${(e as Error).message}`);
+    }
+    const { inside, realRoot, realTarget } = where;
+    if (inside || relative(realRoot, realTarget) === '') {
+      throw new Error(`${what}, ${file}, would be served by the site: ${realTarget} is in the site, ${realRoot}`);
+    }
+  }
+}
+
+/**
+ * The folder a SQLite store's files REALLY live in: the real location of the database file's own
+ * folder, every link followed. SQLite follows a database file that is a link and keeps its `-wal`
+ * and `-shm` beside the real file, so this one folder holds all three. Read by the server once, at
+ * boot, after the store is opened — the file exists by then — and handed to `insideStoreFolder` on
+ * every request.
+ */
+export function realStoreFolder(file: string): string {
+  return dirname(realpathSync(file));
+}
+
+/**
+ * Whether `realTarget`, a path already resolved to its real location, lies inside one of the
+ * `storeFolders` (`realStoreFolder`'s answers). `serveStatic` (engine/api/server.ts) answers "not
+ * there" for such a file, so the server never serves a store it writes — whatever the site's root
+ * points at by then. `refuseServedStore` holds the same guarantee once, at boot; the site root is
+ * resolved again on every request, so this holds it on every request too. A comparison against at
+ * most one folder per file-backed store, with `insideRoot`, the same rule as everywhere else.
+ */
+export function insideStoreFolder(storeFolders: readonly string[], realTarget: string): boolean {
+  return storeFolders.some((folder) => insideRoot(folder, realTarget));
 }
