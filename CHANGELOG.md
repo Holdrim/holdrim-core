@@ -15,6 +15,23 @@ who ran the engine from `main` before it.
 
 ### Breaking
 
+- **A server whose SQLite store would be served by the site now refuses to start, and so does one
+  it cannot check.** Before either store is opened, the folder of the SQLite users store and of the
+  SQLite events store is checked against the site (see **Security**). Four configurations that used
+  to start now stop, each with a line naming the variable: (1) `node engine/api/server.ts` or `npm
+  run serve` run from the engine's own folder with `HOLDRIM_SITE` unset — the site is then that
+  folder, and both stores default to `./data` inside it; (2) a `HOLDRIM_SITE` that does not exist,
+  while a SQLite store is configured — nothing can say whether the store is inside it; (3) a users
+  store, events store, or either store's folder, inside the site or equal to it; (4) a store
+  variable that names no file: `HOLDRIM_USERS=sqlite:` with nothing after the colon, or an empty
+  `HOLDRIM_USERS_PATH` or `HOLDRIM_EVENTS_PATH`, which used to open a temporary database. What to
+  change: for (1), set `HOLDRIM_SITE` to the documentation's folder, or run
+  `bash engine/run-local.sh`, which keeps events in memory; for (2), create the folder, or point
+  `HOLDRIM_SITE` at the one that exists; for (3), move the database file, with its `-wal` and `-shm`
+  beside it, to a folder outside the site, and point `HOLDRIM_USERS_PATH` (or `sqlite:<path>` in
+  `HOLDRIM_USERS`) and `HOLDRIM_EVENTS_PATH` at it; for (4), name a path, use `sqlite::memory:` for a
+  users store kept in memory, or unset the variable for its default. The image and
+  `engine/run-local.sh` need nothing: they already keep the stores apart from the site.
 - **The CLI no longer writes to the cloud store directly: every write goes through the server's
   `POST /api/events`, with an agent token the owner issues (#122).** Before this, `holdrim state` in
   cloud mode wrote its event straight into Firestore as `agent via <gcloud account>`, skipping the
@@ -402,6 +419,17 @@ who ran the engine from `main` before it.
 
 ### Security
 
+- **The server refuses to start when a store it writes would be served by the site.** Before either
+  store is opened, the folder of the SQLite users store (`HOLDRIM_USERS_PATH`, or `sqlite:<path>` in
+  `HOLDRIM_USERS`) and of the SQLite events store (`HOLDRIM_EVENTS_PATH`) is checked against the
+  site (`HOLDRIM_SITE`), each by where it really is, links followed: a folder inside the site, or
+  equal to it, stops the start with a line naming the store, the variable to change and the site,
+  and nothing is created there. The folder and not only the file, because SQLite keeps its `-wal`
+  and `-shm` files beside the database. And on every request, the site answers "not there" for any
+  file inside a store's real folder, resolved once at start, so the server never serves a store it
+  writes, even when the site's root is re-pointed after start. Postgres, Firestore and memory stores
+  write no file and are not asked. What now refuses to start, and what to change, is under
+  **Breaking**.
 - **Wrong passwords are now counted in the user store, so a restart no longer hands out a fresh set
   of free guesses, and every instance counts against the same number (#53).** Before, the count lived
   in each process's memory: a deploy, a crash or a platform recycling an instance reset it, and N
