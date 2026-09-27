@@ -226,7 +226,7 @@ exception — there, ignoring what was written already equals the fail-closed an
 | `issues` | `engine/api/index-store.ts` | derived: what each block is `missing` |
 | `index_meta` | `engine/api/index-store.ts` | one row: the commit and the instant the index was built from |
 | `users` | `users-sqlite.ts`, `users-postgres.ts` | people: `email`, `name`, `salt`, `hash`, `must_change`, `created_at`, `enabled` |
-| `sessions` | `users-sqlite.ts`, `users-postgres.ts` | open sessions: `id`, `email`, `created_at`, `expires_at` |
+| `sessions` | `users-sqlite.ts`, `users-postgres.ts` | open sessions: `id` (the SHA-256 of the cookie's session id, never the id), `email`, `created_at`, `expires_at` |
 
 ⚠️ Renaming a table or a column **breaks stored data**. Every change here needs a migration that
 reads the old format: history does not get rewritten.

@@ -73,6 +73,7 @@ export class UsersPostgres extends UserStoreBase {
         created_at  TEXT NOT NULL,
         enabled     BOOLEAN NOT NULL DEFAULT TRUE
       )`);
+    // `id` holds the SHA-256 of the cookie's session id, never the id: users-sqlite.ts says why.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sessions (
         id         TEXT PRIMARY KEY,
@@ -195,19 +196,19 @@ export class UsersPostgres extends UserStoreBase {
     return Number(r?.n ?? 0);
   }
 
-  protected async insertSession(id: string, email: string, createdAt: string, expiresAt: string): Promise<void> {
+  protected async insertSession(key: string, email: string, createdAt: string, expiresAt: string): Promise<void> {
     await this.#query(
       'INSERT INTO sessions (id, email, created_at, expires_at) VALUES ($1, $2, $3, $4)',
-      [id, email, createdAt, expiresAt]);
+      [key, email, createdAt, expiresAt]);
   }
 
-  protected async readSession(id: string): Promise<StoredSession | null> {
-    const [r] = await this.#query('SELECT email, expires_at FROM sessions WHERE id = $1', [id]);
+  protected async readSession(key: string): Promise<StoredSession | null> {
+    const [r] = await this.#query('SELECT email, expires_at FROM sessions WHERE id = $1', [key]);
     return r ? { email: r.email as string, expiresAt: r.expires_at as string } : null;
   }
 
-  protected async deleteSession(id: string): Promise<void> {
-    await this.#query('DELETE FROM sessions WHERE id = $1', [id]);
+  protected async deleteSession(key: string): Promise<void> {
+    await this.#query('DELETE FROM sessions WHERE id = $1', [key]);
   }
 
   protected async deleteSessionsExpiredBefore(instant: string): Promise<void> {
@@ -218,11 +219,11 @@ export class UsersPostgres extends UserStoreBase {
     await this.#query('DELETE FROM sessions WHERE email = $1', [email]);
   }
 
-  protected async deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void> {
+  protected async deleteSessionsForEmailExcept(email: string, keepKey: string): Promise<void> {
     // One statement: the caller's own row is excluded by the WHERE clause itself, so there is no
     // moment where it is gone and not yet back (users.ts's comment on the abstract method says why
     // that matters).
-    await this.#query('DELETE FROM sessions WHERE email = $1 AND id != $2', [email, keepSessionId]);
+    await this.#query('DELETE FROM sessions WHERE email = $1 AND id != $2', [email, keepKey]);
   }
 
   protected async writeAgentToken(row: StoredAgentToken): Promise<string | null> {
