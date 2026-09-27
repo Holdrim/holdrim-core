@@ -2480,8 +2480,19 @@ site_code() { site_get -o /dev/null -w '%{http_code}' "$B$1"; }
 expect "a plain page serves, on a site mounted through a link → 200"  200 "$(site_code /pages/A01.html)"
 expect "a link that stays inside the site serves → 200"                 200 "$(site_code /pages/leads-in.html)"
 expect "and serves the page it leads to"                                0 "$(site_get $B/pages/leads-in.html | has 'What Holdrim demands of a page'; echo $?)"
-expect "a link whose real location is outside the site → 403"           403 "$(site_code /pages/leads-out.txt)"
-expect "refused as a path that walks out of the site" "$(say_en site.pathOutside)" "$(site_get $B/pages/leads-out.txt | jfield error)"
+# A link whose real location leaves the site is indistinguishable from a file that is not there:
+# the same status, headers and body as a path nothing answers to, byte for byte. Any difference
+# between the two would itself say something about what lies outside the site. `Date` is the one
+# header left out, as it moves with the clock, not with the file. Each comparison first checks the
+# missing path's own answer is really there, so two empty answers cannot agree their way to a pass.
+site_answer() { site_get -D - -o "$2" "$B$1" | tr -d '\r' | grep -iv '^date:' >"$2.head"; }
+site_answer /pages/leads-out.txt "$WORK/answer-leads-out"
+site_answer /pages/nothing-here.txt "$WORK/answer-missing"
+expect "a link whose real location is outside the site → 404"           404 "$(site_code /pages/leads-out.txt)"
+expect "with the status and headers of a missing file" 0 \
+  "$(has '^HTTP/1.1 404' "$WORK/answer-missing.head" && cmp -s "$WORK/answer-leads-out.head" "$WORK/answer-missing.head"; echo $?)"
+expect "and its body, byte for byte" 0 \
+  "$([ -s "$WORK/answer-missing" ] && cmp -s "$WORK/answer-leads-out" "$WORK/answer-missing"; echo $?)"
 expect "and nothing of the file it leads to is sent"                    1 "$(site_get $B/pages/leads-out.txt | has 'written by the contract test'; echo $?)"
 expect "a missing file is still → 404"                                  404 "$(site_code /pages/nothing-here.html)"
 # A link to nothing has no real location to judge: it is a missing file, answered as one.

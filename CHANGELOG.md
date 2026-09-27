@@ -456,11 +456,12 @@ who ran the engine from `main` before it.
 - **The server serves, and the CLI scans, only files whose real location is inside the site.** Both
   already checked a path as it is written; the reads that follow those checks follow symbolic links.
   `serveStatic` (engine/api/server.ts) now also resolves the requested file's real location, and the
-  site root's, and answers 403 — the same refusal, with the same message, as a path that walks out of
-  the site — when the first is not strictly inside the second. `sheetFiles` (engine/cli/pages.ts)
-  does the same for every page file in a configured folder that is itself a link, and refuses it by
-  throwing, exactly as it refuses such a folder, so no page is scanned, fingerprinted or checked from
-  outside the project. Both ask one helper, `realContainment` (engine/cli/fs.ts), which resolves both
+  site root's, and when the first is not strictly inside the second, answers exactly as it answers a
+  file that is not there: the same 404, headers and body, so a link whose real location leaves the
+  site is indistinguishable from a missing file. A path that walks out of the site in the URL itself
+  keeps its 403. `sheetFiles` (engine/cli/pages.ts) resolves every page file in a configured folder
+  that is itself a link, and refuses one outside the project by throwing, exactly as it refuses such
+  a folder, so no page is scanned, fingerprinted or checked from outside the project. Both ask one helper, `realContainment` (engine/cli/fs.ts), which resolves both
   sides with `fs.realpathSync` and compares them with `insideRoot` (engine/core/paths.js);
   `refuseEscapedFolder` now asks it too, so the rule exists once. A link that stays inside the site
   keeps working, a site mounted through a symlink keeps working, and a missing file — a link to

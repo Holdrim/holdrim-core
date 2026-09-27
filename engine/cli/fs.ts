@@ -104,9 +104,10 @@ export function refuseUnreachableFolder(root: string, path: string, what: string
  * Where `path` REALLY is, where `root` REALLY is — every symlink between here and the filesystem
  * followed, on both — and whether the first lies strictly inside the second. The one place that
  * question is answered: `refuseEscapedFolder` below turns a "no" into a refusal for the CLI,
- * `serveStatic` (engine/api/server.ts) into a 403, and `loadLogo` (engine/api/theme.ts) into a logo
- * ignored with a warning, so the CLI that scans a page, the server that serves it and the theme that
- * embeds a logo read one answer about where a file is, never comparisons that drift apart.
+ * `serveStatic` (engine/api/server.ts) into the 404 of a file that is not there, and `loadLogo`
+ * (engine/api/theme.ts) into a logo ignored with a warning, so the CLI that scans a page, the server
+ * that serves it and the theme that embeds a logo read one answer about where a file is, never
+ * comparisons that drift apart.
  *
  * `path` itself may well not exist yet — the very first `sync` of a project, before its registry has
  * ever been written, or a page nobody has created that a reader asks for anyway — so this walks UP
