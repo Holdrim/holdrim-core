@@ -1,5 +1,7 @@
 import { Firestore, type DocumentData, type WhereFilterOp } from '@google-cloud/firestore';
-import { AddressInUse, UserStoreBase, type StoredAgentToken, type StoredSession, type StoredUser } from './users.ts';
+import {
+  AddressInUse, UserStoreBase, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
+} from './users.ts';
 
 /**
  * People and sessions in Firestore: collections `users` and `sessions`.
@@ -192,9 +194,79 @@ export class UsersFirestore extends UserStoreBase {
     });
   }
 
+  // ------------------------------------------------------------- wrong passwords
+  // Collection `sign_in_failures`, one document per key (users.ts, `failureKey`): users-sqlite.ts
+  // says what it is for.
+  protected async readFailure(key: string): Promise<SignInFailures | null> {
+    return docToFailure((await this.#db.collection('sign_in_failures').doc(key).get()).data());
+  }
+
+  protected async updateFailure(
+    key: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void> {
+    // A transaction, so a second wrong password landing between the read and the write aborts one
+    // of the two and the retry counts on top of the other — the reason `next` has to be pure.
+    const ref = this.#db.collection('sign_in_failures').doc(key);
+    await this.#db.runTransaction(async (tx) => {
+      const row = next(docToFailure((await tx.get(ref)).data()));
+      if (row === null) tx.delete(ref);
+      else tx.set(ref, { count: row.count, last_at: row.lastAt, escalated: row.escalated, evict_order: evictOrder(row) });
+    });
+  }
+
+  protected async pruneFailures(lastBefore: string, keep: number): Promise<void> {
+    const failures = this.#db.collection('sign_in_failures');
+    // One page of the stale ones and no loop, like `deleteSessionsExpiredBefore`: this runs after
+    // every wrong password, so whatever one page leaves, the next wrong password takes.
+    const stale = await failures.where('last_at', '<', lastBefore).limit(400).get();
+    const batch = this.#db.batch();
+    for (const doc of stale.docs) batch.delete(doc.ref);
+    if (!stale.empty) await batch.commit();
+    // The ceiling, which the page above does not give: an attacker's invented addresses are all
+    // fresh. `count()` is billed by index entries read, a fraction of reading the documents.
+    const over = (await failures.count().get()).data().count - keep;
+    if (over <= 0) return;
+    // By `evict_order`, the ranking SQLite and Postgres write as `ORDER BY escalated, last_at`, held
+    // in one field: two, one of them an inequality, would need a composite index this project does
+    // not otherwise require.
+    const oldest = await failures.orderBy('evict_order').limit(Math.min(over, 400)).get();
+    const trim = this.#db.batch();
+    for (const doc of oldest.docs) trim.delete(doc.ref);
+    await trim.commit();
+  }
+
+  protected async countFailures(): Promise<number> {
+    return (await this.#db.collection('sign_in_failures').count().get()).data().count;
+  }
+
+  protected async readOrWriteValue(name: string, fresh: Buffer): Promise<Buffer> {
+    // Collection `store_values`, one document per name: users-sqlite.ts says what it is for. In a
+    // transaction, so two instances creating it at once end with one value, read by both.
+    const ref = this.#db.collection('store_values').doc(name);
+    return this.#db.runTransaction(async (tx) => {
+      const before = (await tx.get(ref)).data();
+      if (before) return Buffer.from(before.value);
+      tx.create(ref, { value: fresh });
+      return fresh;
+    });
+  }
+
   async close(): Promise<void> {
     await this.#db.terminate();
   }
+}
+
+/** One document of `sign_in_failures`, or null for none. */
+function docToFailure(d: DocumentData | undefined): SignInFailures | null {
+  return d ? { count: Number(d.count), lastAt: d.last_at, escalated: d.escalated === true } : null;
+}
+
+/**
+ * The order rows leave in when the ceiling is reached, as ONE string: rows not escalated first
+ * (`0`), then escalated ones (`1`), each oldest first — an ISO date of one fixed shape sorts as
+ * the instant it names.
+ */
+function evictOrder(row: SignInFailures): string {
+  return `${row.escalated ? 1 : 0}|${row.lastAt}`;
 }
 
 /** One document of `agent_tokens`, shaped as `users.ts` expects it. */

@@ -113,6 +113,20 @@ const cfg = {
   environment: process.env.NODE_ENV === 'development' ? 'Development' : (process.env.HOLDRIM_ENVIRONMENT ?? 'Production'),
 };
 
+/**
+ * Whether the browser reaches this server over TLS: everywhere but Development. ONE decision, read by
+ * everything that depends on it — the session cookie's `Secure`, the language cookie's, and HSTS —
+ * so the three cannot come to disagree about where they run.
+ *
+ * The environment and not the request, because this process only ever speaks plain HTTP: TLS ends
+ * at whatever stands in front of it, and nothing on the socket says whether that happened.
+ * `X-Forwarded-Proto` would, but only when a proxy this server trusts wrote it, and there is no
+ * such trust here — any client can send the header, and a request that decides from it lets that
+ * client pick. A deployment outside Development is one whose cookies are already `Secure`, and
+ * therefore one already required to sit behind TLS (SECURITY.md, "Running it safely").
+ */
+const servedOverTls = cfg.environment !== 'Development';
+
 // ---------------------------------------------------------------- configuration that fails at boot
 /**
  * How people get in.
@@ -254,7 +268,7 @@ if (identityKind === 'password') {
     console.error('invalid configuration: ' + (error instanceof Error ? error.message : String(error)));
     process.exit(1);
   }
-  byPassword = new PasswordIdentity(users, { secure: cfg.environment !== 'Development' });
+  byPassword = new PasswordIdentity(users, { secure: servedOverTls });
   await users.purgeExpiredSessions();
 
   // ⚠️ It WARNS, it does not refuse. This configuration works — it just forgets people — and a
@@ -1623,6 +1637,24 @@ const SECURITY_HEADERS = {
 };
 
 /**
+ * HSTS: once a browser has seen it over TLS, it goes to this host over TLS only, for a year, and
+ * refuses a certificate it cannot trust instead of offering to click through. Without it, the first
+ * request of a visit typed as `http://` crosses the network in the clear, and whoever sits on that
+ * network answers it instead — the downgrade a `Secure` cookie alone does not stop, since the cookie
+ * is not what is being asked for yet.
+ *
+ * On EVERY answer, and only when `servedOverTls` says so. In Development the server is reached over
+ * plain HTTP on purpose, and behind a developer's own TLS proxy the header would pin `localhost` to
+ * TLS for a year, for every other thing they run on that name. A deployment outside Development
+ * that is reached over plain HTTP anyway sends it too — its `Secure` cookies already keep sign-in
+ * from working there, localhost aside — and a browser ignores it, since it is honoured only when it
+ * arrives over TLS (RFC 6797, section 8.1). No `includeSubDomains` and no `preload`: both reach names this
+ * server does not serve and whoever deploys it may not own, and neither can be taken back from a
+ * browser that has seen it before `max-age` runs out.
+ */
+const HSTS = 'max-age=31536000';
+
+/**
  * What an API answer carries: the same, and a policy that runs nothing. JSON is data; a browser
  * that ever renders one — opened directly, or sniffed despite `nosniff` by something old — has no
  * reason to execute or load anything from it, so it is told so.
@@ -1657,6 +1689,9 @@ async function serveFile(target: string, res: ServerResponse, urlPath = '') {
 
 // ---------------------------------------------------------------- the server
 const server = createServer(async (req, res) => {
+  // First, before anything can answer: every response below — the 404 of a URL that does not parse
+  // included — goes out through `res`, and a header set here rides on all of them.
+  if (servedOverTls) res.setHeader('strict-transport-security', HSTS);
   // A fixed base, not the Host header, and inside a guard. `http://${host}` from a request saying
   // `Host: a b` would throw here, before the try below, and an async handler that throws is an
   // unhandled rejection: one line from anyone who can reach the port, and the process is gone.
@@ -1673,7 +1708,7 @@ const server = createServer(async (req, res) => {
     // Before the authentication guard on purpose: the login screen is where most people change
     // language, and it is the one page they can reach without a session.
     if (url.pathname === LANGUAGE_ROUTE) {
-      const headers = languageSwitch(url, i18n.languages, cfg.environment !== 'Development');
+      const headers = languageSwitch(url, i18n.languages, servedOverTls);
       return (res.writeHead(302, headers), res.end());
     }
 

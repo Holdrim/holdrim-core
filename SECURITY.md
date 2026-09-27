@@ -200,7 +200,10 @@ Worth knowing before you run it:
 ## Running it safely
 
 - **Put it behind TLS.** The session cookie is `Secure` outside development, which means it will not
-  travel over plain HTTP anywhere but localhost.
+  travel over plain HTTP anywhere but localhost. Outside development every answer also carries
+  `Strict-Transport-Security: max-age=31536000`, so a browser that has reached it once over TLS
+  refuses plain HTTP to that host for a year; the server itself speaks plain HTTP to whatever
+  terminates TLS in front of it, and does not read `X-Forwarded-Proto` to decide.
 - **Use a named volume for `/data`**, not a host folder. A host folder arrives with the host's
   ownership, and the process runs as an unprivileged user.
 - **Never put a key in `holdrim.json`.** That file is versioned. Secrets go in the environment or
@@ -234,9 +237,13 @@ Worth knowing before you run it:
   without a lock this method does not have. It is closed by deployment discipline instead — move all
   traffic to the new revision first, the same step named above — not by a check this file's tests run.
 - Identity is password or an identity proxy. OIDC, Google and LDAP are not implemented.
-- **Wrong passwords are counted per process, in memory.** Five free attempts per e-mail, then a
-  wait that doubles up to fifteen minutes. With several instances each counts on its own, and a
-  restart forgets the count, so the real ceiling is the one per instance times the instances. It is
-  not in the user store on purpose: a write on every wrong password is a load anyone could cause
-  without an account. If the service is reachable from the internet, rate-limit
-  `POST /api/sign-in` at your edge as well.
+- **Wrong passwords are counted per address, in the user store, and nowhere else.** Five free
+  attempts per address as typed, then a wait that doubles up to fifteen minutes; every instance
+  reads the same count and a restart forgets none of it. Counting is per address, never per client:
+  it stops a guesser working on one account, not one spreading a few guesses over many, and anyone
+  who knows an address can keep it waiting. A restart does not lift that wait; emptying the
+  `sign_in_failures` table (or collection) of the user store lifts every wait at once. The table
+  keeps at most ten thousand rows, and a row still counting towards a wait is never evicted before
+  one that is not. Each wrong password costs the server two scrypts, a small one for the row's key
+  and the full one for the password, and a write, which anyone can cause without an account. If the
+  service is reachable from the internet, rate-limit `POST /api/sign-in` at your edge as well.

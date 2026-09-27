@@ -173,6 +173,14 @@ echo "boot:"
 expect "the server comes up without loading an optional package" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
 grep -q 'optional package was loaded' $WORK/tests.log && grep -m1 'optional package was loaded' $WORK/tests.log | sed 's/^/       /'
 
+# HSTS reads the one decision the `Secure` cookies already read (`servedOverTls`, server.ts), and
+# Development is plain HTTP: a header pinning this name to TLS would break everything else on it.
+# The header a client sends about its own transport changes nothing — the server trusts no proxy.
+echo "HSTS, never over plain HTTP:"
+expect "Development sends no HSTS" 0 "$(curl -s -D- -o /dev/null $B/api/health | grep -ci '^strict-transport-security:')"
+expect "not even to a client that says it came over https" 0 \
+  "$(curl -s -D- -o /dev/null -H 'X-Forwarded-Proto: https' $B/api/health | grep -ci '^strict-transport-security:')"
+
 echo "identity and roles:"
 expect "no identity → 401"             401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/events)"
 expect "owner is owner"                owner "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield role)"
@@ -1055,6 +1063,11 @@ expect "and the log keeps an address's worth of it, not the megabyte" 0 "$(awk '
 # here, because nothing else would notice it missing.
 expect "and it refuses to be framed"     1 "$(curl -s -D- -o /dev/null $B/sign-in | grep -ci "frame-ancestors 'none'")"
 expect "and it says nosniff"             1 "$(curl -s -D- -o /dev/null $B/sign-in | grep -ci 'x-content-type-options: nosniff')"
+# Outside Development the browser comes over TLS, and every answer tells it to keep doing so: the
+# API, the sign-in screen, and the redirect that reaches a person before any page does.
+expect "HSTS on an API answer"           1 "$(curl -s -D- -o /dev/null $B/api/health | grep -ci '^strict-transport-security: max-age=31536000')"
+expect "on the sign-in screen"           1 "$(curl -s -D- -o /dev/null $B/sign-in | grep -ci '^strict-transport-security: max-age=31536000')"
+expect "and on the redirect to it"       1 "$(curl -s -D- -o /dev/null $B/pages/A01.html | grep -ci '^strict-transport-security: max-age=31536000')"
 # The sign-in page runs only what this server wrote into it. The nonce in the policy has to be the
 # one on every script and style of THIS response, new on the next one, and `unsafe-inline` must not
 # appear: a policy that allows inline script allows the injected kind too.
@@ -1487,6 +1500,10 @@ mchange() { curl -s -b $MCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type
 for i in 1 2 3 4 5 6; do mchange "guess-$i" >/dev/null; done
 expect "after six wrong current passwords, the right one waits → 403" 403 "$(mchange "$NEW_PASSWORD")"
 expect "and so does signing in with it → 401" 401 "$(mlogin "$NEW_PASSWORD")"
+# Two more, so the wait the restart below has to keep is eighty seconds, not twenty: the boot it
+# waits on may itself take up to twenty (the health poll's ceiling), and a wait that ran out
+# during a slow boot would fail the check below for nothing.
+for i in 1 2; do mlogin "guess-again-$i" >/dev/null; done
 rm -f $MCOOKIES
 
 # ------------------------------------------------------------------ handing the owner role over
@@ -1526,6 +1543,11 @@ HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$HANDOVER HOLDRIM_ADMINS=$ADMIN HOL
   PORT=$PORT HOLDRIM_SITE="$SITE" \
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/handover.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+
+# Before anything else here: the member's ten refused attempts above bought an eighty-second wait,
+# and this restart must not have handed it back. Counted in memory instead, the right password gets
+# straight in on the new process.
+expect "the member's wait survived the restart → 401" 401 "$(mlogin "$NEW_PASSWORD")"
 
 expect "the new owner has no account yet" 1 "$(as_admin $B/api/users | has -F "$HANDOVER"; echo $?)"
 expect "and no first-access was printed" 0 "$(grep -c 'FIRST ACCESS' $WORK/handover.log)"
