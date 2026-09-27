@@ -428,6 +428,24 @@ who ran the engine from `main` before it.
   inside the second. A working symlinked folder that resolves INSIDE the project keeps working, at
   any depth, exactly as before. Nothing to change for a project whose `content.registry` already
   names an ordinary path inside its own folder.
+- **`content.folders` can no longer name a folder outside the project, the same gap #161 closed for
+  `content.registry` (#164).** `sheetFolders` (engine/cli/pages.ts) joined each entry onto the
+  project root with a plain `join`, and `sheetFiles` then `readdirSync`'d whatever that produced:
+  `"../other-project/pages"`, or an absolute path, made the engine scan, fingerprint and SERVE pages
+  belonging to a different project. `readConfig` now refuses, at load, a `content.folders` that is
+  not an array, and any entry that is not a non-empty string, is absolute, or resolves outside the
+  root or to the root itself — with the same `insideRoot` (engine/core/paths.js) `content.registry`
+  already uses, never a second comparison. **A second gap, closed alongside it:** a WORKING symlinked
+  folder that resolves outside the project — `content.folders: ["mnt"]` with `mnt` a committed link
+  to somewhere else — read as an ordinary nested path to that lexical check. `sheetFiles`, the one
+  place a configured folder is actually opened, now runs `refuseEscapedFolder` (engine/cli/fs.ts,
+  holdrim#161) on each folder first, resolving its real location and the project's real root with
+  `fs.realpathSync` before ever reading it. A working symlinked folder that resolves INSIDE the
+  project keeps working, at any depth, exactly as before. Nothing to change for a project whose
+  `content.folders` already names ordinary paths inside its own folder. **Left open, and not this
+  fix's to close:** `sheetFiles` never recurses into a configured folder's own subfolders, so a
+  symlinked subfolder or page FILE inside one is not walked into by this check either — see the pull
+  request for the recommendation.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY

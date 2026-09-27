@@ -6,6 +6,7 @@ import { rolesOf, pageOfBlock } from '../core/roles.js';
 import { parseHTML } from 'linkedom';
 import { fingerprintOfText } from '../core/fingerprint.js';
 import { kindOf, whatIsMissing } from '../core/kinds.js';
+import { refuseEscapedFolder } from './fs.ts';
 
 /**
  * Reading a repository's pages: which blocks exist, the text of each one, and the fingerprint.
@@ -136,6 +137,15 @@ export function sheetFolders(root: string): string[] {
 export function sheetFiles(root: string): string[] {
   const out: string[] = [];
   for (const folder of sheetFolders(root)) {
+    // `readConfig`'s own check on `content.folders` (engine/core/config.js) is lexical, on the
+    // string as written, so `content.folders: ["mnt"]` with `mnt` a committed, WORKING symlink to
+    // somewhere outside the project reads as contained right there — the exact gap holdrim#161
+    // closed for `content.registry`. This is the ONE place every configured folder is actually
+    // opened, so refusing a folder's REAL location here, before `readdirSync` ever reads it, is the
+    // one check that sees a link's real target. Called before the `try` below, on purpose: a folder
+    // that escapes must fail loudly, not be swallowed by the "never created yet" catch meant for an
+    // ordinary missing folder.
+    refuseEscapedFolder(root, folder, `scan pages in ${folder}`);
     try {
       // By number, as a person counts: a plain sort puts A10 before A9, and so would the home,
       // which lists pages in the order they arrive here.

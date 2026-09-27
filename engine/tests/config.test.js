@@ -157,6 +157,66 @@ test('content.registry refuses a sibling folder whose name starts with the root\
     /content\.registry.*resolves outside the project root/);
 });
 
+// ---------------------------------------------------------------- content.folders stays inside the root
+
+/**
+ * `sheetFolders` (engine/cli/pages.ts) joins each entry onto the project root with a plain `join`,
+ * trusting `readConfig` to have already refused anything that would land outside it (holdrim#164) —
+ * the same shape as `content.registry`'s own tests above, one entry at a time.
+ */
+test('content.folders defaults to ["pages"], and a legitimate nested path is kept as written', () => {
+  assert.deepEqual(readConfig('/p', file({})).sheetFolders, ['pages']);
+  assert.deepEqual(readConfig('/p', file({ content: { folders: ['docs/sheets'] } })).sheetFolders,
+    ['docs/sheets']);
+  // An empty list is a project naming no folders at all — a different statement from an invalid one,
+  // and every test above already relies on it being accepted (`content: { folders: [] }`).
+  assert.deepEqual(readConfig('/p', file({ content: { folders: [] } })).sheetFolders, []);
+});
+
+test('content.folders refuses an entry that climbs out of the project root', () => {
+  assert.throws(() => readConfig('/p', file({ content: { folders: ['..'] } })),
+    /content\.folders\[0\].*resolves outside the project root/);
+  // The second entry, not the first: every entry is checked, not only folders[0].
+  assert.throws(() => readConfig('/p', file({ content: { folders: ['pages', '../other/pages'] } })),
+    /content\.folders\[1\].*resolves outside the project root/);
+});
+
+test('content.folders refuses an absolute entry outright, even though the join would tame it', () => {
+  assert.throws(() => readConfig('/p', file({ content: { folders: ['/etc'] } })),
+    /content\.folders\[0\].*is an absolute path/);
+});
+
+test('content.folders refuses an entry equal to the root itself, or an empty string', () => {
+  assert.throws(() => readConfig('/p', file({ content: { folders: ['.'] } })),
+    /content\.folders\[0\].*resolves outside the project root/);
+  assert.throws(() => readConfig('/p', file({ content: { folders: [''] } })),
+    /content\.folders\[0\].*must be a non-empty string/);
+});
+
+/**
+ * `typeof entry !== 'string'` on its own, never exercised by any of the tests above — the same gap
+ * `content.registry`'s own test above names, one level down: an entry that is a number or an object
+ * would otherwise reach `sheetFolders`' `join(...entry.split('/'))` and crash somewhere far from here.
+ */
+test('content.folders refuses an entry that is not a string at all', () => {
+  assert.throws(() => readConfig('/p', file({ content: { folders: [123] } })),
+    /content\.folders\[0\].*must be a non-empty string/);
+  assert.throws(() => readConfig('/p', file({ content: { folders: [{}] } })),
+    /content\.folders\[0\].*must be a non-empty string/);
+});
+
+test('content.folders refuses a value that is not an array at all', () => {
+  assert.throws(() => readConfig('/p', file({ content: { folders: 'pages' } })),
+    /content\.folders.*must be an array of strings/);
+  assert.throws(() => readConfig('/p', file({ content: { folders: { a: 'pages' } } })),
+    /content\.folders.*must be an array of strings/);
+});
+
+test('content.folders refuses a sibling folder whose name starts with the root\'s own name', () => {
+  assert.throws(() => readConfig('/proj', file({ content: { folders: ['../proj-other/pages'] } })),
+    /content\.folders\[0\].*resolves outside the project root/);
+});
+
 test('a file that is not JSON counts as no file, not as a crash', () => {
   // A broken `holdrim.json` is a developer's mistake, and the service saying "Documentation" on a
   // screen is a better clue than a stack trace on a port nobody is listening to.

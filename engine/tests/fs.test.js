@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { saveRegistry, loadRegistry } from '../cli/validation.ts';
 import { exportSite } from '../cli/export.ts';
+import { sheetFiles } from '../cli/pages.ts';
 
 /** Replaces `fs[name]` with `impl(real, ...args)` for the life of the test, through the ESM binding too. */
 function spy(t, name, impl) {
@@ -260,4 +261,42 @@ test('exportSite propagates a real lstat error on `out`, rather than reading it 
     return real(p, ...rest);
   });
   assert.throws(() => exportSite(tmp, out), { code: 'EACCES' });
+});
+
+// ===================================================================== holdrim#164
+// `content.folders` (`sheetFolders`, engine/cli/pages.ts) has the exact same shape as
+// `content.registry`, and the same gap #161 closed there: `readConfig`'s own check is lexical, on
+// the string as written, so a committed, WORKING symlink standing in for a configured folder —
+// `content.folders: ["mnt"]`, `mnt` pointing outside the project — reads as an ordinary nested path.
+// `sheetFiles` is the one place a configured folder is actually opened; it now runs
+// `refuseEscapedFolder` on each one first, exactly as `loadRegistry`/`saveRegistry` do for the
+// registry.
+
+/** A project whose one page folder (`mnt`) is a working symlink to somewhere OUTSIDE the project,
+ *  with a page sitting in the real, outside location. */
+function escapingPagesProject(t) {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  const outside = mkdtempSync(join(tmpdir(), 'holdrim-fs-outside-'));
+  t.after(() => { rmSync(tmp, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['mnt'], registry: 'r.json' } }));
+  writeFileSync(join(outside, 'X01.html'), '<main></main>');
+  symlinkSync(outside, join(tmp, 'mnt'));
+  return { tmp, outside };
+}
+
+test('sheetFiles refuses a configured folder that is a working symlink resolving OUTSIDE the project', (t) => {
+  const { tmp } = escapingPagesProject(t);
+  assert.throws(() => sheetFiles(tmp), /outside the project root/);
+});
+
+test('sheetFiles accepts a configured folder that is a working symlink resolving INSIDE the project', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['mnt'], registry: 'r.json' } }));
+  mkdirSync(join(tmp, 'real-pages'));
+  writeFileSync(join(tmp, 'real-pages', 'X01.html'), '<main></main>');
+  symlinkSync(join(tmp, 'real-pages'), join(tmp, 'mnt'));
+
+  assert.deepEqual(sheetFiles(tmp), [join(tmp, 'mnt', 'X01.html')],
+    'a working symlinked folder is a legitimate way to mount content, exactly like the registry\'s own');
 });

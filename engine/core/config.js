@@ -128,6 +128,61 @@ function readRegistry(configured, root) {
 }
 
 /**
+ * `content.folders`'s own limit, the same shape as `readRegistry` just above and for the same
+ * reason: `sheetFolders` (engine/cli/pages.ts) joins each entry onto the project root with a plain
+ * `join`, and `sheetFiles` then `readdirSync`s the result — until now, nothing checked any of that
+ * stayed inside the project. `"../other-project/pages"`, or an absolute path, made the engine scan,
+ * fingerprint and SERVE pages that belong to a different project entirely: whoever can commit to
+ * `holdrim.json` decides what a reader sees, not only what a reader reads back to the registry.
+ *
+ * Checked here, at load, the same one place `readRegistry` already goes through, with the same
+ * `insideRoot` (engine/core/paths.js) — never a second hand-rolled comparison, and never a value
+ * this function has not already cleared reaching `sheetFolders`' own plain `join`.
+ *
+ * An absolute entry is refused outright, before `insideRoot` ever runs, for the reason `readRegistry`
+ * gives for its own `content.registry`: a value written as an absolute path says something different
+ * from what it does, and reinterpreting it as relative because the join happens to fold it back
+ * inside the root is a surprise of its own.
+ *
+ * ⚠️ Lexical only, on each STRING as written — see `readRegistry`'s own warning for why a symlinked
+ * ANCESTOR is not this function's to catch. `sheetFiles` (engine/cli/pages.ts, holdrim#164) runs
+ * `refuseEscapedFolder` (engine/cli/fs.ts) on each folder's REAL location before it ever opens one,
+ * the same guard `loadRegistry`/`saveRegistry` run on the registry's (holdrim#161, round 2).
+ *
+ * `content.folders` is an array, unlike `content.registry`'s single string, so a value that is not
+ * an array at all is refused before any entry is even looked at — a project that wrote an object or
+ * a string here meant something this function cannot read as folders.
+ *
+ * @param {unknown} configured  `file.content.folders`, or undefined
+ * @param {string} root
+ * @returns {string[]}
+ */
+function readFolders(configured, root) {
+  const value = configured ?? ['pages'];
+  if (!Array.isArray(value)) {
+    throw new Error(`${root}/holdrim.json's "content.folders" must be an array of strings.`);
+  }
+  value.forEach((entry, i) => {
+    if (typeof entry !== 'string' || entry.length < 1) {
+      throw new Error(
+        `${root}/holdrim.json's "content.folders[${i}]" must be a non-empty string; got ` +
+        `${JSON.stringify(entry)}.`);
+    }
+    if (isAbsolute(entry)) {
+      throw new Error(
+        `${root}/holdrim.json's "content.folders[${i}]" ("${entry}") is an absolute path — it must ` +
+        'name a folder inside the project, relative to its root.');
+    }
+    if (!insideRoot(root, join(root, ...entry.split('/')))) {
+      throw new Error(
+        `${root}/holdrim.json's "content.folders[${i}]" ("${entry}") resolves outside the project ` +
+        'root — it must name a folder inside the project.');
+    }
+  });
+  return value;
+}
+
+/**
  * The keys that would grant authority, refused in `holdrim.json`. `roles` and `grants` joined this
  * list in the rework of #29: reading a project's own roles and who holds them from the file would
  * let a committer, or the agent applying an approved request, widen anyone's power at the next
@@ -239,7 +294,7 @@ export function readConfig(root, io, env = {}) {
     // would have to name their folders the way that project named its own.
     // The defaults below are an example of shape, not a rule: one folder of pages next to the file
     // that records their approvals.
-    sheetFolders: content.folders ?? ['pages'],
+    sheetFolders: readFolders(content.folders, root),
     registry: readRegistry(content.registry, root),
     // Where `/` leads. The engine's own home by default: every page with its light and every open
     // request, which is the first thing a person needs after signing in. A project that would rather

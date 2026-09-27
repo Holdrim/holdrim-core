@@ -127,6 +127,11 @@ export function refuseUnreachableFolder(root: string, path: string, what: string
  * `refuseLink` and `refuseUnreachableFolder` already treat it — a real failure reading the
  * filesystem is not "not there yet".
  *
+ * Takes a FOLDER just as well as a file: `sheetFiles` (engine/cli/pages.ts, holdrim#164) calls this
+ * on each `content.folders` entry before it ever `readdirSync`s one, for the identical reason —
+ * `readConfig`'s own check on that setting is lexical too, and a folder is simply a path whose
+ * walk-up may stop at itself rather than at a parent.
+ *
  * Called AFTER `refuseUnreachableFolder` wherever both run on the same path (`loadRegistry`): a
  * DANGLING ancestor must still get that check's own, more specific message — `realpathSync` on a
  * dangling symlink fails with a plain `ENOENT` naming the link itself, which would read here as a
