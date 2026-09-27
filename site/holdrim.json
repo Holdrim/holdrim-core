@@ -12,7 +12,7 @@
   "name": "Holdrim",
 
   "content": {
-    "folders": ["pages"],
+    "folders": ["pages", "pages/pt-BR", "pages/es"],
     "registry": "approvals.json",
     "home": "/pages/S01.html",
     "trimPrefix": "pages/",
