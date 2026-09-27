@@ -307,6 +307,57 @@ forEachStore('a session opens, is found, and stops being found when it closes', 
   await s.closeSession(id);                        // closing twice must not blow up
 });
 
+/**
+ * The key a session row is kept under, computed here and NOT imported from users.ts: an oracle of its
+ * own, so a store that changed what it hashes, or stopped hashing, disagrees with this line instead of
+ * agreeing with itself.
+ */
+const sessionKeyOf = (id) => createHash('sha256').update(id, 'utf8').digest('hex');
+
+/**
+ * A live session row written straight into the store under `key`, bypassing `openSession`: to CHOOSE
+ * the key, or to write one the way the version before hashing did, keyed by the raw id.
+ */
+async function insertSessionRow(s, key, email) {
+  const now = new Date();
+  await s.insertSession(key, email, now.toISOString(), new Date(now.getTime() + 12 * 3600_000).toISOString());
+}
+
+forEachStore('a copy of the users store no longer holds a usable session: the row is under the hash of the id', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = await s.openSession('x@example.org');
+
+  assert.equal(await s.readSession(id), null,
+    'the row is kept under the id the cookie carries');
+  assert.equal((await s.readSession(sessionKeyOf(id)))?.email, 'x@example.org',
+    'the row is not kept under the SHA-256 of the id');
+});
+
+forEachStore('a copy of the users store no longer holds a usable session: a stored key is not a cookie', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const id = await s.openSession('x@example.org');
+  const copied = sessionKeyOf(id);
+  // Asked first, so the refusal below is about THIS value and not about one no row holds.
+  assert.ok(await s.readSession(copied), 'the value under test is not what the store holds');
+
+  assert.equal(await s.fromSession(copied), null,
+    'a stored key, sent as a cookie, signs somebody in');
+  assert.equal((await s.fromSession(id))?.email, 'x@example.org', 'the cookie itself stopped working');
+});
+
+forEachStore('a session row kept under its raw id, as before hashing, signs nobody in', async (s) => {
+  await s.create('x@example.org', 'X', 'a-long-enough-password');
+  const raw = randomBytes(32).toString('base64url');
+  await insertSessionRow(s, raw, 'x@example.org');
+  assert.ok(await s.readSession(raw), 'the old row under test is not there');
+
+  assert.equal(await s.fromSession(raw), null,
+    'a row kept under a raw id signs somebody in');
+  // And a disable still takes it: the rows go by address, whatever they are keyed by.
+  await s.setEnabled('x@example.org', false);
+  assert.equal(await s.readSession(raw), null, 'disabling left the old row behind');
+});
+
 forEachStore('an expired session is worth nothing, and gets purged', async (s) => {
   await s.create('x@example.org', 'X', 'a-long-enough-password');
   const dead = await s.openSession('x@example.org', -1);      // opened already expired
@@ -756,21 +807,21 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
 forEachStore('the kept session survives even past a single delete page, and every other one is gone', async (s) => {
   await s.create('x@example.org', 'X', 'a-long-enough-password');
 
-  // Crafted, not random: `!` (0x21) sorts before every character `openSession`'s base64url ids use
-  // (`-0-9A-Za-z_`, all 0x2D or higher), and a plain `.where(...).limit(...)` query with no
-  // `orderBy` reads Firestore documents back in ascending id order — checked against the real
-  // emulator, not merely assumed. That lands this ONE session inside the FIRST page a paginated
-  // delete reads, which is the only place `#deleteSessionPage`'s "how many documents did the QUERY
-  // return" and "how many did this call actually delete" can ever come apart: with fewer sessions,
-  // or the kept one happening to fall on the always-short LAST page, the two numbers are always
-  // equal and a bug that confused them would pass unnoticed regardless of how many sessions exist.
-  // `insertSession` bypasses `openSession`'s random id on purpose, to CHOOSE where this one lands
-  // rather than hope for it; every store implements it, so this same test is portable to all three,
-  // even though only Firestore's delete has a page boundary to get wrong.
-  const mine = '!!!!!!!!the-kept-session';
-  const now = new Date();
-  await s.insertSession(mine, 'x@example.org', now.toISOString(),
-    new Date(now.getTime() + 12 * 3600_000).toISOString());
+  // Crafted, not random: this id's key (`sessionKeyOf`, the document id a store keeps) starts with
+  // five zeros — found by counting up the suffix until one did — so it sorts before the keys of the
+  // 401 random sessions below but for a chance of about one in a million, and a plain
+  // `.where(...).limit(...)` query with no `orderBy` reads Firestore documents back in ascending id
+  // order — checked against the real emulator, not merely assumed. That lands this ONE session
+  // inside the FIRST page a paginated delete reads, which is the only place `#deleteSessionPage`'s
+  // "how many documents did the QUERY return" and "how many did this call actually delete" can ever
+  // come apart: with fewer sessions, or the kept one happening to fall on the always-short LAST page,
+  // the two numbers are always equal and a bug that confused them would pass unnoticed regardless of
+  // how many sessions exist. `insertSession` bypasses `openSession`'s random id on purpose, to CHOOSE
+  // where this one lands rather than hope for it; every store implements it, so this same test is
+  // portable to all three, even though only Firestore's delete has a page boundary to get wrong.
+  const mine = 'the-kept-session-635302';
+  assert.match(sessionKeyOf(mine), /^00000/, 'the kept session no longer sorts first, so this proves nothing');
+  await insertSessionRow(s, sessionKeyOf(mine), 'x@example.org');
   const others = [];
   for (let i = 0; i < 401; i++) others.push(await s.openSession('x@example.org'));
 

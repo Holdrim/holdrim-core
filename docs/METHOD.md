@@ -235,8 +235,8 @@ that recycles its instances.
 | `firestore` | Firestore, in the project named by `HOLDRIM_PROJECT` |
 | `postgres://…` | Postgres, through the optional `pg` package. `postgresql://…` too |
 
-The scrypt hashing, the salt, the constant-time comparison and the session lifetime live in
-`UserStoreBase`, not in the implementations. That is not tidiness: a password hashed one way in
+The scrypt hashing, the salt, the constant-time comparison, the session lifetime and the hashing
+of session ids live in `UserStoreBase`, not in the implementations. That is not tidiness: a password hashed one way in
 SQLite and another way in Postgres is an account that works in one deployment and not in the other,
 and the person is told "e-mail or password do not match" while holding the right password. The
 implementations know about rows; none of them knows about scrypt.

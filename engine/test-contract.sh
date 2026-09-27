@@ -1109,6 +1109,22 @@ expect "and a refused sign-in still logs the address that was typed" 1 \
   "$(grep '"event":"sign_in_refused"' $WORK/password.log | grep -Fc -e "\"email\":\"$OWNER\"")"
 expect "correct password → 200"        200 "$(login "$PASSWORD")"
 expect "and the session identifies the owner" owner "$(curl -s -b $COOKIES $B/api/me | jfield role)"
+# A copy of the users store no longer holds a usable session: every value its sessions table keeps,
+# sent back as the cookie, is 401, and the cookie the browser holds is none of them. Read from the
+# server's own file, through the server's own routes — the unit tests prove the store, this proves
+# the cookie a real sign-in hands out is the one that is hashed.
+OWNER_SESSION=$(awk '$6 == "holdrim_session" { print $7 }' $COOKIES)
+node --input-type=module -e "
+import { DatabaseSync } from 'node:sqlite';
+const db = new DatabaseSync(process.argv[1], { readOnly: true });
+for (const row of db.prepare('SELECT * FROM sessions').all()) for (const v of Object.values(row)) console.log(String(v));
+db.close();
+" "$DATA_DIR/users.db" > "$WORK/session-values.txt"
+expect "the browser holds a session cookie" 0 "$([ -n "$OWNER_SESSION" ] && echo 0 || echo 1)"
+expect "the users store holds the session's row" 0 "$([ -s "$WORK/session-values.txt" ] && echo 0 || echo 1)"
+expect "and not the cookie the browser holds" 0 "$(grep -cxF -e "$OWNER_SESSION" "$WORK/session-values.txt")"
+COPIED_ANSWERS=$(while read -r v; do curl -s -o /dev/null -w '%{http_code}\n' -H "Cookie: holdrim_session=$v" $B/api/me; done < "$WORK/session-values.txt" | sort -u | tr '\n' ' ')
+expect "and none of its values, sent as the cookie, signs anyone in" "401 " "$COPIED_ANSWERS"
 # Signing in does not ITSELF name a person — but the owner's row already exists by the time anyone
 # can sign in: this store's first boot wrote the `lock_baseline` event authored by the owner (decision
 # B), which mints their row before any request, comment or ✓ of theirs ever could. So the log finds a
