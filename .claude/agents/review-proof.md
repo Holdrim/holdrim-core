@@ -30,9 +30,10 @@ instead of inventing one. That is a valid answer, not a gap.
   there is untested until a test in `engine/tests/` drives it and fails without it. `engine/tests/check-language.test.js` shows a script run as CI runs it,
   against a throwaway directory; `engine/tests/session-start.test.js` shows one whose `npm`, `npx`,
   `git` and `node` are replaced by stubs on the `PATH`, because the real ones would install or rewrite.
-- **A test that cannot fail.** It asserts on a value it just built, mocks the very thing under test,
-  asserts `true`, or its assertion holds whatever the code does. Say what you would break to make
-  it fail, and why it would stay green.
+- **A test that cannot fail.** It asserts on a value it just built — an expected value computed by
+  the very function under test is one — mocks the very thing under test, asserts `true`, or its
+  assertion holds whatever the code does. Say what you would break to make it fail, and why it
+  would stay green.
 - **An equivalent mutant.** The change's own mutation round used an input where the old and new code
   agree, so the mutant "survived" for a reason the report missed. For example, a precedence test
   that configures the first agent in the list proves nothing, because the PATH would answer the
@@ -42,6 +43,23 @@ instead of inventing one. That is a valid answer, not a gap.
   it. Try it from the other side: a stub that *observes* (counts calls, records order, stays alive)
   instead of one that is observed. A counted `curl` stub proved the emulator script's deadline
   after the change had called it untestable.
+- **A refusal proved only beneath its entry point.** A refusal is proved through the entry point
+  that meets the input — a boot of the real server, the CLI command — not only through the function
+  beneath it. A registry path's refusal proved only through `readConfig` with a mocked reader said
+  nothing about whether the server refused to boot; the boot-refusal cases in
+  `engine/test-contract.sh` are the shape.
+- **A comment that claims coverage.** A comment that says a case is already handled elsewhere is a
+  claim, and it gets a test of that case before anything relies on it. A comment said a symlink
+  inside the root that points elsewhere was "already refused", and a working symlinked folder
+  passed every check it named.
+- **A test that depends on file permissions, proved as root.** Root passes every access check, and
+  CI runs as a plain user, so such a test is proved as a plain user. A save over a read-only
+  registry passed locally as root, and in CI it was refused with `EACCES`, exactly as the code
+  intends.
+- **A test that races a clock against a wait.** It flakes on a slow runner, so it asserts the state
+  the rule protects instead — the row itself, not that the wait still holds. A test expected a
+  five-second wait to hold after eighty wrong passwords, and CI's slowest runner took 6.4 seconds to
+  get there.
 - **A proof claimed but not run.** The change says a check passes; run it and see.
 - **The five proofs**, exactly as `AGENTS.md` rule 3 spells them — copy the commands from there,
   arguments included. A shortened one proves nothing: `scripts/check-language.sh` without its file
