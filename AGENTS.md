@@ -21,13 +21,9 @@ commit message. The repository is public, and someone who opens it and sees anot
 the tab. `scripts/check-language.sh` enforces comments in CI.
 *The three exceptions:* the translated values in `engine/locales/pt-BR.json` and `es.json`; the
 README's translations, `README.pt-BR.md` and `README.es.md`, which `engine/tests/docs.test.js` keeps
-in step with the English they translate; and the site's own translated pages,
-`site/pages/pt-BR/*.html` and `site/pages/es/*.html` — content, not code, the same way any adopting
-project's documentation is written in the language of whoever reviews it (docs/GLOSSARY.md). They
-stay honest the method's own way rather than a second one built for translations: each translated
-block `data-depends` on the English original it translates, so it turns 🔴 the moment that original
-changes — `engine/tests/site.test.js` proves it, and holds every translated block to depending on
-exactly its own original and nothing else. Everything that is contract — event vocabulary, `data-*` attributes, `HOLDRIM_*` variables, the keys of
+in step with the English they translate; and the site's translated pages, `site/pages/pt-BR/` and
+`site/pages/es/`, where every block `data-depends` on the English block it translates, so a changed
+original turns its translations 🔴 (`engine/tests/site.test.js`). Everything that is contract — event vocabulary, `data-*` attributes, `HOLDRIM_*` variables, the keys of
 `holdrim.json` — is English, and there is no layer that translates any of it on read.
 
 **2. Green is not proof.** A passing suite is not the same claim as "it works". A suite stays green
