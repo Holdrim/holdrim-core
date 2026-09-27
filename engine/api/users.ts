@@ -49,6 +49,11 @@ export { normalizeEmail, isEmailAddress, MAX_EMAIL_LENGTH };
  */
 
 const derive = promisify(scrypt) as (secret: string, salt: Buffer, length: number) => Promise<Buffer>;
+const deriveWith = promisify(scrypt) as (
+  secret: string, salt: Buffer, length: number, options: { N: number; r: number; p: number }) => Promise<Buffer>;
+
+/** The cost of a sign-in failure key (`UserStoreBase.failureKey` says why these three). */
+const KEY_SCRYPT = { N: 1024, r: 8, p: 1 };
 
 /** scrypt output length, in bytes. Same number for every implementation — see the note above. */
 const KEY_LENGTH = 64;
@@ -243,7 +248,11 @@ export interface UserStore {
    */
   updateSignInFailures(
     email: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void>;
-  /** Drops every row whose last wrong password is older than `lastBefore`, then all but the `keep` newest. */
+  /**
+   * Drops every row whose last wrong password is older than `lastBefore`; then, past `keep` rows,
+   * the rows that are not `escalated`, oldest first, and only when those run out, the oldest of the
+   * escalated ones. A row still counting towards a wait is never evicted before one that is not.
+   */
   pruneSignInFailures(lastBefore: string, keep: number): Promise<void>;
   /** How many rows there are. Exists so a test can prove the ceiling holds, in every store. */
   countSignInFailures(): Promise<number>;
@@ -260,6 +269,12 @@ export interface SignInFailures {
   count: number;
   /** ISO string, like every timestamp here, so the prune compares the same way in every store. */
   lastAt: string;
+  /**
+   * Whether the count is past the free attempts, as the policy decided when it wrote the row
+   * (`identity-password.ts`, `#rowAfter`). Written down rather than worked out by each store, so
+   * three databases cannot hold three ideas of which rows the ceiling must keep.
+   */
+  escalated: boolean;
 }
 
 /**
@@ -372,7 +387,7 @@ export abstract class UserStoreBase implements UserStore {
   /** Deletes the address's token row; the public id of the row deleted, or null when there was none. */
   protected abstract deleteAgentToken(email: string): Promise<string | null>;
   /**
-   * The sign-in failure rows, by KEY (`#failureKey`), never by address: the address is hashed here,
+   * The sign-in failure rows, by KEY (`failureKey`), never by address: the key is derived here,
    * once, so no store can keep it in the clear by mistake. `updateFailure` holds its read, `next`
    * and its write in one transaction (see `updateSignInFailures` on the interface).
    */
@@ -381,6 +396,13 @@ export abstract class UserStoreBase implements UserStore {
     key: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void>;
   protected abstract pruneFailures(lastBefore: string, keep: number): Promise<void>;
   protected abstract countFailures(): Promise<number>;
+  /**
+   * The value kept under `name`, writing `fresh` there first when there is none — atomically, so
+   * two instances starting at once end up with the one value that landed, not one each. A value
+   * written here is never changed and never removed: it is what a store holds ONCE per deployment
+   * (`#keySalt` is the one there is).
+   */
+  protected abstract readOrWriteValue(name: string, fresh: Buffer): Promise<Buffer>;
 
   abstract close(): Promise<void>;
 
@@ -664,30 +686,58 @@ export abstract class UserStoreBase implements UserStore {
 
   // ------------------------------------------------------------- wrong passwords
   /**
-   * The key a typed address is counted under: SHA-256 of the address, normalised.
+   * The key a typed address is counted under: scrypt of the address, normalised, with this
+   * deployment's own salt.
    *
    * ⚠️ Never the address itself. The rows hold every address anybody TYPED at the sign-in form in the
    * last hour or so — typos of a colleague's private address, whatever list an attacker is working
    * through — and most of them belong to nobody with an account here, so no procedure in
-   * docs/PRIVACY.md would ever find them to remove. Hashed, the table cannot be read as a list of
-   * addresses; it can only confirm one somebody already holds, and only while its row lives. That is
-   * not anonymity — an address is guessable, and a dictionary of them finds its own hashes — and it
-   * is not meant to be: it is what keeps a copy of this database from handing over the list.
+   * docs/PRIVACY.md would ever find them to remove.
    *
-   * No salt, on purpose: the key has to be the same on every instance and after every restart, or
-   * the count would not survive either, which is the whole reason it is in the store.
+   * A slow, salted derivation and not a plain hash: an address is guessable, and with a plain hash
+   * a copy of this database lets anyone test a whole list of addresses against its rows in
+   * microseconds each, or look them up in a table computed once for every Holdrim there is. The
+   * salt defeats the table; the cost prices each guess. It is not secret, and cannot be: it lives
+   * in this same store (`#keySalt` says why), so whoever holds a copy holds it too, and can still
+   * test the addresses they suspect, one scrypt at a time. What this refuses is the cheap, bulk
+   * reading of the table, not a determined attacker with the file.
+   *
+   * N=1024, r=8, p=1: about a sixteenth of the password check's own scrypt (Node's default,
+   * N=16384), measured at 2.3 ms against 37 ms, and it runs on every sign-in attempt, known address
+   * or not, twice (the read, then the write). Dearer, and it starts to be a price the server pays
+   * for every wrong password anyone sends; cheaper, and it stops pricing a guess at all.
+   *
+   * Protected rather than private so the conformance suite can ask it directly, as it does the row
+   * operations: which key a store derives is the property, and no public answer shows it.
    */
-  #failureKey(email: string): string {
-    return createHash('sha256').update(normalizeEmail(email), 'utf8').digest('hex');
+  protected async failureKey(email: string): Promise<string> {
+    const key = await deriveWith(normalizeEmail(email), await this.#keySalt(), 32, KEY_SCRYPT);
+    return key.toString('hex');
+  }
+
+  /**
+   * This deployment's salt for `failureKey`, generated the first time any instance needs it and
+   * read back from the store ever after.
+   *
+   * In the STORE, not in the environment or a file beside the process: the key has to come out the
+   * same on every instance and after every restart, or no count would survive either, which is the
+   * whole reason the count is in the store. That is also why it is no secret — see `failureKey`.
+   * Cached per store once read; a failed read is not cached, so the next attempt asks again.
+   */
+  #salt: Promise<Buffer> | null = null;
+  #keySalt(): Promise<Buffer> {
+    this.#salt ??= this.readOrWriteValue('sign_in_key_salt', randomBytes(SALT_LENGTH))
+      .catch((error) => { this.#salt = null; throw error; });
+    return this.#salt;
   }
 
   readSignInFailures(email: string): Promise<SignInFailures | null> {
-    return this.readFailure(this.#failureKey(email));
+    return this.failureKey(email).then((key) => this.readFailure(key));
   }
 
   updateSignInFailures(
     email: string, next: (current: SignInFailures | null) => SignInFailures | null): Promise<void> {
-    return this.updateFailure(this.#failureKey(email), next);
+    return this.failureKey(email).then((key) => this.updateFailure(key, next));
   }
 
   pruneSignInFailures(lastBefore: string, keep: number): Promise<void> {

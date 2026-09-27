@@ -94,11 +94,18 @@ export class UsersPostgres extends UserStoreBase {
     // Wrong passwords per typed address, as in SQLite: users-sqlite.ts says what the table is for.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sign_in_failures (
-        key     TEXT PRIMARY KEY,
-        count   INTEGER NOT NULL CHECK (count > 0),
-        last_at TEXT NOT NULL
+        key       TEXT PRIMARY KEY,
+        count     INTEGER NOT NULL CHECK (count > 0),
+        last_at   TEXT NOT NULL,
+        escalated BOOLEAN NOT NULL
       )`);
     await pool.query('CREATE INDEX IF NOT EXISTS sign_in_failures_by_last ON sign_in_failures (last_at)');
+    // What a store holds once per deployment: users-sqlite.ts says what it is for.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS store_values (
+        name  TEXT PRIMARY KEY,
+        value BYTEA NOT NULL
+      )`);
 
     this.#pool = pool;
     return pool;
@@ -252,7 +259,7 @@ export class UsersPostgres extends UserStoreBase {
   }
 
   protected async readFailure(key: string): Promise<SignInFailures | null> {
-    const [r] = await this.#query('SELECT count, last_at FROM sign_in_failures WHERE key = $1', [key]);
+    const [r] = await this.#query('SELECT count, last_at, escalated FROM sign_in_failures WHERE key = $1', [key]);
     return rowToFailure(r);
   }
 
@@ -261,32 +268,42 @@ export class UsersPostgres extends UserStoreBase {
     // The key's own advisory lock, for the reason `#inAddressTurn` gives: a first wrong password has
     // no row yet for `FOR UPDATE` to lock, and two at once would each insert a count of one.
     await this.#inTurn(`holdrim:sign-in:${key}`, async (q) => {
-      const [r] = (await q('SELECT count, last_at FROM sign_in_failures WHERE key = $1', [key])).rows;
+      const [r] = (await q('SELECT count, last_at, escalated FROM sign_in_failures WHERE key = $1', [key])).rows;
       const row = next(rowToFailure(r));
       if (row === null) {
         await q('DELETE FROM sign_in_failures WHERE key = $1', [key]);
         return;
       }
       await q(
-        'INSERT INTO sign_in_failures (key, count, last_at) VALUES ($1, $2, $3) '
-        + 'ON CONFLICT (key) DO UPDATE SET count = EXCLUDED.count, last_at = EXCLUDED.last_at',
-        [key, row.count, row.lastAt]);
+        'INSERT INTO sign_in_failures (key, count, last_at, escalated) VALUES ($1, $2, $3, $4) '
+        + 'ON CONFLICT (key) DO UPDATE SET count = EXCLUDED.count, last_at = EXCLUDED.last_at, '
+        + 'escalated = EXCLUDED.escalated',
+        [key, row.count, row.lastAt, row.escalated]);
     });
   }
 
   protected async pruneFailures(lastBefore: string, keep: number): Promise<void> {
     await this.#query('DELETE FROM sign_in_failures WHERE last_at < $1', [lastBefore]);
-    // Every row past the `keep` newest. `last_at` is an ISO string of one fixed shape, so it sorts
-    // as the instant it names under any collation, the same way `sessions.expires_at` is compared.
+    // Every row past the first `keep`, ranked as in SQLite: escalated first, then the newest.
+    // `last_at` is an ISO string of one fixed shape, so it sorts as the instant it names under any
+    // collation, the same way `sessions.expires_at` is compared.
     await this.#query(
       'DELETE FROM sign_in_failures WHERE key IN (SELECT key FROM sign_in_failures '
-      + 'ORDER BY last_at DESC, key DESC OFFSET $1)', [keep]);
+      + 'ORDER BY escalated DESC, last_at DESC, key DESC OFFSET $1)', [keep]);
   }
 
   protected async countFailures(): Promise<number> {
     const [r] = await this.#query('SELECT COUNT(*) AS n FROM sign_in_failures');
     // bigint arrives as a string; `countUsers` says why the fallback.
     return Number(r?.n ?? 0);
+  }
+
+  protected async readOrWriteValue(name: string, fresh: Buffer): Promise<Buffer> {
+    // `DO NOTHING`, then read: whichever instance wrote first, every one reads the same value back.
+    await this.#query('INSERT INTO store_values (name, value) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING',
+      [name, fresh]);
+    const [r] = await this.#query('SELECT value FROM store_values WHERE name = $1', [name]);
+    return Buffer.from(r!.value as Uint8Array);
   }
 
   async close(): Promise<void> {
@@ -321,5 +338,5 @@ function rowToToken(r: Record<string, unknown>): StoredAgentToken {
 
 /** One row of `sign_in_failures`, or null for none. */
 function rowToFailure(r: Record<string, unknown> | undefined): SignInFailures | null {
-  return r ? { count: Number(r.count), lastAt: r.last_at as string } : null;
+  return r ? { count: Number(r.count), lastAt: r.last_at as string, escalated: !!r.escalated } : null;
 }

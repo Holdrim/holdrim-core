@@ -50,12 +50,14 @@ export class PasswordIdentity {
    *   the same answer. Counting only real accounts would put a write on the known-address path and
    *   none on the other, and the time a wrong password takes would say who has an account here,
    *   which `check` spends a whole scrypt on an unknown address to hide.
-   * - **Stored under a hash of the address, never the address** (`users.ts`, `#failureKey`): the
+   * - **Stored under a salted, slow key, never the address** (`users.ts`, `failureKey`): the
    *   table is a record of what people typed at a sign-in form, and most of it names nobody here.
    * - **Bounded twice.** A row is forgotten an hour after its wait ends, and past `MAX_TRACKED`
-   *   rows the least recently failed go: an attacker posting a new invented address per request adds
-   *   a row each time, and without the ceiling the only thing that ever removed one was a successful
-   *   sign-in of that same address, which an attacker has no reason to make.
+   *   rows some go: an attacker posting a new invented address per request adds a row each time,
+   *   and without the ceiling the only thing that ever removed one was a successful sign-in of that
+   *   same address, which an attacker has no reason to make. WHICH go is the other half of the
+   *   ceiling (`#rowAfter`): a row still counting towards a wait is never evicted before one that
+   *   is not.
    * - **Facts, not deadlines.** A row keeps the count and when the last wrong one came; the wait is
    *   worked out on reading, and never longer than the count allows (`#waitOf`). Stored as a
    *   deadline, a clock stepped back an hour would stretch every wait by an hour.
@@ -66,6 +68,9 @@ export class PasswordIdentity {
   // limit are two numbers that will one day disagree about what an address is.
   static readonly MAX_EMAIL = MAX_EMAIL_LENGTH;
   static readonly MAX_PASSWORD = 256;   // scrypt on a megabyte of text is a CPU bill, not a login
+
+  /** How many wrong passwords cost nothing (`#waitAfter` says why five). */
+  static readonly FREE = 5;
 
   /** The longest a wait gets, and how long a count is kept after its wait ends. */
   static readonly MAX_WAIT_MS = 15 * 60_000;
@@ -87,7 +92,7 @@ export class PasswordIdentity {
    * from "the account is gone" stops protecting anything and starts costing support.
    */
   #waitAfter(count: number): number {
-    if (count <= 5) return 0;
+    if (count <= PasswordIdentity.FREE) return 0;
     return Math.min(2 ** (count - 6) * 5_000, PasswordIdentity.MAX_WAIT_MS);
   }
 
@@ -112,6 +117,24 @@ export class PasswordIdentity {
     if (!row) return 0;
     const wait = this.#waitAfter(row.count);
     return Math.max(0, Math.min(wait, Date.parse(row.lastAt) + wait - now));
+  }
+
+  /**
+   * The row one more wrong password leaves behind: the count goes on, or starts again once the old
+   * one is forgotten.
+   *
+   * `escalated` is what the ceiling keeps first (`UserStore.pruneSignInFailures`): a row past the
+   * free attempts outranks every row that is not, and is evicted only when escalated rows alone
+   * outnumber the ceiling. Past the free attempts, and not "while its wait runs": the row's worth is
+   * the count it carries, and that count is what makes the NEXT wrong password cost a wait, during
+   * the wait and just as much in the hour after it. A predicate on time as well (count past the free
+   * ones AND a wrong password in the last fifteen minutes) would protect a row only until its wait
+   * ended, and leave the count evictable for the rest of the time it is remembered. Decided here,
+   * from `FREE`, and written into the row, so the three stores never each work out their own.
+   */
+  #rowAfter(current: SignInFailures | null, now: number): SignInFailures {
+    const count = current && !this.#forgotten(current, now) ? current.count + 1 : 1;
+    return { count, lastAt: new Date(now).toISOString(), escalated: count > PasswordIdentity.FREE };
   }
 
   /**
@@ -179,10 +202,7 @@ export class PasswordIdentity {
 
     if (locked || !user) {
       const now = Date.now();
-      await this.#users.updateSignInFailures(email, (current) => ({
-        count: current && !this.#forgotten(current, now) ? current.count + 1 : 1,
-        lastAt: new Date(now).toISOString(),
-      }));
+      await this.#users.updateSignInFailures(email, (current) => this.#rowAfter(current, now));
       // Pruned AFTER writing, not before: pruning first leaves the new row sitting one above the
       // ceiling, which is exactly how a ceiling stops being one. The cutoff is the oldest a row can
       // be and still be remembered, whatever its count: `#forgotten` decides the rest on reading.

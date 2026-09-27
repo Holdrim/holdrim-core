@@ -176,10 +176,13 @@ so the two lists cannot drift apart.
   whoever is standing at the terminal which address to sign in with — configuration, not a user's
   personal data.
 - **Refused sign-ins.** The user store counts wrong passwords per address as it was typed — an
-  address with no account here included — and keeps each count under a SHA-256 of the address, never
-  the address itself, for no more than an hour and a quarter after the last wrong password. Past
-  ten thousand rows the oldest go. A hash of an address is not anonymous — anyone holding the address can find its row —
-  but the table cannot be read as a list of who tried to sign in.
+  address with no account here included — and keeps each count under a key derived from the address
+  with scrypt and a salt of this deployment's own, never the address itself, for no more than an hour
+  and a quarter after the last wrong password. Past ten thousand rows some go, and a row still
+  counting towards a wait is never evicted before one that is not. The key is not anonymous: the
+  salt lives in the same store, so anyone holding a copy and an address they suspect can find its
+  row, one slow derivation per address tried. What it refuses is reading the table as a list of who
+  tried to sign in.
 - **The repository.** The registry of approvals holds the file, the date, the fingerprint, the
   start of the block's own text and the event's id; the page's `data-validated` holds a date. Neither
   names anybody.

@@ -195,7 +195,7 @@ export class UsersFirestore extends UserStoreBase {
   }
 
   // ------------------------------------------------------------- wrong passwords
-  // Collection `sign_in_failures`, one document per key (users.ts, `#failureKey`): users-sqlite.ts
+  // Collection `sign_in_failures`, one document per key (users.ts, `failureKey`): users-sqlite.ts
   // says what it is for.
   protected async readFailure(key: string): Promise<SignInFailures | null> {
     return docToFailure((await this.#db.collection('sign_in_failures').doc(key).get()).data());
@@ -209,7 +209,7 @@ export class UsersFirestore extends UserStoreBase {
     await this.#db.runTransaction(async (tx) => {
       const row = next(docToFailure((await tx.get(ref)).data()));
       if (row === null) tx.delete(ref);
-      else tx.set(ref, { count: row.count, last_at: row.lastAt });
+      else tx.set(ref, { count: row.count, last_at: row.lastAt, escalated: row.escalated, evict_order: evictOrder(row) });
     });
   }
 
@@ -225,7 +225,10 @@ export class UsersFirestore extends UserStoreBase {
     // fresh. `count()` is billed by index entries read, a fraction of reading the documents.
     const over = (await failures.count().get()).data().count - keep;
     if (over <= 0) return;
-    const oldest = await failures.orderBy('last_at').limit(Math.min(over, 400)).get();
+    // By `evict_order`, the ranking SQLite and Postgres write as `ORDER BY escalated, last_at`, held
+    // in one field: two, one of them an inequality, would need a composite index this project does
+    // not otherwise require.
+    const oldest = await failures.orderBy('evict_order').limit(Math.min(over, 400)).get();
     const trim = this.#db.batch();
     for (const doc of oldest.docs) trim.delete(doc.ref);
     await trim.commit();
@@ -235,6 +238,18 @@ export class UsersFirestore extends UserStoreBase {
     return (await this.#db.collection('sign_in_failures').count().get()).data().count;
   }
 
+  protected async readOrWriteValue(name: string, fresh: Buffer): Promise<Buffer> {
+    // Collection `store_values`, one document per name: users-sqlite.ts says what it is for. In a
+    // transaction, so two instances creating it at once end with one value, read by both.
+    const ref = this.#db.collection('store_values').doc(name);
+    return this.#db.runTransaction(async (tx) => {
+      const before = (await tx.get(ref)).data();
+      if (before) return Buffer.from(before.value);
+      tx.create(ref, { value: fresh });
+      return fresh;
+    });
+  }
+
   async close(): Promise<void> {
     await this.#db.terminate();
   }
@@ -242,7 +257,16 @@ export class UsersFirestore extends UserStoreBase {
 
 /** One document of `sign_in_failures`, or null for none. */
 function docToFailure(d: DocumentData | undefined): SignInFailures | null {
-  return d ? { count: Number(d.count), lastAt: d.last_at } : null;
+  return d ? { count: Number(d.count), lastAt: d.last_at, escalated: d.escalated === true } : null;
+}
+
+/**
+ * The order rows leave in when the ceiling is reached, as ONE string: rows not escalated first
+ * (`0`), then escalated ones (`1`), each oldest first — an ISO date of one fixed shape sorts as
+ * the instant it names.
+ */
+function evictOrder(row: SignInFailures): string {
+  return `${row.escalated ? 1 : 0}|${row.lastAt}`;
 }
 
 /** One document of `agent_tokens`, shaped as `users.ts` expects it. */

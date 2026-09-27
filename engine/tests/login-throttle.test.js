@@ -165,9 +165,11 @@ test('a restart forgets nothing: the wait survives the store being closed and op
   });
 });
 
-test('the file keeps a hash of the typed address, never the address', async () => {
+test('the file keeps a salted, slow key for the typed address, never the address and never its plain SHA-256', async () => {
   // Most of what is typed at a sign-in form names nobody here — a typo of a colleague's private
-  // address, an attacker's list — and no removal procedure would ever find it in this table.
+  // address, an attacker's list — and no removal procedure would ever find it in this table. A plain
+  // SHA-256 would keep the address out of sight and still let a copy of the file be checked against
+  // a list of addresses at microseconds a guess, or against a table computed once for every site.
   await withUsersFile(async (path) => {
     const users = new UsersSqlite(path);
     const id = new PasswordIdentity(users, { secure: false });
@@ -178,9 +180,10 @@ test('the file keeps a hash of the typed address, never the address', async () =
     try {
       const rows = db.prepare('SELECT * FROM sign_in_failures').all();
       assert.equal(rows.length, 1);
-      assert.equal(JSON.stringify(rows).toLowerCase().includes('typo'), false, 'the address is in the file');
-      assert.equal(rows[0].key, createHash('sha256').update('typo@example.org').digest('hex'),
-        'the key is the address normalised and hashed, the same on every instance');
+      assert.equal(JSON.stringify(rows).toLowerCase().includes('typo'), false, 'the address is not in the file');
+      assert.match(rows[0].key, /^[0-9a-f]{64}$/, 'the key is 32 bytes, in hex');
+      assert.notEqual(rows[0].key, createHash('sha256').update('typo@example.org').digest('hex'),
+        'the key is not the plain SHA-256 of the address');
     } finally {
       db.close();
     }
@@ -210,7 +213,7 @@ test('a clock stepped back never stretches a wait past what the count allows', a
   const users = store();
   const id = new PasswordIdentity(users, { secure: false });
   await users.updateSignInFailures('someone@example.org',
-    () => ({ count: 6, lastAt: new Date(Date.now() + 86_400_000).toISOString() }));
+    () => ({ count: 6, lastAt: new Date(Date.now() + 86_400_000).toISOString(), escalated: true }));
   const wait = await id.remainingWait('someone@example.org');
   assert.ok(wait > 0 && wait <= 5, `six failures buy five seconds at most, got ${wait}`);
 });
@@ -221,7 +224,7 @@ test('a count is forgotten an hour after its wait ends, and starts again from on
   // Twenty failures, the last one two hours ago: its fifteen-minute wait ended an hour and three
   // quarters ago.
   await users.updateSignInFailures('someone@example.org',
-    () => ({ count: 20, lastAt: new Date(Date.now() - 2 * 3_600_000).toISOString() }));
+    () => ({ count: 20, lastAt: new Date(Date.now() - 2 * 3_600_000).toISOString(), escalated: true }));
   assert.equal(await id.remainingWait('someone@example.org'), 0, 'nothing left to wait');
   await id.signIn('someone@example.org', 'wrong');
   assert.equal((await users.readSignInFailures('someone@example.org'))?.count, 1, 'counting restarted');
@@ -234,10 +237,38 @@ test('a row past remembering is removed from the store, and one that may still c
   const users = store();
   const id = new PasswordIdentity(users, { secure: false });
   const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
-  await users.updateSignInFailures('old@example.org', () => ({ count: 20, lastAt: ago(80) }));
-  await users.updateSignInFailures('recent@example.org', () => ({ count: 20, lastAt: ago(70) }));
+  await users.updateSignInFailures('old@example.org', () => ({ count: 20, lastAt: ago(80), escalated: true }));
+  await users.updateSignInFailures('recent@example.org', () => ({ count: 20, lastAt: ago(70), escalated: true }));
   await id.signIn('someone@example.org', 'wrong');
-  assert.equal(await users.readSignInFailures('old@example.org'), null, 'the stale row is still there');
+  assert.equal(await users.readSignInFailures('old@example.org'), null, 'the stale row is gone');
   assert.equal((await users.readSignInFailures('recent@example.org'))?.count, 20,
-    'a row whose wait ended under an hour ago went too early');
+    'a row whose wait ended under an hour ago is kept');
+});
+
+test('the ceiling this ships with is ten thousand rows, and it is the one a prune is given', async () => {
+  // Every other ceiling test lowers it to run in a second, so without this one the shipped number
+  // could move anywhere — a million rows is a table nobody sized for — and nothing would notice.
+  // Read from what the store is asked to keep, on an identity nobody overrode.
+  const users = store();
+  const kept = [];
+  const prune = users.pruneSignInFailures.bind(users);
+  users.pruneSignInFailures = (lastBefore, keep) => { kept.push(keep); return prune(lastBefore, keep); };
+  const id = new PasswordIdentity(users, { secure: false });
+  await id.signIn('someone@example.org', 'wrong');
+  assert.deepEqual(kept, [10_000]);
+});
+
+test('a row still in its wait outlasts a flood of newer rows over the ceiling', async () => {
+  // The ceiling has to take rows from somewhere, and newest-first alone would take the oldest row
+  // there is, whatever it is still guarding. What it guarantees instead: a row past the free
+  // attempts is never evicted before one that is not.
+  const users = store();
+  const id = new PasswordIdentity(users, { secure: false });
+  const right = await id.firstAccess('someone@example.org', 'Someone');
+  id.maxTracked = 50;
+  for (let i = 0; i < 6; i++) await id.signIn('someone@example.org', 'wrong');
+  for (let i = 0; i < 80; i++) await id.signIn(`invented-${i}@example.org`, 'wrong');
+  assert.ok(await users.countSignInFailures() <= 50, 'the ceiling still holds');
+  assert.equal((await users.readSignInFailures('someone@example.org'))?.count, 6, 'the waiting row is kept');
+  assert.equal(await id.signIn('someone@example.org', right), null, 'and the wait still stands');
 });

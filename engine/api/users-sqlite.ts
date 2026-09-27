@@ -64,11 +64,18 @@ export class UsersSqlite extends UserStoreBase {
       -- (identity-password.ts says why, and users.ts why the key is a hash and never the address).
       -- No reference to users: an address nobody has is counted exactly like one somebody has.
       CREATE TABLE IF NOT EXISTS sign_in_failures (
-        key     TEXT PRIMARY KEY,
-        count   INTEGER NOT NULL CHECK (count > 0),
-        last_at TEXT NOT NULL
+        key       TEXT PRIMARY KEY,
+        count     INTEGER NOT NULL CHECK (count > 0),
+        last_at   TEXT NOT NULL,
+        escalated INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS sign_in_failures_by_last ON sign_in_failures (last_at);
+      -- What a store holds once per deployment, written the first time it is needed and never again
+      -- (users.ts, \`readOrWriteValue\`): today, the salt of the sign-in failure keys.
+      CREATE TABLE IF NOT EXISTS store_values (
+        name  TEXT PRIMARY KEY,
+        value BLOB NOT NULL
+      );
     `);
   }
 
@@ -198,7 +205,7 @@ export class UsersSqlite extends UserStoreBase {
   }
 
   protected async readFailure(key: string): Promise<SignInFailures | null> {
-    return rowToFailure(this.#db.prepare('SELECT count, last_at FROM sign_in_failures WHERE key = ?').get(key));
+    return rowToFailure(this.#db.prepare('SELECT count, last_at, escalated FROM sign_in_failures WHERE key = ?').get(key));
   }
 
   protected async updateFailure(
@@ -206,30 +213,41 @@ export class UsersSqlite extends UserStoreBase {
     // In `BEGIN IMMEDIATE`: two instances on one file each reading the same count and each writing
     // it plus one would count two wrong passwords as one.
     this.#immediate(() => {
-      const current = rowToFailure(this.#db.prepare('SELECT count, last_at FROM sign_in_failures WHERE key = ?').get(key));
+      const current = rowToFailure(this.#db.prepare('SELECT count, last_at, escalated FROM sign_in_failures WHERE key = ?').get(key));
       const row = next(current);
       if (row === null) {
         this.#db.prepare('DELETE FROM sign_in_failures WHERE key = ?').run(key);
         return;
       }
       this.#db.prepare(
-        'INSERT INTO sign_in_failures (key, count, last_at) VALUES (?, ?, ?) '
-        + 'ON CONFLICT(key) DO UPDATE SET count = excluded.count, last_at = excluded.last_at',
-      ).run(key, row.count, row.lastAt);
+        'INSERT INTO sign_in_failures (key, count, last_at, escalated) VALUES (?, ?, ?, ?) '
+        + 'ON CONFLICT(key) DO UPDATE SET count = excluded.count, last_at = excluded.last_at, '
+        + 'escalated = excluded.escalated',
+      ).run(key, row.count, row.lastAt, row.escalated ? 1 : 0);
     });
   }
 
   protected async pruneFailures(lastBefore: string, keep: number): Promise<void> {
     this.#db.prepare('DELETE FROM sign_in_failures WHERE last_at < ?').run(lastBefore);
-    // `LIMIT -1 OFFSET ?` is SQLite's "every row past the first ?": the newest `keep` stay.
+    // Ranked by what stays: escalated rows first, then the newest. `LIMIT -1 OFFSET ?` is SQLite's
+    // "every row past the first ?", so what goes is every row the first `keep` did not reach — the
+    // oldest of those not escalated, and escalated ones only once there are more than `keep` of them.
     this.#db.prepare(
-      'DELETE FROM sign_in_failures WHERE key IN '
-      + '(SELECT key FROM sign_in_failures ORDER BY last_at DESC, key DESC LIMIT -1 OFFSET ?)',
+      'DELETE FROM sign_in_failures WHERE key IN (SELECT key FROM sign_in_failures '
+      + 'ORDER BY escalated DESC, last_at DESC, key DESC LIMIT -1 OFFSET ?)',
     ).run(keep);
   }
 
   protected async countFailures(): Promise<number> {
     return (this.#db.prepare('SELECT COUNT(*) AS n FROM sign_in_failures').get() as { n: number }).n;
+  }
+
+  protected async readOrWriteValue(name: string, fresh: Buffer): Promise<Buffer> {
+    // `DO NOTHING`, then read: whichever instance wrote first, every one reads the same value back.
+    this.#db.prepare('INSERT INTO store_values (name, value) VALUES (?, ?) ON CONFLICT(name) DO NOTHING')
+      .run(name, fresh);
+    const r = this.#db.prepare('SELECT value FROM store_values WHERE name = ?').get(name) as { value: Uint8Array };
+    return Buffer.from(r.value);
   }
 
   async close(): Promise<void> {
@@ -240,8 +258,8 @@ export class UsersSqlite extends UserStoreBase {
 /** One row of `sign_in_failures`, or null for none. */
 function rowToFailure(r: unknown): SignInFailures | null {
   if (!r) return null;
-  const row = r as { count: number; last_at: string };
-  return { count: Number(row.count), lastAt: row.last_at };
+  const row = r as { count: number; last_at: string; escalated: number };
+  return { count: Number(row.count), lastAt: row.last_at, escalated: !!row.escalated };
 }
 
 /**

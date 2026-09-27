@@ -1500,6 +1500,10 @@ mchange() { curl -s -b $MCOOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type
 for i in 1 2 3 4 5 6; do mchange "guess-$i" >/dev/null; done
 expect "after six wrong current passwords, the right one waits → 403" 403 "$(mchange "$NEW_PASSWORD")"
 expect "and so does signing in with it → 401" 401 "$(mlogin "$NEW_PASSWORD")"
+# Two more, so the wait the restart below has to keep is eighty seconds, not twenty: the boot it
+# waits on may itself take up to twenty (the health poll's ceiling), and a wait that ran out
+# during a slow boot would fail the check below for nothing.
+for i in 1 2; do mlogin "guess-again-$i" >/dev/null; done
 rm -f $MCOOKIES
 
 # ------------------------------------------------------------------ handing the owner role over
@@ -1540,7 +1544,7 @@ HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$HANDOVER HOLDRIM_ADMINS=$ADMIN HOL
   node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/handover.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 
-# Before anything else here: the member's eight refused attempts above bought a twenty-second wait,
+# Before anything else here: the member's ten refused attempts above bought an eighty-second wait,
 # and this restart must not have handed it back. Counted in memory instead, the right password gets
 # straight in on the new process.
 expect "the member's wait survived the restart → 401" 401 "$(mlogin "$NEW_PASSWORD")"

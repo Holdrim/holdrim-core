@@ -408,10 +408,13 @@ who ran the engine from `main` before it.
   instances allowed N times the guesses. The policy is unchanged — five free per address as typed,
   then a wait that doubles up to fifteen minutes, forgotten an hour after the wait ends — and an
   address with no account is counted exactly like one with an account, so how a wrong password is
-  answered still says nothing about who has one here. Each row is keyed by a SHA-256 of the address,
-  never the address, and the table keeps at most ten thousand rows. The user store gains a
-  `sign_in_failures` table (SQLite, Postgres) or collection (Firestore), created on start. Each
-  wrong password now costs a write. What an operator notices: restarting no longer lifts a wait
+  answered still says nothing about who has one here. Each row is keyed by scrypt of the address
+  with a salt generated once per deployment, never by the address, and the table keeps at most ten
+  thousand rows, never evicting a row still counting towards a wait before one that is not. The
+  user store gains two tables (SQLite, Postgres) or collections (Firestore), created on start:
+  `sign_in_failures`, and `store_values`, which holds that salt. Leave `store_values` alone: a salt
+  removed under running instances leaves them keying one address two different ways. Each wrong password now costs a write and a small scrypt
+  (about a sixteenth of the password check's). What an operator notices: restarting no longer lifts a wait
   someone is kept in — emptying `sign_in_failures` does — and an edge rate limit on `POST
   /api/sign-in` is still advised for a service on the internet.
 - **Every answer outside Development now carries `Strict-Transport-Security: max-age=31536000`

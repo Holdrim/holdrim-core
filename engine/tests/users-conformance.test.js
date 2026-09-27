@@ -81,7 +81,7 @@ try {
   const openEmpty = async () => {
     const store = new UsersPostgres(PG_URL);
     await store.isEmpty();                       // forces the connection and creates the schema
-    await admin.query('TRUNCATE sessions, users, agent_tokens, sign_in_failures');
+    await admin.query('TRUNCATE sessions, users, agent_tokens, sign_in_failures, store_values');
     return store;
   };
   stores.push({
@@ -931,11 +931,12 @@ forEachStore('a sign-in failure row is read back as written, and null deletes it
   const lastAt = new Date().toISOString();
   await s.updateSignInFailures('x@example.org', (current) => {
     assert.equal(current, null);
-    return { count: 3, lastAt };
+    return { count: 3, lastAt, escalated: false };
   });
   // The same address as it might be typed next time: one key, however it is spelled.
-  assert.deepEqual(await s.readSignInFailures('  X@Example.ORG '), { count: 3, lastAt });
-  await s.updateSignInFailures('x@example.org', (current) => ({ count: current.count + 1, lastAt }));
+  assert.deepEqual(await s.readSignInFailures('  X@Example.ORG '), { count: 3, lastAt, escalated: false });
+  await s.updateSignInFailures('x@example.org', (current) => ({ count: current.count + 1, lastAt, escalated: true }));
+  assert.equal((await s.readSignInFailures('x@example.org'))?.escalated, true, 'escalated is read back as written');
   assert.equal((await s.readSignInFailures('x@example.org'))?.count, 4, 'next sees what is there');
   assert.equal(await s.readSignInFailures('y@example.org'), null, 'and nobody else is counted');
   await s.updateSignInFailures('x@example.org', () => null);
@@ -947,14 +948,14 @@ forEachStore('wrong passwords arriving at once each count', async (s) => {
   // attacker who sends guesses in parallel gets them at a fraction of the count.
   const lastAt = new Date().toISOString();
   await Promise.all(Array.from({ length: 12 }, () => s.updateSignInFailures('x@example.org',
-    (current) => ({ count: (current?.count ?? 0) + 1, lastAt }))));
+    (current) => ({ count: (current?.count ?? 0) + 1, lastAt, escalated: false }))));
   assert.equal((await s.readSignInFailures('x@example.org'))?.count, 12);
 }, { firestoreTimeout: 30_000 });
 
 forEachStore('the prune drops what is stale, then keeps only the newest', async (s) => {
   const at = (minutes) => new Date(Date.UTC(2026, 0, 1, 12, minutes)).toISOString();
   for (let i = 0; i < 6; i++) {
-    await s.updateSignInFailures(`n${i}@example.org`, () => ({ count: 1, lastAt: at(i) }));
+    await s.updateSignInFailures(`n${i}@example.org`, () => ({ count: 1, lastAt: at(i), escalated: false }));
   }
   // Before minute 1: only n0 is stale. Then three stay, the three most recent: n3, n4, n5.
   await s.pruneSignInFailures(at(1), 3);
@@ -962,6 +963,39 @@ forEachStore('the prune drops what is stale, then keeps only the newest', async 
   const kept = [];
   for (let i = 0; i < 6; i++) if (await s.readSignInFailures(`n${i}@example.org`)) kept.push(i);
   assert.deepEqual(kept, [3, 4, 5], 'the ones that went are the oldest');
+});
+
+forEachStore('past the ceiling, escalated rows go last, and oldest first once only they are left', async (s) => {
+  const at = (minutes) => new Date(Date.UTC(2026, 0, 1, 12, minutes)).toISOString();
+  // e0 and e1 escalated and the OLDEST rows there are; n2..n5 newer and not escalated.
+  await s.updateSignInFailures('e0@example.org', () => ({ count: 9, lastAt: at(0), escalated: true }));
+  await s.updateSignInFailures('e1@example.org', () => ({ count: 9, lastAt: at(1), escalated: true }));
+  for (let i = 2; i < 6; i++) {
+    await s.updateSignInFailures(`n${i}@example.org`, () => ({ count: 1, lastAt: at(i), escalated: false }));
+  }
+  const present = async () => {
+    const names = [];
+    for (const n of ['e0', 'e1', 'n2', 'n3', 'n4', 'n5']) if (await s.readSignInFailures(`${n}@example.org`)) names.push(n);
+    return names;
+  };
+  await s.pruneSignInFailures(at(0), 3);
+  assert.deepEqual(await present(), ['e0', 'e1', 'n5'], 'the rows not escalated went first, oldest first');
+  await s.pruneSignInFailures(at(0), 1);
+  assert.deepEqual(await present(), ['e1'], 'and with only escalated rows over it, the oldest of those');
+});
+
+forEachStore('the failure key is not the plain SHA-256 of the address, and two deployments disagree on it', async (s, name) => {
+  // A plain hash is the same for every Holdrim there is: one table computed once reads them all. The
+  // salt is per store, so a second, fresh store keys the same address differently.
+  const key = await s.failureKey('x@example.org');
+  assert.notEqual(key, createHash('sha256').update('x@example.org').digest('hex'));
+  assert.equal(await s.failureKey(' X@Example.ORG '), key, 'one key however the address is spelled');
+  const other = await stores.find((st) => st.name === name).open();
+  try {
+    assert.notEqual(await other.failureKey('x@example.org'), key, 'a second deployment has its own salt');
+  } finally {
+    await other.close();
+  }
 });
 
 /**
@@ -1005,6 +1039,24 @@ forEachDurableStore('a wrong-password wait survives the store being closed and o
     assert.ok(await id.remainingWait('x@example.org') > 0, 'the wait came back with the store');
     assert.equal(await id.signIn('x@example.org', right), null, 'and the right password still waits');
     assert.equal((await after.readSignInFailures('x@example.org'))?.count, 7, 'counting on from six');
+  } finally {
+    await after.close();
+  }
+});
+
+forEachDurableStore('the failure key comes back the same after the store is closed and opened again', async (open) => {
+  // Keys drawn from a salt that did not survive the restart would find none of the rows written
+  // before it, and every wait would be lifted by the restart exactly as if the count were in memory.
+  const before = await open();
+  let key;
+  try {
+    key = await before.failureKey('x@example.org');
+  } finally {
+    await before.close();
+  }
+  const after = await open();
+  try {
+    assert.equal(await after.failureKey('x@example.org'), key);
   } finally {
     await after.close();
   }

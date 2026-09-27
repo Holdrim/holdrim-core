@@ -242,6 +242,8 @@ Worth knowing before you run it:
   reads the same count and a restart forgets none of it. Counting is per address, never per client:
   it stops a guesser working on one account, not one spreading a few guesses over many, and anyone
   who knows an address can keep it waiting. A restart does not lift that wait; emptying the
-  `sign_in_failures` table (or collection) of the user store lifts every wait at once. Each wrong
-  password costs the server a scrypt and a write, which anyone can cause without an account. If the
+  `sign_in_failures` table (or collection) of the user store lifts every wait at once. The table
+  keeps at most ten thousand rows, and a row still counting towards a wait is never evicted before
+  one that is not. Each wrong password costs the server two scrypts, a small one for the row's key
+  and the full one for the password, and a write, which anyone can cause without an account. If the
   service is reachable from the internet, rate-limit `POST /api/sign-in` at your edge as well.
