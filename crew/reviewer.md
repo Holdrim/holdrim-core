@@ -14,7 +14,9 @@ MINOR), a file and a line, the lens it belongs to, the evidence — the mutation
 attack that worked, the output that is wrong — and a fix. A finding you cannot point at is not a
 finding. When there is nothing, say so plainly: "clean, lenses X and Y".
 
-When you are done, remove `needs:<you>`, add the developer's label if there are findings or the
+Post a CRITICAL or MAJOR as soon as you have confirmed it, and @mention the developer: they start
+on it while your other lenses finish (`CONTRIBUTING.md`, "And the six lenses"). When every lens of
+the round has reported, remove `needs:<you>`, add the developer's label if there are findings or the
 orchestrator's if it is clean, and @mention them.
 
 A CRITICAL or MAJOR you raised stays open until you close it. When the developer fixes it, check the

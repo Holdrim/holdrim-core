@@ -5,8 +5,8 @@ description: Reviews a change to Holdrim through six lenses at once — language
 
 # Full review
 
-Six reviewers read the same change at the same time, each through one lens, and you merge what
-they find into one ordered list.
+Six lenses read the same change at the same time, one question each, and you merge what they
+find into one ordered list.
 
 **It runs here, on this machine, on the person's own account.** Nothing posts anywhere and nothing
 needs an API key. The six lenses are plain Markdown in `.claude/agents/`: this file is how Claude
@@ -104,17 +104,20 @@ Two things to settle first:
 
 ## 3. Launch the six, in parallel
 
-Six independent runs of the same prompt, one per lens file, each returning its own JSON array to
-whoever merges. Run them at once where your agent can and one after another where it cannot: the
-lenses never talk to each other, so the order changes nothing but the wait. In Claude Code that is
-one message with six `Agent` calls.
+Independent runs of the same prompt, one per lens file, each returning its own JSON array to
+whoever merges — or one for locks, one for proof and one combined run for correctness, craft,
+engine and language, which `CONTRIBUTING.md` ("And the six lenses") allows. Run them at once where
+your agent can and one after another where it cannot: the lenses never talk to each other, so the
+order changes nothing but the wait. In Claude Code that is one message with one `Agent` call per
+run.
 
 **Which lenses, and on which model**, follows the tier the change declares (`CONTRIBUTING.md`, "And
-the six lenses"): tier 1 runs all six, tier 2 proof, correctness and craft, tier 3 the ones its row
-names. Pass the model explicitly on every call — `sonnet`, and `opus` only for locks and proof on a
-tier 1 change. The model named in a lens file is not always the one that runs: a call made from a
-workflow inherits its caller's unless it is told otherwise, and six lenses on the strongest model
-for a documentation change is the waste this rule exists to stop.
+the six lenses"): in round 1, tier 1 runs all six, tier 2 proof, correctness and craft, tier 3 the
+ones its row names; a later round runs the ones that section schedules for it. Pass the model
+explicitly on every call — `sonnet`, and `opus` only for locks and proof on a tier 1 change. The
+model named in a lens file is not always the one that runs: a call made from a workflow inherits
+its caller's unless it is told otherwise, and six lenses on the strongest model for a
+documentation change is the waste this rule exists to stop.
 
 | Agent | Lens |
 |---|---|
@@ -138,7 +141,9 @@ Give every agent the same prompt, built from these parts:
    starts in the person's own tree — its shell's working directory is the project root, not
    wherever the last bash call ended — so a lens told it may break files, and not told where it
    is, breaks them in the tree the person is about to commit.
-2. `Read .claude/agents/<name>.md and follow it exactly as your instructions.`
+2. `Read .claude/agents/<name>.md and follow it exactly as your instructions.` The combined run
+   gets one such line for each of its lens files, and then: `Apply each file's checklist on its own,
+   as if it were the only one, and give every finding a "lens" field naming the file it came from.`
 3. The base SHA, and the exact list of changed files, every one named.
 4. The diff, or the paths to read when it is large.
 5. What the change is trying to do, in one sentence.
@@ -146,9 +151,9 @@ Give every agent the same prompt, built from these parts:
    cannot read GitHub, and without them it judges the change against its own guess at the goal.
 7. The shared contract, verbatim:
 
-> Your lens is yours alone. The other five are language, proof, locks, engine, correctness and
-> craft; when you see a defect that belongs to one of them, leave it — reporting it here only
-> means the reader gets it twice.
+> Your lens is yours alone, or your lenses when you were handed more than one file. The six are
+> language, proof, locks, engine, correctness and craft; when you see a defect that belongs to one
+> you were not handed, leave it — reporting it here only means the reader gets it twice.
 >
 > Return a JSON array and nothing else. One object per finding, with `file`, `line`, `severity`,
 > `claim` (one sentence, the defect itself), `evidence` (whatever your own file says that field
@@ -196,6 +201,11 @@ Give every agent the same prompt, built from these parts:
 ## 4. Verify before you report
 
 A finding you report without checking costs the reader more than a finding you drop.
+
+A CRITICAL or MAJOR does not wait for the rest of the round: the developer starts on it as it
+arrives (`CONTRIBUTING.md`, "And the six lenses"). So verify each one as below the moment its lens
+returns, and hand it on; the report, and its verdict, still wait for every lens the round
+scheduled.
 
 For **every CRITICAL and MAJOR**, open the file at the line and confirm it says what the reviewer
 says. Then:
@@ -247,7 +257,8 @@ The second line is always the finding's `evidence`. Then, in this order:
 
 1. **The verdict**, one line: `ready for a pull request`, or `not ready: N blocking`. Anything
    CRITICAL or MAJOR blocks. MINOR does not.
-2. **What is clean**, one line naming the lenses that returned nothing. A lens that found nothing
+2. **What is clean**, one line naming the lenses that returned nothing — inside the combined run
+   too, where a lens with no finding under its name is one of them. A lens that found nothing
    is a result, and saying so is what makes the list above worth reading.
 3. **The proofs**, as they actually ran: which ones, and what they printed.
 4. **What you dropped.** Every dropped CRITICAL and MAJOR listed with its file, line, lens and the
@@ -262,8 +273,9 @@ leave their own record there. The terminal is gone by the time step 6 runs; the 
 not.
 
 Then stop. Do not fix anything unless asked: this reports. When a fix follows, it is a change like
-any other: rerun every lens that reads what the fix touched, not only the lens that reported, and
-record what that round finds on the pull request. Step 6 is a separate pass, after the merge.
+any other, and the next round runs the lenses `CONTRIBUTING.md` ("And the six lenses") schedules
+for it; record what that round finds on the pull request. Step 6 is a separate pass, after the
+merge.
 
 ## 6. Learn, when the change is done
 
