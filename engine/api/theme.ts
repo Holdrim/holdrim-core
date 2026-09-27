@@ -1,4 +1,5 @@
-import { normalize, join, sep, extname } from 'node:path';
+import { normalize, join, extname } from 'node:path';
+import { insideRoot } from '../core/paths.js';
 
 /**
  * The project's theme: how a project dresses the engine, in the Keycloak sense.
@@ -199,9 +200,12 @@ const MAX_LOGO_BYTES = 64 * 1024;
 function loadLogo(root: string, configured: string, io: ThemeIO, warnings: string[]): string | null {
   const base = normalize(root);
   const target = normalize(join(base, configured));
-  // The same prefix check the static server uses. `theme/../../secrets.png` normalises to somewhere
-  // outside the project, and a project's config file should not be able to read the disk.
-  if (!target.startsWith(base + sep)) {
+  // `insideRoot` (engine/core/paths.js), shared with `content.registry`'s own containment check
+  // (engine/core/config.js): `theme/../../secrets.png` normalises to somewhere outside the project,
+  // and a project's config file should not be able to read the disk. Lexical only, on the path as
+  // written — not the static file server's own checks in server.ts, which guard a REQUEST URL, a
+  // different kind of input, and are left exactly as they are.
+  if (!insideRoot(base, target)) {
     warnings.push(`theme logo "${configured}" resolves outside the project; ignored`);
     return null;
   }

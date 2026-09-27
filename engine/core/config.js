@@ -20,10 +20,11 @@
  * @module
  */
 
-import { join, relative, isAbsolute, sep } from 'node:path';
+import { join, isAbsolute } from 'node:path';
 import { HOME_SCREEN } from './screens.js';
 import { readFeatures } from './features.js';
 import { readPeopleShow } from './people-show.js';
+import { insideRoot } from './paths.js';
 
 /** `content.glossary`'s own limits — generous enough for a real vocabulary, small enough that a
  *  request text built from it (`holdrim propose-deps`, engine/cli/propose.ts) cannot itself become
@@ -85,22 +86,24 @@ function readGlossary(configured, root) {
  * already goes through, so `registryPath` itself stays a plain join, trusting a value this function
  * has already cleared.
  *
- * Checked by RESOLUTION, with `path.relative`, never by scanning the string for `".."` or by
- * `startsWith` on the two raw paths: `relative` folds `"a/../../x"` and a leading `"./"` down to
- * what they actually resolve to, where a string search would have to reinvent that folding to catch
- * the first and would wrongly flag the second; and `startsWith(root)` alone would wave a SIBLING
- * folder through as if it were inside — `/proj-other` passes a raw `"/proj"` prefix check the way
- * `/proj/…` does, exactly the classic bug this function exists not to repeat.
+ * The containment check itself is `insideRoot` (engine/core/paths.js), shared with the theme's own
+ * logo path (`loadLogo`, engine/api/theme.ts) rather than a second hand-rolled comparison here —
+ * see that module for why it resolves by `path.relative` and never a raw `startsWith`.
  *
- * An absolute value is refused outright, before resolution: `join(root, ...value.split('/'))`
- * happens to fold a leading `/` away and land back inside `root` on this platform, but a value
- * written as an absolute path says something different from what it does, and a project that wrote
- * one meant an absolute path — silently reinterpreting it as relative is its own kind of surprise.
+ * An absolute value is refused outright, before `insideRoot` ever runs: `join(root,
+ * ...value.split('/'))` happens to fold a leading `/` away and land back inside `root` on this
+ * platform, but a value written as an absolute path says something different from what it does, and
+ * a project that wrote one meant an absolute path — silently reinterpreting it as relative is its
+ * own kind of surprise.
  *
- * Lexical only, like every other read of this value: a symlink INSIDE the root that points
- * elsewhere is a different failure, already refused where the registry is loaded and saved
- * (`refuseLink` / `refuseUnreachableFolder`, holdrim#150/#155) — duplicating that check on the
- * string alone here would only be a second, weaker copy of it.
+ * ⚠️ Lexical only, on the STRING as written — nothing here touches the filesystem, so a symlinked
+ * ANCESTOR that resolves outside the root (`content.registry: "mnt/approvals.json"`, `mnt` a
+ * committed, working symlink to somewhere else) reads as contained right here, string-wise, and is
+ * not this function's to catch: `refuseEscapedFolder` (engine/cli/fs.ts, holdrim#161 round 2) does,
+ * with `fs.realpathSync`, at the moment the registry is actually loaded or saved — the one place a
+ * link's real target is knowable, which a string never is. What this function alone rules out is a
+ * value that could never stay inside no matter what the filesystem holds: `".."`, an absolute path,
+ * the root itself.
  *
  * @param {unknown} configured  `file.content.registry`, or undefined
  * @param {string} root
@@ -116,9 +119,7 @@ function readRegistry(configured, root) {
       `${root}/holdrim.json's "content.registry" ("${value}") is an absolute path — it must name a ` +
       'file inside the project, relative to its root.');
   }
-  const joined = join(root, ...value.split('/'));
-  const rel = relative(root, joined);
-  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+  if (!insideRoot(root, join(root, ...value.split('/')))) {
     throw new Error(
       `${root}/holdrim.json's "content.registry" ("${value}") resolves outside the project root — ` +
       'it must name a file inside the project.');

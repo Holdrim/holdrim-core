@@ -141,6 +141,82 @@ test('loadRegistry refuses, never reads {}, when the registry\'s folder is actua
   assert.throws(() => loadRegistry(tmp), { code: 'ENOTDIR' });
 });
 
+// ===================================================================== holdrim#161, round 2
+// `refuseLink` only ever looks at the registry's own LAST component, never an ancestor, and
+// `refuseUnreachableFolder` only ever refuses a DANGLING ancestor, never a WORKING one — so
+// `content.registry: "mnt/approvals.json"`, with `mnt` a committed, resolving symlink to somewhere
+// OUTSIDE the project, passes both, and `readConfig`'s own containment check (holdrim#161, round 1)
+// is lexical, on the string as written, so it cannot see a symlink either. `refuseEscapedFolder`
+// closes that: it resolves the registry's REAL location, and the project's REAL root, with
+// `fs.realpathSync`, and refuses when the first is not strictly inside the second.
+
+/** A project whose registry sits behind `mnt`, plus a folder OUTSIDE the project for `mnt` to link
+ *  to — two unrelated temp directories, never nested inside one another. */
+function escapingProject(t) {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  const outside = mkdtempSync(join(tmpdir(), 'holdrim-fs-outside-'));
+  t.after(() => { rmSync(tmp, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+  writeFileSync(join(tmp, 'holdrim.json'),
+    JSON.stringify({ content: { folders: [], registry: 'mnt/approvals.json' } }));
+  symlinkSync(outside, join(tmp, 'mnt'));
+  return { tmp, outside };
+}
+
+test('loadRegistry refuses a working symlinked folder that resolves OUTSIDE the project, registry not yet written', (t) => {
+  const { tmp } = escapingProject(t);
+  assert.throws(() => loadRegistry(tmp), /outside the project root/);
+});
+
+test('loadRegistry refuses a working symlinked folder that resolves OUTSIDE the project, registry already there', (t) => {
+  const { tmp, outside } = escapingProject(t);
+  // Written straight into the REAL folder — exactly what an owner's `holdrim sync` would have done
+  // through the link, had this gone unrefused.
+  writeFileSync(join(outside, 'approvals.json'), '{}');
+  assert.throws(() => loadRegistry(tmp), /outside the project root/);
+});
+
+test('saveRegistry refuses a working symlinked folder that resolves OUTSIDE the project', (t) => {
+  const { tmp } = escapingProject(t);
+  assert.throws(() => saveRegistry(tmp, { z: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'zzz' } }),
+    /outside the project root/);
+});
+
+test('loadRegistry accepts a working symlinked folder that resolves INSIDE the project, written or not', (t) => {
+  const tmp = nestedProject(t);
+  mkdirSync(join(tmp, 'real-docs'));
+  symlinkSync(join(tmp, 'real-docs'), join(tmp, 'docs'));
+
+  assert.deepEqual(loadRegistry(tmp), {}, 'registry not yet written, and the link resolves inside');
+  writeFileSync(join(tmp, 'real-docs', 'approvals.json'), '{}');
+  assert.deepEqual(loadRegistry(tmp), {}, 'registry now present, still through a link that resolves inside');
+});
+
+test('saveRegistry accepts a working symlinked folder that resolves INSIDE the project', (t) => {
+  const tmp = nestedProject(t);
+  mkdirSync(join(tmp, 'real-docs'));
+  symlinkSync(join(tmp, 'real-docs'), join(tmp, 'docs'));
+
+  const entry = { z: { file: 'p/X01.html', date: '2026-01-01', fingerprint: 'zzz' } };
+  saveRegistry(tmp, entry);
+  assert.deepEqual(loadRegistry(tmp), entry, 'written through the link, and read back through it');
+});
+
+test('loadRegistry still works when the PROJECT ROOT ITSELF is reached through a symlink', (t) => {
+  // A checkout at a symlinked path (`~/work -> /real/project`, say) must not be refused for
+  // resolving "outside" its own literal root: `refuseEscapedFolder` resolves ROOT with
+  // `realpathSync` too, exactly like the registry's own location, so the two are compared as the
+  // same real path either way.
+  const real = mkdtempSync(join(tmpdir(), 'holdrim-fs-real-'));
+  const alias = join(tmpdir(), `holdrim-fs-alias-${process.pid}-${Math.floor(Math.random() * 1e9)}`);
+  symlinkSync(real, alias);
+  t.after(() => { rmSync(alias, { force: true }); rmSync(real, { recursive: true, force: true }); });
+  writeFileSync(join(real, 'holdrim.json'), JSON.stringify({ content: { folders: [], registry: 'approvals.json' } }));
+
+  assert.deepEqual(loadRegistry(alias), {}, 'registry not yet written, root itself is the symlink');
+  writeFileSync(join(real, 'approvals.json'), '{}');
+  assert.deepEqual(loadRegistry(alias), {}, 'registry present, root itself is the symlink');
+});
+
 test('exportSite propagates a real lstat error on `out`, rather than reading it as absent', (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));

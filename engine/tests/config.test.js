@@ -134,6 +134,20 @@ test('content.registry refuses a value equal to the root itself, or an empty str
 });
 
 /**
+ * `typeof value !== 'string'` on its own, never exercised by any of the tests above: every one of
+ * them passes a string, so a mutant that narrows the guard to `value.length < 1` — dropping the
+ * `typeof` half entirely — would still leave every other test in this file green (`123.length` and
+ * `{}.length` are both `undefined`, neither `< 1`), and the guard would silently accept a number or
+ * an object where the rest of `readRegistry` expects a string.
+ */
+test('content.registry refuses a value that is not a string at all', () => {
+  assert.throws(() => readConfig('/p', file({ content: { registry: 123 } })),
+    /content\.registry.*must be a non-empty string/);
+  assert.throws(() => readConfig('/p', file({ content: { registry: {} } })),
+    /content\.registry.*must be a non-empty string/);
+});
+
+/**
  * The classic prefix bug: `/proj-other` starts with the string `/proj`, so a raw `startsWith` check
  * would wave a SIBLING folder through as if it were inside the root. `path.relative` is not fooled —
  * it says `"../proj-other/x"`, which begins with `".."`, not with nothing.

@@ -408,10 +408,23 @@ who ran the engine from `main` before it.
   later WRITTEN, by `holdrim sync` — wherever that landed, never necessarily inside the project a
   committer of `holdrim.json` can see. `readConfig` now refuses, at load, a `content.registry` whose
   resolved path escapes the root, an absolute path outright, and a value equal to the root itself or
-  empty; checked with `path.relative`, not a raw `startsWith`, so a sibling folder whose name happens
-  to start with the root's own (`/proj-other` against `/proj`) is refused rather than waved through.
-  Nothing to change for a project whose `content.registry` already names an ordinary path inside its
-  own folder.
+  empty; checked with the new `insideRoot` (engine/core/paths.js), by `path.relative`, not a raw
+  `startsWith`, so a sibling folder whose name happens to start with the root's own (`/proj-other`
+  against `/proj`) is refused rather than waved through. `insideRoot` replaces the theme's own
+  hand-rolled version of the same check (`loadLogo`, engine/api/theme.ts) — one rule, not two that
+  could drift — with no change to what a bad logo path does (still a warning, never a boot refusal).
+  **A second gap, closed alongside it:** a WORKING symlinked ANCESTOR that resolves outside the
+  project — `content.registry: "mnt/approvals.json"` with `mnt` a committed link to somewhere else —
+  read as an ordinary nested path to that first check, which is lexical, on the string as written,
+  and to `refuseLink`/`refuseUnreachableFolder` (holdrim#150/#155), which only ever catch the
+  registry's own last component or a DANGLING ancestor; `holdrim sync` read and wrote the owner's
+  registry through it regardless. `loadRegistry` and `saveRegistry` now also run
+  `refuseEscapedFolder` (engine/cli/fs.ts), which resolves the registry's real location and the
+  project's real root with `fs.realpathSync` — both sides, so a project checked out through its own
+  symlinked path is not itself mistaken for an escape — and refuses when the first is not strictly
+  inside the second. A working symlinked folder that resolves INSIDE the project keeps working, at
+  any depth, exactly as before. Nothing to change for a project whose `content.registry` already
+  names an ordinary path inside its own folder.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY
