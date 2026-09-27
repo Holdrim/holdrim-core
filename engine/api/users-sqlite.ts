@@ -43,6 +43,9 @@ export class UsersSqlite extends UserStoreBase {
         -- 1: being disabled is an explicit act, never a starting state.
         enabled     INTEGER NOT NULL DEFAULT 1
       );
+      -- \`id\` holds the SHA-256 of the cookie's session id, never the id (users.ts, \`sessionKey\`):
+      -- a copy of this file must not be a live session. A row an older version wrote holds the raw
+      -- id, is never found by a lookup, and is purged like any expired row by a start after it expires.
       CREATE TABLE IF NOT EXISTS sessions (
         id         TEXT PRIMARY KEY,
         email      TEXT NOT NULL REFERENCES users(email),
@@ -174,19 +177,19 @@ export class UsersSqlite extends UserStoreBase {
     return (this.#db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n;
   }
 
-  protected async insertSession(id: string, email: string, createdAt: string, expiresAt: string): Promise<void> {
+  protected async insertSession(key: string, email: string, createdAt: string, expiresAt: string): Promise<void> {
     this.#db.prepare('INSERT INTO sessions (id, email, created_at, expires_at) VALUES (?, ?, ?, ?)')
-      .run(id, email, createdAt, expiresAt);
+      .run(key, email, createdAt, expiresAt);
   }
 
-  protected async readSession(id: string): Promise<StoredSession | null> {
-    const r = this.#db.prepare('SELECT email, expires_at FROM sessions WHERE id = ?').get(id) as
+  protected async readSession(key: string): Promise<StoredSession | null> {
+    const r = this.#db.prepare('SELECT email, expires_at FROM sessions WHERE id = ?').get(key) as
       { email: string; expires_at: string } | undefined;
     return r ? { email: r.email, expiresAt: r.expires_at } : null;
   }
 
-  protected async deleteSession(id: string): Promise<void> {
-    this.#db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+  protected async deleteSession(key: string): Promise<void> {
+    this.#db.prepare('DELETE FROM sessions WHERE id = ?').run(key);
   }
 
   protected async deleteSessionsExpiredBefore(instant: string): Promise<void> {
@@ -197,11 +200,11 @@ export class UsersSqlite extends UserStoreBase {
     this.#db.prepare('DELETE FROM sessions WHERE email = ?').run(email);
   }
 
-  protected async deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void> {
+  protected async deleteSessionsForEmailExcept(email: string, keepKey: string): Promise<void> {
     // One statement: the caller's own row is excluded by the WHERE clause itself, so there is no
     // moment where it is gone and not yet back (users.ts's comment on the abstract method says why
     // that matters).
-    this.#db.prepare('DELETE FROM sessions WHERE email = ? AND id != ?').run(email, keepSessionId);
+    this.#db.prepare('DELETE FROM sessions WHERE email = ? AND id != ?').run(email, keepKey);
   }
 
   protected async readFailure(key: string): Promise<SignInFailures | null> {

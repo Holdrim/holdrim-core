@@ -305,7 +305,10 @@ export interface StoredUser extends User {
   hash: Buffer;
 }
 
-/** A session row. Timestamps are ISO strings everywhere, so they compare the same in every store. */
+/**
+ * A session row. Timestamps are ISO strings everywhere, so they compare the same in every store. The
+ * row is found by its KEY, `sessionKey` of the id the cookie carries, never by that id itself.
+ */
 export interface StoredSession {
   email: string;
   expiresAt: string;
@@ -343,9 +346,14 @@ export abstract class UserStoreBase implements UserStore {
   protected abstract readAllUsers(): Promise<StoredUser[]>;
   protected abstract writeEnabled(email: string, enabled: boolean): Promise<void>;
   protected abstract writeName(email: string, name: string): Promise<void>;
-  protected abstract insertSession(id: string, email: string, createdAt: string, expiresAt: string): Promise<void>;
-  protected abstract readSession(id: string): Promise<StoredSession | null>;
-  protected abstract deleteSession(id: string): Promise<void>;
+  /**
+   * Every session operation below that names a row takes its KEY, `sessionKey(id)`, and never sees
+   * the id a cookie carries: the hashing is decided here, once, so no store can keep a live session
+   * in the clear.
+   */
+  protected abstract insertSession(key: string, email: string, createdAt: string, expiresAt: string): Promise<void>;
+  protected abstract readSession(key: string): Promise<StoredSession | null>;
+  protected abstract deleteSession(key: string): Promise<void>;
   protected abstract deleteSessionsExpiredBefore(instant: string): Promise<void>;
   /**
    * Every session open under this e-mail, gone. See `setEnabled` and `resetPassword` for why this
@@ -369,7 +377,7 @@ export abstract class UserStoreBase implements UserStore {
    * ?` (or its store's equivalent) has no such window: the caller's row is simply never touched, so
    * there is nothing for a concurrent request to race.
    */
-  protected abstract deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void>;
+  protected abstract deleteSessionsForEmailExcept(email: string, keepKey: string): Promise<void>;
   /**
    * Writes the address's token row, REPLACING any row the address already had, and returns the public
    * id of the row it replaced, or null. Throws `AddressInUse` when the address has an account.
@@ -563,7 +571,7 @@ export abstract class UserStoreBase implements UserStore {
   async #dropSessions(email: string, keepSessionId?: string): Promise<boolean> {
     try {
       if (keepSessionId === undefined) await this.deleteSessionsForEmail(email);
-      else await this.deleteSessionsForEmailExcept(email, keepSessionId);
+      else await this.deleteSessionsForEmailExcept(email, sessionKey(keepSessionId));
       return true;
     } catch {
       return false;
@@ -595,14 +603,27 @@ export abstract class UserStoreBase implements UserStore {
     const id = randomBytes(32).toString('base64url');
     const now = new Date();
     await this.insertSession(
-      id, normalizeEmail(email), now.toISOString(),
+      sessionKey(id), normalizeEmail(email), now.toISOString(),
       new Date(now.getTime() + hours * 3600_000).toISOString());
+    // The id leaves here once, for the cookie, and is kept nowhere: the store holds only its key.
     return id;
   }
 
+  /**
+   * ⚠️ Found BY the hash, not found by something else and then compared in constant time the way
+   * `fromAgentToken` is. A token has a public id to find its row by; a session cookie carries only
+   * the secret, and giving it a public half would change the cookie for no gain. A lookup by hash
+   * leaks nothing a guess can use: whatever the index's timing says about how near the hash of a
+   * presented value lies to a stored key, nobody can choose a value whose hash moves one byte nearer,
+   * so there is no walk towards a stored key to take.
+   *
+   * No fallback to the raw id, ever. A row written before sessions were hashed is keyed by the raw
+   * id, and looking that up too would make every such row a usable session again; the presented
+   * value is hashed, and a raw row is simply never found. Those rows are invalidated, not migrated.
+   */
   async fromSession(id: string | undefined): Promise<User | null> {
     if (!id) return null;
-    const session = await this.readSession(id);
+    const session = await this.readSession(sessionKey(id));
     // Expiry is decided here, against the service's clock, and not by each database's own idea of
     // "now". A session that is dead in SQLite and alive in Postgres is not one product.
     if (!session || session.expiresAt < new Date().toISOString()) return null;
@@ -622,7 +643,7 @@ export abstract class UserStoreBase implements UserStore {
   }
 
   async closeSession(id: string | undefined): Promise<void> {
-    if (id) await this.deleteSession(id);
+    if (id) await this.deleteSession(sessionKey(id));
   }
 
   async purgeExpiredSessions(): Promise<void> {
@@ -630,25 +651,11 @@ export abstract class UserStoreBase implements UserStore {
   }
 
   // ------------------------------------------------------------- agent tokens
-  /**
-   * The stored form of a token's secret: plain SHA-256, no salt, no scrypt — and that is a choice,
-   * not a shortcut. scrypt and a salt exist for a PASSWORD, which a person picks from a small space
-   * an attacker can enumerate; the slowness is what makes each guess expensive. This secret is 32
-   * bytes from `randomBytes`, never chosen by anyone: 2^256 possibilities leave nothing to enumerate,
-   * so a slow hash would add nothing an attacker has to pay, and would charge scrypt's 50 ms to every
-   * API call the agent makes instead. A salt protects a guessable value from a precomputed table;
-   * nobody can precompute a table of random 256-bit values. What the hash still buys: a copy of the
-   * users database hands over no token anyone can present.
-   */
-  #tokenHash(secret: string): Buffer {
-    return createHash('sha256').update(secret, 'utf8').digest();
-  }
-
   async issueAgentToken(email: string): Promise<{ token: string; agent: AgentToken; tokenId: string; replaced: string | null }> {
     const tokenId = randomBytes(12).toString('hex');
     const secret = randomBytes(32).toString('hex');
     const agent: AgentToken = { email: normalizeEmail(email), kind: 'agent', issuedAt: new Date().toISOString() };
-    const replaced = await this.writeAgentToken({ ...agent, tokenId, hash: this.#tokenHash(secret) });
+    const replaced = await this.writeAgentToken({ ...agent, tokenId, hash: secretHash(secret) });
     // The secret leaves here once, inside `token`, and is kept nowhere: from the next line on only its
     // hash exists, so "shown once" is a property of the store, not a promise every caller has to keep.
     return { token: `holdrim_agent_${tokenId}_${secret}`, agent, tokenId, replaced };
@@ -673,7 +680,7 @@ export abstract class UserStoreBase implements UserStore {
     if (!parts) return null;
     const row = await this.readAgentTokenById(parts[1]!);
     if (!row) return null;
-    const presented = this.#tokenHash(parts[2]!);
+    const presented = secretHash(parts[2]!);
     if (presented.length !== row.hash.length || !timingSafeEqual(presented, row.hash)) return null;
     // Read back from the row, never assumed: a row some future kind wrote must not pass as an agent's.
     if (row.kind !== 'agent') return null;
@@ -747,6 +754,31 @@ export abstract class UserStoreBase implements UserStore {
   countSignInFailures(): Promise<number> {
     return this.countFailures();
   }
+}
+
+/**
+ * The stored form of a secret nobody chose — an agent token's, a session's: plain SHA-256, no salt,
+ * no scrypt — and that is a choice, not a shortcut. scrypt and a salt exist for a PASSWORD, which a
+ * person picks from a small space an attacker can enumerate; the slowness is what makes each guess
+ * expensive. These secrets are 32 bytes from `randomBytes`, never chosen by anyone: 2^256
+ * possibilities leave nothing to enumerate, so a slow hash would add nothing an attacker has to pay,
+ * and would charge scrypt's 50 ms to every request that carries one instead. A salt protects a
+ * guessable value from a precomputed table; nobody can precompute a table of random 256-bit values.
+ * What the hash buys: a copy of the users store hands over no token and no session anyone can
+ * present, because what it holds is the hash, and a hash presented comes back hashed again.
+ */
+function secretHash(secret: string): Buffer {
+  return createHash('sha256').update(secret, 'utf8').digest();
+}
+
+/**
+ * The key a session row is stored and found under: `secretHash` of the id the cookie carries, as
+ * hex, because every store keys the row by text (a SQL primary key, a Firestore document id). Every
+ * id presented is hashed before it is looked up, so neither a stored key nor a raw id kept by an
+ * older version finds a row when it is sent back as a cookie.
+ */
+function sessionKey(id: string): string {
+  return secretHash(id).toString('hex');
 }
 
 /** Drops the hash and the id. Every token that leaves this file goes through here. */

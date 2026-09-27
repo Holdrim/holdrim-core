@@ -205,6 +205,14 @@ who ran the engine from `main` before it.
   id. `holdrim sync` and `holdrim restamp` also refuse, with that reason, to write a seal on a page
   where a block reads differently to a browser — a `data-id`, `data-code` or `data-depends` not in
   lower case, on the page of the block or on any page where a browser finds a block by that id.
+- **Upgrading signs everyone out once: every session opened before it stops working.** The user
+  store now keeps a session under the SHA-256 of its id instead of the id (see **Security**), and a
+  row an older version wrote is invalidated, not migrated: it is never found again, and the purge of
+  expired sessions at a start after its twelve hours removes it. What an operator notices: after the
+  deploy every person, the owner included, lands on the sign-in screen once and signs in with the
+  password they already have; agent tokens are unaffected. Nothing to change in configuration or in
+  the store — the `sessions` table (SQLite, Postgres) and collection (Firestore) keep their shape.
+  Rolling back past this version signs everyone out once more, for the same reason.
 
 ### Added
 
@@ -556,6 +564,13 @@ who ran the engine from `main` before it.
   `reportTampered`, the same routing `sqlite_guard_missing` already used for the same reason. Nothing
   to change for a caller of `holdrim list --json`: its stdout was never valid JSON on a tampered
   store before this, and always is now.
+- **A copy of the users store no longer holds a usable session.** A session is kept under the
+  SHA-256 of the id its cookie carries, never under the id, the way agent tokens already were; the
+  cookie is unchanged, and whatever the store holds, sent back as a cookie, signs nobody in. It holds
+  in every user store — SQLite, Postgres and Firestore — and for every path that opens, reads, closes
+  or drops a session: sign-in, sign-out, a password change, a reset and a disable. A backup of the
+  users store is still worth guarding, for the password hashes in it; its sessions are no longer part
+  of that. The one-time sign-out this costs on upgrade is under **Breaking**.
 
 ### Fixed
 

@@ -168,6 +168,10 @@ Worth knowing before you run it:
   in a list, an event or a log line. It opens the API's event routes and nothing else, never gives a
   ✓, and is refused when the same request also carries a session. A copy of the user store hands
   over no token anyone can present.
+- **It stores sessions** as SHA-256 of the 256-bit random id the cookie carries, never the id, in
+  every user store. A copy of the user store no longer holds a usable session: tests assert that
+  the id does not appear in the raw database file, and that no value the file holds signs anyone in
+  when sent as the cookie.
 - **It stores passwords** with scrypt, per-user salt, and constant-time comparison. A test asserts
   the password does not appear in the raw database file.
 - **The first-access password is random**, printed once, and must be changed at first login. There

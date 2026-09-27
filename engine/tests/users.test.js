@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { rmSync, readFileSync, writeFileSync, mkdtempSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -30,6 +30,38 @@ test('the password is never stored as text', async () => {
     const raw = readFileSync(path).toString('latin1');
     assert.equal(raw.includes('secret-test-password'), false, 'the password showed up in the database file');
     assert.ok(password);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a copy of the users store no longer holds a usable session: nothing in the file signs anyone in', async () => {
+  const dir = scratch();
+  const path = join(dir, 'users.db');
+  const copyPath = join(dir, 'copy.db');
+  try {
+    const store = new UsersSqlite(path);
+    await store.create('x@example.org', 'X', 'a-long-enough-password');
+    const id = await store.openSession('x@example.org');
+    await store.close();
+    copyFileSync(path, copyPath);
+    // The copy read byte by byte: the id the cookie carries is nowhere in it, in any column or page.
+    assert.equal(readFileSync(copyPath).toString('latin1').includes(id), false,
+      'the session id the cookie carries is in the file');
+    // Every value its sessions table holds, sent back as the cookie, is nobody.
+    const copy = new DatabaseSync(copyPath, { readOnly: true });
+    const values = copy.prepare('SELECT * FROM sessions').all().flatMap((row) => Object.values(row).map(String));
+    copy.close();
+    assert.ok(values.length > 0, 'the session under test is not in the copy');
+    const reopened = new UsersSqlite(path);
+    try {
+      for (const value of values) {
+        assert.equal(await reopened.fromSession(value), null, `a value the copy holds signs somebody in: ${value}`);
+      }
+      assert.equal((await reopened.fromSession(id))?.email, 'x@example.org', 'the cookie itself stopped working');
+    } finally {
+      await reopened.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

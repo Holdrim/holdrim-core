@@ -82,19 +82,20 @@ export class UsersFirestore extends UserStoreBase {
     return r.size;
   }
 
-  protected async insertSession(id: string, email: string, createdAt: string, expiresAt: string): Promise<void> {
-    await this.#db.collection('sessions').doc(id).create({
+  // The document id is the SHA-256 of the cookie's session id, never the id: users-sqlite.ts says why.
+  protected async insertSession(key: string, email: string, createdAt: string, expiresAt: string): Promise<void> {
+    await this.#db.collection('sessions').doc(key).create({
       email, created_at: createdAt, expires_at: expiresAt,
     });
   }
 
-  protected async readSession(id: string): Promise<StoredSession | null> {
-    const d = (await this.#db.collection('sessions').doc(id).get()).data();
+  protected async readSession(key: string): Promise<StoredSession | null> {
+    const d = (await this.#db.collection('sessions').doc(key).get()).data();
     return d ? { email: d.email, expiresAt: d.expires_at } : null;
   }
 
-  protected async deleteSession(id: string): Promise<void> {
-    await this.#db.collection('sessions').doc(id).delete();
+  protected async deleteSession(key: string): Promise<void> {
+    await this.#db.collection('sessions').doc(key).delete();
   }
 
   protected async deleteSessionsExpiredBefore(instant: string): Promise<void> {
@@ -111,7 +112,7 @@ export class UsersFirestore extends UserStoreBase {
     while (await this.#deleteSessionPage('email', '==', email));
   }
 
-  protected async deleteSessionsForEmailExcept(email: string, keepSessionId: string): Promise<void> {
+  protected async deleteSessionsForEmailExcept(email: string, keepKey: string): Promise<void> {
     // Looped for the same reason as `deleteSessionsForEmail` above: every OTHER session has to be
     // gone, not "most of them, eventually" (issue #115, the same gap #113 named for a disable or a
     // reset). The kept id is excluded IN THIS FILE, after the query, rather than as a second `where`
@@ -119,7 +120,7 @@ export class UsersFirestore extends UserStoreBase {
     // on `email` with an inequality on `__name__` would need a composite index this project does not
     // otherwise require, to exclude exactly one document a plain filter in JavaScript excludes for
     // free.
-    while (await this.#deleteSessionPage('email', '==', email, keepSessionId));
+    while (await this.#deleteSessionPage('email', '==', email, keepKey));
   }
 
   /**
