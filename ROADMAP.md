@@ -46,10 +46,13 @@ order. Nothing is released before **G**. The letter **F** is the platform, after
 
 **D** and part of **E** wait for 0.2. An adopter needs the method whole — approvals, roles, the
 graph, a trail that can be exported — before they need to create by voice or sketch, or to sign in
-through OIDC; the identity proxy already covers a company's single sign-on. Cutting them brings the
-first version worth pinning weeks closer, and nothing in 0.1 has to be undone to add them. Events
-signed by the server stay in 0.1.0: they change the event format, and a format changed after the
-first release is one every adopter's history already holds (`docs/PRIVACY.md`).
+through OIDC or with a second factor: the identity proxy already covers a company's single sign-on,
+and its second factor with it. Granting `lock` beyond the owner can wait too: until then only the
+owner locks, as today, and a lock is written when it is given (phase **B**), so granting it to
+others later changes no ✓ already given. Cutting them brings the first version worth pinning weeks
+closer, and nothing in 0.1.0 has to be undone to add them. Events signed by the server stay in
+0.1.0: they change the event format, and a format changed after the first release is one every
+adopter's history already holds (`docs/PRIVACY.md`).
 
 | Phase | What it delivers | Design |
 |---|---|---|
@@ -95,7 +98,7 @@ phase.
 
 | Phase | What it delivers | Design |
 |---|---|---|
-| **D · Create** #16 | attachments on a request; dictating a request by voice (the browser's own recognition); a sketch canvas saved as text, under the traffic light; a sketch turned into a screen by the person's own agent; design links | [`docs/VISION.md`](docs/VISION.md) |
+| **D · Create** #16 | attachments on a request (#44); dictating a request by voice (the browser's own recognition); a sketch canvas saved as text, under the traffic light; a sketch turned into a screen by the person's own agent; design links | [`docs/VISION.md`](docs/VISION.md) |
 | **E · Ready for a company** #17 | OIDC (#51) and two-step sign-in (#52); lock grants from the settings screen (#54) | [`docs/PRIVACY.md`](docs/PRIVACY.md) §3, [`docs/ROLES.md`](docs/ROLES.md) §3 |
 
 ## After 0.2
