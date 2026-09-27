@@ -1,5 +1,5 @@
 import { lstatSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, relative, join, sep } from 'node:path';
 
 /**
  * Filesystem guards shared by more than one CLI command, so a rule like "refuse a symlink" is
@@ -45,38 +45,54 @@ export function refuseLink(path: string, what: string): void {
 }
 
 /**
- * Refuses `path` when the folder that would hold it cannot be reached — meant for a caller that
+ * Refuses `path` when an ANCESTOR of it is a symlink that does not resolve — meant for a caller that
  * already found NOTHING under `path`'s own exact name (`lstatSync` on it came back ENOENT) and is
- * about to read that as "never written". That reading is right when the folder is genuinely there,
- * empty of this name; it is wrong when the folder itself does not resolve, which gives the very same
- * ENOENT on `path` — a parent that is a DANGLING symlink (`docs -> /mnt/shared`, unmounted) looks,
- * from `path` alone, exactly like a project that has simply never run sync (holdrim#155).
+ * about to read that as "never written". That reading is right when the folder simply has not been
+ * created yet — a project that has never run sync, say; it is wrong when a folder ABOVE it is a
+ * DANGLING symlink (`docs -> /mnt/shared`, unmounted), which gives the very same ENOENT on `path`
+ * (holdrim#155, round 2): the two are indistinguishable from `path` alone, and a single
+ * `statSync(dirname(path))` cannot tell them apart either — it fails ENOENT on both, which is why the
+ * first version of this fix (round 1) refused the "never synced yet" case it was meant to spare.
  *
- * `statSync`, not `lstatSync`: it follows links, so a WORKING symlinked folder — content mounted in
- * from elsewhere, a legitimate deployment shape — passes here, where `refuseLink` above would refuse
- * it for a different reason entirely if pointed at it. And because resolving a path walks every one
- * of its components, `statSync(dirname(path))` already fails on an unreachable ANCESTOR two levels
- * up exactly as it would on one immediately above `path` — there is no need to walk the ancestors one
- * at a time to cover them.
+ * So this walks the ancestors instead of asking one folder, `lstatSync` component by component, from
+ * `root` (which resolved already — this is only ever called once `root/holdrim.json` was itself read)
+ * down to `dirname(path)`. The first component that is not there AT ALL (`lstatSync` ENOENT, and it
+ * is not a symlink either — there is nothing under that name to be one) ends the walk: nothing further
+ * down exists yet, so the registry reads as genuinely absent, `{}`. A component that IS a symlink is
+ * followed with `statSync`: ENOENT there means DANGLING (the name exists, what it points at does not)
+ * and refuses; a plain, resolving folder is neither case, so the walk moves to the next component.
+ * Ancestors ABOVE `root` are never walked: they are `root`'s own business, resolved before this ever
+ * runs, and re-checking them here would be the same "already proven" work `refuseLink` avoids too.
  *
- * A project that has genuinely never run sync keeps working: every registry in this engine sits at
- * its OWN project root (`content.registry` in `holdrim.json`, e.g. `approvals.json`, never nested
- * under a content folder that might not exist yet), and that root already resolved — it is where
- * `holdrim.json` itself was just read from — before this is ever called.
+ * `lstatSync`, not `statSync`, at each step — the same reason `refuseLink` above uses it: `statSync`
+ * follows a link before this can ever see that the component WAS one, so a genuinely dangling
+ * ancestor would look identical to one plainly missing, and the walk could never refuse it. Only the
+ * symlink target itself is read with `statSync`, exactly once it is known to be a link.
  *
- * No check that `dir` actually IS a directory once `statSync` succeeds: a caller that reaches this
- * already called `lstatSync` on the full `path` and got exactly `ENOENT` (that is the contract —
- * `loadRegistry` runs this only once `existsSync(path)` came back false) — and an ancestor that is a
- * plain FILE, not a folder, makes THAT lstat fail with `ENOTDIR`, not `ENOENT`, so it is caught and
- * propagated by `refuseLink` two lines above this call, never reaching here at all. Adding a second
- * check for a case the caller's own error already rules out would be a branch nothing can ever drive.
+ * No check that a non-symlink component is a directory rather than a file: a component that is a
+ * plain FILE makes `lstatSync` on `path` ITSELF fail with `ENOTDIR`, not `ENOENT`, in `refuseLink`,
+ * two lines above this is ever called — that case never reaches here at all, so adding a check for it
+ * here would be a branch nothing can ever drive.
  */
-export function refuseUnreachableFolder(path: string, what: string): void {
+export function refuseUnreachableFolder(root: string, path: string, what: string): void {
   const dir = dirname(path);
-  try {
-    statSync(dir);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-    throw new Error(`refusing to ${what}: its folder, ${dir}, cannot be reached`);
+  const nested = relative(root, dir);
+  let cur = root;
+  for (const part of nested === '' ? [] : nested.split(sep)) {
+    cur = join(cur, part);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; // not created yet — genuinely absent
+      throw e;
+    }
+    if (!st.isSymbolicLink()) continue; // an ordinary folder here: keep walking down
+    try {
+      statSync(cur); // follows the link: ENOENT means its target is gone
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      throw new Error(`refusing to ${what}: its folder, ${cur}, cannot be reached`);
+    }
   }
 }

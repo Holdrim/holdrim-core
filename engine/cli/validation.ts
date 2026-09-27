@@ -64,13 +64,15 @@ export function loadRegistry(root: string): Registry {
   // simply never written yet) is refused too, rather than silently read as an empty registry.
   refuseLink(p, `load ${p}`);
   if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'));
-  // NOTHING under this exact name — but that reads as "never written" only when the FOLDER that
-  // would hold it is genuinely empty of it, not when the folder itself cannot be reached. A dangling
-  // ANCESTOR symlink (`docs -> /mnt/shared`, unmounted) gives the exact same ENOENT `existsSync` just
-  // read above, so left unchecked here, `sync` would start from an empty registry and stamp seals
-  // onto pages nobody can then account for (holdrim#155) — the same shape of loss `refuseLink` above
-  // exists to prevent for the file's own name, one folder up.
-  refuseUnreachableFolder(p, `load ${p}`);
+  // NOTHING under this exact name — but that reads as "never written" only when nothing further up
+  // stops it from ever being written, not when an ANCESTOR is a dangling symlink (`docs ->
+  // /mnt/shared`, unmounted): that gives the exact same ENOENT `existsSync` just read above, so left
+  // unchecked here, `sync` would start from an empty registry and stamp seals onto pages nobody can
+  // then account for (holdrim#155). A folder simply never created yet is a different thing —
+  // `refuseUnreachableFolder` walks from `root` down and tells the two apart component by component,
+  // rather than asking one `statSync` that fails ENOENT on both alike (round 1 of this fix did, and
+  // wrongly refused a project that had simply never run sync).
+  refuseUnreachableFolder(root, p, `load ${p}`);
   return {};
 }
 
