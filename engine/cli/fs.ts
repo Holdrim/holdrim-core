@@ -167,11 +167,11 @@ export function realContainment(root: string, path: string): { inside: boolean; 
  * `readConfig`'s own check on that setting is lexical too — and again on each page file inside that
  * folder that is itself a link, which no check on the folder can see through.
  *
- * Called AFTER `refuseUnreachableFolder` wherever both run on the same path (`loadRegistry`): a
- * DANGLING ancestor must still get that check's own, more specific message — `realpathSync` on a
- * dangling symlink fails with a plain `ENOENT` naming the link itself, which would read here as a
- * confusing, unrelated error rather than the "its folder … cannot be reached" a caller already
- * knows to look for.
+ * Called AFTER `refuseUnreachableFolder` wherever both run on the same path (`loadRegistry`, and
+ * `sheetFiles` on each configured folder): a DANGLING ancestor must still get that check's own, more
+ * specific message — `realpathSync` on a dangling symlink fails with a plain `ENOENT` naming the link
+ * itself, which would read here as a confusing, unrelated error rather than the "its folder … cannot
+ * be reached" a caller already knows to look for.
  */
 export function refuseEscapedFolder(root: string, path: string, what: string): void {
   const { inside, realRoot, realTarget } = realContainment(root, path);
