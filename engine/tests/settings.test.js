@@ -39,18 +39,29 @@ test('a scope that is none of the three shapes is refused as a scope, whatever t
 });
 
 test('an address HOLDRIM_LOCKS itself would refuse is refused as an address', () => {
-  // The display form, a trailing dot and a quoted local part pass `isEmailAddress` and not
-  // `parseLocks` — the composer has to refuse what start refuses, not what sign-up refuses.
-  for (const email of ['', 'not-an-address', '<bea@example.org>', 'bea@example.org.', '"bea"@example.org',
-    'bea@example.org;eve@example.org', 'a:b@example.org']) {
+  // Made only of characters the line carries, and still not an address: `parseLocks` refuses a
+  // trailing dot that `isEmailAddress` lets through — the composer refuses what start refuses.
+  for (const email of ['', 'not-an-address', 'bea@example.org.', '@example.org']) {
     assert.deepEqual(compose(email, 'A01'), { error: 'settings.compose.error.email' }, email);
   }
 });
 
-test('an address that smuggles a second entry in is refused, never half-granted', () => {
-  // `parseLocks` reads this as two good entries, neither of them the one typed: taking the first
-  // would hand out a grant over A01 nobody asked the composer for.
-  assert.deepEqual(compose('bea@example.org:A01; cat@example.org', 'A02'), { error: 'settings.compose.error.email' });
+test('an address with a character the line cannot carry safely is refused, before any other check', () => {
+  for (const email of ['b`id`ea@example.org', 'bea$(id)@example.org', 'be\\a@example.org', 'bea!@example.org',
+    "o'bea@example.org", 'bea@exa$mple.org', 'bea@exam_ple.org', '<bea@example.org>', '"bea"@example.org',
+    'bea @example.org', 'bea@example.org;eve@example.org', 'a:b@example.org', 'bea@example.org:A01; cat@example.org']) {
+    assert.deepEqual(compose(email, 'A01'), { error: 'settings.compose.error.characters' }, email);
+    assert.deepEqual(compose(email, 'not a scope'), { error: 'settings.compose.error.characters' },
+      `${email}: the characters are asked first, whatever else is wrong`);
+  }
+  assert.equal(compose('bea.o+x_1%y-z@mail-1.example.org', 'A01').entry.email, 'bea.o+x_1%y-z@mail-1.example.org',
+    'every character the rule allows, on its side of the @, still composes');
+});
+
+test('an entry already set with a single quote is never handed out inside the quoted line', () => {
+  // `parseLocks` accepts `'` in an address, so the deployment may hold one; the typed address never can.
+  const quoted = [{ email: "o'ana@example.org", scope: 'A0*' }];
+  assert.deepEqual(compose('bea@example.org', 'B07', quoted), { error: 'settings.compose.error.quote' });
 });
 
 test('an entry already present is refused, and the same address with another scope is a second entry', () => {
@@ -58,7 +69,7 @@ test('an entry already present is refused, and the same address with another sco
     { error: 'settings.compose.error.present', params: { email: 'ana@example.org', scope: 'A0*' } },
     'normalized the way start normalizes it, so a change of case is not a new grant');
   const second = compose('ana@example.org', 'B07');
-  assert.equal(second.line, 'HOLDRIM_LOCKS="ana@example.org:A0*; ana@example.org:B07"');
+  assert.equal(second.line, "HOLDRIM_LOCKS='ana@example.org:A0*; ana@example.org:B07'");
 });
 
 test('a scope that reaches no page of this site is refused, as start refuses it', () => {
@@ -72,14 +83,15 @@ test('an address HOLDRIM_AGENTS marks is refused: the service would not start wi
   assert.deepEqual(compose(BOT, 'A01'), { error: 'settings.compose.error.agent', params: { email: BOT } });
 });
 
-test('the answer is the whole line: every entry already set, then the new one, in the shape start parses', () => {
+test('the answer is the whole line, single-quoted: every entry already set, then the new one, in the shape start parses', () => {
   const answer = compose('Bea@Example.org', 'A0*');
-  assert.equal(answer.line, 'HOLDRIM_LOCKS="ana@example.org:A0*; bea@example.org:A0*"');
+  assert.equal(answer.line, "HOLDRIM_LOCKS='ana@example.org:A0*; bea@example.org:A0*'");
   assert.deepEqual(answer.entry, { email: 'bea@example.org', scope: 'A0*' });
   assert.deepEqual(answer.reaches, ['A01', 'A02'], 'a family reaches its pages, never B07');
   // Round trip: what is between the quotes is exactly what `parseLocks` reads back.
-  assert.deepEqual(parseLocks(answer.line.slice('HOLDRIM_LOCKS="'.length, -1)), [ANA, answer.entry]);
-  assert.equal(compose('bea@example.org', 'A01.1.2', []).line, 'HOLDRIM_LOCKS="bea@example.org:A01.1.2"',
+  assert.deepEqual(parseLocks(answer.line.slice("HOLDRIM_LOCKS='".length, -1)), [ANA, answer.entry]);
+  assert.equal(answer.line.split("'").length, 3, 'the two quotes around the value, and no third');
+  assert.equal(compose('bea@example.org', 'A01.1.2', []).line, "HOLDRIM_LOCKS='bea@example.org:A01.1.2'",
     'with nothing set yet, the line is the one entry');
 });
 
@@ -132,7 +144,7 @@ test('who holds lock, and what each scope reaches, with the honest note that it 
 test('the composer answer is shown, with the restart it needs, and never points at holdrim.json', () => {
   const html = render({ compose: { email: 'bea@example.org', scope: 'A0*', result: compose('bea@example.org', 'A0*') } });
   const composer = section(html, 'settings-compose');
-  assert.ok(composer.includes('HOLDRIM_LOCKS=&quot;ana@example.org:A0*; bea@example.org:A0*&quot;'));
+  assert.ok(composer.includes('HOLDRIM_LOCKS=&#39;ana@example.org:A0*; bea@example.org:A0*&#39;'));
   assert.ok(composer.includes(dictionaries.en['settings.compose.restart']));
   assert.doesNotMatch(composer, /holdrim\.json/, 'holdrim.json refuses `locks`: the composer never suggests it');
 });
@@ -143,7 +155,12 @@ test('what was typed into the composer is shown back, never run', () => {
   assert.doesNotMatch(html, /<script/, 'the screen carries no script, and nothing typed opens one');
   assert.match(html, /name="email" type="email" required autocomplete="off" value="&quot;&gt;&lt;script&gt;/);
   assert.match(html, /name="scope" required autocomplete="off" spellcheck="false" value="&quot;&gt;&lt;script&gt;/);
-  assert.ok(html.includes(dictionaries.en['settings.compose.error.scope']), 'refused, in words');
+  assert.ok(html.includes(dictionaries.en['settings.compose.error.characters']), 'refused, in words');
+});
+
+test('the composer posts, so the address typed never travels in the URL', () => {
+  // A GET would leave it in the browser's history and in any proxy's access log.
+  assert.match(section(render(), 'settings-compose'), /<form method="post" action="\/engine\/settings#settings-compose"/);
 });
 
 test('a refusal that names the typed scope escapes it inside the sentence', () => {

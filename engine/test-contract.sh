@@ -2236,22 +2236,33 @@ expect "an admin is sent home" 0 "$(t_admin -D- -o /dev/null $B/engine/settings 
 expect "and their home offers no Settings link" 1 "$(t_admin $B/engine/home | has '/engine/settings'; echo $?)"
 expect "a member is sent home" 0 "$(t_member -D- -o /dev/null $B/engine/settings | has -i '^location: /engine/home'; echo $?)"
 expect "an agent token opens no screen: it is sent to sign in" 0 \
-  "$(curl -s -D- -o /dev/null -H "Authorization: Bearer $BOT_TOKEN" "$B/engine/settings?email=bea@example.org&scope=A01" | has -i '^location: /sign-in'; echo $?)"
+  "$(curl -s -D- -o /dev/null -H "Authorization: Bearer $BOT_TOKEN" $B/engine/settings | has -i '^location: /sign-in'; echo $?)"
+# The composer posts a plain form, as a browser does from the page: its own origin, url-encoded fields.
+compose_as() { curl -s -b $TOC -H 'Accept-Language: en' --data-urlencode "email=$1" --data-urlencode "scope=$2" "${@:3}" $B/engine/settings; }
 # What the store holds, before and after composing: the same bytes, or the composer wrote something.
 EVENTS_BEFORE=$(t_owner $B/api/events | cksum)
 # Without this, two identical error answers would compare equal and prove nothing about the store.
 expect "(the events are read as a list, not an error)" 0 "$(t_owner $B/api/events | has '^\[{'; echo $?)"
-COMPOSED=$(t_owner "$B/engine/settings?email=Bea%40Example.org&scope=A01")
-expect "the composer answers the whole line: the entry already set, then the new one" 0 \
-  "$(echo "$COMPOSED" | has -F 'HOLDRIM_LOCKS=&quot;tlocked@example.org:A0*; bea@example.org:A01&quot;'; echo $?)"
+COMPOSED=$(compose_as Bea@Example.org A01 -H "Origin: $B")
+expect "the composer answers the whole line, single-quoted: the entry already set, then the new one" 0 \
+  "$(echo "$COMPOSED" | has -F 'HOLDRIM_LOCKS=&#39;tlocked@example.org:A0*; bea@example.org:A01&#39;'; echo $?)"
 expect "and says a restart is what makes it count" 0 "$(echo "$COMPOSED" | has -F "$(say_en settings.compose.restart)"; echo $?)"
 expect "and the events are exactly what they were" "$EVENTS_BEFORE" "$(t_owner $B/api/events | cksum)"
+# The address travels in the body only: one in the query string composes nothing.
+expect "an address in the URL composes nothing" 1 \
+  "$(t_owner "$B/engine/settings?email=bea@example.org&scope=A01" | has -F 'bea@example.org:A01'; echo $?)"
+expect "a post from another site is refused → 403" 403 "$(compose_as bea@example.org A01 -H 'Origin: https://elsewhere.example' -o /dev/null -w '%{http_code}')"
+expect "and one that names no origin → 403" 403 "$(compose_as bea@example.org A01 -o /dev/null -w '%{http_code}')"
+expect "an admin's post is sent home, like their visit" 0 \
+  "$(curl -s -b $TAC -D- -o /dev/null -H "Origin: $B" --data-urlencode 'email=bea@example.org' --data-urlencode 'scope=A01' $B/engine/settings | has -i '^location: /engine/home'; echo $?)"
 expect "an entry already set is refused, in words" 0 \
-  "$(t_owner "$B/engine/settings?email=$T_LOCKED&scope=A0*" | has -F "HOLDRIM_LOCKS already grants $T_LOCKED the scope A0*"; echo $?)"
+  "$(compose_as $T_LOCKED 'A0*' -H "Origin: $B" | has -F "HOLDRIM_LOCKS already grants $T_LOCKED the scope A0*"; echo $?)"
 expect "a scope that reaches no page of this site is refused, as start refuses it" 0 \
-  "$(t_owner "$B/engine/settings?email=bea@example.org&scope=Z0*" | has -F 'reaches no page and no block of this site'; echo $?)"
-SETTINGS_HOSTILE=$(t_owner "$B/engine/settings?email=%22%3E%3Cb%3Ex&scope=%22%3E%3Cb%3Ey")
-expect "a hostile input is refused in words" 0 "$(echo "$SETTINGS_HOSTILE" | has -F "$(say_en settings.compose.error.scope)"; echo $?)"
+  "$(compose_as bea@example.org 'Z0*' -H "Origin: $B" | has -F 'reaches no page and no block of this site'; echo $?)"
+expect "an address the line cannot carry safely is refused, in words" 0 \
+  "$(compose_as 'be$(id)a@example.org' A01 -H "Origin: $B" | has -F "$(say_en settings.compose.error.characters)"; echo $?)"
+SETTINGS_HOSTILE=$(compose_as '"><b>x' '"><b>y' -H "Origin: $B")
+expect "a hostile input is refused in words" 0 "$(echo "$SETTINGS_HOSTILE" | has -F "$(say_en settings.compose.error.characters)"; echo $?)"
 expect "and shown back escaped, never as markup" "1 0" \
   "$(echo "$SETTINGS_HOSTILE" | grep -c 'value="&quot;&gt;&lt;b&gt;x"') $(echo "$SETTINGS_HOSTILE" | grep -c '"><b>')"
 expect "and still nothing was written" "$EVENTS_BEFORE" "$(t_owner $B/api/events | cksum)"

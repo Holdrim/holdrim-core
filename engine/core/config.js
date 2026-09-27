@@ -10,12 +10,13 @@
  *
  * ⚠️ AUTHORITY IS NOT IN THE FILE AT ALL. Who the owner and the admins are comes from HOLDRIM_OWNER
  * and HOLDRIM_ADMINS, who else holds `lock` comes from HOLDRIM_LOCKS, who is an agent comes from
- * HOLDRIM_AGENTS, and a project's own roles and who holds them come from the owner, at a settings
- * screen (not yet built) — none of the five is ever read from this file (docs/ROLES.md, "Authority
- * comes from the deployment only"). The file travels with the repository, and whoever can commit
- * to it — a contributor, or the agent applying an approved request — is not whoever deploys it:
- * with a fallback to the file, editing one line would name a new owner, a new lock-holder or a new
- * role at the next deploy, or at the next `holdrim sync` on somebody's machine.
+ * HOLDRIM_AGENTS, and a project's own roles and who holds them come from the owner, at the settings
+ * screen (read-only today; granting from it is not built) — none of the five is ever read from this
+ * file (docs/ROLES.md, "Authority comes from the deployment only"). The file travels with the
+ * repository, and whoever can commit to it — a contributor, or the agent applying an approved
+ * request — is not whoever deploys it: with a fallback to the file, editing one line would name a
+ * new owner, a new lock-holder or a new role at the next deploy, or at the next `holdrim sync` on
+ * somebody's machine.
  * @module
  */
 
@@ -92,9 +93,10 @@ const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'agents', 'roles', 'grants']
  * Where each authority key actually lives — docs/ROLES.md, "Where everything lives" (section 5) —
  * named in the refusal so removing the key is not the only thing an adopter learns from it. `roles`
  * and `grants` name no variable: unlike `owner`, `admins` and `locks`, they have no environment
- * fallback AT ALL yet, because the piece that lets the owner set them (the settings screen) is not
- * built. Saying so, rather than pointing at a variable that does not exist, is the whole reason this
- * is a lookup instead of one string reused for every key.
+ * fallback AT ALL yet, because the piece that lets the owner set them is not built: the settings
+ * screen is read-only today, and granting from it is not built. Saying so, rather than pointing at a
+ * variable that does not exist, is the whole reason this is a lookup instead of one string reused for
+ * every key.
  */
 const AUTHORITY_HOMES = {
   owner: 'HOLDRIM_OWNER (one e-mail), set where Holdrim runs',

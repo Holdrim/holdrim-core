@@ -1364,17 +1364,21 @@ async function servePeople(req: IncomingMessage, res: ServerResponse) {
  * an agent token never reaches here, whatever it carries.
  *
  * It writes nothing, on any method: the composer's answer is a line of text, and every value shown
- * is read from what start already parsed (`project`, `roles`, `lockScopes`). The site's blocks are
- * read afresh, and only when a scope needs measuring against them — the pages a commit moved since
- * start are what the owner is asking about.
+ * is read from what start already parsed (`project`, `roles`, `lockScopes`). The composer posts, so
+ * the address typed stays out of the URL, and its post is refused from anywhere but this server's own
+ * page, as the home's forms are (`sameOrigin`). The site's blocks are read afresh, and only when a
+ * scope needs measuring against them — the pages a commit moved since start are what the owner is
+ * asking about.
  */
-async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL) {
+async function serveSettings(req: IncomingMessage, res: ServerResponse) {
   const viewer = await viewerOf(req);
   if (!viewer || !roles.isOwner(viewer)) return (res.writeHead(302, { location: HOME_SCREEN }), res.end());
   const lang = languageOf(req);
-  const email = url.searchParams.get('email');
-  const scope = url.searchParams.get('scope');
-  const asked = email !== null || scope !== null;
+  const asked = req.method === 'POST';
+  if (asked && !sameOrigin(req)) return json(res, 403, { error: i18n.t(lang, 'api.crossSite') });
+  const form = asked ? new URLSearchParams(await rawBody(req)) : null;
+  const email = form?.get('email') ?? null;
+  const scope = form?.get('scope') ?? null;
   const blockIds = lockScopes.length || asked ? [...(await readBlocks(projectRoot)).keys()] : [];
   const reach = lockCoverage(lockScopes, blockIds);
   // As the panel, the home and the API show a person to the owner — never a second way of spelling
@@ -1708,7 +1712,7 @@ const server = createServer(async (req, res) => {
         : await serveHome(req, res, { asked: url.searchParams.has('asked'), decided: url.searchParams.has('decided') });
     }
     if (url.pathname === PEOPLE_SCREEN) return await servePeople(req, res);
-    if (url.pathname === SETTINGS_SCREEN) return await serveSettings(req, res, url);
+    if (url.pathname === SETTINGS_SCREEN) return await serveSettings(req, res);
 
     return await serveStatic(url, res, languageOf(req));
   } catch (error) {

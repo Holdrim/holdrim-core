@@ -222,8 +222,9 @@ who ran the engine from `main` before it.
   `HOLDRIM_ADMINS`, `HOLDRIM_AGENTS`, and `HOLDRIM_LOCKS` with the pages each scope reaches; and
   `features` and `people.show`, with whether each value comes from `holdrim.json` or the default,
   and the snippet to commit to change them. A form composes a lock grant: it checks an address and a
-  scope the way start checks `HOLDRIM_LOCKS`, and answers with the full `HOLDRIM_LOCKS="…"` line to
-  set where Holdrim runs, then restart. The screen writes nothing, and no event; granting from it is
+  scope the way start checks `HOLDRIM_LOCKS` — the address, besides, of letters, digits and
+  `._%+-` before the `@` and `.-` after it, so the line pastes safely into a shell — and answers
+  with the full `HOLDRIM_LOCKS='…'` line to set where Holdrim runs, then restart. The screen writes nothing, and no event; granting from it is
   the next step. Anybody but the owner is sent home.
 - **Ask for a new page, in plain words**, from the home (a form that needs no script) or from any
   block (the new `page` category). `holdrim apply` tells the agent to write one new page shaped like

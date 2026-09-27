@@ -22,10 +22,10 @@ import { PEOPLE_SHOW_VALUES } from '../core/people-show.js';
  *
  * ## No script
  *
- * The composer is a plain GET form posted back to this address, and the page carries no script at
+ * The composer is a plain form posted back to this address, and the page carries no script at
  * all: its policy (`screenPolicy(nonce, { script: false })`) runs nothing, and the one style block
- * carries the response's nonce. A GET, not a POST, because composing changes nothing: a reload asks
- * again rather than warning about resending, and there is no write for a cross-site post to reach.
+ * carries the response's nonce. A POST although composing changes nothing: as a GET, the address
+ * typed would travel in the URL, and stay in the browser's history and in any proxy's access log.
  */
 
 type Roles = ReturnType<typeof createRoles>;
@@ -35,7 +35,7 @@ export interface LockEntry { email: string; scope: string }
 
 /** The composer's refusals — each a sentence in every dictionary, so none reaches the page raw. */
 const COMPOSE_ERRORS = [
-  'settings.compose.error.scope', 'settings.compose.error.email', 'settings.compose.error.present',
+  'settings.compose.error.characters', 'settings.compose.error.quote', 'settings.compose.error.scope', 'settings.compose.error.email', 'settings.compose.error.present',
   'settings.compose.error.nothing', 'settings.compose.error.agent',
 ] as const;
 type ComposeError = typeof COMPOSE_ERRORS[number];
@@ -68,6 +68,27 @@ export function locksValue(entries: readonly LockEntry[]): string {
 }
 
 /**
+ * The characters an address may carry into the composed line: letters, digits and `._%+-` before the
+ * `@`, letters, digits and `.-` after it. Narrower than `parseLocks` on purpose, and only here: the
+ * line is meant to be pasted where Holdrim runs, often a file a shell reads, and an address made of
+ * these alone reads the same to every shell and every env-file parser. Start itself stays as lenient
+ * as it is — this decides what the screen hands out, not what the service accepts.
+ */
+const LINE_SAFE_LOCAL = /^[A-Za-z0-9._%+-]*$/;
+const LINE_SAFE_DOMAIN = /^[A-Za-z0-9.-]*$/;
+
+/**
+ * Whether every character of `address` is one the line may carry, on its side of the first `@`. The
+ * SHAPE of an address — empty, no `@`, a trailing dot — is not asked here but of `parseLocks` below,
+ * so a mistyped address is told it is not one, not that its characters are wrong.
+ */
+function lineSafe(address: string): boolean {
+  const at = address.indexOf('@');
+  if (at === -1) return LINE_SAFE_LOCAL.test(address);
+  return LINE_SAFE_LOCAL.test(address.slice(0, at)) && LINE_SAFE_DOMAIN.test(address.slice(at + 1));
+}
+
+/**
  * The lock-grant composer: the current `HOLDRIM_LOCKS` entries plus the one asked for, as the full
  * line to set — or the reason the service would refuse it. Pure, and it writes nothing.
  *
@@ -78,8 +99,10 @@ export function locksValue(entries: readonly LockEntry[]): string {
  * `refuseGrantsToAgents`, over the whole line, as `rolesOf` does. Without those last two, the screen
  * would hand the owner a line the service then refuses to start with.
  *
- * The scope is checked before the address because `parseLocks` answers both in one throw: once the
- * scope is known good, a throw from it can only be about the address.
+ * Before any of those, the address's characters (`lineSafe`), which also keeps `;` and `:` out of it,
+ * so `parseLocks` can only ever read one entry back. Then the scope before the address, because
+ * `parseLocks` answers both in one throw: once the scope is known good, a throw from it can only be
+ * about the address.
  *
  * An entry already present — the same address AND the same scope — is refused rather than repeated.
  * The same address with another scope is a second entry, which `parseLocks` accepts: one person may
@@ -89,30 +112,33 @@ export function composeLock(
   existing: readonly LockEntry[], asked: { email: string; scope: string },
   blockIds: Iterable<string>, roles: Roles,
 ): Composed {
+  const email = asked.email.trim();
+  if (!lineSafe(email)) return { error: 'settings.compose.error.characters' };
   const scope = asked.scope.trim();
   if (!isValidScope(scope)) return { error: 'settings.compose.error.scope' };
-  let parsed: LockEntry[];
+  let entry: LockEntry;
   try {
-    parsed = parseLocks(`${asked.email.trim()}:${scope}`);
+    [entry] = parseLocks(`${email}:${scope}`);
   } catch {
     return { error: 'settings.compose.error.email' };
   }
-  // An address carrying `;` or `:` parses into another shape than one entry with this scope — never
-  // a grant anybody typed on purpose, so it is the address's refusal too.
-  if (parsed.length !== 1 || parsed[0].scope !== scope) return { error: 'settings.compose.error.email' };
-  const entry = parsed[0];
   if (existing.some((e) => e.email === entry.email && e.scope === entry.scope)) {
     return { error: 'settings.compose.error.present', params: { email: entry.email, scope } };
   }
   const [{ reaches }] = lockCoverage([entry], blockIds);
   if (reaches.length === 0) return { error: 'settings.compose.error.nothing', params: { scope } };
   const value = locksValue([...existing, entry]);
+  // The line is single-quoted, and a `'` would end the quoting early. The typed address cannot carry
+  // one (`lineSafe`), but the entries already set came from the deployment through `parseLocks`,
+  // which accepts it — such a line is refused rather than handed out broken.
+  if (value.includes("'")) return { error: 'settings.compose.error.quote' };
   try {
     refuseGrantsToAgents(roles, value);
   } catch {
     return { error: 'settings.compose.error.agent', params: { email: entry.email } };
   }
-  return { line: `HOLDRIM_LOCKS="${value}"`, entry, reaches };
+  // Single quotes: inside them a shell expands nothing, whatever the entries already set carry.
+  return { line: `HOLDRIM_LOCKS='${value}'`, entry, reaches };
 }
 
 /** Everything the screen shows, resolved by the server; nothing here reads the environment. */
@@ -250,7 +276,7 @@ ${roleRows}
     <h2 id="settings-compose">${t('settings.compose.heading')}</h2>
     <p class="holdrim-muted">${t('settings.compose.lede')}</p>
     ${answer}
-    <form method="get" action="${forHtml(SETTINGS_SCREEN)}#settings-compose" class="settings-compose">
+    <form method="post" action="${forHtml(SETTINGS_SCREEN)}#settings-compose" class="settings-compose">
       <label class="holdrim-field"><span class="holdrim-label">${t('settings.compose.email')}</span>
         <input class="holdrim-input" name="email" type="email" required autocomplete="off" value="${forHtml(asked?.email ?? '')}"></label>
       <label class="holdrim-field"><span class="holdrim-label">${t('settings.compose.scope')}</span>

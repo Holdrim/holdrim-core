@@ -24,9 +24,10 @@
  * A project's OWN roles, and who holds them, are NOT read here yet, and never from `holdrim.json`
  * (docs/ROLES.md, "Authority comes from the deployment only"; `engine/core/config.js`'s
  * `AUTHORITY_KEYS` refuses the file the moment it names `roles` or `grants`). They come from the
- * owner, through events at a settings screen — a later piece, which will need its own name grammar
- * for a project role then, not before: a format with no caller is untested by construction, whatever
- * a unit test that calls it directly says — the settings screen gets one when it exists, not sooner.
+ * owner, through events at the settings screen (read-only today); granting from it is not built, and
+ * defining a project role there will need its own name grammar then, not before: a format with no
+ * caller is untested by construction, whatever a unit test that calls it directly says — the grammar
+ * comes with the screen's first role definition, not sooner.
  * `isValidScope` below is different: `HOLDRIM_LOCKS` (`parseLocks`) is a real caller of it TODAY, so
  * its grammar is proved against the tier this change actually ships.
  *
@@ -68,8 +69,8 @@ const GRANTABLE = Object.freeze(CAPABILITIES.filter((c) => c !== 'lock'));
  * — `capabilitiesOf('admin').add('lock')` — would otherwise reach into this table itself, and every
  * `can()` call for the rest of the process would read it too.
  *
- * A project-defined role, once the settings screen exists, will extend this shape rather than
- * replace it: the same kind of array, held in the store instead of written here.
+ * A project-defined role, once the settings screen (read-only today) can define one, will extend this
+ * shape rather than replace it: the same kind of array, held in the store instead of written here.
  *
  * `owner` is included for `capabilitiesOf` and the mapping test to read from one table, not two,
  * even though the owner is not a role a project can hold or grant (see the module comment) — its

@@ -288,6 +288,8 @@
   "settings.compose.reaches": "The new entry reaches: {pages}.",
   "settings.compose.restart": "HOLDRIM_LOCKS is read at start: nothing changes until the service restarts with it.",
   "settings.compose.error.scope": "That scope is none of a page (P03), a page family (P0*) or a block (P03.2.1).",
+  "settings.compose.error.characters": "That address has characters the HOLDRIM_LOCKS line cannot carry safely. It may use letters, digits and . _ % + - before the @, and letters, digits, . and - after it.",
+  "settings.compose.error.quote": "The HOLDRIM_LOCKS set now holds an address with a single quote, which this line cannot carry. Set that variable by hand.",
   "settings.compose.error.email": "That is not an address HOLDRIM_LOCKS accepts.",
   "settings.compose.error.present": "HOLDRIM_LOCKS already grants {email} the scope {scope}.",
   "settings.compose.error.nothing": "The scope {scope} reaches no page and no block of this site, and the service refuses to start with one that does not.",
