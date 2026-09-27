@@ -60,6 +60,13 @@ export class MemoryEventStore implements EventStore {
     return out;
   }
 
+  async listBare(page: string): Promise<Event[]> {
+    // A copy of each, `authorId` beside `author` as every store answers it, and no hash: the hashes
+    // are `withTexts`'s to read, and this read does not resolve texts at all.
+    return this.#events.filter((e) => e.page === page).sort((a, b) => a.when.localeCompare(b.when))
+      .map(({ textHash: _t, snapshotHash: _s, ...e }) => ({ ...e, text: null, snapshot: null, authorId: e.author }));
+  }
+
   async removeText(event: string, field: TextField, by: string): Promise<Event> {
     // The event before the row, as the other two stores answer it: an unknown event is "no event",
     // not the same "nothing to remove" a real field already gone would give.

@@ -124,6 +124,38 @@ forEachStore('two events in the same instant keep the order they were recorded i
   assert.deepEqual((await s.list(null)).map((e) => e.text), texts);
 });
 
+// ===================================================================== one page, bare
+// `listBare` is what the server reads `_roles` with on every request (docs/ROLES.md, section 5):
+// one page, nothing joined. Each store answers it the same way, or a grant would read differently
+// on SQLite than on Firestore.
+
+forEachStore('listBare reads one page, in the order recorded, as `list` does', async (s) => {
+  // Twelve, six on the page read: an order that merely happened to match — a store's own document
+  // order, say — would have to guess six right in a row.
+  for (let i = 0; i < 12; i++) {
+    await s.append({ type: 'comment', page: i % 2 ? '_roles' : 'A01', text: `t${i}`, data: { n: String(i) } }, 'r@example.org');
+  }
+  const bare = await s.listBare('_roles');
+  assert.deepEqual(bare.map((e) => e.data.n), ['1', '3', '5', '7', '9', '11'], 'that page alone, in recorded order, same instant or not');
+  assert.deepEqual(bare.map((e) => e.id), (await s.list('_roles')).map((e) => e.id), 'the same events `list` finds there');
+  assert.deepEqual(await s.listBare('A02'), [], 'a page with nothing on it answers nothing');
+});
+
+forEachStore('listBare names the author by the id the row holds, and joins no text', async (s) => {
+  const sent = { type: 'role_granted', page: '_roles', block: null, text: 'a text it should not return',
+    data: { role: 'lead', person: 'p_x', scope: '' } };
+  const answered = await s.append(sent, 'owner@example.org');
+  const [bare] = await s.listBare('_roles');
+  assert.match(bare.author, PERSON_ID, 'the id, never resolved to an address');
+  assert.equal(bare.author, answered.authorId, 'the same id `list` resolves from');
+  assert.equal(bare.authorId, bare.author);
+  assert.deepEqual([bare.id, bare.type, bare.page, bare.block, bare.when], [answered.id, answered.type, '_roles', null, answered.when]);
+  assert.deepEqual(bare.data, sent.data);
+  assert.equal(bare.text, null, 'the texts table is not read');
+  assert.equal(bare.snapshot, null);
+  assert.ok(!('textHash' in bare) && !('snapshotHash' in bare), 'no hash leaks out of the store');
+});
+
 forEachStore('appending the same event twice records it twice: nothing is overwritten', async (s) => {
   const e = { type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' };
   const one = await s.append(e, 'owner@example.org');

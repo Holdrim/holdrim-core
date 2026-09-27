@@ -1,4 +1,4 @@
-import { whereOf, pageOfBlock, type agentByToken } from '../core/roles.js';
+import { whereOf, pageOfBlock, addressOf, EVERYWHERE, type agentByToken } from '../core/roles.js';
 import { isBlockId } from '../core/limits.js';
 
 /**
@@ -25,18 +25,38 @@ export interface Asks {
 export interface StoredRequest { page: string; block?: string | null; author: string }
 
 /**
- * Whether `who` may move `request` to `target`. Triage is `triage` on the STORED request's place —
- * its block, or its page when it names none — never the `page` or `block` the triage event itself
- * carries, which the client wrote and could point anywhere it holds `triage`. The states the agent
- * owns (`applying`, `waiting`, `applied`) stay reachable by an agent, and by the local runner, on
- * who is asking alone: an agent holds no `triage` anywhere, and without this it could not move the
- * approved request it exists to apply (docs/ROLES.md, section 4).
+ * Whether `request` is `who`'s own. `author` is what the store resolved from the person id the event
+ * holds (`withAuthors`, engine/api/people.ts), so this is the person-id comparison with the address
+ * standing in for the id: a forgotten author resolves to the id, and matches nobody.
+ */
+export function isOwnRequest(who: Who, request: StoredRequest): boolean {
+  return addressOf(who) === request.author;
+}
+
+/**
+ * Whether `who` may triage `request`: `triage` on the STORED request's place — its block, or its page
+ * when it names none — never the `page` or `block` a triage event itself carries, which the client
+ * wrote and could point anywhere it holds `triage`. On their OWN request, `triage` everywhere: a
+ * request skips or passes triage only by someone who could have triaged it wherever it may reach, and
+ * a triager whose grant is limited to some pages never decides their own (docs/ROLES.md, section 2) —
+ * the same question `recordEvent` asks when it writes whether a request starts decided. The owner and
+ * an admin hold `triage` everywhere, so for them this is the question it always was.
+ */
+export function mayTriage(roles: Asks, who: Who, request: StoredRequest): boolean {
+  return roles.can('triage', who, isOwnRequest(who, request) ? EVERYWHERE : whereOf(request));
+}
+
+/**
+ * Whether `who` may move `request` to `target`: `mayTriage`. The states the agent owns (`applying`,
+ * `waiting`, `applied`) stay reachable by an agent, and by the local runner, on who is asking alone:
+ * an agent holds no `triage` anywhere, and without this it could not move the approved request it
+ * exists to apply (docs/ROLES.md, section 4).
  */
 export function mayMove(
   roles: Asks, who: Who, request: StoredRequest, target: string,
   opts: { agentStates: readonly string[]; localMode: boolean },
 ): boolean {
-  if (roles.can('triage', who, whereOf(request))) return true;
+  if (mayTriage(roles, who, request)) return true;
   return (opts.localMode || roles.isAgent(who)) && opts.agentStates.includes(target);
 }
 
@@ -51,14 +71,14 @@ export function mayAddDetails(roles: Asks, who: Who, address: string, request: S
 
 /**
  * A request's `status` as `who` is sent it: the cycle's triage destinations only where `who` may
- * triage this request, and none elsewhere. The panel and the home draw their triage buttons from this
+ * triage this request (`mayTriage`, their own included), and none elsewhere. The panel and the home draw their triage buttons from this
  * list and nothing else, so a list left full for someone the server would refuse is a button that
  * fails on click.
  */
 export function statusFor<S extends { triage: string[] }>(
   roles: Asks, who: Who | null, request: StoredRequest, status: S,
 ): S {
-  const may = who !== null && roles.can('triage', who, whereOf(request));
+  const may = who !== null && mayTriage(roles, who, request);
   return may ? status : { ...status, triage: [] };
 }
 

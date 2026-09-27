@@ -10,8 +10,8 @@
  *
  * ⚠️ AUTHORITY IS NOT IN THE FILE AT ALL. Who the owner and the admins are comes from HOLDRIM_OWNER
  * and HOLDRIM_ADMINS, who else holds `lock` comes from HOLDRIM_LOCKS, who is an agent comes from
- * HOLDRIM_AGENTS, and a project's own roles and who holds them come from the owner, at the settings
- * screen (read-only today; granting from it is not built) — none of the five is ever read from this
+ * HOLDRIM_AGENTS, and a project's own roles and who holds them come from the owner, as events from
+ * the settings screen (docs/ROLES.md, section 5) — none of the five is ever read from this
  * file (docs/ROLES.md, "Authority comes from the deployment only"). The file travels with the
  * repository, and whoever can commit to it — a contributor, or the agent applying an approved
  * request — is not whoever deploys it: with a fallback to the file, editing one line would name a
@@ -199,19 +199,17 @@ const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'agents', 'roles', 'grants']
 /**
  * Where each authority key actually lives — docs/ROLES.md, "Where everything lives" (section 5) —
  * named in the refusal so removing the key is not the only thing an adopter learns from it. `roles`
- * and `grants` name no variable: unlike `owner`, `admins` and `locks`, they have no environment
- * fallback AT ALL yet, because the piece that lets the owner set them is not built: the settings
- * screen is read-only today, and granting from it is not built. Saying so, rather than pointing at a
- * variable that does not exist, is the whole reason this is a lookup instead of one string reused for
- * every key.
+ * and `grants` name no variable: they are not set where Holdrim runs at all, but by the owner, as
+ * events from the settings screen. Saying so, rather than pointing at a variable that does not exist,
+ * is the whole reason this is a lookup instead of one string reused for every key.
  */
 const AUTHORITY_HOMES = {
   owner: 'HOLDRIM_OWNER (one e-mail), set where Holdrim runs',
   admins: 'HOLDRIM_ADMINS (comma separated), set where Holdrim runs',
   locks: 'HOLDRIM_LOCKS, set where Holdrim runs',
   agents: 'HOLDRIM_AGENTS, set where Holdrim runs',
-  roles: 'the owner, from the settings screen — not built yet, and never this file',
-  grants: 'the owner, from the settings screen — not built yet, and never this file',
+  roles: 'the owner, from the settings screen (/engine/settings), and never this file',
+  grants: 'the owner, from the settings screen (/engine/settings), and never this file',
 };
 
 /**

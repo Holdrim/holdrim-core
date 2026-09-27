@@ -72,8 +72,29 @@ green CI. What varies is the review:
 | **3 · Support** | documentation, configuration, development scripts, CI, examples | language, craft — and locks when an invariant's wording changes | one |
 
 The pull request names its tier, and when in doubt the tier goes up, never down. A MINOR never opens
-another round: it rides the next commit when it is trivial, or becomes an issue. A later round reads
-only what the fix changed.
+another round: it rides the next commit when it is trivial, or becomes an issue.
+
+How a round runs, at every tier:
+
+- **Round 1 runs every lens the tier names. From round 2 on, a round runs the lenses that found
+  something in the round before, plus correctness and proof, and they read only what the fix
+  changed.** A lens that came back clean does not run again unless the fix changed files in its
+  scope. Asking a clean lens the same question of the same files buys the same answer at full
+  price; correctness and proof run every round because a fix is new logic, and new logic is where
+  a later round's findings come from.
+- **The developer starts fixing on the first CRITICAL or MAJOR, without waiting for every lens to
+  finish.** The round still closes only when every lens scheduled for it has reported, and the fix
+  is read by the next round, not this one. The lenses read a worktree fixed at the commit under
+  review, so a fix landing on the branch does not move under them, and the slowest lens no longer
+  decides when the work starts.
+- **The lenses may run as three reviewers: locks alone, proof alone, and one combined reviewer for
+  correctness, craft, engine and language.** Those four read the same diff under the same
+  read-only contract, so one reviewer reading it once does what four did reading it four times.
+  The combined reviewer still applies each lens file's checklist on its own and reports its
+  findings per lens, and a lens clean inside it is named as clean; in a later round it covers only
+  the lenses that round schedules. Locks and proof are never folded into it: locks is adversarial
+  and its misses cost the most, so it gets a reviewer's whole attention, and proof breaks files on
+  purpose in a worktree of its own, which no read-only lens may share.
 
 Read `LESSONS.md` first, its Security section above all: it is what earlier reviews missed, and
 the three questions every pull request answers. Then run them over your change and come back with
