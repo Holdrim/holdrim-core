@@ -141,7 +141,18 @@ WORK=$(mktemp -d)
 # EADDRINUSE, the old one keeps answering, and the whole suite ends up testing the previous code —
 # enough to make a fix that is actually correct look broken, and get it undone. Better not to run
 # than to run while lying.
-if curl -s -o /dev/null --max-time 2 $B/api/health; then
+# Three outcomes, not two: curl's exit 28 is a timeout, a port bound by something that never answers.
+# Read as "free", the server started there dies with EADDRINUSE and the run fails later, somewhere
+# that names neither the port nor the reason.
+curl -s -o /dev/null --max-time 2 $B/api/health
+PROBE=$?
+if [ "$PROBE" -eq 28 ]; then
+  echo "port $PORT is bound but never answered its health check — no server can start there."
+  { ss -ltnp 2>/dev/null | grep ":$PORT " || lsof -nP -iTCP:"$PORT" 2>/dev/null; } || true
+  echo "  free the port (or run with PORT=another) and try again."
+  exit 1
+fi
+if [ "$PROBE" -eq 0 ]; then
   echo "port $PORT is already in use — the test would run against ANOTHER server."
   # Whichever of the three is installed. `ss` is Linux, `lsof` is macOS and most Linuxes, and
   # Windows has neither — so this is a hint, never the check itself.

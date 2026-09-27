@@ -96,7 +96,7 @@ await refuseIfPortUnusable(TOGGLES_OFF, PORT + 2, 'the feature-toggles server');
 const TAMPERED = `http://127.0.0.1:${PORT + 3}`;
 await refuseIfPortUnusable(TAMPERED, PORT + 3, 'the tampered-events server');
 
-// The same guard as the contract test, for the same reason: a port already taken means the old
+// The same guard as the contract test, three outcomes and all: a port already taken means the old
 // server keeps answering, and the whole run tests the previous build without saying so.
 await refuseIfPortUnusable(BASE, PORT, 'the main server');
 
