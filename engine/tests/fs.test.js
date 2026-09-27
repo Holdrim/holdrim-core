@@ -300,3 +300,71 @@ test('sheetFiles accepts a configured folder that is a working symlink resolving
   assert.deepEqual(sheetFiles(tmp), [join(tmp, 'mnt', 'X01.html')],
     'a working symlinked folder is a legitimate way to mount content, exactly like the registry\'s own');
 });
+
+// ===================================================================== a page file that is a link
+// `sheetFiles` scans only pages whose REAL location is inside the project. The folder's own check
+// above sees the folder, never a page FILE inside it that is a link, and every read downstream
+// (readBlocks, fingerprintsByPage, scanBlocks) follows links — so each page that IS a link is
+// resolved too, with the same `realContainment` (engine/cli/fs.ts) the server uses before it serves
+// a file from the site.
+
+/** A project with one ordinary page folder, `pages`, holding a plain page, `A01.html`. */
+function pagesProject(t) {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-fs-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['pages'], registry: 'r.json' } }));
+  mkdirSync(join(tmp, 'pages'));
+  writeFileSync(join(tmp, 'pages', 'A01.html'), '<main></main>');
+  return tmp;
+}
+
+test('sheetFiles refuses a page file that is a link whose real location is outside the project', (t) => {
+  const tmp = pagesProject(t);
+  const outside = mkdtempSync(join(tmpdir(), 'holdrim-fs-outside-'));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  writeFileSync(join(outside, 'X01.html'), '<main></main>');
+  symlinkSync(join(outside, 'X01.html'), join(tmp, 'pages', 'B01.html'));
+
+  assert.throws(() => sheetFiles(tmp), /refusing to scan the page .*B01\.html: .*outside the project root/);
+});
+
+test('sheetFiles scans a page file that is a link whose real location is inside the project', (t) => {
+  const tmp = pagesProject(t);
+  mkdirSync(join(tmp, 'drafts'));
+  writeFileSync(join(tmp, 'drafts', 'B01.html'), '<main></main>');
+  symlinkSync(join(tmp, 'drafts', 'B01.html'), join(tmp, 'pages', 'B01.html'));
+
+  assert.deepEqual(sheetFiles(tmp), [join(tmp, 'pages', 'A01.html'), join(tmp, 'pages', 'B01.html')],
+    'a link that stays inside the project is a page like any other');
+});
+
+test('sheetFiles scans a linked page of a project whose ROOT itself is reached through a link', (t) => {
+  // The site mounted through a link (`/srv/docs -> /data/docs`): the page's real location has to be
+  // compared with the root's REAL location, not with the root as spelled, or every linked page of
+  // such a project reads as outside it.
+  const real = pagesProject(t);
+  symlinkSync('A01.html', join(real, 'pages', 'B01.html'));
+  const alias = join(tmpdir(), `holdrim-fs-alias-${process.pid}-${Math.floor(Math.random() * 1e9)}`);
+  symlinkSync(real, alias);
+  t.after(() => rmSync(alias, { force: true }));
+
+  assert.deepEqual(sheetFiles(alias), [join(alias, 'pages', 'A01.html'), join(alias, 'pages', 'B01.html')]);
+});
+
+test('sheetFiles fails loudly on a page file that is a link to nothing, rather than listing it', (t) => {
+  // Every caller reads each page it is given, and would fail on this one anyway; failing here, with
+  // the link's own name, keeps a page with no real location from ever being judged inside or out.
+  const tmp = pagesProject(t);
+  symlinkSync(join(tmp, 'never-written.html'), join(tmp, 'pages', 'B01.html'));
+
+  assert.throws(() => sheetFiles(tmp), { code: 'ENOENT' });
+});
+
+test('sheetFiles still reads a configured folder that does not exist yet as holding no pages', (t) => {
+  // The per-page check sits outside the `try` around `readdirSync`, so that `try` now covers the
+  // listing alone; a folder not created yet must still read as empty, not as an error.
+  const tmp = pagesProject(t);
+  writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify({ content: { folders: ['pages', 'later'], registry: 'r.json' } }));
+
+  assert.deepEqual(sheetFiles(tmp), [join(tmp, 'pages', 'A01.html')]);
+});

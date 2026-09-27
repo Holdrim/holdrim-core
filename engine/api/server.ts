@@ -26,6 +26,7 @@ import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js'
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
 import { graphOf } from '../cli/graph.ts';
+import { realContainment } from '../cli/fs.ts';
 import { loadTheme } from './theme.ts';
 import { LANGUAGE_ROUTE, chosenLanguage, languageSwitch } from './language.ts';
 import { PasswordIdentity } from './identity-password.ts';
@@ -1592,6 +1593,15 @@ async function serveStatic(url: URL, res: ServerResponse, lang: string) {
     return json(res, 403, { error: i18n.t(lang, 'site.pathOutside') });
   }
   try {
+    // Only a file whose REAL location is inside the site is served. The check above reads the path
+    // as a STRING, while `stat` and `readFile` below follow links, so without this what is served
+    // would be decided by where a link leads rather than by where the site is. Refused exactly as a
+    // path that walks out. A link that stays inside keeps working; a missing file still reaches the
+    // 404 below (a dangling link throws here, into that same catch).
+    // The site root is resolved on every request, not once at boot: it is not the engine's to hold
+    // still — a release that re-points a symlinked site at new content is an ordinary deployment,
+    // and a real root remembered from before it would refuse the whole site until a restart.
+    if (!realContainment(cfg.site, target).inside) return json(res, 403, { error: i18n.t(lang, 'site.pathOutside') });
     const info = await stat(target);
     if (info.isDirectory()) return serveStatic(new URL(url.href.replace(/\/?$/, '/index.html')), res, lang);
     return serveFile(target, res, path);

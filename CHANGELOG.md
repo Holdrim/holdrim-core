@@ -444,8 +444,21 @@ who ran the engine from `main` before it.
   project keeps working, at any depth, exactly as before. Nothing to change for a project whose
   `content.folders` already names ordinary paths inside its own folder. **Left open, and not this
   fix's to close:** `sheetFiles` never recurses into a configured folder's own subfolders, so a
-  symlinked subfolder or page FILE inside one is not walked into by this check either — see the pull
-  request for the recommendation.
+  symlinked subfolder inside one is not walked into by this check either — see the pull request for
+  the recommendation. A page FILE that is a link is the next entry's.
+- **The server serves, and the CLI scans, only files whose real location is inside the site.** Both
+  already checked a path as it is written; the reads that follow those checks follow symbolic links.
+  `serveStatic` (engine/api/server.ts) now also resolves the requested file's real location, and the
+  site root's, and answers 403 — the same refusal, with the same message, as a path that walks out of
+  the site — when the first is not strictly inside the second. `sheetFiles` (engine/cli/pages.ts)
+  does the same for every page file in a configured folder that is itself a link, and refuses it by
+  throwing, exactly as it refuses such a folder, so no page is scanned, fingerprinted or checked from
+  outside the project. Both ask one helper, `realContainment` (engine/cli/fs.ts), which resolves both
+  sides with `fs.realpathSync` and compares them with `insideRoot` (engine/core/paths.js);
+  `refuseEscapedFolder` now asks it too, so the rule exists once. A link that stays inside the site
+  keeps working, a site mounted through a symlink keeps working, and a missing file — a link to
+  nothing included — is still a 404. Nothing to change for a project whose content keeps its links
+  inside itself.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY
