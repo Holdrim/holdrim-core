@@ -173,6 +173,14 @@ echo "boot:"
 expect "the server comes up without loading an optional package" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
 grep -q 'optional package was loaded' $WORK/tests.log && grep -m1 'optional package was loaded' $WORK/tests.log | sed 's/^/       /'
 
+# HSTS reads the one decision the `Secure` cookies already read (`servedOverTls`, server.ts), and
+# Development is plain HTTP: a header pinning this name to TLS would break everything else on it.
+# The header a client sends about its own transport changes nothing — the server trusts no proxy.
+echo "HSTS, never over plain HTTP:"
+expect "Development sends no HSTS" 0 "$(curl -s -D- -o /dev/null $B/api/health | grep -ci '^strict-transport-security:')"
+expect "not even to a client that says it came over https" 0 \
+  "$(curl -s -D- -o /dev/null -H 'X-Forwarded-Proto: https' $B/api/health | grep -ci '^strict-transport-security:')"
+
 echo "identity and roles:"
 expect "no identity → 401"             401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/events)"
 expect "owner is owner"                owner "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/me | jfield role)"
@@ -1055,6 +1063,11 @@ expect "and the log keeps an address's worth of it, not the megabyte" 0 "$(awk '
 # here, because nothing else would notice it missing.
 expect "and it refuses to be framed"     1 "$(curl -s -D- -o /dev/null $B/sign-in | grep -ci "frame-ancestors 'none'")"
 expect "and it says nosniff"             1 "$(curl -s -D- -o /dev/null $B/sign-in | grep -ci 'x-content-type-options: nosniff')"
+# Outside Development the browser comes over TLS, and every answer tells it to keep doing so: the
+# API, the sign-in screen, and the redirect that reaches a person before any page does.
+expect "HSTS on an API answer"           1 "$(curl -s -D- -o /dev/null $B/api/health | grep -ci '^strict-transport-security: max-age=31536000')"
+expect "on the sign-in screen"           1 "$(curl -s -D- -o /dev/null $B/sign-in | grep -ci '^strict-transport-security: max-age=31536000')"
+expect "and on the redirect to it"       1 "$(curl -s -D- -o /dev/null $B/pages/A01.html | grep -ci '^strict-transport-security: max-age=31536000')"
 # The sign-in page runs only what this server wrote into it. The nonce in the policy has to be the
 # one on every script and style of THIS response, new on the next one, and `unsafe-inline` must not
 # appear: a policy that allows inline script allows the injected kind too.

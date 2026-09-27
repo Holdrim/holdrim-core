@@ -414,6 +414,14 @@ who ran the engine from `main` before it.
   wrong password now costs a write. What an operator notices: restarting no longer lifts a wait
   someone is kept in — emptying `sign_in_failures` does — and an edge rate limit on `POST
   /api/sign-in` is still advised for a service on the internet.
+- **Every answer outside Development now carries `Strict-Transport-Security: max-age=31536000`
+  (#53).** Without it, the first request of a visit typed as `http://` crossed the network in the
+  clear, where whoever sat on it could answer instead. It is sent on the same decision that already
+  makes the session cookie `Secure`, never in Development, and never because of an
+  `X-Forwarded-Proto` a client sent. No `includeSubDomains` and no `preload`: both reach names the
+  deployment may not own. What to check: a deployment outside Development has to be reached over
+  TLS, which its `Secure` cookies already required; a browser that has seen the header refuses plain
+  HTTP to that host for a year.
 - **`engine/tests`, `engine/test-contract.sh` and `engine/test-browser.js` — every test-only path at
   `engine/`'s root, including the `--import` hook that grants one fixed address triage and approve on
   chosen pages for the contract test — no longer ship in the image (#33).** `Dockerfile`'s `COPY

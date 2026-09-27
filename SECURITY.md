@@ -200,7 +200,10 @@ Worth knowing before you run it:
 ## Running it safely
 
 - **Put it behind TLS.** The session cookie is `Secure` outside development, which means it will not
-  travel over plain HTTP anywhere but localhost.
+  travel over plain HTTP anywhere but localhost. Outside development every answer also carries
+  `Strict-Transport-Security: max-age=31536000`, so a browser that has reached it once over TLS
+  refuses plain HTTP to that host for a year; the server itself speaks plain HTTP to whatever
+  terminates TLS in front of it, and does not read `X-Forwarded-Proto` to decide.
 - **Use a named volume for `/data`**, not a host folder. A host folder arrives with the host's
   ownership, and the process runs as an unprivileged user.
 - **Never put a key in `holdrim.json`.** That file is versioned. Secrets go in the environment or
