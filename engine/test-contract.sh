@@ -249,16 +249,27 @@ expect "comment, mismatched page → 400"   400 "$(post $REVIEWER '{"type":"comm
 expect "comment, matching page → 201"     201 "$(post $REVIEWER '{"type":"comment","page":"D01","block":"D01.5.3","text":"x"}')"
 RID152=$(new_request $REVIEWER '{"type":"request","page":"D01","block":"D01.6.1","text":"holdrim#152 fixture"}')
 require_id "$RID152" RID152
-# `request_state` and `supplement` are deliberately NOT asked this: permission for both is judged on
-# the STORED request's place, never on the page or block the event itself claims — see "the server
-# judges triage and details on the STORED request's place (#33)" further down, and `decide_forged`
-# above, both of which post a block from a DIFFERENT page than the request they act on and expect
-# that pairing to change no answer. Refusing it here first would turn both into a 400 instead — a
-# mismatched pair still reaches the request lookup and the 403/201 those sections already prove.
-expect "supplement naming a block of another page → 201, still judged on the request" 201 \
+# `request_state` and `supplement` are neither refused nor trusted here: `decide_forged` and the
+# SCOPED fixture, both further down, already prove that a forged `block` on either changes no
+# permission answer (judged on the STORED request, not on `incoming`) — so refusing it in `refusalOf`
+# would gain nothing. But left as sent, it would still be APPENDED with the forged place, unreadable
+# from the request's own thread and misfiled onto whichever page the forgery named. `recordEvent`
+# overwrites `page`/`block` with the request's own right after it looks the request up: accepted,
+# and stored where the request's thread actually lives — never where the forgery pointed.
+finds() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=$1" \
+  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type===process.argv[2]&&x.data.request===process.argv[3]).pop();console.log(e?[e.page,e.block].join(' '):'none')})" "$1" "$2" "$3"; }
+expect "supplement naming a block of another page → 201" 201 \
   "$(post $REVIEWER "{\"type\":\"supplement\",\"page\":\"D01\",\"block\":\"A01.1.1\",\"text\":\"x\",\"data\":{\"request\":\"$RID152\"}}")"
-expect "request_state naming a block of another page → 201, still judged on the request" 201 \
+expect "…stored under the request's OWN page and block, not the forged one" "D01 D01.6.1" \
+  "$(finds D01 supplement "$RID152")"
+expect "…and absent from the forged page's own history" 1 \
+  "$(curl -s -H \"X-Dev-Email: $OWNER\" \"$B/api/events?page=A01\" | has -F \"\\\"request\\\":\\\"$RID152\\\"\"; echo $?)"
+expect "request_state naming a block of another page → 201" 201 \
   "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"D01\",\"block\":\"A01.1.1\",\"data\":{\"request\":\"$RID152\",\"state\":\"approved\"}}")"
+expect "…stored under the request's OWN page and block too" "D01 D01.6.1" \
+  "$(finds D01 request_state "$RID152")"
+expect "…and absent from the forged page's own history too" 1 \
+  "$(curl -s -H \"X-Dev-Email: $OWNER\" \"$B/api/events?page=A01\" | has -F \"\\\"request\\\":\\\"$RID152\\\"\"; echo $?)"
 # No block named at all — the "ask for a page" request has none — is unaffected whatever `page`
 # says. `new_request`, again, so the still-open request left by a bare `post` does not leak into
 # `toTriage` below.
