@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S02 · Como funciona</title>
+<link rel="stylesheet" href="../../style/site.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+  <nav class="lang-nav"><a href="../S02.html">EN</a><a href="S02-pt.html" aria-current="page">PT</a><a href="../es/S02-es.html">ES</a></nav>
+  <nav class="site-nav"><a href="S01-pt.html">O que é</a><a href="S02-pt.html" aria-current="page">Como funciona</a><a href="S03-pt.html">Para todos</a><a href="S04-pt.html">Para quem desenvolve</a><a href="S05-pt.html">Para onde vai</a></nav>
+
+  <h1 class="doc-title"><span class="doc-title__code">S02-pt</span> Como funciona</h1>
+
+  <p class="lead" data-id="S02-pt.1.1" data-code="1.1" data-depends="S02.1.1">
+    São três ideias, e cada uma é pequena: aprovar o texto, não a página; deixar que cada frase diga
+    do que ela depende; e nunca apagar nada.
+  </p>
+
+  <h2><span class="n">1</span> O semáforo</h2>
+
+  <div class="block" data-id="S02-pt.1.2" data-code="1.2" data-depends="S02.1.2">
+    <p>Cada bloco da documentação tem um estado, que é calculado — nunca declarado por ninguém:</p>
+    <ul class="lights">
+      <li>⚪ <b>não validado</b> — ainda ninguém olhou;</li>
+      <li>🟢 <b>validado</b> — aprovado, e nada mudou desde então;</li>
+      <li>🟡 <b>desatualizado</b> — o texto deste bloco mudou depois da aprovação;</li>
+      <li>🔴 <b>suspeito</b> — o texto continua o mesmo, mas algo de que ele depende mudou.</li>
+    </ul>
+  </div>
+
+  <div class="block" data-id="S02-pt.1.3" data-code="1.3" data-depends="S02.1.3">
+    <p>O vermelho é o único que ninguém percebe só de ler: na página, nada mudou. É uma pergunta,
+    não um erro — "isso ainda vale?" — e responder a essa pergunta é a revisão.</p>
+  </div>
+
+  <h2><span class="n">2</span> O ciclo do pedido</h2>
+
+  <div class="block" data-id="S02-pt.2.1" data-code="2.1" data-depends="S02.2.1">
+    <p>Quem está lendo pode pedir uma mudança, ou uma página que ainda não existe, direto de onde
+    está. Quem decide é o dono do projeto. Um agente — a própria ferramenta de IA do dono, rodando
+    na máquina dele — aplica o que foi aprovado e informa qual commit levou a mudança. Só o ✓ do
+    dono torna um texto confiável; um agente nunca aprova.</p>
+  </div>
+
+  <h2><span class="n">3</span> Nada é apagado</h2>
+
+  <div class="block" data-id="S02-pt.3.1" data-code="3.1" data-depends="S02.3.1">
+    <p>Toda aprovação, pedido e recusa é um evento novo, com autor, a data e a hora. O banco se recusa a
+    alterar ou apagar qualquer um deles. As pessoas também nunca são apagadas — o acesso é retirado,
+    mas cada aprovação que elas deram continua com o nome delas.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

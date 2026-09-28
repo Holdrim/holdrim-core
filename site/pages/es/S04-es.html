@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S04 · Si eres desarrollador</title>
+<link rel="stylesheet" href="../../style/site.css">
+<link rel="stylesheet" href="/engine/web/panel.css">
+</head>
+<body class="doc">
+<main class="doc-page">
+  <nav class="lang-nav"><a href="../S04.html">EN</a><a href="../pt-BR/S04-pt.html">PT</a><a href="S04-es.html" aria-current="page">ES</a></nav>
+  <nav class="site-nav"><a href="S01-es.html">Qué es</a><a href="S02-es.html">Cómo funciona</a><a href="S03-es.html">Para todos</a><a href="S04-es.html" aria-current="page">Para desarrolladores</a><a href="S05-es.html">Hacia dónde va</a></nav>
+
+  <h1 class="doc-title"><span class="doc-title__code">S04-es</span> Si eres desarrollador</h1>
+
+  <p class="lead" data-id="S04-es.1.1" data-code="1.1" data-depends="S04.1.1">
+    Holdrim es un motor: una imagen Docker en la que se monta tu documentación, igual que un
+    producto usa Keycloak. Tus páginas se quedan en tu repositorio, en HTML plano.
+  </p>
+
+  <h2><span class="n">1</span> Ponlo en marcha</h2>
+
+  <div class="block" data-id="S04-es.1.2" data-code="1.2" data-depends="S04.1.2">
+    <p>Clona el motor y arráncalo con el ejemplo: <code>HOLDRIM_OWNER=you@example.org docker
+    compose up</code>, y abre <code>http://localhost:8080</code>. La contraseña del primer acceso
+    está en un archivo del volumen de datos, nunca en el log; el log solo dice dónde.</p>
+  </div>
+
+  <div class="block" data-id="S04-es.1.3" data-code="1.3" data-depends="S04.1.3">
+    <p>Para tu propia documentación, copia <code>examples/template</code>, define las páginas en
+    <code>holdrim.json</code> y monta la carpeta en la imagen. El propietario se define donde
+    despliegas, en <code>HOLDRIM_OWNER</code> — nunca en <code>holdrim.json</code>, que puede editar
+    cualquiera con acceso de commit al repositorio.</p>
+  </div>
+
+  <h2><span class="n">2</span> La herramienta</h2>
+
+  <div class="block" data-id="S04-es.2.1" data-code="2.1" data-depends="S04.2.1">
+    <p><code>holdrim lights</code> muestra el estado de toda la documentación; <code>holdrim
+    apply</code> entrega una solicitud aprobada a la herramienta de IA que ya usas, corriendo con tu
+    propia cuenta. El motor no llama a ningún modelo ni guarda ninguna clave.</p>
+  </div>
+
+</main>
+
+<script type="module" src="/engine/web/panel-react.js"></script>
+</body>
+</html>

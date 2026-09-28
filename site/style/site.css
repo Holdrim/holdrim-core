@@ -6,6 +6,11 @@ body.doc { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-se
 .site-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-size: .95rem; margin-bottom: 2rem; }
 .site-nav a { color: #3f4b57; text-decoration: none; }
 .site-nav a[aria-current="page"] { color: #1d2733; font-weight: 600; }
+/* Smaller and quieter than .site-nav on purpose: it switches the reader's language, not the page,
+   so it must not compete with the row that says where on the site they are. */
+.lang-nav { display: flex; gap: .75rem; font-size: .8rem; margin-bottom: .5rem; }
+.lang-nav a { color: #8a96a3; text-decoration: none; }
+.lang-nav a[aria-current="page"] { color: #3f4b57; font-weight: 600; }
 .doc-title { font-size: 2rem; line-height: 1.15; margin: 0 0 1.25rem; }
 .doc-title__code { color: #8a96a3; font-weight: 500; font-size: 1rem; vertical-align: middle; margin-right: .5rem; }
 h2 { font-size: 1.25rem; margin: 2.5rem 0 .75rem; }
