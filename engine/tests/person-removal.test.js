@@ -600,6 +600,48 @@ test('a run stalled after forgetting the row, while another run took the claim o
   assert.equal(row.email, ANA, 'still keyed by the address');
 });
 
+/** A store that cannot let a claim go: the claim then lapses on its own. */
+class Unreleasing extends MemoryEventStore {
+  async releaseRemoval() { throw new Error('the store could not let the claim go'); }
+}
+
+/** `fn`'s answer, and the `removal_claim_kept` lines it logged. */
+async function keptLines(fn) {
+  const logged = [];
+  const info = console.log;
+  console.log = (line) => logged.push(line);
+  try {
+    const answer = await fn().then((value) => ({ value }), (error) => ({ error }));
+    return { ...answer, kept: logged.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((l) => l?.event === 'removal_claim_kept') };
+  } finally {
+    console.log = info;
+  }
+}
+
+test('a claim that cannot be let go of leaves a finished removal finished: its answer, and a line saying so', async () => {
+  const events = new Unreleasing();
+  await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
+  const person = await events.personOf(ANA);
+  const run = await keptLines(() => removePerson({ events, users: null, deployment, by: OWNER, byAgent: false },
+    { email: ANA, confirmed: true }));
+  assert.equal(run.error, undefined, `answered, not thrown: ${run.error}`);
+  assert.equal(run.value.status, 201);
+  assert.equal((await removedOnce(events)).length, 1);
+  assert.deepEqual(run.kept.map((l) => [l.severity, l.person]), [['WARNING', person]], 'said once, by id');
+});
+
+test('a claim that cannot be let go of after a step failed: the step\'s own error is the one thrown', async () => {
+  const events = new (class extends Unreleasing {
+    async removeText() { throw new Error('the disk is full'); }
+  })();
+  await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
+  const run = await keptLines(() => removePerson({ events, users: null, deployment, by: OWNER, byAgent: false },
+    { email: ANA, confirmed: true }));
+  assert.match(String(run.error?.message), /the disk is full/);
+  assert.equal(run.kept.length, 1);
+});
+
 // ---------------------------------------------------------------- stores from before ids and texts moved
 /** A SQLite store in a folder of its own, and a way to write rows the way an older version did. */
 async function olderStore() {
