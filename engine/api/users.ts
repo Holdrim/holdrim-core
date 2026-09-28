@@ -597,9 +597,7 @@ export abstract class UserStoreBase implements UserStore {
     const row = await this.readUser(address);
     if (row) {
       await this.writeRemoved(address, { key: address });
-      // Closed with no name only when this step wrote it: an account emptied later in a removal is
-      // past the point where a resumed run asks whether there was one.
-      return !(row.removed && row.name === '');
+      return wasAccount(row);
     }
     try {
       await this.insertUser({
@@ -608,10 +606,14 @@ export abstract class UserStoreBase implements UserStore {
       });
       return false;
     } catch (error) {
-      // An account was created for the address between the read and this insert: it is the one to
-      // close, and it was the person's to have. With no row there, the insert failed for its own
-      // reason, and the removal must stop rather than go on with the address free.
-      if (await this.writeRemoved(address, { key: address })) return true;
+      // A row landed for the address between the read and this insert, and it is read, not assumed:
+      // an account created meanwhile is the one to close, and it was the person's to have; a row
+      // another `closeAccount` wrote in the same gap is that call's closed row, and answering `true`
+      // for it would put an account the person never had into their `person_removed`. With no row
+      // there, the insert failed for its own reason, and the removal must stop rather than go on
+      // with the address free.
+      const found = await this.readUser(address);
+      if (found && await this.writeRemoved(address, { key: address })) return wasAccount(found);
       throw error;
     }
   }
@@ -880,6 +882,15 @@ function sessionKey(id: string): string {
 /** Drops the hash and the id. Every token that leaves this file goes through here. */
 function tokenProfileOf(row: StoredAgentToken): AgentToken {
   return { email: row.email, kind: row.kind, issuedAt: row.issuedAt };
+}
+
+/**
+ * Whether a row `closeAccount` found was the person's own account. Closed with no name only when
+ * `closeAccount` wrote it, for an address with no account, or when a removal already emptied it, past
+ * the point where a resumed run asks whether there was one.
+ */
+function wasAccount(row: StoredUser): boolean {
+  return !(row.removed && row.name === '');
 }
 
 /** Drops the secret. Anything that leaves this file goes through here. */

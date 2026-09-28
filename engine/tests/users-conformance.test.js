@@ -1268,3 +1268,32 @@ forEachStore('an account created while the address is being taken is the one clo
   const [row] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
   assert.deepEqual([row.name, row.enabled, row.removed], ['Ana Lima', false, true], 'closed, not left open');
 });
+
+forEachStore('two closings of an address with no account at once: neither calls the other\'s closed row an account', async (s) => {
+  // Both read no row, both insert, and one insert finds the address taken by the other's closed row.
+  // That row is no account the person had: answered `true`, it would reach their `person_removed`.
+  // Neither read goes on until both are done, so the two meet at the insert on every store, whatever
+  // its timing; the read in the refused one's catch comes after, and passes straight through.
+  const read = s.readUser.bind(s);
+  let waiting = [];
+  s.readUser = async (email) => {
+    const row = await read(email);
+    if (waiting) {
+      await new Promise((resolve) => {
+        waiting.push(resolve);
+        if (waiting.length === 2) { for (const go of waiting) go(); waiting = null; }
+      });
+    }
+    return row;
+  };
+  const insert = s.insertUser.bind(s);
+  let refused = 0;
+  s.insertUser = async (row) => {
+    try { return await insert(row); } catch (error) { refused++; throw error; }
+  };
+  const answers = await Promise.all([s.closeAccount('ana@example.org'), s.closeAccount('ana@example.org')]);
+  assert.equal(refused, 1, '(the two closings met: one insert found the other\'s row)');
+  assert.deepEqual(answers, [false, false], 'there was no account of theirs, whichever closing came second');
+  const rows = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  assert.deepEqual(rows.map((r) => [r.name, r.enabled, r.removed]), [['', false, true]], 'one closed row, nameless');
+});
