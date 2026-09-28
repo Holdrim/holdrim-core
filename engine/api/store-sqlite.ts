@@ -16,7 +16,8 @@ import { log, jsonForTerminal } from './log.ts';
  *
  * INSERT ONLY, as the method demands: there is no DELETE in this file, and the one UPDATE empties a
  * person's e-mail — the only change the people table takes, and the triggers refuse any other. The
- * trail is the product.
+ * trail is the product. `removal_claims` is apart from it: it holds no fact, only who is removing
+ * whom right now, and its rows are renewed and let go of.
  */
 /**
  * How long a connection waits for another connection's write on the same file before answering
@@ -609,7 +610,35 @@ export class SqliteEventStore implements EventStore {
       );
     `);
 
+    // Who is removing whom right now (`claimRemoval`): a person's id, a random holder and the time the
+    // claim ends. Beside the events, in the file every process on this machine writes them to, so two
+    // processes claiming one removal meet here. Not a fact of the trail: a row is renewed and let go
+    // of, and no guard reads it.
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS removal_claims (
+        person   TEXT PRIMARY KEY,
+        holder   TEXT NOT NULL,
+        expires  TEXT NOT NULL
+      );
+    `);
+
     installGuards(this.#db);
+  }
+
+  async claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean> {
+    // One statement, so no other connection's claim lands between its read and its write: the row
+    // is written when there is none, and overwritten only when its holder is this one or its claim
+    // has ended. A row left as it is changes nothing, and `changes` says so.
+    const r = this.#db.prepare(
+      `INSERT INTO removal_claims (person, holder, expires) VALUES (?, ?, ?)
+       ON CONFLICT (person) DO UPDATE SET holder = excluded.holder, expires = excluded.expires
+       WHERE removal_claims.holder = excluded.holder OR removal_claims.expires <= ?`,
+    ).run(person, holder, until, now);
+    return r.changes === 1;
+  }
+
+  async releaseRemoval(person: string, holder: string): Promise<void> {
+    this.#db.prepare("UPDATE removal_claims SET expires = '' WHERE person = ? AND holder = ?").run(person, holder);
   }
 
   async personFor(email: string): Promise<string> {

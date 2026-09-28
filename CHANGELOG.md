@@ -300,7 +300,11 @@ who ran the engine from `main` before it.
   held inside its event, is left, and the screen says how many; events from before authors were ids
   keep the address, which then stays taken by the closed account, and the screen says that too. A
   removal a failure stopped finishes when run again, and the address is never free while anything
-  still leads from it to the person. Behind an identity proxy there is no account to empty, and the
+  still leads from it to the person. One removal of a person runs at a time (#181): a second one —
+  the form sent twice, two tabs, two server instances — is refused while the first runs, so the
+  trail holds one `person_removed` that counts all of it; the claim is a new `removal_claims` table
+  (SQLite) or collection (Firestore) beside the events, made on start, and one left by a process that
+  died lapses two minutes later. Behind an identity proxy there is no account to empty, and the
   screen says to take the address out of the proxy first. The users table gains a `removed` column
   (SQLite, Postgres) or field (Firestore), added on start. `text_removed` and `person_removed` join
   the event types on `engine/surface.json`: from this version on, the engine writes both.

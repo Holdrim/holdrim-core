@@ -17,7 +17,7 @@ import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { MemoryEventStore } from '../api/store.ts';
 import { UsersSqlite } from '../api/users-sqlite.ts';
 import { createRoles } from '../core/roles.js';
-import { removePerson, removedPersonEvent, PERSON_REMOVED, PEOPLE_PAGE } from '../api/person-removal.ts';
+import { removePerson, removedPersonEvent, PERSON_REMOVED, PEOPLE_PAGE, REMOVAL_CLAIM_MS } from '../api/person-removal.ts';
 import { ROLES_PAGE, definedEvent, grantedEvent, projectRolesOf, GRANT_REVOKED } from '../api/role-grants.ts';
 import { EVENT_TYPES, ensureLockBaseline, earliestLockBaseline, isLocked, LOCK_BASELINE_PAGE } from '../api/types.ts';
 import { TEXT_REMOVED, noText, hashText, newSalt } from '../api/texts.ts';
@@ -383,6 +383,140 @@ test('when the address cannot be taken for a person with no account, the removal
     /the users store is unavailable/);
   assert.equal(projectRolesOf(await events.listBare(ROLES_PAGE)).grants.length, 1, 'no step past it ran');
   assert.ok(await events.personOf(ANA), 'and the row still finds her, for a run that can take the address');
+});
+
+// ---------------------------------------------------------------- one run at a time (#181)
+// Held side by side, one run inside the other's, against every store: engine/tests/helpers/removal.js,
+// from the events and users conformance suites. Here, the orders a claim alone would not settle.
+
+const removedOnce = async (events) => (await events.list(PEOPLE_PAGE)).filter((e) => e.type === PERSON_REMOVED);
+
+test('two removals sent together, as a form sent twice: one removes, the other is refused, and one event counts it all', async () => {
+  const w = await world();
+  const [one, two] = await Promise.all([0, 1].map(() => removePerson(context(w), { email: ANA, confirmed: true })));
+  const [done, other] = one.status === 201 ? [one, two] : [two, one];
+  assert.equal(done.status, 201);
+  assert.deepEqual(done.removal, { person: w.person, texts: 2, textsTampered: 0, textsInline: 0, legacyEvents: 0, grants: 1, account: true });
+  // Refused while the first ran, or — had it finished first — nobody left: never a second removal.
+  assert.ok(['api.removal.inProgress', 'api.removal.nobody'].includes(other.key), `the other answered ${JSON.stringify(other)}`);
+  assert.equal((await removedOnce(w.events)).length, 1);
+});
+
+/**
+ * Runs `first` in full inside `second`'s first read of the account, so `second` goes on with what it
+ * read before `first` began: a run that read the stores, then waited, while another finished.
+ */
+function finishedInside(users, first) {
+  const find = users.find.bind(users);
+  let armed = true;
+  users.find = async (email) => {
+    const read = await find(email);
+    if (armed) { armed = false; await first(); }
+    return read;
+  };
+}
+
+test('a run that read the stores before another finished the removal answers nobody, and adds nothing', async () => {
+  const w = await world();
+  let first;
+  finishedInside(w.store, async () => { first = await removePerson(context(w), { email: ANA, confirmed: true }); });
+  const second = await removePerson(context(w), { email: ANA, confirmed: true });
+  assert.equal(first.status, 201);
+  assert.deepEqual(second, { status: 404, key: 'api.removal.nobody', params: { email: ANA } });
+  assert.equal((await removedOnce(w.events)).length, 1);
+  // Gone on, it would have taken the freed address again with a closed row of its own.
+  assert.equal((await w.store.readAllUsers()).length, 1, 'the one emptied account, and no row besides');
+  assert.equal(typeof await w.store.create(ANA, 'Ana, invited later'), 'string', 'and the address is free');
+});
+
+test('an account whose person never acted, removed by another run meanwhile: the row the late run made is forgotten again', async () => {
+  const events = new MemoryEventStore();
+  const users = new UsersSqlite(':memory:');
+  await users.create(BEA, 'Bea');
+  const ctx = { events, users, deployment, by: OWNER, byAgent: false };
+  let first;
+  finishedInside(users, async () => { first = await removePerson(ctx, { email: BEA, confirmed: true }); });
+  const second = await removePerson(ctx, { email: BEA, confirmed: true });
+  assert.equal(first.status, 201);
+  // The late run found no row, the first run's already forgotten, and made one for the address: the
+  // claim on it was free, since nobody else had that id. Gone on, it would remove that new person.
+  assert.deepEqual(second, { status: 404, key: 'api.removal.nobody', params: { email: BEA } });
+  assert.equal((await removedOnce(events)).length, 1, 'one person_removed, not one more for the row the late run made');
+  assert.equal(await events.personOf(BEA), null, 'and no row holds the address');
+});
+
+/**
+ * A store where another run takes the claim over, at `at` in the fake clock, while this run removes
+ * a text: as a run would that found this one's claim lapsed.
+ */
+class TakenOverAt extends MemoryEventStore {
+  constructor() { super(); this.person = null; this.rival = null; this.at = null; }
+  async removeText(event, field, by) {
+    if (this.at != null && this.rival == null) {
+      this.rival = await this.claimRemoval(this.person, 'rival', new Date(this.at).toISOString(),
+        new Date(this.at + REMOVAL_CLAIM_MS).toISOString());
+    }
+    return super.removeText(event, field, by);
+  }
+}
+
+test('a run whose claim another run took over stops where it is, and writes no person_removed', async () => {
+  const events = new TakenOverAt();
+  await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
+  const second = await events.append({ type: 'comment', page: 'A01', text: 'two' }, ANA);
+  events.person = await events.personOf(ANA);
+  // Past the end of any claim this run takes, and a clock that moves on enough between two texts for
+  // the run to renew its claim before the next: it finds the claim gone.
+  let now = Date.parse('2026-09-28T10:00:00.000Z');
+  events.at = now + 10 * REMOVAL_CLAIM_MS;
+  const clock = () => (now += REMOVAL_CLAIM_MS / 2);
+  const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false, clock }, { email: ANA, confirmed: true });
+  assert.equal(events.rival, true, '(the other run did take it over)');
+  assert.deepEqual(outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
+  assert.equal((await removedOnce(events)).length, 0, 'the run that holds the claim writes the event');
+  assert.equal((await byId(events, second.id)).text, 'two', 'and the next text is left for it');
+  assert.equal(await events.claimRemoval(events.person, 'third', new Date(events.at).toISOString(), 'z'), false,
+    'the claim the other run holds is not let go of by this one');
+});
+
+test('a run renews its claim right before writing person_removed, and stops if it was taken over', async () => {
+  // A clock that never moves: no renewal on the way, only the one before the event.
+  const events = new TakenOverAt();
+  await events.append({ type: 'comment', page: 'A01', text: 'the only one' }, ANA);
+  events.person = await events.personOf(ANA);
+  const now = Date.parse('2026-09-28T10:00:00.000Z');
+  events.at = now + 10 * REMOVAL_CLAIM_MS;
+  const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false, clock: () => now },
+    { email: ANA, confirmed: true });
+  assert.equal(events.rival, true, '(the other run did take it over)');
+  assert.deepEqual(outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
+  assert.equal((await removedOnce(events)).length, 0);
+});
+
+test('a long run keeps its claim: another run is refused long after the first claim would have ended', async () => {
+  // Each grant revoked and each text removed takes half a claim's length, in the fake clock: four of
+  // them outlast the first claim twice over.
+  let now = Date.parse('2026-09-28T10:00:00.000Z');
+  const rivals = [];
+  const events = new (class extends MemoryEventStore {
+    async rival() {
+      now += REMOVAL_CLAIM_MS / 2;
+      rivals.push(await this.claimRemoval(this.person, 'rival', new Date(now).toISOString(), new Date(now + 1).toISOString()));
+    }
+    async append(event, author) { if (event.type === GRANT_REVOKED) await this.rival(); return super.append(event, author); }
+    async removeText(event, field, by) { await this.rival(); return super.removeText(event, field, by); }
+  })();
+  for (const text of ['one', 'two']) await events.append({ type: 'comment', page: 'A01', text }, ANA);
+  events.person = await events.personFor(ANA);
+  for (const role of ['reviewer', 'editor']) {
+    await events.append(definedEvent(role, ['approve'], false), OWNER);
+    await events.append(grantedEvent(role, events.person, null, false), OWNER);
+  }
+  const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false, clock: () => now },
+    { email: ANA, confirmed: true });
+  assert.deepEqual(rivals, [false, false, false, false], 'refused at every grant and every text');
+  assert.equal(outcome.status, 201);
+  assert.deepEqual([outcome.removal.grants, outcome.removal.texts], [2, 2]);
 });
 
 // ---------------------------------------------------------------- stores from before ids and texts moved

@@ -185,6 +185,29 @@ export class FirestoreEventStore implements EventStore {
     });
   }
 
+  // The removal claims, `removal_claims/{person id}`: `{ holder, expires }`. Read and written in one
+  // transaction, which Firestore retries when another claim commits in between, so two server
+  // instances claiming one removal cannot both be answered true.
+
+  async claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean> {
+    const claim = this.#db.collection('removal_claims').doc(person);
+    return this.#db.runTransaction(async (tx) => {
+      const held = await tx.get(claim);
+      const h = held.data();
+      if (h && h.holder !== holder && (h.expires as string) > now) return false;
+      tx.set(claim, { holder, expires: until });
+      return true;
+    });
+  }
+
+  async releaseRemoval(person: string, holder: string): Promise<void> {
+    const claim = this.#db.collection('removal_claims').doc(person);
+    await this.#db.runTransaction(async (tx) => {
+      const held = await tx.get(claim);
+      if (held.data()?.holder === holder) tx.update(claim, { expires: '' });
+    });
+  }
+
   async forget(id: string): Promise<void> { await this.setEmail(id, null); }
 
   async close(): Promise<void> {

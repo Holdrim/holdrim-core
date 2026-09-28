@@ -169,6 +169,20 @@ export interface EventStore extends PeopleTable {
    * Refuses with `noText` when the field was never given, or was already removed.
    */
   removeText(event: string, field: TextField, by: string): Promise<Event>;
+  /**
+   * Claims the removal of the person `person` names (engine/api/person-removal.ts) for `holder`,
+   * until `until`. Taken when nobody holds it, when `holder` already does — renewing it — or when
+   * whoever holds it was due to finish by `now`: a run whose process died holding it. True when
+   * `holder` holds it now. Atomic in every store, so of two runs claiming at once one is answered
+   * true, whichever server instance each runs in: the claim lives where the removal's own writes do.
+   * `now` and `until` are ISO times, compared as strings.
+   */
+  claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean>;
+  /**
+   * Lets the claim go, when `holder` still holds it: a claim taken over meanwhile is the other run's
+   * to let go of. The row stays, expired, as `claimRemoval` then finds it.
+   */
+  releaseRemoval(person: string, holder: string): Promise<void>;
   close(): Promise<void>;
 }
 

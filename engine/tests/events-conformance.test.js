@@ -25,6 +25,8 @@ import { PERSON_ID } from '../api/people.ts';
 import { createRoles } from '../core/roles.js';
 import { hashText, newSalt, TEXT_REMOVED, NoText } from '../api/texts.ts';
 import { openFindings, acknowledgementOf } from '../api/tamper.ts';
+import { UsersSqlite } from '../api/users-sqlite.ts';
+import { removedTwiceAtOnce, assertOneRemoval } from './helpers/removal.js';
 
 const stores = [
   { name: 'memory', open: async () => new MemoryEventStore() },
@@ -345,6 +347,61 @@ for (const store of stores.filter((s) => s.name !== 'firestore')) {
     } finally { await s.close(); }
   });
 }
+
+// ===================================================================== one removal of a person at a time (#181)
+// `claimRemoval` is what keeps two removals of one person from running side by side, across server
+// instances too: engine/api/person-removal.ts, "One run at a time".
+
+const P = `p_${'a'.repeat(24)}`;
+const at = (minute) => `2026-09-28T10:${String(minute).padStart(2, '0')}:00.000Z`;
+
+forEachStore('a removal is claimed by one holder at a time, renewed by it, and taken over once it ended', async (s) => {
+  assert.equal(await s.claimRemoval(P, 'a', at(0), at(2)), true, 'nobody held it');
+  assert.equal(await s.claimRemoval(P, 'b', at(1), at(3)), false, 'held by another until later than now');
+  assert.equal(await s.claimRemoval(`p_${'b'.repeat(24)}`, 'b', at(1), at(3)), true, 'another person\'s removal is its own');
+  assert.equal(await s.claimRemoval(P, 'a', at(1), at(4)), true, 'its own holder renews it');
+  assert.equal(await s.claimRemoval(P, 'b', at(3), at(5)), false, 'renewed: held past the end it first had');
+  assert.equal(await s.claimRemoval(P, 'b', at(4), at(6)), true, 'ended exactly now: a run that died holding it');
+  assert.equal(await s.claimRemoval(P, 'a', at(5), at(7)), false, 'and the holder it lapsed from has lost it');
+});
+
+forEachStore('a claim is let go of by its holder alone', async (s) => {
+  assert.equal(await s.claimRemoval(P, 'a', at(0), at(2)), true);
+  await s.releaseRemoval(P, 'b');
+  assert.equal(await s.claimRemoval(P, 'c', at(1), at(3)), false, 'let go of by somebody else, it holds');
+  await s.releaseRemoval(P, 'a');
+  assert.equal(await s.claimRemoval(P, 'c', at(1), at(3)), true, 'let go of by its holder, it is free before its end');
+  await s.releaseRemoval(`p_${'b'.repeat(24)}`, 'c');
+  assert.equal(await s.claimRemoval(P, 'a', at(2), at(4)), false, 'nor does letting go of another person\'s touch it');
+});
+
+forEachStore('two claims of one removal at once: one holder', async (s) => {
+  const answers = await Promise.all(['a', 'b', 'c'].map((h) => s.claimRemoval(P, h, at(0), at(2))));
+  assert.equal(answers.filter(Boolean).length, 1, `one of three claims is given it: ${answers}`);
+});
+
+test('[sqlite] two connections to one file — two server processes — share one claim', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-claims-'));
+  const path = join(dir, 'events.db');
+  const one = new SqliteEventStore(path);
+  const two = new SqliteEventStore(path);
+  try {
+    assert.equal(await one.claimRemoval(P, 'a', at(0), at(2)), true);
+    assert.equal(await two.claimRemoval(P, 'b', at(1), at(3)), false, 'the other process sees the claim');
+    await one.releaseRemoval(P, 'a');
+    assert.equal(await two.claimRemoval(P, 'b', at(1), at(3)), true, 'and sees it let go of');
+  } finally {
+    await one.close();
+    await two.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+forEachStore('two removals of one person at once: the second is refused while the first runs, and one person_removed says what it did',
+  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(s, new UsersSqlite(':memory:'))); });
+
+forEachStore('two removals of one person at once behind an identity proxy: the same, with no account',
+  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(s, null)); });
 
 // ===================================================================== the stored rows, around the code
 // Asked with SQL written here, not through the store: the claim is about what the file holds.

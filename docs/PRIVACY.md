@@ -167,6 +167,19 @@ is the address free while the row still leads to the person. A removal a failure
 by running it again, and writes `person_removed` once. If the very last step — freeing the address —
 fails, the address stays taken by the emptied account, as it does for older events.
 
+**One removal of a person at a time.** A removal sent twice — a form submitted twice, two tabs, two
+server instances — would otherwise run twice side by side, each writing a `person_removed` and each
+counting only what it reached first. So a removal first claims the person's id, in the events store
+every instance shares (`EventStore.claimRemoval`, `engine/api/person-removal.ts`), and a second one is
+refused while the claim holds, saying the removal is already running. The claim is let go of when
+the run ends, whether it finished or failed, so a removal a failure stopped is run again at once. A
+run whose process died cannot let go of it: the claim lapses two minutes later, and the removal is
+run again then. It holds across instances in every deployment: in memory there is only one process,
+a SQLite file is shared by every process on the machine, and Firestore decides the claim in a
+transaction. What it cannot hold is a run that stalls, between renewing its claim for the last time
+and writing its `person_removed`, for longer than the claim itself: a second run may then finish
+beside it.
+
 **Behind an identity proxy** there is no account to empty, and Holdrim holds no list of who the proxy
 admits: take the address out of the IAP, or whatever Cloud access policy is in front of Holdrim,
 before removing the person, not after. Until then their next visit makes them a new person — any

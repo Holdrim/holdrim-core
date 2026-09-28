@@ -124,5 +124,21 @@ export class MemoryEventStore implements EventStore {
 
   async forget(id: string): Promise<void> { await this.setEmail(id, null); }
 
+  // The removal claims, by person id. No `await` between the read and the write, for the reason
+  // `#findByEmail` gives: of two claims made together, the second sees the first.
+  #claims = new Map<string, { holder: string; until: string }>();
+
+  async claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean> {
+    const held = this.#claims.get(person);
+    if (held && held.holder !== holder && held.until > now) return false;
+    this.#claims.set(person, { holder, until });
+    return true;
+  }
+
+  async releaseRemoval(person: string, holder: string): Promise<void> {
+    const held = this.#claims.get(person);
+    if (held?.holder === holder) held.until = '';
+  }
+
   async close(): Promise<void> {}
 }

@@ -35,6 +35,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshFirestoreProject } from './helpers/firestore.js';
+import { removedTwiceAtOnce, assertOneRemoval } from './helpers/removal.js';
+import { MemoryEventStore } from '../api/store.ts';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
   ?? 'postgres://postgres:test@127.0.0.1:55432/postgres';
@@ -1297,3 +1299,6 @@ forEachStore('two closings of an address with no account at once: neither calls 
   const rows = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
   assert.deepEqual(rows.map((r) => [r.name, r.enabled, r.removed]), [['', false, true]], 'one closed row, nameless');
 });
+
+forEachStore('two removals of one person at once: the second is refused while the first runs, and one person_removed says what it did',
+  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(new MemoryEventStore(), s)); });

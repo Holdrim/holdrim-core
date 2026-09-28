@@ -1,8 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { AS_AGENT_FIELD, LOCK_BASELINE_PAGE, earliestLockBaseline, type Event, type EventStore, type NewEvent } from './types.ts';
 import { normalizeEmail, isEmailAddress, type UserStore } from './users.ts';
 import { recordAuthored } from './people.ts';
 import { NoText } from './texts.ts';
 import { ROLES_PAGE, projectRolesOf, revokedGrantEvent } from './role-grants.ts';
+import { log } from './log.ts';
 import type { Identity } from '../core/roles.js';
 
 /**
@@ -90,10 +92,67 @@ export interface RemovalContext {
   by: string;
   /** Whether whoever removes is an agent, for `asAgent`. */
   byAgent: boolean;
+  /** The time, in milliseconds, for the removal's claim: `Date.now` unless a test sets another. */
+  clock?: () => number;
 }
 
 /** Whether an event's author, as stored, is the address itself — an event from before authors were ids. */
 const namesAddress = (e: Event, address: string) => normalizeEmail(e.authorId ?? e.author) === address;
+
+/**
+ * How long a run's claim on a removal lasts (`EventStore.claimRemoval`) before another run may take it
+ * over. A run renews it as it goes, so a long removal keeps it however long it takes; a run whose
+ * process died lets it lapse, and the removal is run again that much later. Two minutes: far longer
+ * than any pause between two steps of one run, and short enough that nobody waits long to resume.
+ */
+export const REMOVAL_CLAIM_MS = 2 * 60_000;
+
+/** How often a run renews its claim: every quarter of it, so three quarters are always left. */
+const REMOVAL_RENEW_MS = REMOVAL_CLAIM_MS / 4;
+
+/** What another run's claim answers: the removal is running, and running it twice would count twice. */
+const inProgress = (address: string): RemovalOutcome =>
+  ({ status: 409, key: 'api.removal.inProgress', params: { email: address } });
+
+/** Thrown when a run's claim went to another run: this one stops where it is, and the other finishes. */
+class ClaimLost extends Error {}
+
+/**
+ * One run's claim on the removal of `person`, under a holder nobody else has. `hold` takes or renews
+ * it, and says whether it was given; `keep` renews it once `REMOVAL_RENEW_MS` has gone by since the
+ * last renewal, or at once when `now` is set, and stops the run when it was not given.
+ */
+function claimOn(events: EventStore, person: string, clock: () => number) {
+  const holder = randomBytes(12).toString('hex');
+  const iso = (ms: number) => new Date(ms).toISOString();
+  let renewed = -Infinity;
+  const hold = async (): Promise<boolean> => {
+    const at = clock();
+    if (!(await events.claimRemoval(person, holder, iso(at), iso(at + REMOVAL_CLAIM_MS)))) return false;
+    renewed = at;
+    return true;
+  };
+  return {
+    hold,
+    keep: async (now = false): Promise<void> => {
+      if (!now && clock() - renewed < REMOVAL_RENEW_MS) return;
+      if (!(await hold())) throw new ClaimLost();
+    },
+    release: () => events.releaseRemoval(person, holder),
+  };
+}
+type Claim = ReturnType<typeof claimOn>;
+
+/**
+ * What a run answers when nobody is left to remove: no account and no row in the people table. When
+ * events from before authors were ids name the address, the refusal says so: nothing rewrites them,
+ * and made into a person here, every later run would make another.
+ */
+async function nobodyLeft(events: EventStore, address: string): Promise<RemovalOutcome> {
+  const older = (await events.list(null)).some((e) => namesAddress(e, address));
+  return older ? { status: 409, key: 'api.removal.onlyOlderEvents', params: { email: address } }
+    : { status: 404, key: 'api.removal.nobody', params: { email: address } };
+}
 
 /**
  * Removes the person `asked.email` names. Who may ask is the caller's to decide, before this runs:
@@ -114,7 +173,8 @@ const namesAddress = (e: Event, address: string) => normalizeEmail(e.authorId ??
  *   the baseline's author id reads as that address, and forgetting the row would un-lock it;
  * - an address with no account and no row in the people table: nobody to remove. This is also what
  *   a second run answers, since the first emptied both — or, when events from before authors were
- *   ids name it, nothing that can be let go of, and it says so.
+ *   ids name it, nothing that can be let go of, and it says so;
+ * - a person another run is removing right now: see "One run at a time", below.
  *
  * The steps run in an order a failure can be resumed from, and never leave the address free while
  * the row still leads to the person — an account made for it then would act under their id. The
@@ -122,11 +182,23 @@ const namesAddress = (e: Event, address: string) => normalizeEmail(e.authorId ??
  * address stays taken; the grants go before the texts; the account is emptied before the row is
  * forgotten; and the address is freed only after. Run again, a removal a failure stopped finds the row
  * still holding the address and finishes, writing `person_removed` only if no earlier run did.
+ *
+ * One run at a time (#181). Two runs side by side — the form sent twice, two tabs, two server
+ * instances — would each see no `person_removed` yet and each write one, each counting what it
+ * happened to reach first. So before its first write a run claims the removal of the person's id
+ * (`EventStore.claimRemoval`), in the store the removal writes to, which every instance shares; a
+ * second run is refused while the claim holds, with nothing written but, for an account whose person
+ * never acted, the row both runs make for it. The claim is let go of when the run ends, however it
+ * ends, so a removal a failure stopped is run again at once. A run whose process died cannot let go
+ * of it: the claim lapses `REMOVAL_CLAIM_MS` later, and the removal is run again then. A run renews
+ * it as it goes, and once more just before writing `person_removed`, and stops if another run has
+ * taken it over. What it cannot cover is a run that stalls between that last renewal and its write
+ * for longer than the whole claim: then another run may be finishing beside it.
  */
 export async function removePerson(
   context: RemovalContext, asked: { email: unknown; confirmed: boolean },
 ): Promise<RemovalOutcome> {
-  const { events, users, deployment, by } = context;
+  const { events, users, deployment } = context;
   const address = normalizeEmail(typeof asked.email === 'string' ? asked.email : '');
   if (!isEmailAddress(address)) return { status: 400, key: 'api.users.emailInvalid', params: { email: address } };
   if (!asked.confirmed) return { status: 400, key: 'api.removal.unconfirmed' };
@@ -149,21 +221,48 @@ export async function removePerson(
       return { status: 409, key: 'api.removal.holdsOldLocks', params: { email: address } };
     }
   }
-  if (!known && !account) {
-    // Named only by events from before authors were ids: nothing rewrites them, and there is no row
-    // or account to let go of. Made into a person here, every later run would make another.
-    const older = (await events.list(null)).some((e) => namesAddress(e, address));
-    return older ? { status: 409, key: 'api.removal.onlyOlderEvents', params: { email: address } }
-      : { status: 404, key: 'api.removal.nobody', params: { email: address } };
-  }
+  if (!known && !account) return nobodyLeft(events, address);
   // An account whose person never acted has no row yet: one is made, to be emptied at once, so the
-  // event has an id to name — the id nothing else in the trail names.
+  // event has an id to name — the id nothing else in the trail names. Before the claim, which is
+  // taken on that id: two runs for one address are handed the same one.
   const person = known ?? await events.personFor(address);
+
+  const claim = claimOn(events, person, context.clock ?? Date.now);
+  if (!(await claim.hold())) return inProgress(address);
+  try {
+    return await removeClaimed(context, address, person, known !== null, claim);
+  } catch (error) {
+    if (error instanceof ClaimLost) return inProgress(address);
+    throw error;
+  } finally {
+    // A claim that cannot be let go of lapses on its own, `REMOVAL_CLAIM_MS` later: the run's own
+    // answer, or its own error, is still the one to hand back.
+    await claim.release().catch(() => log('WARNING', 'removal_claim_kept', { person }));
+  }
+}
+
+/** The removal itself, under the run's claim: `removePerson` has decided whom, and that they may go. */
+async function removeClaimed(
+  context: RemovalContext, address: string, person: string, hadRow: boolean, claim: Claim,
+): Promise<RemovalOutcome> {
+  const { events, users, by } = context;
+  // Read again under the claim: what was read before it may be what another run has changed since.
+  // A run that finished meanwhile forgot the row, and this one answers as a second run does. Nor is
+  // an account whose row this run just made still there, if a removal took it meanwhile: the row
+  // names nothing, and is forgotten again rather than removed as a person.
+  if ((await events.personOf(address)) !== person) return nobodyLeft(events, address);
+  if (!hadRow && users && !(await users.find(address))) {
+    await events.forget(person);
+    return nobodyLeft(events, address);
+  }
 
   const hadAccount = users ? await users.closeAccount(address) : false;
 
   const mine = projectRolesOf(await events.listBare(ROLES_PAGE)).grants.filter((g) => g.person === person);
-  for (const g of mine) await recordAuthored(events, revokedGrantEvent(g.id, context.byAgent), by);
+  for (const g of mine) {
+    await claim.keep();
+    await recordAuthored(events, revokedGrantEvent(g.id, context.byAgent), by);
+  }
 
   let texts = 0;
   let textsTampered = 0;
@@ -176,6 +275,7 @@ export async function removePerson(
     // Before the value is read: a tampered field reads as null, and would pass for one never given.
     if (e.textTampered) { textsTampered++; continue; }
     if (e.text == null) continue;
+    await claim.keep();
     try {
       await events.removeText(e.id, 'text', by);
       texts++;
@@ -191,7 +291,13 @@ export async function removePerson(
   // Once per person: a run that a failure stopped after the event was written finishes without a
   // second one, and answers with the first.
   const earlier = (await events.list(PEOPLE_PAGE)).find((e) => e.type === PERSON_REMOVED && e.data?.person === person);
-  const event = earlier ?? (await recordAuthored(events, removedPersonEvent(removal, context.byAgent), by)).event;
+  let event = earlier;
+  if (!event) {
+    // Renewed now, whenever it last was: the write is what a run that took the claim over meanwhile
+    // would also make, and this is the last moment to find out.
+    await claim.keep(true);
+    event = (await recordAuthored(events, removedPersonEvent(removal, context.byAgent), by)).event;
+  }
   if (users) await users.emptyAccount(address, true);
   await events.forget(person);
   // Freed last, once nothing leads from the address to the id; kept while an older event names it.
