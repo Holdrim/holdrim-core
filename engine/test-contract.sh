@@ -2648,7 +2648,7 @@ expect "removing them now → 303, saying what was left" 0 \
 expect "the screen says a text could not be removed, and an older event still names the address" "0 0" \
   "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' "$B/engine/settings?done=remove&left=1&legacy=1" | has -F "$(r_say settings.remove.left count=1)"; echo $?) $(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' "$B/engine/settings?done=remove&left=1&legacy=1" | has -F "$(r_say settings.remove.legacy count=1)"; echo $?)"
 # Each shape a number can take that is not a count: negative, a fraction, an exponent, markup.
-for NOT_A_COUNT in '-1' '1.5' '1e9' '%3Cb%3E'; do
+for NOT_A_COUNT in '-1' '1.5' '1e9' '%3Cb%3E' '12345678' '01'; do
   expect "and a count of $NOT_A_COUNT is shown as nothing" 1 \
     "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' "$B/engine/settings?done=remove&left=$NOT_A_COUNT" | has -F 'could not be removed'; echo $?)"
 done

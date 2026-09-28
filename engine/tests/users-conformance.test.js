@@ -1212,6 +1212,8 @@ forEachStore('closing an address with no account takes it with a closed row, and
   // invited them. The address is taken from the first step of their removal all the same.
   await s.create('bea@example.org', 'Bea');
   assert.equal(await s.closeAccount('ana@example.org'), false, 'there was no account of theirs');
+  const [written] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  assert.deepEqual([written.name, written.enabled, written.removed], ['', false, true], 'the row written is closed, nameless');
   await assert.rejects(s.create('ana@example.org', 'Somebody else'), 'the address is taken meanwhile');
   assert.equal(await s.find('ana@example.org'), null, 'by a row nothing finds');
   assert.deepEqual((await s.list()).map((u) => u.email), ['bea@example.org'], 'and nothing lists');
@@ -1250,3 +1252,19 @@ test('[postgres] a users table from before removal existed gains the removed col
       await reopened.close();
     }
   });
+
+forEachStore('an account created while the address is being taken is the one closed, and it was theirs', async (s) => {
+  // Staged between closeAccount's read, which found no account, and its own insert: the account
+  // appears in that gap, the insert then finds the address taken, and the account is closed instead.
+  const insert = s.insertUser.bind(s);
+  let raced = false;
+  s.insertUser = async (row) => {
+    if (row.removed && !raced) { raced = true; await s.create('ana@example.org', 'Ana Lima'); }
+    return insert(row);
+  };
+  assert.equal(await s.closeAccount('ana@example.org'), true, 'there was an account of theirs to close');
+  assert.ok(raced, '(the account did appear in the gap)');
+  assert.equal(await s.find('ana@example.org'), null, 'and nothing finds it now');
+  const [row] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  assert.deepEqual([row.name, row.enabled, row.removed], ['Ana Lima', false, true], 'closed, not left open');
+});
