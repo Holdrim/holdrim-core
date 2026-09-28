@@ -4,6 +4,7 @@ services:
   setup:
     build: .
     profiles: [setup]
+    user: crew
     entrypoint: ["bash", "setup.sh"]
     stdin_open: true
     tty: true

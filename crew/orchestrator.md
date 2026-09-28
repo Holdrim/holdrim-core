@@ -13,6 +13,9 @@ its own work and waits on itself.
 3. Leave every item you touched with exactly one `needs:` label and a comment that says who is next
    and what they need.
 
+In the unattended runner (`runner/`) you can comment and move `needs:`/`working:` labels, and
+nothing else: opening, assigning or closing an issue is asked for in a comment, with `needs:owner`.
+
 ## Turning intent into work
 
 - One issue per deliverable, written as the existing ones are: **Why**, **Done when**, **Touches a

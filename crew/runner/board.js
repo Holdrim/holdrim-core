@@ -2,22 +2,26 @@
 /**
  * The two halves of a pass that hold the GitHub token, so that the model in between holds none.
  *
- *   node board.js snapshot <dir>       read the board into <dir>/board.json; exit 3 when the owner paused
+ *   node board.js snapshot <dir>          read the board into <dir>/board.json; exit 3 when paused
  *   node board.js publish <result> <dir>  apply the model's answer, but only what this file allows
  *
- * The model reads files and writes one JSON answer; it has no shell, no network and no token
- * (run-orchestrator.sh). Whatever it was talked into by a comment it read, the most it can do is
- * ask for a comment or a label on an item already open, and this file is what says no to the rest.
- * The rules below are the orchestrator's (`crew/orchestrator.md`, `crew/autonomy.md`) written as
- * code, because a rule the model is only asked to keep is a rule a prompt injection can talk away.
+ * The model reads files and writes one JSON answer, as a user of its own with no shell, no network
+ * and no token (run-orchestrator.sh). Whatever it was talked into by a comment it read, the most it
+ * can do is ask for a comment or a label on an item already open, and this file is what says no to
+ * the rest. The rules below are the orchestrator's (`crew/orchestrator.md`, `crew/autonomy.md`)
+ * written as code, because a rule the model is only asked to keep is a rule a prompt injection can
+ * talk away.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export const OWNER_ID = 7923867;
+export const ORCHESTRATOR_ID = 333497607;
 export const MAX_ACTIONS = 20;
 export const MAX_BODY = 20000;
+export const STALL_MS = 24 * 60 * 60 * 1000;
 // needs:owner comes off only by the owner's own hand (crew/README.md, "Who may give an
 // instruction"); every other queue label is the orchestrator's to move.
 const LABEL = /^(needs|working):[a-z0-9-]+$/;
@@ -26,31 +30,66 @@ const KEY = /^[\w.:@#/-]{1,100}$/;
 /** The marker a published comment carries, so that no later pass posts it twice. */
 export const markerFor = (key) => `<!-- holdrim-key: ${key} -->`;
 
+const pausedEvents = (timeline) => timeline.filter((e) => (e.event === 'labeled' || e.event === 'unlabeled') && e.label?.name === 'paused');
+
 /**
- * Whether the owner paused the crew: the handoff issue carries `paused` and the timeline shows the
- * owner's own id applied it last. A `paused` put there by anyone else is reported and not obeyed,
- * or any account that can label could stop the crew. A label whose author the timeline does not
- * show pauses all the same: a flag that cannot be read keeps the crew idle (`crew/autonomy.md`).
+ * Whether the owner paused the crew. Only the owner's own `paused` events count, both ways: a label
+ * the owner put there stays in force when someone else removes it, and one someone else put there
+ * is reported and not obeyed, or any account that can label could stop or restart the crew. With
+ * no handoff issue, or a `paused` whose author the timeline does not show, the flag cannot be read,
+ * and a flag that cannot be read keeps the crew idle (`crew/autonomy.md`).
  */
-export function pauseState(labels, timeline) {
-  if (!labels.includes('paused')) return { paused: false };
-  const last = timeline.filter((e) => (e.event === 'labeled' || e.event === 'unlabeled') && e.label?.name === 'paused').at(-1);
-  if (last?.event !== 'labeled' || !last.actor) return { paused: true };
-  if (last.actor.id === OWNER_ID) return { paused: true };
-  return { paused: false, ignored: last.actor.login };
+export function pauseState(handoff) {
+  if (!handoff) return { paused: true, why: 'no open handoff issue' };
+  const events = pausedEvents(handoff.timeline ?? []);
+  const owners = events.filter((e) => e.actor?.id === OWNER_ID);
+  const own = owners.at(-1);
+  const after = own ? events.slice(events.lastIndexOf(own) + 1) : events;
+  const other = after.filter((e) => e.actor?.id !== OWNER_ID).at(-1);
+  if (own) return other ? { paused: own.event === 'labeled', ignored: other.actor?.login ?? 'unknown' } : { paused: own.event === 'labeled' };
+  if (!handoff.labels.includes('paused')) return { paused: false };
+  if (!other?.actor) return { paused: true, why: 'a paused label with no readable author' };
+  return { paused: false, ignored: other.actor.login };
 }
 
-/** A fingerprint of everything a pass acts on: equal to the last one means nothing to do. */
-export function boardDigest(items) {
-  const lines = items.map((i) => [i.number, i.updated_at, i.head ?? '', i.checks ?? ''].join(' ')).sort();
-  return createHash('sha256').update(lines.join('\n')).digest('hex');
+/**
+ * Claims older than the stall limit, as `<item>:<label>`. The limit is crossed by time passing, not
+ * by anything written, so the digest carries this list: otherwise the pass that should report a
+ * stalled claim would be the one skipped for "nothing changed".
+ */
+export function staleClaims(items, now) {
+  const out = [];
+  for (const i of items) {
+    for (const label of i.labels.filter((l) => l.startsWith('working:'))) {
+      const at = (i.timeline ?? []).filter((e) => e.event === 'labeled' && e.label?.name === label).at(-1)?.created_at;
+      const since = Math.max(Date.parse(at ?? 0), Date.parse(i.head_date ?? 0));
+      if (now - since > STALL_MS) out.push(`${i.number}:${label}`);
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * A fingerprint of everything a pass acts on: equal to the last one means nothing to do. It leaves
+ * out what the orchestrator itself wrote, or its own handoff comment would change the board, wake
+ * the next pass, and be answered by another one every two hours for as long as work is in flight.
+ */
+export function boardDigest(items, now = Date.now()) {
+  const lines = items.map((i) => {
+    const theirs = (i.comments ?? []).filter((c) => c.author?.id !== ORCHESTRATOR_ID).map((c) => c.id);
+    const events = (i.timeline ?? []).filter((e) => e.actor?.id !== ORCHESTRATOR_ID).map((e) => `${e.event}:${e.label?.name ?? ''}:${e.created_at}`);
+    const reviews = (i.reviews ?? []).map((r) => `${r.state}:${r.commit_id}`);
+    return [i.number, [...i.labels].sort(), i.head ?? '', i.checks ?? '', theirs.at(-1) ?? '', events.at(-1) ?? '', reviews.join(',')].join(' ');
+  }).sort();
+  return createHash('sha256').update([...lines, ...staleClaims(items, now)].join('\n')).digest('hex');
 }
 
 /**
  * Sorts the model's answer into what may be applied and what is refused, with the reason.
- * `secrets` are the values the answer must never carry, whatever the model was told.
+ * `secrets` are the values the answer must never carry, whatever the model was told, and `known`
+ * the labels the repository has, so a typo does not become a new label.
  */
-export function vetActions(answer, items, secrets = []) {
+export function vetActions(answer, items, { secrets = [], known = null } = {}) {
   const actions = Array.isArray(answer?.actions) ? answer.actions : null;
   if (!actions) return { accepted: [], refused: [{ action: answer, reason: 'the answer has no actions list' }] };
   if (actions.length > MAX_ACTIONS) return { accepted: [], refused: [{ action: null, reason: `more than ${MAX_ACTIONS} actions in one pass` }] };
@@ -59,7 +98,7 @@ export function vetActions(answer, items, secrets = []) {
   const accepted = [];
   const refused = [];
   for (const a of actions) {
-    const reason = refusal(a, open, commented, secrets);
+    const reason = refusal(a, open, commented, secrets, known);
     if (reason) { refused.push({ action: a, reason }); continue; }
     if (a.type === 'comment') commented.add(a.number);
     accepted.push(a);
@@ -67,104 +106,145 @@ export function vetActions(answer, items, secrets = []) {
   return { accepted, refused };
 }
 
-function refusal(a, open, commented, secrets) {
+function refusal(a, open, commented, secrets, known) {
   const item = open.get(a?.number);
   if (!item) return 'not an open item on the board';
   if (a.type === 'comment') {
-    if (typeof a.body !== 'string' || a.body.trim() === '' || a.body.length > MAX_BODY) return 'a comment needs a body of at most 20000 characters';
+    if (typeof a.body !== 'string' || a.body.trim() === '' || a.body.length > MAX_BODY) return `a comment needs a body of at most ${MAX_BODY} characters`;
     if (typeof a.key !== 'string' || !KEY.test(a.key)) return 'a comment needs a key naming the item and what it answers';
     if (commented.has(a.number)) return 'one comment per item per pass';
-    if ((item.comments ?? []).some((c) => c.body?.includes(markerFor(a.key)))) return 'already posted under this key';
+    // Only the orchestrator's own markers count: anyone can write the marker into a comment, and
+    // one written by a stranger would otherwise silence the orchestrator on that item.
+    if ((item.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(a.key)))) return 'already posted under this key';
     if (secrets.some((s) => s && a.body.includes(s))) return 'the body carries a credential';
     return null;
   }
   if (a.type === 'add_label' || a.type === 'remove_label') {
     if (typeof a.label !== 'string' || !LABEL.test(a.label)) return 'only needs: and working: labels';
     if (a.type === 'remove_label' && a.label === 'needs:owner') return 'only the owner removes needs:owner';
+    if (a.type === 'remove_label' && !item.labels.includes(a.label)) return 'the item does not carry that label';
+    if (a.type === 'add_label' && item.labels.includes(a.label)) return 'the item already carries that label';
+    if (a.type === 'add_label' && known && !known.includes(a.label)) return 'no such label in the repository';
     return null;
   }
   return `unknown action type ${JSON.stringify(a?.type)}`;
 }
 
-/** The model is asked for bare JSON; this takes the object out of the first ``` block or the text. */
+/**
+ * The model is asked for bare JSON, so that is read first: a fence is looked for only when the
+ * whole text is not JSON, since a comment body in a valid answer may itself hold a fenced block.
+ */
 export function parseAnswer(text) {
+  try { return JSON.parse(text.trim()); } catch { /* not bare JSON: look for a fence */ }
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
-  try { return JSON.parse((fenced ? fenced[1] : text).trim()); } catch { return null; }
+  try { return fenced ? JSON.parse(fenced[1].trim()) : null; } catch { return null; }
 }
 
-const REPO = 'Holdrim/holdrim-core';
-
-async function gh(path, init = {}) {
-  const res = await fetch(`https://api.github.com/${path}`, {
-    ...init,
-    headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: 'application/vnd.github+json', ...init.headers },
-  });
-  if (!res.ok) throw new Error(`${init.method ?? 'GET'} ${path}: ${res.status}`);
-  return res;
-}
-
-async function all(path) {
-  const out = [];
-  for (let page = 1; ; page++) {
-    const batch = await (await gh(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`)).json();
-    out.push(...batch);
-    if (batch.length < 100) return out;
+/** The one place a GitHub request is made; `fetch` is a parameter so the tests can stand in for it. */
+function client(repo, fetchImpl, token) {
+  async function gh(path, init = {}) {
+    const res = await fetchImpl(`https://api.github.com/${path.replace('{repo}', `repos/${repo}`)}`, {
+      ...init,
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', ...init.headers },
+    });
+    if (!res.ok) throw new Error(`${init.method ?? 'GET'} ${path}: ${res.status}`);
+    return res;
   }
+  async function all(path) {
+    const out = [];
+    for (let page = 1; ; page++) {
+      const batch = await (await gh(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`)).json();
+      out.push(...batch);
+      if (batch.length < 100) return out;
+    }
+  }
+  return { gh, all };
 }
 
-async function snapshot(dir) {
-  const issues = await all(`repos/${REPO}/issues?state=open`);
+const who = (u) => u && { login: u.login, id: u.id };
+
+/** Reads every open issue and pull request into `<dir>/board.json`; true when the crew is paused. */
+export async function snapshot(dir, { repo, fetch: fetchImpl = fetch, token = process.env.GH_TOKEN, now = Date.now() }) {
+  const { gh, all } = client(repo, fetchImpl, token);
   const items = [];
-  for (const i of issues) {
+  for (const i of await all('{repo}/issues?state=open')) {
     const item = {
       number: i.number, title: i.title, body: i.body, pull_request: Boolean(i.pull_request),
-      author: { login: i.user.login, id: i.user.id }, labels: i.labels.map((l) => l.name),
-      assignees: i.assignees.map((a) => a.login), updated_at: i.updated_at,
-      comments: (await all(`repos/${REPO}/issues/${i.number}/comments`))
-        .map((c) => ({ id: c.id, author: { login: c.user.login, id: c.user.id }, created_at: c.created_at, body: c.body })),
-      timeline: (await all(`repos/${REPO}/issues/${i.number}/timeline`))
+      author: who(i.user), labels: i.labels.map((l) => l.name), assignees: i.assignees.map((a) => a.login),
+      comments: (await all(`{repo}/issues/${i.number}/comments`))
+        .map((c) => ({ id: c.id, author: who(c.user), created_at: c.created_at, body: c.body })),
+      timeline: (await all(`{repo}/issues/${i.number}/timeline`))
         .filter((e) => ['labeled', 'unlabeled', 'assigned', 'unassigned', 'closed', 'reopened'].includes(e.event))
-        .map((e) => ({ event: e.event, label: e.label && { name: e.label.name }, actor: e.actor && { login: e.actor.login, id: e.actor.id }, created_at: e.created_at })),
+        .map((e) => ({ event: e.event, label: e.label && { name: e.label.name }, actor: who(e.actor), created_at: e.created_at })),
     };
     if (i.pull_request) {
-      const pr = await (await gh(`repos/${REPO}/pulls/${i.number}`)).json();
-      const runs = (await (await gh(`repos/${REPO}/commits/${pr.head.sha}/check-runs?per_page=100`)).json()).check_runs;
+      const pr = await (await gh(`{repo}/pulls/${i.number}`)).json();
+      const runs = (await (await gh(`{repo}/commits/${pr.head.sha}/check-runs?per_page=100`)).json()).check_runs;
+      const commit = await (await gh(`{repo}/commits/${pr.head.sha}`)).json();
       item.head = pr.head.sha;
+      item.head_date = commit.commit.committer.date;
       item.draft = pr.draft;
+      // Often `unknown` on a first read while GitHub computes it; kept out of the digest for that reason.
       item.mergeable_state = pr.mergeable_state;
       item.checks = runs.map((r) => `${r.name}=${r.conclusion ?? r.status}`).sort().join(',');
-      item.reviews = (await all(`repos/${REPO}/pulls/${i.number}/reviews`))
-        .map((r) => ({ author: { login: r.user.login, id: r.user.id }, state: r.state, commit_id: r.commit_id, body: r.body }));
+      item.reviews = (await all(`{repo}/pulls/${i.number}/reviews`))
+        .map((r) => ({ author: who(r.user), state: r.state, commit_id: r.commit_id, body: r.body }));
     }
     items.push(item);
   }
+  const known = (await all('{repo}/labels')).map((l) => l.name);
+  const digest = boardDigest(items, now);
+  const stale = staleClaims(items, now);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'board.json'), JSON.stringify({ repo: REPO, read_at: new Date().toISOString(), items }, null, 1));
-  writeFileSync(join(dir, 'digest'), boardDigest(items));
-  const handoff = items.find((i) => i.labels.includes('handoff'));
-  const pause = handoff ? pauseState(handoff.labels, handoff.timeline) : { paused: false };
-  if (pause.ignored) console.log(`paused label on the handoff issue from ${pause.ignored}, not the owner: ignored`);
+  writeFileSync(join(dir, 'board.json'), JSON.stringify({ repo, read_at: new Date(now).toISOString(), digest, stale_claims: stale, labels: known, items }, null, 1));
+  writeFileSync(join(dir, 'digest'), digest);
+  const pause = pauseState(items.find((i) => i.labels.includes('handoff')));
+  if (pause.ignored) console.log(`paused label changed by ${pause.ignored}, not the owner: ignored`);
+  if (pause.why) console.log(`${pause.why}: staying idle`);
   return pause.paused;
 }
 
-async function publish(resultFile, dir) {
-  const { items } = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
-  const answer = parseAnswer(JSON.parse(readFileSync(resultFile, 'utf8')).result ?? '');
-  const { accepted, refused } = vetActions(answer, items, [process.env.GH_TOKEN, process.env.CLAUDE_CODE_OAUTH_TOKEN]);
-  for (const r of refused) console.log(`refused: ${r.reason}: ${JSON.stringify(r.action)?.slice(0, 200)}`);
+/**
+ * Applies the model's answer, and returns how many actions went through. What it did and refused
+ * goes to stderr, the container's log; stdout carries only the count, which the script reads. An answer that is missing,
+ * failed or unreadable throws instead: a pass that never answered must not be recorded as one that
+ * found nothing to do. Refused actions are said on the handoff issue, where the owner sees them,
+ * not only in the container's log.
+ */
+export async function publish(resultFile, dir, { repo, fetch: fetchImpl = fetch, token = process.env.GH_TOKEN, secrets = [] }) {
+  const { items, labels, digest } = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
+  const result = JSON.parse(readFileSync(resultFile, 'utf8'));
+  if (result.is_error || typeof result.result !== 'string') throw new Error(`the model gave no answer (${result.subtype ?? 'no result'})`);
+  const answer = parseAnswer(result.result);
+  if (!Array.isArray(answer?.actions)) throw new Error('the model\'s answer is not a JSON object with an actions list');
+  const { accepted, refused } = vetActions(answer, items, { secrets: [token, ...secrets], known: labels });
+  for (const r of refused) console.error(`refused: ${r.reason}: ${JSON.stringify(r.action)?.slice(0, 200)}`);
+  const handoff = items.find((i) => i.labels.includes('handoff'));
+  if (refused.length && handoff) {
+    const note = `The runner refused ${refused.length} action(s) the orchestrator asked for:\n`
+      + refused.map((r) => `- ${r.reason}: \`${JSON.stringify(r.action)?.slice(0, 200)}\``).join('\n');
+    const own = accepted.find((a) => a.type === 'comment' && a.number === handoff.number);
+    if (own) own.body = `${own.body}\n\n${note}`;
+    else accepted.push({ type: 'comment', number: handoff.number, key: `refused@${digest.slice(0, 16)}`, body: note });
+  }
+  const { gh } = client(repo, fetchImpl, token);
   for (const a of accepted) {
-    const base = `repos/${REPO}/issues/${a.number}`;
+    const base = `{repo}/issues/${a.number}`;
     if (a.type === 'comment') await gh(`${base}/comments`, { method: 'POST', body: JSON.stringify({ body: `${a.body}\n\n${markerFor(a.key)}` }) });
     if (a.type === 'add_label') await gh(`${base}/labels`, { method: 'POST', body: JSON.stringify({ labels: [a.label] }) });
     if (a.type === 'remove_label') await gh(`${base}/labels/${encodeURIComponent(a.label)}`, { method: 'DELETE' });
-    console.log(`applied: ${a.type} on #${a.number}${a.label ? ` ${a.label}` : ''}`);
+    console.error(`applied: ${a.type} on #${a.number}${a.label ? ` ${a.label}` : ''}`);
   }
   return accepted.length;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compared by real path: a path with a space, or one reached through a symlink, is spelled
+// differently in import.meta.url, and a mismatch here would make every command a silent no-op.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const [cmd, a, b] = process.argv.slice(2);
-  if (cmd === 'snapshot') process.exit((await snapshot(a)) ? 3 : 0);
-  else if (cmd === 'publish') console.log(`${await publish(a, b)} applied`);
-  else { console.error('usage: board.js snapshot <dir> | publish <result.json> <dir>'); process.exit(2); }
+  const repo = process.env.REPO;
+  if (!repo) { console.error('REPO is not set'); process.exit(2); }
+  if (cmd === 'snapshot') process.exit((await snapshot(a, { repo })) ? 3 : 0);
+  else if (cmd === 'publish') console.log(`${await publish(a, b, { repo, secrets: [process.env.CLAUDE_CODE_OAUTH_TOKEN] })} applied`);
+  else { console.error('usage: REPO=<owner/name> board.js snapshot <dir> | publish <result.json> <dir>'); process.exit(2); }
 }

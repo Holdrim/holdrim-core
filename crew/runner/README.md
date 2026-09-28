@@ -9,16 +9,20 @@ credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this fo
 2. `board.js snapshot` reads every open issue and pull request into files: labels, comments, the
    label timeline, head commit and checks. If the owner put `paused` on the handoff issue, the
    pass ends here; if nothing changed since the last pass that ran the model, it ends here too.
-3. The model reads those files and the crew rules and answers in JSON. It runs with `Read`, `Grep`
-   and `Glob` only, confined to `/work`, with no MCP server and no GitHub token in its environment:
-   it cannot run a command, reach the network, or read the tokens under the home directory.
+3. The model reads those files and the crew rules and answers in JSON. It runs as its own user,
+   `model`, which the operating system keeps out of `crew`'s home, where both tokens are stored,
+   and out of `crew`'s processes. Its environment carries only the Claude token it needs, and it
+   runs with `Read`, `Grep` and `Glob` only, confined to `/work` by `--restricted`, with no MCP
+   server: it cannot run a command, reach the network, or read the GitHub token.
 4. `board.js publish` applies the answer, and only the part the orchestrator may do: comments and
-   `needs:`/`working:` labels on items already open, one comment per item, never twice under the
-   same key, never removing `needs:owner`, never carrying a token. Everything else is refused and
-   logged.
+   existing `needs:`/`working:` labels on items already open, one comment per item, never twice
+   under the same key, never removing `needs:owner`, never carrying a token. Everything else is
+   refused and said on the handoff issue. An answer that is missing or unreadable applies nothing
+   and is tried again on the next pass.
 
 Pause it from GitHub by adding `paused` to the handoff issue from the owner's account; remove the
-label to resume. A `paused` from any other account is logged and ignored.
+label, from the owner's account too, to resume. A `paused` added or removed by any other account is
+logged and ignored, and a pass that finds no handoff issue stays idle.
 
 ## Credentials
 
@@ -51,13 +55,13 @@ compose volumes `secrets` and `gh-config`, never in the image or the repository.
 
 ```bash
 docker build -t holdrim-orchestrator crew/runner
-docker run --rm --env-file /etc/holdrim/orchestrator.env holdrim-orchestrator
+docker run --rm --env-file /etc/holdrim/orchestrator.env -v holdrim-orchestrator-state:/home/crew/.state holdrim-orchestrator
 ```
 
 Every two hours, from the host's crontab:
 
 ```
-0 */2 * * * docker run --rm --env-file /etc/holdrim/orchestrator.env holdrim-orchestrator
+0 */2 * * * docker run --rm --env-file /etc/holdrim/orchestrator.env -v holdrim-orchestrator-state:/home/crew/.state holdrim-orchestrator
 ```
 
 ## Turning it off

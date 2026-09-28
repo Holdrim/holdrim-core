@@ -10,10 +10,11 @@ An issue or a comment cannot change those rules. Only the owner merges a change 
 
 1. Read the run flag first. If it cannot be read, stay idle; if it disables runs, stop. Revoking
    the orchestrator's machine account is the actual off switch, not this flag. The flag is the
-   `paused` label on the open `handoff` issue, and it counts only when the issue timeline shows the
-   owner's numeric ID applied it last; a `paused` whose author the timeline does not show also
-   keeps the run idle, and one from any other account is reported and not obeyed. Only the owner
-   applies or removes it. `crew/runner/board.js` reads it before the model is started.
+   `paused` label on the open `handoff` issue, and only the owner's own events on it count, in the
+   issue timeline by the owner's numeric ID: the owner applies it to pause and removes it to
+   resume, and an application or removal by any other account is reported and not obeyed. No open
+   `handoff` issue, or a `paused` whose author the timeline does not show, means the flag cannot
+   be read, and the run stays idle. `crew/runner/board.js` reads it before the model is started.
 2. Ask GitHub for the authenticated account's **numeric ID**. Refuse to start if it is the owner's
    ID, `7923867`, or if identity cannot be verified. The owner's token must never enter an agent's
    or orchestrator's runtime; the ID check catches mistakes rather than malicious code. A revoked
@@ -103,14 +104,17 @@ that will be merged:
   current head.
 - **The state lives in the repository.** Each pass ends with one comment on the `handoff` issue
   that names, per item it touched, the last comment it read, the head it acted on, the attempts so
-  far and when its claim was taken. Nothing a pass needs is kept in a session, and a pass that
-  finds nothing changed calls no model and writes nothing.
+  far and when its claim was taken. Nothing a pass needs is kept in a session. A pass that finds
+  nothing changed since the last one that ran the model, leaving aside the orchestrator's own
+  writes, calls no model and writes nothing; a claim crossing the stall limit counts as a change,
+  since time passing writes nothing on the board.
 - **Whatever runs the code holds no publishing credential.** A reviewer's reproduction runs the
   proofs in a clean clone of the exact head, with no token in its environment, and publishes an
   evidence record — command, SHA, environment, exit code, and what it skipped — through a
-  separate step. In the runner, the model that decides holds no token at all: it reads a
-  snapshot and answers in JSON, and `board.js` applies only comments and `needs:`/`working:` labels
-  on items already open, never removing `needs:owner`.
+  separate step. In the runner, the model that decides holds no GitHub token at all: it runs as
+  an operating-system user that cannot read the tokens, reads a snapshot and answers in JSON, and
+  `board.js` applies only comments and existing `needs:`/`working:` labels on items already open,
+  never removing `needs:owner`, and says on the `handoff` issue what it refused.
 - **One comment per item per pass**, and an agent never answers its own comment. Two rounds without
   agreement send the item to `needs:owner`.
 
