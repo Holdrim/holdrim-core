@@ -530,7 +530,7 @@ test('a long run keeps its claim: another run is refused long after the first cl
  * past the end of the claim, as a run that stalled there would find it. Answers what the stalled
  * run answered, and the `person_removal_stopped` lines it logged.
  */
-async function stalledIn(where, meanwhile) {
+async function stalledIn(where, meanwhile, { withUsers = true } = {}) {
   let now = Date.parse('2026-09-28T10:00:00.000Z');
   const clock = () => now;
   let armed = true;
@@ -555,8 +555,8 @@ async function stalledIn(where, meanwhile) {
     }
     reads = 0;
   })();
-  const users = new UsersSqlite(':memory:');
-  await users.create(ANA, 'Ana Lima');
+  const users = withUsers ? new UsersSqlite(':memory:') : null;
+  if (users) await users.create(ANA, 'Ana Lima');
   await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
   const ctx = { events, users, deployment, by: OWNER, byAgent: false, clock };
   const logged = [];
@@ -607,6 +607,19 @@ test('a run stalled after its event, while another run took the claim over, leav
   assert.equal(run.stopped.length, 1);
   const [row] = await run.users.readAllUsers();
   assert.deepEqual([row.email, row.name], [ANA, 'Ana Lima'], 'closed, and not emptied: the run holding the claim does that');
+});
+
+test('behind an identity proxy, a run stalled after its event, while another run took the claim over, leaves the row to it', async () => {
+  // No account to empty first, so the check before forgetting the row is the first one this run meets.
+  let person;
+  const run = await stalledIn('event', async (ctx) => {
+    person = await ctx.events.personOf(ANA);
+    const at = new Date(ctx.clock()).toISOString();
+    assert.equal(await ctx.events.claimRemoval(person, 'rival', at, new Date(ctx.clock() + REMOVAL_CLAIM_MS).toISOString()), true);
+  }, { withUsers: false });
+  assert.deepEqual(run.outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
+  assert.equal(run.stopped.length, 1);
+  assert.equal(await run.events.personOf(ANA), person, 'the row still leads to the person, for the run holding the claim');
 });
 
 test('a run stalled after forgetting the row, while another run took the claim over, does not free the address', async () => {

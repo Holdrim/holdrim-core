@@ -423,6 +423,54 @@ test('[sqlite] two connections to one file — two server processes — share on
   }
 });
 
+test('[sqlite] a claim made while another process is writing one waits for it, and sees it', async () => {
+  // IMMEDIATE takes the write lock before the read: a plain BEGIN would read, then fail to write
+  // with "database is locked" instead of waiting for the other process and answering from its claim.
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-claims-'));
+  const path = join(dir, 'events.db');
+  const store = new SqliteEventStore(path);
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['-e', `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(process.argv[1]);
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('BEGIN IMMEDIATE');
+    db.prepare("INSERT INTO removal_claims (person, holder, expires) VALUES (?, 'a', ?)").run(process.argv[2], process.argv[3]);
+    console.log('locked');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+    db.exec('COMMIT');
+  `, path, P, at(2)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    await new Promise((resolve) => child.stdout.on('data', (d) => { if (String(d).includes('locked')) resolve(); }));
+    let answer;
+    try { answer = await store.claimRemoval(P, 'b', at(0), at(2)); } catch (error) { answer = `threw: ${error.message}`; }
+    assert.equal(answer, false, 'refused, having waited for the other process\'s claim');
+  } finally {
+    await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.on('exit', resolve)));
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('[sqlite] a claim whose write fails leaves no transaction open: the next claim, and another connection\'s write, go through', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-claims-'));
+  const path = join(dir, 'events.db');
+  const store = new SqliteEventStore(path);
+  const raw = new DatabaseSync(path);
+  try {
+    raw.exec("CREATE TRIGGER x_fail BEFORE INSERT ON removal_claims BEGIN SELECT RAISE(ABORT, 'refused'); END");
+    await assert.rejects(store.claimRemoval(P, 'a', at(0), at(2)), /refused/);
+    raw.exec('DROP TRIGGER x_fail');
+    assert.equal(await store.claimRemoval(P, 'a', at(0), at(2)), true, 'the next claim on this connection');
+    raw.exec('PRAGMA busy_timeout = 200');
+    raw.exec("INSERT INTO removal_claims (person, holder, expires) VALUES ('p_other', 'z', '')");
+  } finally {
+    raw.close();
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 forEachStore('two removals of one person at once: the second is refused while the first runs, and one person_removed says what it did',
   async (s) => { await assertOneRemoval(await removedTwiceAtOnce(s, new UsersSqlite(':memory:'))); });
 
