@@ -25,10 +25,11 @@ import { PERSON_ID } from '../api/people.ts';
 import { createRoles } from '../core/roles.js';
 import { hashText, newSalt, TEXT_REMOVED, NoText } from '../api/texts.ts';
 import { openFindings, acknowledgementOf } from '../api/tamper.ts';
+import { signing } from './helpers/signing.js';
 
 const stores = [
-  { name: 'memory', open: async () => new MemoryEventStore() },
-  { name: 'sqlite', open: async () => new SqliteEventStore(':memory:') },
+  { name: 'memory', open: async (with_ = signing) => new MemoryEventStore(with_) },
+  { name: 'sqlite', open: async (with_ = signing) => new SqliteEventStore(':memory:', with_) },
 ];
 const skipped = [];
 
@@ -39,7 +40,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
     // A project of its own on every open: the emulator keeps what earlier tests and runs wrote, and
     // a leftover event — or one written by another run against the same emulator at the same
     // time — would make an ordering or a count pass or fail for the wrong reason.
-    open: async () => new FirestoreEventStore(freshFirestoreProject('holdrim-conformance')),
+    open: async (with_ = signing) => new FirestoreEventStore(freshFirestoreProject('holdrim-conformance'), with_),
   });
 } else {
   skipped.push({
@@ -312,8 +313,8 @@ forEachStore('a read hands its tampered fields to a caller that asks, and an ack
 // earlier snapshot) would otherwise date the removal before its own target, and removalsOf's
 // ordering check (round 2, finding F, which has to stay exactly as strict as it is) would then
 // refuse a genuine removal forever — events are immutable, so there is no later moment to fix it
-// in. Firestore needs none of this: FieldValue.serverTimestamp() is the server's own clock, already
-// monotonic regardless of clock skew on any one caller's machine.
+// in. Firestore is held to it too since its `when` became this process's clock (#50, owner decision
+// 7): it has no rowid to break a tie, so its removal is dated strictly after its target.
 
 /** Runs `fn` with `Date` patched so `new Date()` (no arguments) always answers `iso`. */
 async function withClockAt(iso, fn) {
@@ -330,7 +331,7 @@ async function withClockAt(iso, fn) {
   }
 }
 
-for (const store of stores.filter((s) => s.name !== 'firestore')) {
+for (const store of stores) {
   test(`[${store.name}] removeText never dates a removal before the text it removes, even if the clock steps back`, async () => {
     const s = await store.open();
     try {
@@ -346,12 +347,94 @@ for (const store of stores.filter((s) => s.name !== 'firestore')) {
   });
 }
 
+// ===================================================================== signed by the server (#50)
+forEachStore('every event a store writes reads back signed, through list and listBare alike', async (s) => {
+  const request = await s.append({ type: 'request', page: 'A01', block: 'A01.1.1', text: 'why', snapshot: 'then',
+    data: { category: 'text', nested: { n: 1, list: ['a', 2, true] } } }, 'r@example.org');
+  const approval = await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
+    data: { locks: 'true' } }, 'owner@example.org');
+  const removal = await s.removeText(request.id, 'text', 'owner@example.org');
+  for (const answered of [request, approval, removal]) assert.equal(answered.signed, true, `${answered.type}, as answered`);
+  const found = [];
+  const listed = await s.list('A01', found);
+  assert.deepEqual(listed.map((e) => [e.type, e.signed]), [['request', true], ['approval', true], ['text_removed', true]]);
+  assert.deepEqual(found, [], 'nothing to report on a store only the store wrote to');
+  assert.deepEqual(listed[0].data, request.data, 'data of every kind survives the seal, as the store keeps it');
+  assert.equal(listed[0].textRemoved?.by, 'owner@example.org', 'a signed removal still reads as the removal it is');
+  assert.deepEqual((await s.listBare('A01')).map((e) => e.signed), [true, true, true]);
+  for (const e of listed) assert.ok(!('envelope' in e) && !('sig' in e) && !('kid' in e), 'the seal stays in the store');
+});
+
+for (const store of stores) {
+  test(`[${store.name}] a store whose keyring does not trust the key it signs with reads its events as not signed`, async () => {
+    // Signs with the test key, trusts nothing: what a reader sees of a key retired from
+    // HOLDRIM_PUBLIC_KEYS, or of a store signed by another deployment's key.
+    const s = await store.open({ signer: signing.signer, keyring: new Map() });
+    try {
+      const e = await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', data: { locks: 'true' } }, 'owner@example.org');
+      assert.equal(e.signed, true, 'as answered, by the store that just sealed it');
+      const found = [];
+      const [read] = await s.list('A01', found);
+      assert.equal(read.signed, false);
+      assert.deepEqual(found.map((r) => [r.field, r.kind]), [['event', 'forged']]);
+      assert.equal((await s.listBare('A01'))[0].signed, false);
+    } finally { await s.close(); }
+  });
+}
+
+/** A SQLite file with the store open on it, and a raw connection beside it: the direct writer. */
+async function sqliteFile() {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-signed-'));
+  const path = join(dir, 'events.db');
+  const s = new SqliteEventStore(path, signing);
+  return { s, db: new DatabaseSync(path), done: async () => { await s.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+test('[sqlite] a ✓ inserted into the file by someone without the key is shown, not signed, and reported', async () => {
+  const { s, db, done } = await sqliteFile();
+  try {
+    const owner = await s.personFor('owner@example.org');
+    db.prepare("INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data) VALUES "
+      + "('forged', 'approval', 'A01', 'A01.1.1', 'f', ?, '2026-09-28T10:00:00.000Z', ?)")
+      .run(owner, JSON.stringify({ locks: 'true', asAgent: 'false' }));
+    const found = [];
+    const [read] = await s.list('A01', found);
+    assert.equal(read.id, 'forged', 'shown: hiding it would hide the evidence');
+    assert.equal(read.signed, false);
+    assert.equal(read.author, 'owner@example.org');
+    assert.deepEqual(found.map((r) => [r.event, r.field, r.kind]), [['forged', 'event', 'unsigned']]);
+    assert.equal((await s.listBare('A01'))[0].signed, false, 'listBare checks it too');
+  } finally { db.close(); await done(); }
+});
+
+test('[sqlite] a genuine row with a column changed beside its seal reads as forged', async () => {
+  const { s, db, done } = await sqliteFile();
+  try {
+    const e = await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f', data: { locks: 'false' } },
+      'admin@example.org');
+    // The guard dropped first, as SECURITY.md says a writer with the file can: the point is what a
+    // reader makes of the row afterwards.
+    db.exec('DROP TRIGGER events_no_update');
+    for (const [column, value] of [['data', JSON.stringify({ locks: 'true', asAgent: 'false' })], ['page', 'A02'],
+      ['happened_at', '2026-01-01T00:00:00.000Z'], ['fingerprint', 'g']]) {
+      const before = db.prepare(`SELECT ${column} AS v FROM events WHERE id = ?`).get(e.id).v;
+      db.prepare(`UPDATE events SET ${column} = ? WHERE id = ?`).run(value, e.id);
+      const found = [];
+      const read = (await s.list(null, found)).find((x) => x.id === e.id);
+      assert.equal(read.signed, false, column);
+      assert.deepEqual(found.map((r) => r.kind), ['forged'], column);
+      db.prepare(`UPDATE events SET ${column} = ? WHERE id = ?`).run(before, e.id);
+    }
+    assert.equal((await s.list(null)).find((x) => x.id === e.id).signed, true, 'put back, it verifies again');
+  } finally { db.close(); await done(); }
+});
+
 // ===================================================================== the stored rows, around the code
 // Asked with SQL written here, not through the store: the claim is about what the file holds.
 test('[sqlite] no e-mail is in the events table, only ids of the people table', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   try {
     await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, 'owner@example.org');
     await s.append({ type: 'comment', page: 'A02', text: 'a remark' }, 'reader@example.org');
@@ -373,7 +456,7 @@ test('[sqlite] no e-mail is in the events table, only ids of the people table', 
 test('[sqlite] an event written before authors were ids still reads as the address it holds', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   try {
     const db = new DatabaseSync(path);
     db.prepare("INSERT INTO events (id, type, page, author, happened_at) VALUES ('old', 'approval', 'A01', 'owner@example.org', '2026-01-01T00:00:00.000Z')").run();
@@ -386,7 +469,7 @@ test('[sqlite] an event written before authors were ids still reads as the addre
 test('[sqlite] no text or snapshot is in the events table, only the hash of each', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   try {
     await s.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
       text: 'a CPF: 123.456.789-00', snapshot: 'the block as it was' }, 'r@example.org');
@@ -407,7 +490,7 @@ test('[sqlite] no text or snapshot is in the events table, only the hash of each
 test('[sqlite] an event whose texts row was never written, with a hash but no removal event, reads as tampered — not as absence', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   try {
     const db = new DatabaseSync(path);
     // `texts_no_delete` (round 1, finding 5) now refuses a plain DELETE with nothing to account for
@@ -428,7 +511,7 @@ test('[sqlite] an event whose texts row was never written, with a hash but no re
 test('[sqlite] an event and a texts row crafted directly, whose hash does not match, reads as tampered', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   try {
     const db = new DatabaseSync(path);
     // Both rows inserted fresh, never through `append` or `removeText`: `texts_no_update` refuses
@@ -449,7 +532,7 @@ test('[sqlite] an event and a texts row crafted directly, whose hash does not ma
 test('[sqlite] an event written before texts were extracted still reads its own plain text', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-events-'));
   const path = join(dir, 'events.db');
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   try {
     const db = new DatabaseSync(path);
     db.prepare("INSERT INTO events (id, type, page, author, happened_at, text) VALUES " +
@@ -466,9 +549,64 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
   const { Firestore } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
 
+  test('[firestore] a removal written by another instance whose clock is behind still dates after its text', async () => {
+    // Two instances of the service on one project: the second has written nothing, so nothing of
+    // its own orders it, and its clock stands years behind the first's. Only dating the removal from
+    // its target keeps it after the text it removes; a tie would not do, with no rowid to break it.
+    const project = freshFirestoreProject('holdrim-clock');
+    const first = new FirestoreEventStore(project, signing);
+    const second = new FirestoreEventStore(project, signing);
+    try {
+      const written = await first.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
+      const removal = await withClockAt('2000-01-01T00:00:00.000Z', () => second.removeText(written.id, 'text', 'owner@example.org'));
+      assert.ok(removal.when > written.when, `strictly after: ${removal.when} > ${written.when}`);
+      const [read] = await first.list('A01');
+      assert.equal(read.textRemoved?.by, 'owner@example.org');
+      assert.equal(read.textTampered, false);
+    } finally { await first.close(); await second.close(); }
+  });
+
+  test('[firestore] a document written without the key is shown, not signed, and reported', async () => {
+    const project = freshFirestoreProject('holdrim-signed');
+    const s = new FirestoreEventStore(project, signing);
+    const db = new Firestore({ projectId: project });
+    try {
+      const owner = await s.personFor('owner@example.org');
+      await db.collection('events').doc('forged').create({ type: 'approval', page: 'A01', block: 'A01.1.1',
+        fingerprint: 'f', author: owner, data: { locks: 'true', asAgent: 'false' }, when: new Date('2026-09-28T10:00:00Z') });
+      const found = [];
+      const [read] = await s.list('A01', found);
+      assert.deepEqual([read.id, read.signed, read.author], ['forged', false, 'owner@example.org']);
+      assert.deepEqual(found.map((r) => [r.event, r.kind]), [['forged', 'unsigned']]);
+      assert.equal((await s.listBare('A01'))[0].signed, false);
+    } finally { await s.close(); await db.terminate(); }
+  });
+
+  test('[firestore] a genuine document with a field changed beside its seal reads as forged', async () => {
+    const project = freshFirestoreProject('holdrim-signed');
+    const s = new FirestoreEventStore(project, signing);
+    const db = new Firestore({ projectId: project });
+    try {
+      const e = await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f', data: { locks: 'false' } },
+        'admin@example.org');
+      const doc = db.collection('events').doc(e.id);
+      const original = (await doc.get()).data();
+      for (const [field, value] of [['data', { locks: 'true', asAgent: 'false' }], ['page', 'A02'],
+        ['when', new Date('2026-01-01T00:00:00Z')], ['author', 'p_' + '0'.repeat(24)], ['envelope', { a: 1 }]]) {
+        await doc.update({ [field]: value });
+        const found = [];
+        const read = (await s.list(null, found)).find((x) => x.id === e.id);
+        assert.equal(read.signed, false, field);
+        assert.deepEqual(found.map((r) => r.kind), ['forged'], field);
+        await doc.set(original);
+      }
+      assert.equal((await s.list(null)).find((x) => x.id === e.id).signed, true, 'put back, it verifies again');
+    } finally { await s.close(); await db.terminate(); }
+  });
+
   test('[firestore] no e-mail is in the events collection, only ids of the people collection', async () => {
     const project = freshFirestoreProject('holdrim-authors');
-    const s = new FirestoreEventStore(project);
+    const s = new FirestoreEventStore(project, signing);
     const db = new Firestore({ projectId: project });
     try {
       await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, 'owner@example.org');
@@ -485,7 +623,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
 
   test('[firestore] an event written before authors were ids still reads as the address it holds', async () => {
     const project = freshFirestoreProject('holdrim-authors');
-    const s = new FirestoreEventStore(project);
+    const s = new FirestoreEventStore(project, signing);
     const db = new Firestore({ projectId: project });
     try {
       await db.collection('events').doc('old').create({ type: 'approval', page: 'A01', author: 'owner@example.org',
@@ -496,7 +634,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
 
   test('[firestore] no text or snapshot is in the events collection, only the hash of each', async () => {
     const project = freshFirestoreProject('holdrim-texts');
-    const s = new FirestoreEventStore(project);
+    const s = new FirestoreEventStore(project, signing);
     const db = new Firestore({ projectId: project });
     try {
       const written = await s.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
@@ -514,7 +652,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
 
   test('[firestore] a text deleted straight in the store, with no removal event, reads as tampered — not as absence', async () => {
     const project = freshFirestoreProject('holdrim-texts');
-    const s = new FirestoreEventStore(project);
+    const s = new FirestoreEventStore(project, signing);
     const db = new Firestore({ projectId: project });
     try {
       const written = await s.append({ type: 'comment', page: 'A01', text: 'a comment' }, 'r@example.org');
@@ -528,7 +666,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
 
   test('[firestore] an event written before texts were extracted still reads its own plain text', async () => {
     const project = freshFirestoreProject('holdrim-texts');
-    const s = new FirestoreEventStore(project);
+    const s = new FirestoreEventStore(project, signing);
     const db = new Firestore({ projectId: project });
     try {
       await db.collection('events').doc('old').create({ type: 'comment', page: 'A01', author: 'owner@example.org',

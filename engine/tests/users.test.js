@@ -16,6 +16,7 @@ import { UsersSqlite } from '../api/users-sqlite.ts';
 import { ephemeralUserStoreWarning, looksEphemeral, isEmailAddress, maskCredentials } from '../api/users.ts';
 import { PasswordIdentity, SESSION_COOKIE } from '../api/identity-password.ts';
 import { SqliteEventStore, GUARDS } from '../api/store-sqlite.ts';
+import { signing } from './helpers/signing.js';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'holdrim-users-'));
 
@@ -183,7 +184,7 @@ test('the database REFUSES to alter and to delete an event', async () => {
   const dir = scratch();
   const path = join(dir, 'events.db');
   try {
-    const store = new SqliteEventStore(path);
+    const store = new SqliteEventStore(path, signing);
     await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
     await store.close();
     // Open it from outside, the way anyone with access to the disk would.
@@ -201,7 +202,7 @@ test('the database REFUSES to replace an event, in both REPLACE forms', async ()
   const dir = scratch();
   const path = join(dir, 'events.db');
   try {
-    const store = new SqliteEventStore(path);
+    const store = new SqliteEventStore(path, signing);
     const e = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
     // The column holds the owner's person id, not the address (docs/PRIVACY.md, section 1).
     const owner = await store.personFor('owner@example.org');
@@ -233,7 +234,7 @@ test('the database REFUSES an insert whose rowid lands below one already held, e
   const dir = scratch();
   const path = join(dir, 'events.db');
   try {
-    const store = new SqliteEventStore(path);
+    const store = new SqliteEventStore(path, signing);
     await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'abc', text: null, snapshot: null, data: null }, 'owner@example.org');
     await store.close();
     // From outside, as for the two tests above: `events_no_replace` alone only refuses a rowid
@@ -270,7 +271,7 @@ test('the database REFUSES an insert whose rowid lands below one already held, e
     // AFTER trigger runs, the new row is already in the table `MAX(rowid)` reads, so a genuine
     // append — always becoming the new highest rowid — compares equal to that MAX, never less
     // than it.
-    const reopened = new SqliteEventStore(path);
+    const reopened = new SqliteEventStore(path, signing);
     await assert.doesNotReject(
       reopened.append({ type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'def', text: null, snapshot: null, data: null }, 'owner@example.org'),
       'a normal append still goes through');
@@ -281,7 +282,7 @@ test('the database REFUSES an insert whose rowid lands below one already held, e
 });
 
 test('the sqlite store keeps and gives back the whole event', async () => {
-  const store = new SqliteEventStore(':memory:');
+  const store = new SqliteEventStore(':memory:', signing);
   const e = await store.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'x',
     text: 'swap the term', snapshot: 'the text as it was then', data: { category: 'term' } }, 'reviewer@example.org');
   const [read] = await store.list('A01');
@@ -299,7 +300,7 @@ test('a folder that cannot be written is explained, not just refused', () => {
   try {
     const notAFolder = join(dir, 'file');
     writeFileSync(notAFolder, '');
-    assert.throws(() => new SqliteEventStore(join(notAFolder, 'events.db')), /could not open the database at/);
+    assert.throws(() => new SqliteEventStore(join(notAFolder, 'events.db'), signing), /could not open the database at/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

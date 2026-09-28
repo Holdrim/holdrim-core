@@ -27,6 +27,7 @@ import { ofProject, readBlocks } from '../cli/pages.ts';
 import { rolesOf, createRoles } from '../core/roles.js';
 import { createCycle } from '../core/cycle.js';
 import { authorCouldTriage, earliestLockBaseline } from '../api/types.ts';
+import { signing } from './helpers/signing.js';
 
 /** Order within one millisecond is not part of the contract (events-conformance.test.js): the
  *  baseline `project` seeds has to land strictly BEFORE the events that follow it, or `authorCouldTriage`
@@ -80,7 +81,7 @@ async function project(t, extra = {}, variables = { owner: OWNER }) {
   // Read before `extra` is written: a file claiming authority refuses to load, even for this.
   const blocks = await readBlocks(dir);
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const roles = createRoles(variables.owner, variables.admins);
   await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, variables.owner ?? OWNER);
   await tick();

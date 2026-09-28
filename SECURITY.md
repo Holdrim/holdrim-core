@@ -217,6 +217,52 @@ Worth knowing before you run it:
   ownership, and the process runs as an unprivileged user.
 - **Never put a key in `holdrim.json`.** That file is versioned. Secrets go in the environment or
   in `.env`, which is git-ignored. The engine itself needs no model key: it calls no model.
+
+### The signing key
+
+Every event is signed by the server that records it, with an Ed25519 key only that server holds
+(`engine/api/signing.ts`), and every reader — the panel, the home, `holdrim sync` and the rest of the
+CLI — trusts an event only where the signature verifies against a key the deployment names. Whoever
+can write the store directly can still insert a row; without the key, it is shown, marked "not
+signed by this server", raised as CRITICAL, and counts for nothing.
+
+- **Make it once**, with `holdrim key new <file>`: it writes the private key as PEM, readable by its
+  owner alone, never over a file already there, and prints the public half.
+  `openssl genpkey -algorithm ed25519 -out <file>` makes an equivalent one. The README shows the same
+  step through the image, for a machine with no Node.
+- **Give it to the server** as `HOLDRIM_SIGNING_KEY_FILE=<file>` (a mounted secret, in a platform
+  that has them) or `HOLDRIM_SIGNING_KEY` holding the file's contents — one, never both. A store that
+  keeps what it writes (a SQLite file, Firestore) refuses to start without it, in Development too.
+  Only an events store in memory starts without one, on a key made up for the process and gone
+  with it, like the events.
+- **Keep it away from the store.** Not in the repository, not in `holdrim.json` (refused there), not
+  on the volume that holds the database: the person signing exists to stop is the one who can write
+  the store, and a key beside it is theirs. The server never writes it anywhere, and never logs it;
+  the boot log prints only its id and its public half.
+- **One key per deployment.** A staging and a production that share a key accept each other's
+  events: a ✓ given in staging, copied into production's store, would read there as signed.
+- **Give readers the public key.** Wherever `holdrim` reads the events file or the cloud directly,
+  export `HOLDRIM_PUBLIC_KEYS` with it — printed by `holdrim key new`, logged at every start
+  (`signing_key`) and answered, to anyone, by `GET /api/signing-keys`. Copied, not fetched: the CLI
+  does not trust a key a server answers over the network, since an answer is whoever answers, and
+  whoever deploys decides which keys count. `holdrim.json` naming `publicKeys` is refused.
+
+### Rotating the signing key
+
+A key is named in every event it signs (`kid`, derived from the key itself, so it cannot name one key
+and be checked by another), and an event stays verifiable for as long as its key's public half is
+listed. No event is ever re-signed: an event is never altered.
+
+- **Routine rotation.** Make a new key. Add the OLD public key to `HOLDRIM_PUBLIC_KEYS` on the server
+  and on every machine that reads the store. Give the server the new private key, and restart it.
+  Add the NEW public key to every reader. From then on the server signs with the new key and still
+  trusts every event the old one signed.
+- **A key that leaked.** Remove its public key from `HOLDRIM_PUBLIC_KEYS` everywhere, and give the
+  server a new one. Every event the old key signed then reads as not signed: its ✓s stop being locks
+  (their blocks read as unvalidated until the owner approves them again), and its request decisions,
+  removals, acknowledgements and grants stop counting. There is no "trusted until" date: whoever
+  holds a key can write any date into what they sign, so a date proves nothing. ✓s already brought
+  into the repository by `holdrim sync` stay there — they were reviewed in a commit.
 - **Upgrading to a version that writes the lock baseline (CHANGELOG.md), move ALL traffic to the new
   revision before anyone uses it, and boot it once under the `HOLDRIM_OWNER` who gave the existing
   ✓s.** The first server of that version to read a store writes one `lock_baseline` event, freezing

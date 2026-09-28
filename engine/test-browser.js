@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { chromium } from 'playwright-core';
 import { hashText, newSalt } from './api/texts.ts';
+import { newKeyPair, parsePrivateKey, signerOf, sealEvent } from './api/signing.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const PORT = Number(process.env.PORT ?? 18096);
@@ -314,12 +315,17 @@ const toggleServer = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
 
 const tamperedData = mkdtempSync(join(tmpdir(), 'holdrim-browser-tampered-'));
 const tamperedEvents = join(tamperedData, 'events.db');
+// Its signing key, held here too: a store kept on disk refuses to start without one, and the rows
+// this run writes into the file to tamper with a TEXT are sealed with it, so that what the banner
+// shows is the text's finding and not also the event's (engine/api/signing.ts).
+const tamperedKey = newKeyPair();
+const tamperedSigner = signerOf(parsePrivateKey(tamperedKey.privatePem));
 // echoStderr false: every read of a tampered text logs a CRITICAL line there, on purpose, and this
 // run reads one many times — still captured, for a failure, just never printed live.
 const tamperedServer = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
   ...process.env, PORT: String(PORT + 3), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
   HOLDRIM_OWNER: OWNER, HOLDRIM_ADMINS: LEAD, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'sqlite',
-  HOLDRIM_EVENTS_PATH: tamperedEvents, HOLDRIM_SITE: site,
+  HOLDRIM_EVENTS_PATH: tamperedEvents, HOLDRIM_SITE: site, HOLDRIM_SIGNING_KEY: tamperedKey.privatePem,
 }, false);
 
 let browser;
@@ -1062,9 +1068,13 @@ try {
     await settled(reader.page);
     expect('nothing tampered: no banner', 0, await reader.page.locator('.rv-tamper').count());
 
-    // A hash with no row, and nothing that says it was let go.
-    directly("INSERT INTO events (id, type, page, block, author, happened_at, text_hash) VALUES " +
-      "('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?)", new Date().toISOString(), hashText('the real text', newSalt()));
+    // A hash with no row, and nothing that says it was let go: a signed event whose text row is gone.
+    const forged = { id: 'forged1', type: 'comment', page: 'A01', block: 'A01.1.1', author: 'r@example.org',
+      when: new Date().toISOString(), data: null };
+    const textHash = hashText('the real text', newSalt());
+    const seal = sealEvent(forged, { text: textHash, snapshot: null }, tamperedSigner);
+    directly("INSERT INTO events (id, type, page, block, author, happened_at, text_hash, envelope, sig, kid) VALUES " +
+      "('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?, ?, ?, ?)", forged.when, textHash, seal.envelope, seal.sig, seal.kid);
     await reader.page.reload();
     await must('a tampered text puts a banner on the page', () => reader.page.locator('.rv-tamper .rv-tamper-line').waitFor());
     expect('one line, naming the page and the event', true,

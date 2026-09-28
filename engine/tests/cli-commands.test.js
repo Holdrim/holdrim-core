@@ -18,6 +18,7 @@ import { TEXT_REMOVED } from '../api/texts.ts';
 import { readBlocks } from '../cli/pages.ts';
 import { outside } from './helpers/sqlite.js';
 import { stub } from './helpers/stub.js';
+import { signing } from './helpers/signing.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -214,7 +215,7 @@ test('list, show, impact, summary and apply --dry-run read the events file with 
   const blocks = await readBlocks(dir);
   const block = blocks.get('A01.1.2');
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const request = await store.append({ type: 'request', page: 'A01', block: 'A01.1.2', fingerprint: block.fingerprint,
     text: 'say header, not menu', snapshot: block.text, data: { category: 'term' } }, 'reviewer@example.org');
   await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.2', text: 'yes',
@@ -268,7 +269,7 @@ test('list, show, impact, summary and apply --dry-run read the events file with 
 test('propose-deps\'s --dry-run really reaches proposeDeps as dryRun: true; without it, a write is really attempted', async (t) => {
   const dir = project(t); // hello-world's own holdrim.json names a content.glossary
   const db = join(dir, 'events.db');
-  await new SqliteEventStore(db).close(); // an empty, real events file — enough for --db to read from, no network
+  await new SqliteEventStore(db, signing).close(); // an empty, real events file — enough for --db to read from, no network
 
   const dry = run(['propose-deps', '--dry-run', '--db', db], dir);
   assert.equal(dry.code, 0, dry.out);
@@ -289,7 +290,7 @@ test('propose-deps\'s --dry-run really reaches proposeDeps as dryRun: true; with
 // only proof that sees that line.
 async function tamperedDb(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
   await store.removeText(kept.id, 'text', 'owner@example.org');
   // A duplicate, forged removal — `removeText` itself can never produce a second one — reads as
@@ -308,7 +309,7 @@ async function tamperedDb(dir) {
  */
 async function tamperedApprovedRequest(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const request = await store.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'x',
     text: 'redact me', data: { category: 'text' } }, 'reviewer@example.org');
   await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.1',
@@ -372,7 +373,7 @@ test('list --json prints parseable JSON on stdout and the CRITICAL line on stder
 test('list exits 0 and carries `tampered: false` when nothing is tampered, on both paths', async (t) => {
   const dir = project(t);
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   await store.append({ type: 'comment', page: 'A01', text: 'an ordinary remark' }, 'r@example.org');
   await store.close();
   const table = run(['list', '--all', '--db', db], dir);
@@ -408,7 +409,7 @@ function duplicateA0111(dir) {
 /** An events file holding the owner's ✓ on A01.1.1's current text, after the store's baseline. */
 async function approvedA0111(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, 'you@example.org');
   // `append` stamps its own time: without a gap, the ✓ could share the baseline's millisecond and
   // read as predating it, which is a different rule (`legacyLock`) than the one this is about.
@@ -460,7 +461,7 @@ test('restamp exits 0 when every entry is stamped, and non-zero when it has to r
 /** A file the store made — every guard in place — holding one approved request, and its id. */
 async function guardedDb(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const request = await store.append({ type: 'request', page: 'A01', block: 'A01.1.2', fingerprint: 'x',
     text: 'say header, not menu', data: { category: 'term' } }, 'reviewer@example.org');
   await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.2', text: 'yes',
@@ -569,7 +570,7 @@ test('the locks lens\'s reproduction: a request forged below every hashed row, e
   async (t) => {
     const dir = project(t);
     const db = join(dir, 'events.db');
-    const store = new SqliteEventStore(db);
+    const store = new SqliteEventStore(db, signing);
     await store.append({ type: 'comment', page: 'A01', text: 'a real, hashed remark' }, 'r@example.org');
     await store.close();
     // Negative rowids, no hash, the text inline: below `extractionBoundary`, so it reads as a row
@@ -608,7 +609,7 @@ test('plain list --db (the table) exits non-zero on a dropped guard, with approv
 test('plain list --db exits non-zero on a dropped guard with nothing in the queue, on the "no requests" path', async (t) => {
   const dir = project(t);
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   await store.append({ type: 'comment', page: 'A01', text: 'an ordinary remark' }, 'r@example.org');
   await store.close();
   outside(db, 'DROP TRIGGER events_no_delete');
@@ -734,7 +735,7 @@ function projectFiles(dir) {
 /** A store holding the lock baseline and one owner's ✓ on A01.1.1, at `fingerprint`, and its id. */
 async function approvedDb(dir, fingerprint) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   await store.append({ type: 'lock_baseline', page: '_lock_baseline' }, 'you@example.org');
   // `isLocked` trusts a written `locks` only on a ✓ dated AFTER the baseline, and two appends can
   // share one millisecond.

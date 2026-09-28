@@ -6,6 +6,7 @@ import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './p
 import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
   type TextField, type TamperReport } from './texts.ts';
 import { log, jsonForTerminal } from './log.ts';
+import { sealEvent, withSignatures, type Signing } from './signing.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -531,10 +532,29 @@ export function eventStoreFile(
   return { file, variable: 'HOLDRIM_EVENTS_PATH' };
 }
 
+/**
+ * One row of `events`, as a store and the CLI's reader of the file both read it: the columns, and
+ * the seal beside them for `withSignatures` to check. The author is the stored id, not yet resolved.
+ * A file from before a column existed answers `undefined` for it, read as null.
+ */
+export function rowOf(r: Record<string, any>) {
+  return {
+    id: String(r.id), type: String(r.type), page: String(r.page), block: (r.block ?? null) as string | null,
+    fingerprint: (r.fingerprint ?? null) as string | null, text: (r.text ?? null) as string | null,
+    snapshot: (r.snapshot ?? null) as string | null, textHash: (r.text_hash ?? null) as string | null,
+    snapshotHash: (r.snapshot_hash ?? null) as string | null, author: String(r.author), when: String(r.happened_at),
+    data: r.data ? JSON.parse(String(r.data)) as Record<string, unknown> : null,
+    textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+    envelope: (r.envelope ?? null) as string | null, sig: (r.sig ?? null) as string | null, kid: (r.kid ?? null) as string | null,
+  };
+}
+
 export class SqliteEventStore implements EventStore {
   #db: DatabaseSync;
+  #signing: Signing;
 
-  constructor(path: string) {
+  constructor(path: string, signing: Signing) {
+    this.#signing = signing;
     try {
       if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
       this.#db = new DatabaseSync(path);
@@ -583,6 +603,13 @@ export class SqliteEventStore implements EventStore {
     // so `withTexts` returns a pre-extraction row's own value unchanged (docs/PRIVACY.md, section 4).
     ensureColumn(this.#db, 'events', 'text_hash', 'TEXT');
     ensureColumn(this.#db, 'events', 'snapshot_hash', 'TEXT');
+    // The seal beside each event (engine/api/signing.ts): the envelope exactly as signed, the
+    // signature, and the id of the key. A row from before signing has none of the three and reads as
+    // not signed — shown, and counting for nothing — which is also what a row inserted into the file
+    // by anyone without the key reads as.
+    ensureColumn(this.#db, 'events', 'envelope', 'TEXT');
+    ensureColumn(this.#db, 'events', 'sig', 'TEXT');
+    ensureColumn(this.#db, 'events', 'kid', 'TEXT');
 
     // The people table: an id and an e-mail, next to the events that will name the id
     // (docs/PRIVACY.md, section 1). The unique index covers only rows that still hold an address,
@@ -667,13 +694,16 @@ export class SqliteEventStore implements EventStore {
     const when = new Date().toISOString();
     const { hashes, rows } = saltFields(event);
     const e = stored({ ...event, text: null, snapshot: null }, id, personId, when);
+    const sealed = sealEvent(e, hashes, this.#signing.signer);
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       const r = this.#db.prepare(
-        `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash, author, happened_at, data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash, author, happened_at, data,
+                             envelope, sig, kid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(e.id, e.type, e.page, e.block ?? null, e.fingerprint ?? null, null, null,
-            hashes.text, hashes.snapshot, e.author, e.when, e.data ? JSON.stringify(e.data) : null);
+            hashes.text, hashes.snapshot, e.author, e.when, e.data ? JSON.stringify(e.data) : null,
+            sealed.envelope, sealed.sig, sealed.kid);
       // A trigger that answers RAISE(IGNORE) drops the row and reports no error: without this, an
       // approval that was never written would be handed back as recorded.
       if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
@@ -690,7 +720,8 @@ export class SqliteEventStore implements EventStore {
     // `authorId: personId`, the same value `withAuthors` would capture off this row a moment later,
     // so a fresh append and the list right after it answer it identically (events-conformance.test.js,
     // "the answer to an append is what a list says a moment later").
-    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId };
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId,
+      signed: true };
   }
 
   async removeText(event: string, field: TextField, by: string): Promise<Event> {
@@ -705,6 +736,8 @@ export class SqliteEventStore implements EventStore {
     // target: `list` orders by `(happened_at, rowid)`, and this row's rowid is always the later one.
     const when = notBefore(new Date().toISOString(), original.happened_at);
     const data = { event, field };
+    const sealed = sealEvent({ id, type: TEXT_REMOVED, page: original.page, block: original.block ?? null, author: personId,
+      when, data }, { text: null, snapshot: null }, this.#signing.signer);
     let absent: Error | undefined;
     this.#db.exec('BEGIN IMMEDIATE');
     try {
@@ -714,9 +747,11 @@ export class SqliteEventStore implements EventStore {
       // closes the crash gap `append`'s own comment explains — a hash with no row and no event
       // naming why is exactly what `withTexts` cannot tell from tampering.
       const r = this.#db.prepare(
-        `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash, author, happened_at, data)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(id, TEXT_REMOVED, original.page, original.block ?? null, null, null, null, null, null, personId, when, JSON.stringify(data));
+        `INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash, author, happened_at, data,
+                             envelope, sig, kid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, TEXT_REMOVED, original.page, original.block ?? null, null, null, null, null, null, personId, when, JSON.stringify(data),
+            sealed.envelope, sealed.sig, sealed.kid);
       if (r.changes !== 1) throw new Error('the event was not recorded: the database dropped the insert');
       const del = this.#db.prepare('DELETE FROM texts WHERE event = ? AND field = ?').run(event, field);
       if (del.changes !== 1) throw (absent = noText(event, field));
@@ -734,7 +769,7 @@ export class SqliteEventStore implements EventStore {
     return {
       id, type: TEXT_REMOVED, page: original.page, block: original.block ?? null, fingerprint: null,
       text: null, snapshot: null, textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-      author: personEmail(by), authorId: personId, when, data,
+      author: personEmail(by), authorId: personId, when, data, signed: true,
     };
   }
 
@@ -778,18 +813,13 @@ export class SqliteEventStore implements EventStore {
       rollbackQuietly(this.#db);
       throw err;
     }
-    const events = withAuthors((rows as Record<string, any>[]).map((r) => ({
-      id: r.id as string, type: r.type as string, page: r.page as string, block: r.block as string | null,
-      fingerprint: r.fingerprint as string | null, text: r.text as string | null, snapshot: r.snapshot as string | null,
-      textHash: r.text_hash as string | null, snapshotHash: r.snapshot_hash as string | null,
-      author: r.author as string, when: r.happened_at as string, data: r.data ? JSON.parse(r.data as string) : null,
-      textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-      afterExtraction: boundary != null && (r.rowid as number) >= boundary,
-    })), people);
     // Reported here, not left to whoever reads `list`'s answer next: issue #91 wants every read that
     // resolves a field to tampered to raise the alert, not only the one a person happens to be
-    // looking at.
+    // looking at — and an event not signed is raised the same way.
     const reports: TamperReport[] = [];
+    const events = withAuthors(withSignatures((rows as Record<string, any>[]).map(rowOf).map((e, i) => ({
+      ...e, afterExtraction: boundary != null && ((rows as Record<string, any>[])[i].rowid as number) >= boundary,
+    })), this.#signing.keyring, reports), people);
     const out = withTexts(events, texts, reports);
     for (const r of reports) reportTampered(r);
     found?.push(...reports);
@@ -802,14 +832,16 @@ export class SqliteEventStore implements EventStore {
    * as `list` orders its rows, for the reason given there.
    */
   async listBare(page: string): Promise<Event[]> {
+    // Every column the seal is compared with, not only the ones this answer keeps: a row checked on
+    // fewer columns than `list` checks could read as signed here and forged there.
     const rows = this.#db.prepare(
-      'SELECT id, type, page, block, fingerprint, author, happened_at, data FROM events WHERE page = ? ORDER BY happened_at, rowid',
+      'SELECT * FROM events WHERE page = ? ORDER BY happened_at, rowid',
     ).all(page) as Record<string, any>[];
-    return rows.map((r) => ({
-      ...stored({ type: r.type, page: r.page, block: r.block, fingerprint: r.fingerprint,
-        data: r.data ? JSON.parse(r.data as string) : null }, r.id as string, r.author as string, r.happened_at as string),
-      authorId: r.author as string,
-    }));
+    const reports: TamperReport[] = [];
+    const out = withSignatures(rows.map(rowOf), this.#signing.keyring, reports)
+      .map(({ textHash: _t, snapshotHash: _s, ...e }) => ({ ...e, text: null, snapshot: null, authorId: e.author }));
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   async close(): Promise<void> { this.#db.close(); }

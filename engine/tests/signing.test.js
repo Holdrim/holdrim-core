@@ -255,3 +255,68 @@ test('holdrim key new, run as a person runs it, prints the public key and not th
   assert.equal(refusing.status, 0, refusing.stderr);
   assert.ok(existsSync(join(dir, 'k2.pem')));
 });
+
+// ---------------------------------------------------------------- the CLI's readers
+// The server's stores are proved in events-conformance.test.js. The CLI reads the file and the
+// cloud itself, bypassing the server, so each of its readers is proved here on its own.
+
+test('the CLI reading the events file trusts what its keyring names, and nothing else', async () => {
+  const { SqliteEventStore } = await import('../api/store-sqlite.ts');
+  const { Source } = await import('../cli/remote.ts');
+  const { DatabaseSync } = await import('node:sqlite');
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-signed-cli-'));
+  const path = join(dir, 'events.db');
+  const store = new SqliteEventStore(path, { signer, keyring });
+  const genuine = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
+    data: { locks: 'true', asAgent: 'false' } }, 'owner@example.org');
+  const owner = await store.personOf('owner@example.org');
+  await store.close();
+  const db = new DatabaseSync(path);
+  db.prepare("INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data) VALUES "
+    + "('forged', 'approval', 'A01', 'A01.1.2', 'f', ?, '2099-01-01T00:00:00.000Z', ?)")
+    .run(owner, JSON.stringify({ locks: 'true', asAgent: 'false' }));
+  db.close();
+  const read = async (options) => (await new Source({ db: path, ...options }).events()).map((e) => [e.id, e.signed]);
+  assert.deepEqual(await read({ keyring }), [[genuine.id, true], ['forged', false]]);
+  assert.deepEqual(await read({ keyring: new Map() }), [[genuine.id, false], ['forged', false]],
+    'a reader told of no key trusts no event');
+  const saved = process.env.HOLDRIM_PUBLIC_KEYS;
+  process.env.HOLDRIM_PUBLIC_KEYS = signer.publicKey;
+  try {
+    assert.deepEqual(await read({}), [[genuine.id, true], ['forged', false]], 'by default, the keys HOLDRIM_PUBLIC_KEYS names');
+  } finally {
+    if (saved === undefined) delete process.env.HOLDRIM_PUBLIC_KEYS; else process.env.HOLDRIM_PUBLIC_KEYS = saved;
+  }
+});
+
+/** A sealed row as the Firestore REST API hands its document back, every value typed as it types them. */
+function restDocument(row) {
+  const value = (v) => {
+    if (v === null) return { nullValue: null };
+    if (typeof v === 'string') return { stringValue: v };
+    if (typeof v === 'boolean') return { booleanValue: v };
+    if (typeof v === 'number') return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+    if (Array.isArray(v)) return { arrayValue: { values: v.map(value) } };
+    return { mapValue: { fields: Object.fromEntries(Object.entries(v).map(([k, x]) => [k, value(x)])) } };
+  };
+  const { id, when, ...rest } = row;
+  const fields = Object.fromEntries(Object.entries(rest).map(([k, v]) => [k, value(v)]));
+  // Whole seconds, with no fraction: the REST API's own shape for such a time, which the reader
+  // has to bring back to the millisecond string that was signed.
+  fields.when = { timestampValue: when.replace('.000Z', 'Z') };
+  return { name: `projects/p/databases/(default)/documents/events/${id}`, fields };
+}
+
+test('the CLI reading the cloud over REST verifies each document, with data of every kind', async () => {
+  const { firestoreEventOf } = await import('../cli/remote.ts');
+  const row = sealedRow({ ...FIELDS, when: '2026-09-28T10:00:00.000Z',
+    data: { locks: 'true', count: 3, ratio: 0.5, open: false, nested: { list: ['a', 1, null] } } });
+  const [read] = withSignatures([firestoreEventOf(restDocument(row))], keyring);
+  assert.equal(read.signed, true);
+  assert.deepEqual(read.data, row.data);
+  const edited = restDocument(row);
+  edited.fields.data.mapValue.fields.locks = { stringValue: 'false' };
+  assert.equal(withSignatures([firestoreEventOf(edited)], keyring)[0].signed, false, 'a field of data changed in the document');
+  const bare = restDocument(unsealed(row));
+  assert.equal(withSignatures([firestoreEventOf(bare)], keyring)[0].signed, false, 'a document with no seal');
+});

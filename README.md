@@ -40,8 +40,16 @@ being built next, in [`ROADMAP.md`](ROADMAP.md).
 ```bash
 git clone https://github.com/holdrim/holdrim-core
 cd holdrim-core
-HOLDRIM_OWNER=you@example.org docker compose up
+export HOLDRIM_OWNER=you@example.org
+docker compose run --rm --no-deps -u "$(id -u)" -v "$PWD:/out" holdrim /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
+HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" docker compose up
 ```
+
+The fourth line runs once. It makes the key the server signs every event with, in
+`holdrim-signing.key`, readable by you alone: keep it, and keep it out of the repository and out of
+the data volume — whoever holds it can sign a lock. With Node on the machine,
+`node engine/cli/holdrim.ts key new holdrim-signing.key` does the same. Without a key the service
+refuses to start: a ✓ is a lock only when this server signed it ([`SECURITY.md`](SECURITY.md)).
 
 Open `http://localhost:8080`. The first-access password is **never** in the log: it is in a file
 on the data volume, readable only by the service's own user, and the log says where. Read it with
@@ -103,7 +111,8 @@ first — Compose builds it under a name of its own:
 ```bash
 docker build -t holdrim .
 docker run -p 8080:8080 -v data:/data -v "$PWD/examples/cash-register:/content" \
-  -e HOLDRIM_SITE=/content -e HOLDRIM_OWNER=owner@example.org holdrim
+  -e HOLDRIM_SITE=/content -e HOLDRIM_OWNER=owner@example.org \
+  -e HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" holdrim
 ```
 
 ## For your own documentation
@@ -114,7 +123,7 @@ The image is built from this repository, under the tag the `Dockerfile` itself u
 docker build -t holdrim .
 docker run -p 8080:8080 -v data:/data \
   -v "$PWD/my-docs:/content" -e HOLDRIM_SITE=/content \
-  -e HOLDRIM_OWNER=you@example.org holdrim
+  -e HOLDRIM_OWNER=you@example.org -e HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" holdrim
 ```
 
 `my-docs/` needs a `holdrim.json` saying where the pages live. Copy `examples/template/` and edit

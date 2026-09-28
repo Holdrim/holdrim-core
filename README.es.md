@@ -4,7 +4,7 @@ Documentación que avisa cuando dejó de ser verdad.
 
 [English](README.md) · [Português](README.pt-BR.md)
 
-<!-- source: README.md up to the translated marker, sha256 8262806cca5ca41aba0e431060e1008b2b1f50240e340767d1c802f6986e0174 -->
+<!-- source: README.md up to the translated marker, sha256 1b21ecaa7b88375601ffcc7b771322f21b940ca72fba45f62f7a2688a1b69d40 -->
 
 **Misión.** El documento aprobado es la fuente de verdad del sistema: quien conoce el negocio lo
 escribe y lo aprueba, un agente de IA facilita la construcción, y el código queda a la vista de
@@ -43,8 +43,17 @@ monta en la imagen. Más de la visión, y lo que el agente hace y nunca hace, en
 ```bash
 git clone https://github.com/holdrim/holdrim-core
 cd holdrim-core
-HOLDRIM_OWNER=you@example.org docker compose up
+export HOLDRIM_OWNER=you@example.org
+docker compose run --rm --no-deps -u "$(id -u)" -v "$PWD:/out" holdrim /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
+HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" docker compose up
 ```
+
+La cuarta línea se ejecuta una sola vez. Crea la clave con la que el servidor firma cada evento, en
+`holdrim-signing.key`, que solo tú puedes leer: guárdala, y mantenla fuera del repositorio y fuera del
+volumen de datos — quien tiene la clave puede firmar un bloqueo. Con Node en la máquina,
+`node engine/cli/holdrim.ts key new holdrim-signing.key` hace lo mismo. Sin la clave el servicio se
+niega a arrancar: un ✓ solo es bloqueo cuando este servidor lo firmó ([`SECURITY.md`](SECURITY.md),
+en inglés).
 
 Abre `http://localhost:8080`. La contraseña de primer acceso **nunca** va al log: está en un
 archivo en el volumen de datos, que solo el usuario del propio servicio puede leer, y el log dice

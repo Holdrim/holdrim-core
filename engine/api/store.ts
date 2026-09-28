@@ -2,6 +2,7 @@ import { stored, type Event, type NewEvent, type EventStore, type Person } from 
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
   type RawEvent, type TextField, type TextRow, type TamperReport } from './texts.ts';
+import { sealEvent, withSignatures, type Seal, type Signing } from './signing.ts';
 
 /*
  * The Firestore store lives in store-firestore.ts, loaded only when HOLDRIM_EVENTS=firestore.
@@ -13,7 +14,15 @@ import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT
 
 /** Only for running and testing on the machine. Persists nothing. */
 export class MemoryEventStore implements EventStore {
-  #events: RawEvent<Event>[] = [];
+  // Sealed like every store's rows (engine/api/signing.ts), and verified on every read: nobody
+  // outside this process can write here, but a store that skipped the seal would be the one place
+  // a reader's `signed` meant nothing, and the unit tests run on it.
+  #events: (RawEvent<Event> & Seal)[] = [];
+  #signing: Signing;
+
+  constructor(signing: Signing) {
+    this.#signing = signing;
+  }
 
   // The text table beside the events, as docs/PRIVACY.md, section 4 asks: value and salt, keyed by
   // event and field. What the event itself keeps is the hash alone, on `#events` — never here.
@@ -36,24 +45,26 @@ export class MemoryEventStore implements EventStore {
     const { hashes, rows } = saltFields(event);
     for (const r of rows) this.#texts.set(textKey(id, r.field), { value: r.value, salt: r.salt });
     const e = stored({ ...event, text: null, snapshot: null }, id, await this.personFor(author), when);
-    this.#events.push({ ...e, textHash: hashes.text, snapshotHash: hashes.snapshot });
+    this.#events.push({ ...e, textHash: hashes.text, snapshotHash: hashes.snapshot, ...sealEvent(e, hashes, this.#signing.signer) });
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
     // `authorId: e.author` reads `e`'s OWN field, still the person id `stored()` was given, before
     // this same line's `author:` overwrites the copy being returned — the id `withAuthors` would
     // capture too, so a fresh append and the list a moment later answer it identically (proved in
     // events-conformance.test.js's "the answer to an append is what a list says a moment later").
-    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: e.author };
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: e.author,
+      signed: true };
   }
 
   async list(page?: string | null, found?: TamperReport[]): Promise<Event[]> {
     const people = new Map([...this.#people.values()].map((p) => [p.id, p.email]));
-    const events = withAuthors(this.#events
-      .filter((e) => page == null || e.page === page)
-      .sort((a, b) => a.when.localeCompare(b.when)), people);
-    // `reports` is this list's own read of every field it resolved to tampered — issue #91 wants it
-    // raised right here, at the one store every `run-local.sh` session and every unit test use.
+    // `reports` is this list's own read of every event not signed and every field it resolved to
+    // tampered — issue #91 wants it raised right here, at the one store every `run-local.sh`
+    // session and every unit test use.
     const reports: TamperReport[] = [];
+    const events = withAuthors(withSignatures(this.#events
+      .filter((e) => page == null || e.page === page)
+      .sort((a, b) => a.when.localeCompare(b.when)), this.#signing.keyring, reports), people);
     const out = withTexts(events, this.#texts, reports);
     for (const r of reports) reportTampered(r);
     found?.push(...reports);
@@ -63,8 +74,14 @@ export class MemoryEventStore implements EventStore {
   async listBare(page: string): Promise<Event[]> {
     // A copy of each, `authorId` beside `author` as every store answers it, and no hash: the hashes
     // are `withTexts`'s to read, and this read does not resolve texts at all.
-    return this.#events.filter((e) => e.page === page).sort((a, b) => a.when.localeCompare(b.when))
+    // Verified like `list`, and what is not signed is reported here too: the reader of `_roles`
+    // acts on this answer alone.
+    const reports: TamperReport[] = [];
+    const out = withSignatures(this.#events.filter((e) => e.page === page).sort((a, b) => a.when.localeCompare(b.when)),
+      this.#signing.keyring, reports)
       .map(({ textHash: _t, snapshotHash: _s, ...e }) => ({ ...e, text: null, snapshot: null, authorId: e.author }));
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   async removeText(event: string, field: TextField, by: string): Promise<Event> {

@@ -47,6 +47,7 @@ import {
 } from './role-grants.ts';
 import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
 import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn, isOwnRequest } from './here.ts';
+import { loadSigner, loadKeyring, publicKeyText, type Signing } from './signing.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -259,10 +260,38 @@ for (const { what, variable, file } of fileStores) {
   }
 }
 
+/**
+ * The key every event is signed with, and the keys events are verified with (engine/api/signing.ts;
+ * SECURITY.md, "The signing key"). Loaded before the store opens, so a store that keeps what it
+ * writes never opens without one: a SQLite file or Firestore with no key refuses to start, naming
+ * the variable and the command that makes one. Only a store that dies with this process — memory,
+ * or SQLite at `:memory:` — gets a key made up here and thrown away with it, so `run-local.sh` and
+ * a contract server start with no setup. The keyring trusts this server's own key and whatever
+ * `HOLDRIM_PUBLIC_KEYS` adds: the keys retired by a rotation, whose events stay verifiable.
+ *
+ * Logged: the key's id and its public half, which are no secret and are what every reader copies
+ * into its own `HOLDRIM_PUBLIC_KEYS`. Never the private key, nor anything read from its variable.
+ */
+const signing: Signing = (() => {
+  const lasting = eventsKind === 'firestore' || eventsFile !== null;
+  try {
+    const { signer, ephemeral } = loadSigner(process.env, (path) => readFileSync(path, 'utf8'), lasting);
+    const keyring = loadKeyring(process.env, signer);
+    if (ephemeral) {
+      log('WARNING', 'signing_key_ephemeral', { kid: signer.kid, reason: 'no HOLDRIM_SIGNING_KEY: a key made up for this '
+        + 'process, and gone with it, as are the events it signs — the events store keeps nothing past it' });
+    }
+    log('INFO', 'signing_key', { kid: signer.kid, publicKey: signer.publicKey, trusted: [...keyring.keys()] });
+    return { signer, keyring };
+  } catch (error) {
+    return refuseToStart(error);
+  }
+})();
+
 const events: EventStore = await (async () => {
   switch (eventsKind) {
-    case 'memory': return new MemoryEventStore();
-    case 'sqlite': return new SqliteEventStore(eventsFile?.file ?? ':memory:');
+    case 'memory': return new MemoryEventStore(signing);
+    case 'sqlite': return new SqliteEventStore(eventsFile?.file ?? ':memory:', signing);
     case 'firestore': {
       if (!cfg.project) { console.error('invalid configuration: firestore needs HOLDRIM_PROJECT'); process.exit(1); }
       // Imported here and only here — see the note at the top of store.ts. If the optional package
@@ -272,13 +301,25 @@ const events: EventStore = await (async () => {
           + `@google-cloud/firestore, which is not installed (${error.message})`);
         process.exit(1);
       });
-      return new FirestoreEventStore(cfg.project);
+      return new FirestoreEventStore(cfg.project, signing);
     }
     default:
       console.error(`invalid configuration: HOLDRIM_EVENTS="${eventsKind}" (use memory, sqlite or firestore)`);
       process.exit(1);
   }
 })();
+
+/**
+ * Every event read once, before the server answers anything: each one's seal is checked here, so an
+ * event not signed is named in the log at every start (CRITICAL, `event_unsigned`), and the checks
+ * are remembered (`verifyRow`, signing.ts) — without this, the first request after a start would pay
+ * for verifying the whole history, seconds for a long one, and could time out doing it.
+ */
+{
+  const started = Date.now();
+  const all = await events.list(null);
+  log('INFO', 'events_verified', { events: all.length, signed: all.filter((e) => e.signed).length, ms: Date.now() - started });
+}
 
 /**
  * The fact an unwritten ✓ is measured against (decision B, round 1's review): who HOLDRIM_OWNER was
@@ -2105,6 +2146,16 @@ const server = createServer(async (req, res) => {
   }
   try {
     if (url.pathname === '/api/health') return json(res, 200, { ok: true });
+    // The public keys, to anyone, before any sign-in: they are no secret, and they are what an
+    // operator copies into `HOLDRIM_PUBLIC_KEYS` wherever `holdrim sync` runs. Copied, never fetched
+    // and trusted by the CLI (owner decision 2 on #50): an answer over the network is whoever
+    // answers, and the keys a reader trusts are set where it runs.
+    if (url.pathname === '/api/signing-keys' && req.method === 'GET') {
+      return json(res, 200, {
+        signing: { kid: signing.signer.kid, publicKey: signing.signer.publicKey },
+        trusted: [...signing.keyring].map(([kid, key]) => ({ kid, publicKey: publicKeyText(key) })),
+      });
+    }
 
     // Before the authentication guard on purpose: the login screen is where most people change
     // language, and it is the one page they can reach without a session.

@@ -20,6 +20,7 @@ import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { Source } from '../cli/remote.ts';
 import { stub } from './helpers/stub.js';
 import { freshFirestoreProject } from './helpers/firestore.js';
+import { signing } from './helpers/signing.js';
 
 // The Source reads these before its own options; a developer's own would point these tests at
 // their real events file or account.
@@ -76,7 +77,7 @@ function tempFile(t) {
 
 test('the CLI reads the events file\'s authors as the server does: address, old address, forgotten id', async (t) => {
   const path = tempFile(t);
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   await s.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f' }, 'owner@example.org');
   await s.append({ type: 'comment', page: 'A01', text: 'x' }, 'gone@example.org');
   const gone = await s.personFor('gone@example.org');
@@ -146,7 +147,7 @@ async function cloudProject(t) {
   const { Firestore } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
   const db = new Firestore({ projectId: project });
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   t.after(async () => { await store.close(); await db.terminate(); });
   return { project, db, store };
 }

@@ -15,6 +15,35 @@ who ran the engine from `main` before it.
 
 ### Breaking
 
+- **A signing key is now required: every event is signed by the server, and a store that keeps what
+  it writes refuses to start without the key (#50).** The server signs each event it records —
+  its id, type, page, block, fingerprint, the salted hashes of its texts, its author's person id, its
+  time and its `data` — with an Ed25519 key only it holds, and every reader checks the signature
+  before an event counts for anything. **What to change:** make a key once, with
+  `holdrim key new <file>` (it writes the private key readable by its owner alone, never over an
+  existing file, and prints the public half; `openssl genpkey -algorithm ed25519 -out <file>` makes an
+  equivalent PEM), and give it to the server as `HOLDRIM_SIGNING_KEY_FILE=<file>` or
+  `HOLDRIM_SIGNING_KEY` holding its contents — never both. Keep it out of the repository and off the
+  store's own volume: whoever holds it can sign a lock. A SQLite file or Firestore store with no key
+  now refuses to start, in Development too, naming both variables; an events store in memory
+  (`bash engine/run-local.sh`, the default of `HOLDRIM_MODE=local`) gets a throwaway key and says so
+  (`signing_key_ephemeral`, WARNING). `docker compose up` needs the key too (README, "Try it").
+  Wherever `holdrim` reads the events file or the cloud directly, export
+  `HOLDRIM_PUBLIC_KEYS` with the public key — printed by `holdrim key new`, logged at every start
+  (`signing_key`) and answered by `GET /api/signing-keys` — `;` separated when a rotation keeps an
+  old key trusted (SECURITY.md, "Rotating the signing key"); without it every event read that way is
+  not signed. A `holdrim.json` naming `signing`, `signingKey` or `publicKeys` refuses to load, as one
+  naming `owner` does. New on the surface: the variables `HOLDRIM_SIGNING_KEY`,
+  `HOLDRIM_SIGNING_KEY_FILE` and `HOLDRIM_PUBLIC_KEYS`, the command `holdrim key new`, the route
+  `GET /api/signing-keys` (public: the keys are no secret), and the field `signed` on every event the
+  API answers. Three columns join `events` in SQLite (`envelope`, `sig`, `kid`), added on start, and
+  three fields each Firestore event document. An event with no valid signature is shown, marked, and
+  raised as CRITICAL (`event_unsigned`, `event_forged`) on the banner, beside tampered texts. On
+  Firestore, an event's `when` now comes from the clock of the server that signs it, not
+  `serverTimestamp()`, since it has to be known before it is signed; one instance never dates two
+  events alike, and two instances writing inside one millisecond fall back to the document id. Every
+  event is read once at start, before the server answers (`events_verified`), so the first request
+  does not pay for checking the whole history.
 - **A server whose SQLite store would be served by the site now refuses to start, and so does one
   it cannot check.** Before either store is opened, the folder of the SQLite users store and of the
   SQLite events store is checked against the site (see **Security**). Four configurations that used

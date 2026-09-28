@@ -4,7 +4,7 @@ Documentação que avisa quando deixou de ser verdade.
 
 [English](README.md) · [Español](README.es.md)
 
-<!-- source: README.md up to the translated marker, sha256 8262806cca5ca41aba0e431060e1008b2b1f50240e340767d1c802f6986e0174 -->
+<!-- source: README.md up to the translated marker, sha256 1b21ecaa7b88375601ffcc7b771322f21b940ca72fba45f62f7a2688a1b69d40 -->
 
 **Missão.** O documento aprovado é a fonte da verdade do sistema: quem conhece o negócio escreve e
 aprova, um agente de IA facilita a construção, e o código fica à vista de quem quiser validar.
@@ -41,8 +41,16 @@ imagem. Mais da visão, e o que o agente faz e nunca faz, em [`docs/VISION.md`](
 ```bash
 git clone https://github.com/holdrim/holdrim-core
 cd holdrim-core
-HOLDRIM_OWNER=you@example.org docker compose up
+export HOLDRIM_OWNER=you@example.org
+docker compose run --rm --no-deps -u "$(id -u)" -v "$PWD:/out" holdrim /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
+HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" docker compose up
 ```
+
+A quarta linha roda uma vez só. Ela cria a chave com que o servidor assina cada evento, em
+`holdrim-signing.key`, que só você lê: guarde-a, e mantenha-a fora do repositório e fora do volume
+de dados — quem tem a chave consegue assinar uma trava. Com Node na máquina,
+`node engine/cli/holdrim.ts key new holdrim-signing.key` faz o mesmo. Sem a chave o serviço se recusa
+a subir: um ✓ só é trava quando este servidor o assinou ([`SECURITY.md`](SECURITY.md), em inglês).
 
 Abra `http://localhost:8080`. A senha de primeiro acesso **nunca** vai para o log: ela fica num
 arquivo no volume de dados, que só o usuário do próprio serviço lê, e o log diz onde. Leia com

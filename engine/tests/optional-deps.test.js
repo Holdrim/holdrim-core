@@ -32,8 +32,9 @@ test('the event and user stores a laptop uses load without either optional packa
     const { MemoryEventStore } = await import('./engine/api/store.ts');
     const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
     await import('./engine/api/users.ts');
-    new MemoryEventStore();
-    const s = new SqliteEventStore(':memory:'); await s.close();
+    const { signing } = await import('./engine/tests/helpers/signing.js');
+    new MemoryEventStore(signing);
+    const s = new SqliteEventStore(':memory:', signing); await s.close();
   `);
   assert.equal(r.code, 0, r.err);
 });

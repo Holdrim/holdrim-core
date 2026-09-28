@@ -21,10 +21,11 @@ import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
 import { freshFirestoreProject } from './helpers/firestore.js';
+import { signing } from './helpers/signing.js';
 
 const stores = [
-  { name: 'memory', open: async () => new MemoryEventStore() },
-  { name: 'sqlite', open: async () => new SqliteEventStore(':memory:') },
+  { name: 'memory', open: async () => new MemoryEventStore(signing) },
+  { name: 'sqlite', open: async () => new SqliteEventStore(':memory:', signing) },
 ];
 const skipped = [];
 
@@ -35,7 +36,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
   // id it did not make.
   stores.push({
     name: 'firestore',
-    open: async () => new FirestoreEventStore(freshFirestoreProject('holdrim-people')),
+    open: async () => new FirestoreEventStore(freshFirestoreProject('holdrim-people'), signing),
   });
 } else {
   skipped.push({
@@ -193,7 +194,7 @@ function withSqliteFile(body) {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), 'holdrim-people-'));
     const path = join(dir, 'events.db');
-    const s = new SqliteEventStore(path);
+    const s = new SqliteEventStore(path, signing);
     const db = new DatabaseSync(path);
     try { await body(s, db); } finally { db.close(); await s.close(); rmSync(dir, { recursive: true, force: true }); }
   };
@@ -294,7 +295,7 @@ test('[sqlite] two connections finding-or-creating one address at once agree on 
   const threads = 4;
   const gate = new SharedArrayBuffer(4);
   // Made once before the threads start, so what they race on is the people, not the schema.
-  await new SqliteEventStore(path).close();
+  await new SqliteEventStore(path, signing).close();
   try {
     const workers = Array.from({ length: threads }, () =>
       new Worker(new URL('./helpers/sqlite-person-worker.js', import.meta.url), { workerData: { path, emails, gate } }));

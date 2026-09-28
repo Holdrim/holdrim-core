@@ -141,7 +141,10 @@ Each has a test. If you change the code around one, run the contract test and re
 
 ```bash
 bash engine/run-local.sh                              # straight in, no login, events in memory
-HOLDRIM_OWNER=you@example.org docker compose up       # the real sign-in screen, data in a volume
+export HOLDRIM_OWNER=you@example.org                  # then, once, the key events are signed with:
+docker compose run --rm --no-deps -u "$(id -u)" -v "$PWD:/out" holdrim \
+  /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
+HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" docker compose up   # the real sign-in screen, data in a volume
 ```
 Working on the engine cannot touch anybody's real approvals: the local runner keeps events in
 memory. The first-access password is written to a file beside the store, never to the log; the log

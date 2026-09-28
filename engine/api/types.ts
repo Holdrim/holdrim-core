@@ -38,9 +38,14 @@ export interface Event {
   snapshotRemoved?: Removed | null;
   textTampered?: boolean;
   snapshotTampered?: boolean;
+  // Whether this server signed it (engine/api/signing.ts): its seal verifies against a key this
+  // reader trusts, and every column agrees with what was signed. Required, so no code that builds an
+  // event can leave it out and have it read as either answer by accident; an event that is not
+  // signed is shown, marked, and counts for nothing (`isLocked`, `authorCouldTriage` below).
+  signed: boolean;
 }
 
-export type NewEvent = Omit<Event, 'id' | 'author' | 'authorId' | 'when' | 'textRemoved' | 'snapshotRemoved' | 'textTampered' | 'snapshotTampered'>;
+export type NewEvent = Omit<Event, 'id' | 'author' | 'authorId' | 'when' | 'textRemoved' | 'snapshotRemoved' | 'textTampered' | 'snapshotTampered' | 'signed'>;
 
 /**
  * The event as every store answers it, to an append and to a list alike: each optional field
@@ -52,12 +57,15 @@ export type NewEvent = Omit<Event, 'id' | 'author' | 'authorId' | 'when' | 'text
  * `append` returns this shape untouched (a text just written cannot yet be removed or tampered
  * with); `list` runs the whole page through `withTexts` afterwards, which sets them where a hash
  * says there is something to say.
+ *
+ * `signed` starts `false`, the answer that grants nothing: a store sets it `true` only on what it
+ * just sealed itself, and a reader only through `withSignatures` (engine/api/signing.ts).
  */
 export function stored(event: NewEvent, id: string, author: string, when: string): Event {
   return {
     id, type: event.type, page: event.page, block: event.block ?? null, fingerprint: event.fingerprint ?? null,
     text: event.text ?? null, snapshot: event.snapshot ?? null, author, when, data: event.data ?? null,
-    textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+    textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false, signed: false,
   };
 }
 
@@ -143,7 +151,14 @@ export interface PeopleTable {
   forget(id: string): Promise<void>;
 }
 
-/** Persistence. The in-memory store, SQLite and Firestore implement the same contract. */
+/**
+ * Persistence. The in-memory store, SQLite and Firestore implement the same contract.
+ *
+ * Every store is built with a `Signing` (engine/api/signing.ts) and has no default: `append` and
+ * `removeText` seal each event they write, and `list` and `listBare` verify each one they read, so
+ * a store that writes unsigned events cannot be built by accident — `tsc` holds every construction
+ * to it.
+ */
 export interface EventStore extends PeopleTable {
   append(event: NewEvent, author: string): Promise<Event>;
   /**

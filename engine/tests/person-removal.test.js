@@ -22,6 +22,7 @@ import { ROLES_PAGE, definedEvent, grantedEvent, projectRolesOf, GRANT_REVOKED }
 import { EVENT_TYPES, ensureLockBaseline, earliestLockBaseline, isLocked, LOCK_BASELINE_PAGE } from '../api/types.ts';
 import { TEXT_REMOVED, noText, hashText, newSalt } from '../api/texts.ts';
 import { PERSON_ID } from '../api/people.ts';
+import { signing } from './helpers/signing.js';
 
 const OWNER = 'owner@example.org';
 const ADMIN = 'admin@example.org';
@@ -33,7 +34,7 @@ const deployment = createRoles(OWNER, ADMIN, `${LOCKED}:A0*`, AGENT);
 
 /** A deployment with a person who wrote, was granted a role, and signed in: everything §5 reaches. */
 async function world({ users = true } = {}) {
-  const events = new MemoryEventStore();
+  const events = new MemoryEventStore(signing);
   const store = users ? new UsersSqlite(':memory:') : null;
   let password = null;
   let session = null;
@@ -185,7 +186,7 @@ test('behind an identity proxy there is no account: the texts, the grants and th
 });
 
 test('an account whose person never acted is emptied, and the event names an id made for it', async () => {
-  const events = new MemoryEventStore();
+  const events = new MemoryEventStore(signing);
   const store = new UsersSqlite(':memory:');
   await store.create(BEA, 'Bea');
   const outcome = await removePerson({ events, users: store, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true });
@@ -198,7 +199,7 @@ test('an account whose person never acted is emptied, and the event names an id 
 
 /** A store whose list reads one event's text as tampered, as `withTexts` would after a direct write. */
 class TamperedAt extends MemoryEventStore {
-  constructor(id) { super(); this.tampered = id; }
+  constructor(id) { super(signing); this.tampered = id; }
   async list(page, found) {
     return (await super.list(page, found)).map((e) => (e.id === this.tampered ? { ...e, text: null, textTampered: true } : e));
   }
@@ -219,7 +220,7 @@ test('a tampered text is left and counted, never removed: a removal would silenc
 
 /** A store whose removeText throws once, for the event named, whatever `make` says. */
 class FailingAt extends MemoryEventStore {
-  constructor() { super(); this.failing = null; this.make = null; }
+  constructor() { super(signing); this.failing = null; this.make = null; }
   async removeText(event, field, by) {
     if (event === this.failing) { this.failing = null; throw this.make(event, field); }
     return super.removeText(event, field, by);
@@ -275,7 +276,7 @@ async function stoppedAt(step) {
   const events = new (class extends MemoryEventStore {
     async append(event, author) { if (event.type === GRANT_REVOKED) once('grant'); return super.append(event, author); }
     async forget(id) { once('forget'); return super.forget(id); }
-  })();
+  })(signing);
   const users = new (class extends UsersSqlite {
     async closeAccount(email) { once('close'); return super.closeAccount(email); }
     async emptyAccount(email, keep) { once(keep ? 'empty' : 'free'); return super.emptyAccount(email, keep); }
@@ -357,7 +358,7 @@ test('a person with a grant and no account: a stopped run leaves the address tak
       if (failing) { failing = false; throw new Error('the disk is full'); }
       return super.removeText(event, field, by);
     }
-  })();
+  })(signing);
   const users = new UsersSqlite(':memory:');
   await events.append({ type: 'comment', page: 'A01', text: 'granted before I was invited' }, ANA);
   await events.append(definedEvent('reviewer', ['approve'], false), OWNER);
@@ -373,7 +374,7 @@ test('a person with a grant and no account: a stopped run leaves the address tak
 });
 
 test('when the address cannot be taken for a person with no account, the removal stops before anything else', async () => {
-  const events = new MemoryEventStore();
+  const events = new MemoryEventStore(signing);
   const users = new (class extends UsersSqlite {
     async insertUser() { throw new Error('the users store is unavailable'); }
   })(':memory:');
@@ -389,9 +390,9 @@ test('when the address cannot be taken for a person with no account, the removal
 /** A SQLite store in a folder of its own, and a way to write rows the way an older version did. */
 async function olderStore() {
   const path = join(mkdtempSync(join(tmpdir(), 'holdrim-removal-')), 'events.db');
-  await new SqliteEventStore(path).close();
+  await new SqliteEventStore(path, signing).close();
   const raw = (sql, ...values) => { const db = new DatabaseSync(path); try { db.prepare(sql).run(...values); } finally { db.close(); } };
-  return { path, raw, open: () => new SqliteEventStore(path) };
+  return { path, raw, open: () => new SqliteEventStore(path, signing) };
 }
 const INSERT = 'INSERT INTO events (id, type, page, block, fingerprint, text, text_hash, author, happened_at, data) '
   + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
@@ -438,7 +439,7 @@ test('two people removed from one store: one person_removed each, each naming it
 });
 
 test('the first owner with no ✓ from before the baseline is removed, and their ✓s since stay locks', async () => {
-  const events = new MemoryEventStore();
+  const events = new MemoryEventStore(signing);
   const baseline = await ensureLockBaseline(events, BEA);
   // Later than the baseline by the clock, as a ✓ given after a start always is: in the same
   // millisecond, `isLocked` would not trust what is written on it.

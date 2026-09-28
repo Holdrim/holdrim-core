@@ -7,9 +7,10 @@
  */
 import { parentPort, workerData } from 'node:worker_threads';
 import { SqliteEventStore } from '../../api/store-sqlite.ts';
+import { signing } from './signing.js';
 
 const { path, emails, gate } = workerData;
-const s = new SqliteEventStore(path);
+const s = new SqliteEventStore(path, signing);
 const flag = new Int32Array(gate);
 parentPort.postMessage({ ready: true });
 // Every thread waits here until the last one has opened the file, so the writes start together.

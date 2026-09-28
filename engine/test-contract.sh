@@ -137,6 +137,16 @@ run_for() {
 # every server it booted.
 WORK=$(mktemp -d)
 
+# The signing key every server below signs its events with (engine/api/signing.ts). A store that
+# keeps what it writes refuses to start without one, so it is exported once, for every boot; the
+# boots that prove that refusal, or the throwaway key a store in memory gets, take it away
+# themselves. Made by `holdrim key new`, the command an operator runs, so the command is proved
+# end to end here too.
+node engine/cli/holdrim.ts key new "$WORK/signing.key" >"$WORK/signing.out" || { echo "holdrim key new failed"; exit 1; }
+export HOLDRIM_SIGNING_KEY_FILE="$WORK/signing.key"
+PUBLIC_KEY=$(sed -n 's/^HOLDRIM_PUBLIC_KEYS=//p' "$WORK/signing.out")
+[ -n "$PUBLIC_KEY" ] || { echo "holdrim key new printed no public key"; exit 1; }
+
 # A port already in use is the most treacherous failure there is here: the new server dies with
 # EADDRINUSE, the old one keeps answering, and the whole suite ends up testing the previous code —
 # enough to make a fix that is actually correct look broken, and get it undone. Better not to run
@@ -940,7 +950,8 @@ PSHOW_VIEWER=viewer@example.org
 REMOVE_ID=$(new_request $REVIEWER '{"type":"comment","page":"UC-01","text":"people-show removal marker"}')
 node --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
-const store = new SqliteEventStore(process.argv[1]);
+const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
+const store = new SqliteEventStore(process.argv[1], signingFromEnv());
 await store.removeText(process.argv[2], 'text', process.argv[3]);
 " "$PSHOW_DATA/events.db" "$REMOVE_ID" "$LEAD"
 removed_by() {
@@ -993,7 +1004,8 @@ for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5
 ID_REMOVE_ID=$(new_request $REVIEWER '{"type":"comment","page":"UC-01","text":"people-show id removal marker"}')
 node --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
-const store = new SqliteEventStore(process.argv[1]);
+const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
+const store = new SqliteEventStore(process.argv[1], signingFromEnv());
 await store.removeText(process.argv[2], 'text', process.argv[3]);
 " "$PSHOW_ID_DATA/events.db" "$ID_REMOVE_ID" "$LEAD"
 ID_BY=$(removed_by $PSHOW_VIEWER $ID_REMOVE_ID)
@@ -1714,7 +1726,8 @@ BASELINE_FP=$(cli_fingerprint A01.1.1)
 BASELINE_FP2=$(cli_fingerprint A02.1.2)
 SEEDED=$(node --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
-const store = new SqliteEventStore(process.argv[1]);
+const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
+const store = new SqliteEventStore(process.argv[1], signingFromEnv());
 const [owner, admin, member, fp, fp2] = process.argv.slice(2);
 // A genuine pre-version ✓, never written on: locks only via legacyLock, and only for the OWNER.
 const ownerNull = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: fp, data: null }, owner);
@@ -1859,7 +1872,8 @@ echo "a long history, read in linear time:"
 BIG=$(mktemp -d)
 node --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
-const store = new SqliteEventStore(process.argv[1]);
+const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
+const store = new SqliteEventStore(process.argv[1], signingFromEnv());
 for (let i = 0; i < 20000; i++) {
   const r = await store.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'x', text: 'r' + i }, 'reader@example.org');
   await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.1',
@@ -2215,10 +2229,17 @@ tampered() { curl -s -H "X-Dev-Email: $1" $B/api/tampered; }
 findings_of() { tampered "$1" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);console.log([r.findings.length,...r.findings.map(f=>f.kind+'@'+f.page)].join(' '))})"; }
 finding_id() { tampered $OWNER | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).findings[0]?.finding ?? ''))"; }
 acknowledge() { curl -s -o /dev/null -w '%{http_code}' ${1:+-H "X-Dev-Email: $1"} -H 'Content-Type: application/json' -d "$2" $B/api/tampered/acknowledge; }
+# The event is sealed with the server's own key, as a genuine one is: what this section tampers with
+# is a TEXT, and an unsigned row would add the event's own finding to the text's (the section on
+# signed events, at the end, proves that one).
 direct_write() { node --no-warnings --input-type=module -e "
   import { DatabaseSync } from 'node:sqlite'; import { hashText, newSalt } from './engine/api/texts.ts';
+  import { sealEvent } from './engine/api/signing.ts'; import { signingFromEnv } from './engine/tests/helpers/signing-env.js';
   const db = new DatabaseSync(process.argv[1]);
-  if (process.argv[2] === 'event') db.prepare(\"INSERT INTO events (id, type, page, block, author, happened_at, text_hash) VALUES ('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?)\").run(new Date().toISOString(), hashText('the real text', newSalt()));
+  const e = { id: 'forged1', type: 'comment', page: 'A01', block: 'A01.1.1', author: 'r@example.org', when: new Date().toISOString(), data: null };
+  const hash = hashText('the real text', newSalt());
+  const seal = sealEvent(e, { text: hash, snapshot: null }, signingFromEnv().signer);
+  if (process.argv[2] === 'event') db.prepare(\"INSERT INTO events (id, type, page, block, author, happened_at, text_hash, envelope, sig, kid) VALUES ('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?, ?, ?, ?)\").run(e.when, hash, seal.envelope, seal.sig, seal.kid);
   else db.prepare(\"INSERT INTO texts (event, field, value, salt) VALUES ('forged1', 'text', 'a forged text', ?)\").run(newSalt());
   db.close();" "$TAMPER_DIR/events.db" "$1"; }
 criticals() { grep -c '"event":"text_tampered"' $WORK/tamper.log; }
@@ -2585,7 +2606,8 @@ expect "(and may approve)"                       "false true" "$(may_on $FORGOT 
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 node --no-warnings --input-type=module -e "
   const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
-  const store = new SqliteEventStore(process.argv[1]);
+  const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
+  const store = new SqliteEventStore(process.argv[1], signingFromEnv());
   await store.append({ type: 'role_defined', page: '_roles', block: null, data: { role: 'watcher', capabilities: 'lock' } }, process.argv[2]);
   await store.close();" "$ROLES_DIR/events.db" "$OWNER"
 start_roles_server "$AGENT;$LATER;$EMPTIED"
@@ -2605,7 +2627,8 @@ expect "and the screen marks it ignored"         0 \
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 FORGOT_ID=$(node --no-warnings --input-type=module -e "
   const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
-  const store = new SqliteEventStore(process.argv[1]); const id = await store.personOf(process.argv[2]);
+  const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
+  const store = new SqliteEventStore(process.argv[1], signingFromEnv()); const id = await store.personOf(process.argv[2]);
   await store.forget(id); await store.close(); console.log(id);" "$ROLES_DIR/events.db" "$FORGOT")
 require_id "$FORGOT_ID" FORGOT_ID
 start_roles_server "$AGENT;$LATER;$EMPTIED"
@@ -2641,7 +2664,8 @@ FORMER=former@example.org; ELDER=elder@example.org
 node --no-warnings --input-type=module -e "
   const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
   const { DatabaseSync } = await import('node:sqlite');
-  await new SqliteEventStore(process.argv[1]).close();
+  const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
+  await new SqliteEventStore(process.argv[1], signingFromEnv()).close();
   const db = new DatabaseSync(process.argv[1]);
   const insert = db.prepare('INSERT INTO events (id, type, page, block, fingerprint, text, author, happened_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
   insert.run('older-approval', 'approval', 'A01', 'A01.1.1', 'f', null, process.argv[2], '2025-01-01T00:00:00.000Z', null);
@@ -3183,5 +3207,119 @@ expect "the re-pointed site serves what it holds → 200"   200 "$(site_code /no
 expect "and not the store it now holds → 404"             404 "$(site_code /data/events.db)"
 expect "and nothing of it is sent"                        1 "$(site_get $B/data/events.db | has 'SQLite format'; echo $?)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+echo "events signed by the server (#50):"
+# The refusal, through the entry point that meets it: a boot. A store that keeps what it writes, and
+# no key — every variant that would otherwise have started.
+NOKEY="$WORK/no-key"
+for STORE_AT in "Production password" "Development dev"; do
+  HOLDRIM_ENVIRONMENT=${STORE_AT% *} HOLDRIM_IDENTITY=${STORE_AT#* } HOLDRIM_OWNER=$OWNER HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+    HOLDRIM_EVENTS_PATH="$NOKEY/events.db" HOLDRIM_USERS_PATH="$NOKEY/users.db" HOLDRIM_SITE="$SITE" PORT=$PORT \
+    run_for 15 env -u HOLDRIM_SIGNING_KEY_FILE -u HOLDRIM_SIGNING_KEY node engine/api/server.ts >"$WORK/no-key.log" 2>&1
+  expect "a SQLite store with no signing key ($STORE_AT) → exits 1"   1 "$?"
+  expect "and names the variable and the command that makes one" 0 \
+    "$(has '^invalid configuration: .*no signing key is set.*holdrim key new <file>.*HOLDRIM_SIGNING_KEY_FILE' "$WORK/no-key.log"; echo $?)"
+  expect "and opened no store"                                     1 "$([ -e "$NOKEY" ]; echo $?)"
+done
+HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$NOKEY/events.db" HOLDRIM_SITE="$SITE" PORT=$PORT HOLDRIM_SIGNING_KEY="$(cat "$WORK/signing.key")" \
+  run_for 15 node engine/api/server.ts >"$WORK/two-keys.log" 2>&1
+expect "both HOLDRIM_SIGNING_KEY and its _FILE → exits 1"          1 "$?"
+expect "and says so"                                               0 "$(has 'both HOLDRIM_SIGNING_KEY and HOLDRIM_SIGNING_KEY_FILE are set' "$WORK/two-keys.log"; echo $?)"
+# What compose.yaml hands the service: the key's PEM in the variable, newlines and all — or, before
+# anyone made one, the variable set and empty.
+HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$WORK/inline-key/events.db" HOLDRIM_SITE="$SITE" PORT=$PORT HOLDRIM_SIGNING_KEY="$(cat "$WORK/signing.key")" \
+  env -u HOLDRIM_SIGNING_KEY_FILE node engine/api/server.ts >"$WORK/inline-key.log" 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "the key's PEM in HOLDRIM_SIGNING_KEY: a SQLite store comes up" 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+expect "signing with that key"                                     "$(sed -n 's/^  key id: //p' "$WORK/signing.out")" \
+  "$(log_field "$WORK/inline-key.log" signing_key kid)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$NOKEY/events.db" HOLDRIM_SITE="$SITE" PORT=$PORT HOLDRIM_SIGNING_KEY= \
+  run_for 15 env -u HOLDRIM_SIGNING_KEY_FILE node engine/api/server.ts >"$WORK/empty-key.log" 2>&1
+expect "HOLDRIM_SIGNING_KEY set and empty → exits 1"               1 "$?"
+expect "and says it is empty, and how to make one"                 0 "$(has 'HOLDRIM_SIGNING_KEY is empty. Make one with  holdrim key new' "$WORK/empty-key.log"; echo $?)"
+echo 'not a key' >"$WORK/bad.key"
+HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$NOKEY/events.db" HOLDRIM_SITE="$SITE" PORT=$PORT HOLDRIM_SIGNING_KEY_FILE="$WORK/bad.key" \
+  run_for 15 node engine/api/server.ts >"$WORK/bad-key.log" 2>&1
+expect "a key file that holds no key → exits 1"                    1 "$?"
+expect "and names the file's variable, not its contents"           "0 1" \
+  "$(has 'HOLDRIM_SIGNING_KEY_FILE does not hold an Ed25519 private key' "$WORK/bad-key.log"; echo $?) $(has 'not a key' "$WORK/bad-key.log"; echo $?)"
+# holdrim.json naming a public key is authority from the repository, refused like an owner there.
+FILE_KEYS=$(mktemp -d); cp -r "$SITE/." "$FILE_KEYS"
+node -e "const f=process.argv[1]+'/holdrim.json', c=JSON.parse(require('fs').readFileSync(f,'utf8'));
+  c.publicKeys=[process.argv[2]]; require('fs').writeFileSync(f, JSON.stringify(c))" "$FILE_KEYS" "$PUBLIC_KEY"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_SITE="$FILE_KEYS" PORT=$PORT \
+  run_for 15 node engine/api/server.ts >"$WORK/file-keys.log" 2>&1
+expect "publicKeys in holdrim.json → exits 1"                      1 "$?"
+expect "and names where they live instead"                         0 "$(has '"publicKeys" comes from HOLDRIM_PUBLIC_KEYS' "$WORK/file-keys.log"; echo $?)"
+rm -rf "$FILE_KEYS"
+
+# A store in memory, with no key: it starts, on a key made up for it, and says so.
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Production HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=password HOLDRIM_EVENTS=memory \
+  HOLDRIM_USERS_PATH="$WORK/ephemeral-key/users.db" HOLDRIM_SITE="$SITE" PORT=$PORT \
+  env -u HOLDRIM_SIGNING_KEY_FILE node engine/api/server.ts >"$WORK/ephemeral-key.log" 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "events in memory with no key: it comes up"                 200 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/health)"
+expect "and warns that its key is a throwaway"                     0 "$(has '"severity":"WARNING","event":"signing_key_ephemeral"' "$WORK/ephemeral-key.log"; echo $?)"
+# Public, under password sign-in, with no session: every other /api/ route answers 401 here.
+KEYS=$(curl -s $B/api/signing-keys)
+EPHEMERAL_KID=$(log_field "$WORK/ephemeral-key.log" signing_key kid); require_id "$EPHEMERAL_KID" "the kid in the boot log"
+expect "GET /api/signing-keys answers with no session"             "$EPHEMERAL_KID" "$(echo "$KEYS" | jfield signing.kid)"
+expect "and the boot log prints the same public key"               "$(log_field "$WORK/ephemeral-key.log" signing_key publicKey)" "$(echo "$KEYS" | jfield signing.publicKey)"
+expect "while the API around it still wants a session → 401"       401 "$(curl -s -o /dev/null -w '%{http_code}' $B/api/events)"
+expect "and no private key is in either"                           1 "$(echo "$KEYS" | cat - "$WORK/ephemeral-key.log" | has 'PRIVATE KEY'; echo $?)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+# A SQLite store signed with key A: a genuine ✓ reads signed; a ✓ inserted into the file by someone
+# without the key reads as not signed, after a real restart, and is raised as CRITICAL.
+SIGNED_DIR=$(mktemp -d)
+start_signed() {
+  HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= PORT=$PORT \
+    HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$SIGNED_DIR/events.db HOLDRIM_SITE="$SITE" env "$@" \
+    node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >>$WORK/signed.log 2>&1 & PID=$!
+  for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+}
+signed_of() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=A01" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(e=>e.type==='approval').map(e=>e.id+':'+e.signed).join(' ')))"; }
+start_signed
+GENUINE=$(body $OWNER "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.1\",\"fingerprint\":\"f\"}" | jfield id)
+require_id "$GENUINE" "the genuine ✓'s id"
+expect "the owner's ✓ reads signed"                                "$GENUINE:true" "$(signed_of)"
+KID_A=$(log_field $WORK/signed.log signing_key kid); require_id "$KID_A" "key A's kid"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+node --no-warnings --input-type=module -e "
+  import { DatabaseSync } from 'node:sqlite';
+  const db = new DatabaseSync(process.argv[1]);
+  const owner = db.prepare('SELECT author FROM events WHERE id = ?').get(process.argv[2]).author;
+  db.prepare(\"INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data) VALUES ('forged', 'approval', 'A01', 'A01.1.2', 'f', ?, ?, ?)\")
+    .run(owner, new Date().toISOString(), JSON.stringify({ locks: 'true', asAgent: 'false' }));
+  db.close();" "$SIGNED_DIR/events.db" "$GENUINE"
+start_signed
+expect "after a restart, the ✓ inserted into the file reads not signed" "$GENUINE:true forged:false" "$(signed_of)"
+expect "and is raised as CRITICAL, as an event not signed"         0 "$(has '"severity":"CRITICAL","event":"event_unsigned".*"eventId":"forged"' $WORK/signed.log; echo $?)"
+expect "and shows on the banner"                                    "unsigned@A01" \
+  "$(curl -s -H "X-Dev-Email: $REVIEWER" $B/api/tampered | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).findings.map(f=>f.kind+'@'+f.page).join(' ')))")"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+
+# Rotation (SECURITY.md, "Rotating the signing key"): the server now signs with key B, and keeps
+# trusting A only while HOLDRIM_PUBLIC_KEYS names it.
+node engine/cli/holdrim.ts key new "$WORK/signing-b.key" >/dev/null
+start_signed HOLDRIM_SIGNING_KEY_FILE="$WORK/signing-b.key" HOLDRIM_PUBLIC_KEYS="$PUBLIC_KEY"
+expect "signing with B, A still listed: A's ✓ still reads signed"  "$GENUINE:true forged:false" "$(signed_of)"
+AFTER=$(body $OWNER "{\"type\":\"approval\",\"page\":\"A01\",\"block\":\"A01.1.3\",\"fingerprint\":\"f\"}" | jfield id)
+require_id "$AFTER" "the ✓ signed with B"
+KID_B=$(node -e "const k=require('fs').readFileSync(process.argv[1],'utf8');const c=require('crypto');console.log(c.createHash('sha256').update(c.createPublicKey(k).export({type:'spki',format:'der'})).digest('hex').slice(0,16))" "$WORK/signing-b.key")
+expect "and a new event carries B's kid, not A's"                  "$KID_B" \
+  "$(node --no-warnings -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[1],{readOnly:true});console.log(db.prepare('SELECT kid FROM events WHERE id = ?').get(process.argv[2]).kid)" "$SIGNED_DIR/events.db" "$AFTER")"
+expect "the fixture: A and B are two keys"                         1 "$([ "$KID_A" = "$KID_B" ]; echo $?)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+start_signed HOLDRIM_SIGNING_KEY_FILE="$WORK/signing-b.key"
+expect "A retired (no longer listed): its ✓ reads not signed, with no date to save it" \
+  "$GENUINE:false forged:false $AFTER:true" "$(signed_of)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+rm -rf "$SIGNED_DIR"
 
 echo; [ $FAILURES -eq 0 ] && echo "all good" || { echo "$FAILURES failure(s)"; exit 1; }

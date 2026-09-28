@@ -19,6 +19,7 @@ import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { MemoryEventStore } from '../api/store.ts';
 import { Source } from '../cli/remote.ts';
 import { freshFirestoreProject } from './helpers/firestore.js';
+import { signing } from './helpers/signing.js';
 
 // The plain `console.error` line AND the structured `log()` line `reportTampered` prints, captured
 // the way store-sqlite-guards.test.js captures `sqlite_guard_missing`: `log()` writes one JSON line
@@ -410,7 +411,7 @@ test('withTextsRetrying never reports a tampered field that belongs to another p
 
 test('[memory] list() raises the alert for a field it reads as tampered',
   capturingReports(async (t, said, logged) => {
-    const store = new MemoryEventStore();
+    const store = new MemoryEventStore(signing);
     const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
     await store.removeText(kept.id, 'text', 'owner@example.org');
     // A duplicate, forged removal — `removeText` itself can never produce a second one — is the one
@@ -429,7 +430,7 @@ test('[sqlite] list() raises the alert for a row edited straight in the database
     const dir = mkdtempSync(join(tmpdir(), 'holdrim-tamper-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const path = join(dir, 'events.db');
-    const store = new SqliteEventStore(path);
+    const store = new SqliteEventStore(path, signing);
     const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
     await store.close();
     const { DatabaseSync } = await import('node:sqlite');
@@ -437,7 +438,7 @@ test('[sqlite] list() raises the alert for a row edited straight in the database
     db.exec(`DROP TRIGGER IF EXISTS texts_no_update`);
     db.prepare("UPDATE texts SET value = 'forged' WHERE event = ?").run(written.id);
     db.close();
-    const reopened = new SqliteEventStore(path);
+    const reopened = new SqliteEventStore(path, signing);
     await reopened.list(null);
     await reopened.close();
     assert.ok(said.some((line) => /CRITICAL/.test(line) && line.includes(written.id)));
@@ -450,7 +451,7 @@ test('[sqlite] the CLI\'s own direct reader of the events file raises the alert 
     const dir = mkdtempSync(join(tmpdir(), 'holdrim-tamper-file-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const path = join(dir, 'events.db');
-    const store = new SqliteEventStore(path);
+    const store = new SqliteEventStore(path, signing);
     const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
     await store.close();
     const { DatabaseSync } = await import('node:sqlite');
@@ -476,7 +477,7 @@ async function sqliteB2(t) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-tamper-b2-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'events.db');
-  const store = new SqliteEventStore(path);
+  const store = new SqliteEventStore(path, signing);
   const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
   await store.close();
   const { DatabaseSync } = await import('node:sqlite');
@@ -484,7 +485,7 @@ async function sqliteB2(t) {
   db.exec(`DROP TRIGGER IF EXISTS texts_no_update`);
   db.prepare("UPDATE texts SET value = 'forged' WHERE event = ?").run(written.id);
   db.close();
-  const forger = new SqliteEventStore(path);
+  const forger = new SqliteEventStore(path, signing);
   await forger.append({ type: TEXT_REMOVED, page: 'A01', data: { event: written.id, field: 'text' } }, 'forger@example.org');
   await forger.close();
   return { path, written };
@@ -493,7 +494,7 @@ async function sqliteB2(t) {
 test('[sqlite] list() raises the alert for an edited row a forged removal claims', capturingReports(
   async (t, said, logged) => {
     const { path, written } = await sqliteB2(t);
-    const reopened = new SqliteEventStore(path);
+    const reopened = new SqliteEventStore(path, signing);
     const read = (await reopened.list(null)).find((e) => e.id === written.id);
     await reopened.close();
     assert.equal(read.textTampered, true, 'never a clean removal');
@@ -586,7 +587,7 @@ function tempFile(t) {
 
 test('the CLI reads the events file\'s texts as the server does: present, removed, and from before extraction', async (t) => {
   const path = tempFile(t);
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   const kept = await s.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
   const gone = await s.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
   await s.removeText(gone.id, 'text', 'owner@example.org');
@@ -613,7 +614,7 @@ test('the CLI reads the events file\'s texts as the server does: present, remove
 test('a removal tied to its target\'s happened_at still reads as the removal it was, through the CLI', async (t) => {
   const RealDate = Date;
   const path = tempFile(t);
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   const written = await s.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
   class SteppedBack extends RealDate {
     constructor(...args) { super(...(args.length ? args : ['2000-01-01T00:00:00.000Z'])); }
@@ -670,7 +671,7 @@ async function tamperedByDowngrade(t) {
 
   // Opening it for real migrates the schema (adds text_hash/snapshot_hash, both NULL on 'old') and
   // appends one genuinely hashed event — the first row `extractionBoundary` will ever find.
-  const store = new SqliteEventStore(path);
+  const store = new SqliteEventStore(path, signing);
   const written = await store.append({ type: 'comment', page: 'A01', text: 'a real remark' }, 'r@example.org');
   await store.close();
 
@@ -686,7 +687,7 @@ async function tamperedByDowngrade(t) {
 test('[sqlite] a value with no hash, on a row proven to postdate the first hashed one, reads as "downgraded" tampering',
   async (t) => {
     const { path, oldId, realId, forgedId } = await tamperedByDowngrade(t);
-    const store = new SqliteEventStore(path);
+    const store = new SqliteEventStore(path, signing);
     const out = await store.list(null);
     await store.close();
     const old = out.find((e) => e.id === oldId);
@@ -702,7 +703,7 @@ test('[sqlite] a value with no hash, on a row proven to postdate the first hashe
 
 test('[sqlite] list() reports the downgrade forgery as its own kind', capturingReports(async (t, said, logged) => {
   const { path, forgedId } = await tamperedByDowngrade(t);
-  const store = new SqliteEventStore(path);
+  const store = new SqliteEventStore(path, signing);
   await store.list(null);
   await store.close();
   assert.ok(logged.some((l) => l.severity === 'CRITICAL' && l.eventId === forgedId && l.kind === 'downgraded'));
@@ -727,7 +728,7 @@ test('[sqlite] the CLI\'s own direct file reader catches the same downgrade forg
 test('[sqlite] the CLI\'s direct file reader wraps its four reads in one transaction, not four autocommits',
   async (t) => {
     const path = tempFile(t);
-    const store = new SqliteEventStore(path);
+    const store = new SqliteEventStore(path, signing);
     await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
     await store.close();
 
@@ -818,11 +819,12 @@ test('[sqlite] installGuards surfaces the ORIGINAL repair error too, not a maske
   const storeSqlite = new URL('../api/store-sqlite.ts', import.meta.url);
   const code = `
     const { SqliteEventStore, installGuards, GUARDS } = await import(${JSON.stringify(storeSqlite.pathname)});
+    const { signing } = await import(${JSON.stringify(new URL('./helpers/signing.js', import.meta.url).pathname)});
     const { DatabaseSync } = await import('node:sqlite');
     // Opened and closed first, so the events/people/texts tables and the real guards already exist
     // — the broken one below is installed on top of a normal store, the same repair path a boot with
     // a foreign trigger takes, not a first install.
-    (new SqliteEventStore(${JSON.stringify(path)})).close();
+    (new SqliteEventStore(${JSON.stringify(path)}, signing)).close();
     const db = new DatabaseSync(${JSON.stringify(path)});
     try {
       installGuards(db, { ...GUARDS, zz_broken: 'BEFORE INSERT ON events BEGIN SELEC 1; END' }, () => {});
@@ -863,7 +865,7 @@ test('[firestore] list reads a removal committed mid-read as the removal it was,
   const project = freshFirestoreProject('holdrim-texts');
   const { Query } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   t.after(async () => { await store.close(); });
   const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
 
@@ -878,7 +880,7 @@ test('[firestore] list reads a removal committed mid-read as the removal it was,
   Query.prototype.get = async function (...args) {
     calls++;
     if (calls === 2) { // right after the events read, before people and texts
-      const other = new FirestoreEventStore(project);
+      const other = new FirestoreEventStore(project, signing);
       await other.removeText(written.id, 'text', 'owner@example.org');
       await other.close();
     }
@@ -901,7 +903,7 @@ test('[firestore] list() raises the alert for a field it reads as tampered',
   async (t, said, logged) => {
     const project = freshFirestoreProject('holdrim-texts');
     const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-    const store = new FirestoreEventStore(project);
+    const store = new FirestoreEventStore(project, signing);
     t.after(async () => { await store.close(); });
     const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
     await store.removeText(kept.id, 'text', 'owner@example.org');
@@ -924,7 +926,7 @@ const cloud = process.env.FIRESTORE_EMULATOR_HOST
 test('[firestore] the CLI reads the cloud\'s texts as the server\'s own store does', cloud, async (t) => {
   const project = freshFirestoreProject('holdrim-texts');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   t.after(async () => { await store.close(); });
   const kept = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
   const gone = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
@@ -937,6 +939,24 @@ test('[firestore] the CLI reads the cloud\'s texts as the server\'s own store do
   assert.equal(read.textRemoved.by, 'owner@example.org');
 });
 
+test('[firestore] the CLI reading the cloud finds the store\'s events signed, and one written without the key not', cloud,
+  async (t) => {
+    const project = freshFirestoreProject('holdrim-signed');
+    const { Firestore } = await import('@google-cloud/firestore');
+    const { FirestoreEventStore } = await import('../api/store-firestore.ts');
+    const store = new FirestoreEventStore(project, signing);
+    const db = new Firestore({ projectId: project });
+    t.after(async () => { await store.close(); await db.terminate(); });
+    const genuine = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f',
+      data: { locks: 'true', asAgent: 'false' } }, 'owner@example.org');
+    await db.collection('events').doc('forged').create({ type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'f',
+      author: genuine.authorId, data: { locks: 'true', asAgent: 'false' }, when: new Date() });
+    const read = await new Source({ project, account: 'ci@example.org', keyring: signing.keyring }).events();
+    assert.deepEqual(read.map((e) => [e.id, e.signed]).sort(), [[genuine.id, true], ['forged', false]].sort());
+    const untrusting = await new Source({ project, account: 'ci@example.org', keyring: new Map() }).events();
+    assert.ok(untrusting.every((e) => e.signed === false), 'a reader told of no key trusts no event');
+  });
+
 test('[firestore] the CLI reads a removal committed mid-read as the removal it was, never as tampering', cloud, async (t) => {
   // Round 2, finding C: the CLI's own reader of the cloud has the same torn-read window
   // `withTextsRetrying` closes in the server (finding A) — proved here the way the proof lens did,
@@ -944,7 +964,7 @@ test('[firestore] the CLI reads a removal committed mid-read as the removal it w
   // events read), ahead of its texts read and of its own later re-read of removals.
   const project = freshFirestoreProject('holdrim-texts');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   t.after(async () => { await store.close(); });
   const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
 
@@ -954,7 +974,7 @@ test('[firestore] the CLI reads a removal committed mid-read as the removal it w
     const res = await original(url, init);
     if (String(url).endsWith(':runQuery') && ++queries === 1) {
       await res.clone().text(); // let this response finish landing before the next store starts
-      const other = new FirestoreEventStore(project);
+      const other = new FirestoreEventStore(project, signing);
       await other.removeText(written.id, 'text', 'owner@example.org');
       await other.close();
     }
@@ -978,7 +998,7 @@ test('[firestore] the CLI\'s own reader of the cloud raises the alert too', clou
   async (t, said, logged) => {
     const project = freshFirestoreProject('holdrim-texts');
     const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-    const store = new FirestoreEventStore(project);
+    const store = new FirestoreEventStore(project, signing);
     t.after(async () => { await store.close(); });
     const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
     await store.removeText(kept.id, 'text', 'owner@example.org');
@@ -998,7 +1018,7 @@ async function firestoreB2(t) {
   const project = freshFirestoreProject('holdrim-texts');
   const { Firestore } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   const db = new Firestore({ projectId: project });
   t.after(async () => { await store.close(); await db.terminate(); });
   const written = await store.append({ type: 'comment', page: 'A01', text: 'a remark' }, 'r@example.org');
@@ -1036,7 +1056,7 @@ test('[firestore] the CLI pages through more documents than one page holds, and 
   // fetch against the local emulator loops far too fast for that to ever matter anyway.
   const project = freshFirestoreProject('holdrim-texts');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   t.after(async () => { await store.close(); });
   const written = [];
   for (let i = 0; i < 5; i++) written.push(await store.append({ type: 'comment', page: 'A01', text: `t${i}` }, 'r@example.org'));
@@ -1068,7 +1088,7 @@ test('[firestore] list does not re-count a same-page removal fetchRemovals hands
   const project = freshFirestoreProject('holdrim-texts');
   const { Firestore } = await import('@google-cloud/firestore');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   const db = new Firestore({ projectId: project });
   t.after(async () => { await store.close(); await db.terminate(); });
   const tampered = await store.append({ type: 'comment', page: 'A01', text: 'tampered one' }, 'r@example.org');
@@ -1092,7 +1112,7 @@ test('[firestore] list(page) never leaks another page\'s removal event into its 
   const project = freshFirestoreProject('holdrim-texts');
   const { FirestoreEventStore } = await import('../api/store-firestore.ts');
   const { Firestore } = await import('@google-cloud/firestore');
-  const store = new FirestoreEventStore(project);
+  const store = new FirestoreEventStore(project, signing);
   const db = new Firestore({ projectId: project });
   t.after(async () => { await store.close(); await db.terminate(); });
   const tampered = await store.append({ type: 'comment', page: 'A01', text: 'tampered one' }, 'r@example.org');

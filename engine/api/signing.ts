@@ -272,6 +272,21 @@ export function seal(fields: Sealable, signer: Signer): Seal {
   return { envelope, sig: signer.sign(envelope), kid: signer.kid };
 }
 
+/**
+ * Seals an event as a store is about to write it: `e` as `stored()` (types.ts) built it, its author
+ * already the person's id, and `hashes` the salted hashes `saltFields` (texts.ts) gave its texts —
+ * the one place every store turns its row into the fields signed, so no store can sign a field
+ * another leaves out.
+ */
+export function sealEvent(
+  e: { id: string; type: string; page: string; block?: string | null; fingerprint?: string | null; author: string;
+       when: string; data?: Record<string, unknown> | null },
+  hashes: { text: string | null; snapshot: string | null }, signer: Signer,
+): Seal {
+  return seal({ id: e.id, type: e.type, page: e.page, block: e.block ?? null, fingerprint: e.fingerprint ?? null,
+    textHash: hashes.text, snapshotHash: hashes.snapshot, author: e.author, when: e.when, data: e.data ?? null }, signer);
+}
+
 const nullableString = (v: unknown) => v === null || typeof v === 'string';
 
 /** The envelope read back into fields, or null for anything that is not exactly version 1's shape. */
@@ -302,9 +317,11 @@ export interface SealedRow {
   author: string;
   when: string;
   data?: Record<string, unknown> | null;
-  envelope?: string | null;
-  sig?: string | null;
-  kid?: string | null;
+  // Of whatever type the store holds: a direct writer to Firestore can put a map where a string
+  // goes, and `verifyRow` answers "forged" for it rather than trusting a type it never checked.
+  envelope?: unknown;
+  sig?: unknown;
+  kid?: unknown;
 }
 
 /** Not signed: no seal at all, or one that does not hold. The reason is English, for the log. */
@@ -316,17 +333,22 @@ export type Verdict =
 
 /**
  * Seals already checked, per key. Events never change, so a seal that verified once verifies again,
- * and without this a whole-site read pays one Ed25519 check per event on every request. Only
- * successes are kept, keyed by the key object itself, so a reader with another keyring — a key
- * retired — never inherits an answer given under a key it does not hold.
+ * and without this a whole-site read pays one Ed25519 check per event on every request — about a
+ * tenth of a millisecond each, seconds for a long history. Only successes are kept, keyed by the key
+ * object itself, so a reader with another keyring — a key retired — never inherits an answer given
+ * under a key it does not hold. An entry is a digest of the signature AND the envelope together: a
+ * memo keyed by the signature alone would accept a genuine signature beside a forged envelope.
  */
 const verified = new WeakMap<KeyObject, Set<string>>();
-/** A ceiling on the memo, per key: past it the memo starts over, which costs time, never an answer. */
-const MEMO_CEILING = 200_000;
+/**
+ * A ceiling on the memo, per key: past it the memo starts over, which costs time, never an answer.
+ * Well above any history a whole-site read already holds in memory on every request.
+ */
+const MEMO_CEILING = 1_000_000;
 
 function checks(key: KeyObject, envelope: string, sig: string): boolean {
   const memo = verified.get(key) ?? new Set<string>();
-  const entry = `${sig}\n${envelope}`;
+  const entry = createHash('sha256').update(sig, 'utf8').update('\n').update(envelope, 'utf8').digest('base64');
   if (memo.has(entry)) return true;
   let ok = false;
   try {

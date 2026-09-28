@@ -1,9 +1,10 @@
-import { Firestore, FieldValue } from '@google-cloud/firestore';
+import { Firestore, Timestamp } from '@google-cloud/firestore';
 import { byServerTime } from './firestore-order.ts';
 import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
 import { noText, saltFields, textKey, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent, type TextField, type TamperReport } from './texts.ts';
+import { sealEvent, withSignatures, type Seal, type Signing } from './signing.ts';
 
 /**
  * Firestore, `events` collection. INSERT ONLY: `create` fails if the document already exists, so
@@ -13,8 +14,24 @@ import { noText, saltFields, textKey, withTextsRetrying, reportTampered, TEXT_RE
  */
 export class FirestoreEventStore implements EventStore {
   #db: Firestore;
-  constructor(projectId: string) {
+  #signing: Signing;
+  constructor(projectId: string, signing: Signing) {
     this.#db = new Firestore({ projectId });
+    this.#signing = signing;
+  }
+
+  /**
+   * The time an event is written with: this process's clock, to the millisecond, and never the same
+   * as or earlier than the last one this store wrote. `FieldValue.serverTimestamp()` used to decide
+   * it, and a time Firestore fills in on commit cannot be signed before the write (owner decision 7
+   * on #50). Held strictly increasing within the process so two events one instance writes inside a
+   * millisecond still sort in the order they were written; two instances writing inside the same
+   * millisecond fall back to the document id, which is the cost that decision accepted.
+   */
+  #last = 0;
+  #nextTime(notBefore = 0): number {
+    this.#last = Math.max(Date.now(), this.#last + 1, notBefore);
+    return this.#last;
   }
 
   // `text` and `snapshot` are written as null: their values move to the `texts` collection, and the
@@ -30,23 +47,25 @@ export class FirestoreEventStore implements EventStore {
     // written as the person's id and answered as the address, as a list names it a moment later
     // (docs/PRIVACY.md, section 1). `textRemoved`/`snapshotRemoved`/`textTampered`/`snapshotTampered`
     // are `withTexts`'s to decide on a read, never written here: a row just made cannot yet need them.
+    const at = this.#nextTime();
+    const e = stored({ ...event, text: null, snapshot: null }, doc.id, personId, new Date(at).toISOString());
+    const sealed = sealEvent(e, hashes, this.#signing.signer);
     const { id: _id, when: _when, textRemoved: _tr, snapshotRemoved: _sr, textTampered: _tt, snapshotTampered: _st,
-      ...fields } = stored({ ...event, text: null, snapshot: null }, doc.id, personId, '');
+      signed: _signed, ...fields } = e;
     await this.#db.runTransaction(async (tx) => {
-      tx.create(doc, { ...fields, textHash: hashes.text, snapshotHash: hashes.snapshot, when: FieldValue.serverTimestamp() });
+      tx.create(doc, { ...fields, textHash: hashes.text, snapshotHash: hashes.snapshot, when: Timestamp.fromMillis(at), ...sealed });
       for (const t of rows) {
         tx.create(this.#db.collection('texts').doc(textKey(doc.id, t.field)),
           { event: doc.id, field: t.field, value: t.value, salt: t.salt });
       }
     });
-    const read = await doc.get();
-    const { textHash: _th, snapshotHash: _sh, ...withoutHashes } = this.#fromFirestore(read.id, read.data()!);
     // A row just written cannot yet be removed or tampered with, so the plain values in hand — not
     // a round trip through `withTexts` — are what the caller of a fresh append gets back.
     // `authorId: personId`, the same value `withAuthors` would capture off this document a moment
     // later, so a fresh append and the list right after it answer it identically
     // (events-conformance.test.js, "the answer to an append is what a list says a moment later").
-    return { ...withoutHashes, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId };
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId,
+      signed: true };
   }
 
   /**
@@ -59,6 +78,7 @@ export class FirestoreEventStore implements EventStore {
     const textDoc = this.#db.collection('texts').doc(textKey(event, field));
     const personId = await this.personFor(by);
     const removalDoc = this.#db.collection('events').doc();
+    let removal: Event | undefined;
     await this.#db.runTransaction(async (tx) => {
       // Reads before writes, as every Firestore transaction demands: the two ONE AT A TIME, since
       // a transaction here reads at most a document or two and the clarity of reading each in turn
@@ -69,16 +89,23 @@ export class FirestoreEventStore implements EventStore {
       if (!row.exists) throw noText(event, field);
       const page = original.data()!.page as string;
       const block = (original.data()!.block as string | null | undefined) ?? null;
+      // Strictly after the text it removes, never merely not before: Firestore has no rowid to
+      // break a tie inside one millisecond, so a removal dated the same instant as its target could
+      // come back ahead of it, and `removalsOf` (texts.ts) would then refuse it as a removal placed
+      // before what it names — a genuine removal read as tampering, for good.
+      const target = (original.data()!.when as Timestamp | undefined)?.toMillis?.() ?? 0;
+      const at = this.#nextTime(target + 1);
+      removal = stored({ type: TEXT_REMOVED, page, block, data: { event, field } }, removalDoc.id, personId,
+        new Date(at).toISOString());
+      const sealed = sealEvent(removal, { text: null, snapshot: null }, this.#signing.signer);
       tx.delete(textDoc);
       tx.create(removalDoc, {
         type: TEXT_REMOVED, page, block, fingerprint: null, text: null, snapshot: null,
         textHash: null, snapshotHash: null, author: personId, data: { event, field },
-        when: FieldValue.serverTimestamp(),
+        when: Timestamp.fromMillis(at), ...sealed,
       });
     });
-    const read = await removalDoc.get();
-    const { textHash: _th, snapshotHash: _sh, ...withoutHashes } = this.#fromFirestore(read.id, read.data()!);
-    return { ...withoutHashes, author: personEmail(by), authorId: personId };
+    return { ...removal!, author: personEmail(by), authorId: personId, signed: true };
   }
 
   /**
@@ -101,23 +128,28 @@ export class FirestoreEventStore implements EventStore {
     // By the server's timestamp itself, to the nanosecond (`byServerTime`, firestore-order.ts).
     const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
     const peopleMap = new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null]));
-    const events = withAuthors([...r.docs]
+    // `reports`: see store-sqlite.ts's `list` for why this is raised here rather than left to whoever
+    // reads the answer — an event not signed included.
+    const reports: TamperReport[] = [];
+    const events = withAuthors(withSignatures([...r.docs]
       .sort((a, b) => byServerTime(at(a), at(b)))
-      .map((d) => this.#fromFirestore(d.id, d.data())),
+      .map((d) => this.#fromFirestore(d.id, d.data())), this.#signing.keyring, reports),
     peopleMap);
     const textDocs = await this.#db.collection('texts').get();
     const texts = new Map(textDocs.docs.map((t) => {
       const data = t.data();
       return [textKey(data.event as string, data.field as TextField), { value: data.value as string, salt: data.salt as string }];
     }));
-    // `reports`: see store-sqlite.ts's `list` for why this is raised here rather than left to whoever
-    // reads the answer — `withTextsRetrying` itself only reports what its own retry settles as
-    // genuinely tampered, never a torn read's provisional false alarm (its own doc comment says why).
-    const reports: TamperReport[] = [];
+    // `withTextsRetrying` itself only reports what its own retry settles as genuinely tampered,
+    // never a torn read's provisional false alarm (its own doc comment says why).
     const out = await withTextsRetrying(events, texts, async () => {
       // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
+      // Verified like the first read: a re-read that skipped it would let an unsigned removal in
+      // through the one door the first read closed. Not reported: a removal from this page was
+      // already reported by the first read, and one from another is that page's read to report.
       const removed = await this.#db.collection('events').where('type', '==', TEXT_REMOVED).get();
-      return withAuthors(removed.docs.map((d) => this.#fromFirestore(d.id, d.data())), peopleMap);
+      return withAuthors(withSignatures(removed.docs.map((d) => this.#fromFirestore(d.id, d.data())), this.#signing.keyring),
+        peopleMap);
     }, reports);
     for (const r of reports) reportTampered(r);
     found?.push(...reports);
@@ -131,12 +163,13 @@ export class FirestoreEventStore implements EventStore {
   async listBare(page: string): Promise<Event[]> {
     const r = await this.#db.collection('events').where('page', '==', page).get();
     const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
-    return [...r.docs]
+    const reports: TamperReport[] = [];
+    const out = withSignatures([...r.docs]
       .sort((a, b) => byServerTime(at(a), at(b)))
-      .map((d) => {
-        const { textHash: _t, snapshotHash: _s, ...e } = this.#fromFirestore(d.id, d.data());
-        return { ...e, text: null, snapshot: null, authorId: e.author };
-      });
+      .map((d) => this.#fromFirestore(d.id, d.data())), this.#signing.keyring, reports)
+      .map(({ textHash: _t, snapshotHash: _s, ...e }) => ({ ...e, text: null, snapshot: null, authorId: e.author }));
+    for (const r of reports) reportTampered(r);
+    return out;
   }
 
   // The people table, laid out as FIRESTORE_PEOPLE says: `people/{id}` holds the row, and
@@ -191,7 +224,7 @@ export class FirestoreEventStore implements EventStore {
     await this.#db.terminate();
   }
 
-  #fromFirestore(id: string, d: FirebaseFirestore.DocumentData): RawEvent<Event> {
+  #fromFirestore(id: string, d: FirebaseFirestore.DocumentData): RawEvent<Event> & Partial<Seal> {
     return {
       ...stored(d as NewEvent, id, d.author, d.when?.toDate?.().toISOString() ?? new Date(0).toISOString()),
       // Absent on a document from before texts were extracted, and on `text`/`snapshot` `stored`
@@ -199,6 +232,8 @@ export class FirestoreEventStore implements EventStore {
       // pre-extraction SQLite row.
       textHash: (d.textHash as string | null | undefined) ?? null,
       snapshotHash: (d.snapshotHash as string | null | undefined) ?? null,
+      // Whatever the document holds, of whatever type: `verifyRow` refuses anything but strings.
+      envelope: d.envelope, sig: d.sig, kid: d.kid,
     };
   }
 }

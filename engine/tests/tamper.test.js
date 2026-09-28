@@ -17,6 +17,7 @@ import {
 } from '../api/tamper.ts';
 import { EVENT_TYPES } from '../api/types.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
+import { signing } from './helpers/signing.js';
 
 const OWNER = 'owner@example.org';
 const ADMIN = 'lead@example.org';
@@ -317,7 +318,7 @@ test('every case the server can send has its sentence in every dictionary', () =
 test('the acknowledgement does not repair the text: it still reads as tampered, and is still reported', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-tamper-'));
   const path = join(dir, 'events.db');
-  const s = new SqliteEventStore(path);
+  const s = new SqliteEventStore(path, signing);
   try {
     // A direct writer: an event whose hash is of a text its own row does not hold.
     const db = new DatabaseSync(path);
@@ -326,8 +327,10 @@ test('the acknowledgement does not repair the text: it still reads as tampered, 
     db.prepare("INSERT INTO texts (event, field, value, salt) VALUES ('e1', 'text', 'a forged text', ?)").run(newSalt());
     db.close();
 
+    // The row is also not signed — a direct writer holds no key — and that is its own finding, beside
+    // the text's; this test is about the text's.
     const found = [];
-    const [finding] = openFindings(found, await s.list(null, found));
+    const finding = openFindings(found, await s.list(null, found)).find((f) => f.field === 'text');
     assert.equal(finding?.kind, 'overwritten');
     // As the route appends it, with the `asAgent` it stamps from the identity it saw.
     const incoming = acknowledgementOf(finding);
@@ -339,7 +342,8 @@ test('the acknowledgement does not repair the text: it still reads as tampered, 
     const e1 = after.find((e) => e.id === 'e1');
     assert.equal(e1.textTampered, true, 'the field goes on reading as tampered');
     assert.equal(e1.text, null, 'and its forged value is still not handed out');
-    assert.deepEqual(again.map((r) => r.finding), [finding.finding], 'and the read still reports it, for the CRITICAL line');
-    assert.deepEqual(openFindings(again, after), [], 'only the banner is quiet');
+    assert.deepEqual(again.filter((r) => r.field === 'text').map((r) => r.finding), [finding.finding],
+      'and the read still reports it, for the CRITICAL line');
+    assert.deepEqual(openFindings(again, after).filter((f) => f.field === 'text'), [], 'only the banner is quiet');
   } finally { await s.close(); rmSync(dir, { recursive: true, force: true }); }
 });

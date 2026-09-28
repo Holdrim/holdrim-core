@@ -1,6 +1,13 @@
-# Brings Holdrim up on your machine.
+# Brings Holdrim up on your machine. Once, the key the server signs every event with — readable by
+# you alone, and kept out of the repository and out of the data volume, since whoever holds it can
+# sign a lock (SECURITY.md, "The signing key"):
 #
-#   HOLDRIM_OWNER=you@example.org docker compose up
+#   export HOLDRIM_OWNER=you@example.org
+#   docker compose run --rm --no-deps -u "$(id -u)" -v "$PWD:/out" holdrim /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
+#
+# and then, every time:
+#
+#   HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" docker compose up
 #
 # The first-access password is never in the log; read it from the data volume, then sign in:
 #
@@ -15,6 +22,9 @@ services:
       - "${HOLDRIM_PORT:-8080}:8080"
     environment:
       HOLDRIM_OWNER: "${HOLDRIM_OWNER:?set HOLDRIM_OWNER to the e-mail of whoever approves}"
+      # Empty rather than refused here, so the one-time `run` above can make the key before one
+      # exists; the service itself refuses to start on an empty key, and says how to make one.
+      HOLDRIM_SIGNING_KEY: "${HOLDRIM_SIGNING_KEY:-}"
       HOLDRIM_ENVIRONMENT: Production
       # Point it at your mounted documentation (see the commented volume below).
       HOLDRIM_SITE: "${HOLDRIM_SITE:-/app/examples/hello-world}"
