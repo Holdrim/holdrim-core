@@ -190,11 +190,17 @@ function readFolders(configured, root) {
  * and `admins`. docs/ROLES.md, "Authority comes from the deployment only": role definitions and
  * grants are events from the settings screen, by the owner alone — a later piece, not this file.
  *
+ * `signingKey` and `publicKeys` joined it with signed events (#50): the keys a reader trusts decide
+ * which ✓ is a lock, so a public key named in the file would let whoever commits — or the agent
+ * applying a request — sign their own locks with a key of their own; and a private key in a
+ * versioned file is a private key in every clone. `signing` too, the name a nested setting would
+ * take. They live in the environment where the server and the reader run (engine/api/signing.ts).
+ *
  * Refused, not ignored: an adopter who wrote `owner` there believes it counts. Ignored, the key
  * would sit in the file looking authoritative while the variable decided — and the day someone
  * read the file to find out who the owner is, it would answer wrong.
  */
-const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'agents', 'roles', 'grants'];
+const AUTHORITY_KEYS = ['owner', 'admins', 'locks', 'agents', 'roles', 'grants', 'signing', 'signingKey', 'publicKeys'];
 
 /**
  * Where each authority key actually lives — docs/ROLES.md, "Where everything lives" (section 5) —
@@ -210,6 +216,9 @@ const AUTHORITY_HOMES = {
   agents: 'HOLDRIM_AGENTS, set where Holdrim runs',
   roles: 'the owner, from the settings screen (/engine/settings), and never this file',
   grants: 'the owner, from the settings screen (/engine/settings), and never this file',
+  signing: 'HOLDRIM_SIGNING_KEY or HOLDRIM_SIGNING_KEY_FILE, set where the server runs',
+  signingKey: 'HOLDRIM_SIGNING_KEY or HOLDRIM_SIGNING_KEY_FILE, set where the server runs',
+  publicKeys: 'HOLDRIM_PUBLIC_KEYS, set where the server and each reader run',
 };
 
 /**

@@ -254,10 +254,14 @@ test('a holdrim.json naming an authority key refuses to load, and says where it 
   const home = {
     owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS', agents: 'HOLDRIM_AGENTS',
     roles: 'the settings screen', grants: 'the settings screen',
+    signing: 'HOLDRIM_SIGNING_KEY or HOLDRIM_SIGNING_KEY_FILE', signingKey: 'HOLDRIM_SIGNING_KEY or HOLDRIM_SIGNING_KEY_FILE',
+    publicKeys: 'HOLDRIM_PUBLIC_KEYS',
   };
   for (const [key, value] of [['owner', 'file@example.org'], ['admins', ['a@example.org']],
     ['locks', 'a@example.org:A01'], ['owner', null], ['agents', []],
-    ['roles', { 'clinical-lead': ['triage'] }], ['grants', { 'x@example.org': [{ role: 'clinical-lead' }] }]]) {
+    ['roles', { 'clinical-lead': ['triage'] }], ['grants', { 'x@example.org': [{ role: 'clinical-lead' }] }],
+    // Signed events (#50): a key named in the file would let whoever commits decide what is a lock.
+    ['publicKeys', ['MCowBQYDK2VwAyEA']], ['signingKey', 'a key, pasted into the file'], ['signing', { key: 'x' }]]) {
     for (const env of [{}, { HOLDRIM_OWNER: 'env@example.org', HOLDRIM_ADMINS: 'x@example.org' }]) {
       assert.throws(() => readConfig('/p', file({ name: 'Handbook', [key]: value }), env),
         (e) => e instanceof Error && e.message.includes(`/p/holdrim.json names "${key}"`)

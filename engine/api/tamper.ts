@@ -36,13 +36,13 @@ export { TAMPER_KINDS };
 /** The sentence the panel says for a case — a key, never prose: the panel translates it. */
 export const tamperKey = (kind: TamperKind): string => `panel.tamper.${kind}`;
 /** The name of the field in the reader's language — `text` and `snapshot` are contract values. */
-export const tamperFieldKey = (field: TextField): string => `panel.tamper.field.${field}`;
+export const tamperFieldKey = (field: TextField | 'event'): string => `panel.tamper.field.${field}`;
 
 /** One open finding, as `GET /api/tampered` answers it. */
 export interface Finding {
   finding: string;
   event: string;
-  field: TextField;
+  field: TextField | 'event';
   kind: TamperKind;
   page: string | null;
   block: string | null;

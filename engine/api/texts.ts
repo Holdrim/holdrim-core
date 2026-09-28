@@ -193,7 +193,13 @@ export function resolveRemovedBy(removed: Removed | null | undefined, displays: 
  *   store that can tell "before extraction" from "after, with the hash stripped" reports this kind;
  *   see `afterExtraction` on `RawEvent` for which ones can.
  */
-export const TAMPER_KINDS = ['overwritten', 'unaccounted', 'double_removal', 'downgraded'] as const;
+/**
+ * - `unsigned`, `forged`: not a text but the event itself (field `event`), found by `withSignatures`
+ *   (engine/api/signing.ts) — a row with no signature, or one whose signature, key or columns do not
+ *   hold. Reported through this same door so the banner, the acknowledgement, `holdrim list`'s
+ *   `tampered` and `sync`'s exit code need no second channel.
+ */
+export const TAMPER_KINDS = ['overwritten', 'unaccounted', 'double_removal', 'downgraded', 'unsigned', 'forged'] as const;
 /** Derived from `TAMPER_KINDS`, never written out a second time: that list is what the panel's
  *  dictionaries are held to (engine/tests/tamper.test.js), so a case added here without one fails. */
 export type TamperKind = typeof TAMPER_KINDS[number];
@@ -201,10 +207,13 @@ export type TamperKind = typeof TAMPER_KINDS[number];
 /** One field a reader resolved to tampered — the text itself never travels in this, only where. */
 export interface TamperReport {
   event: string;
-  field: TextField;
+  /** A text field, or `event` for the event as a whole: its signature (engine/api/signing.ts). */
+  field: TextField | 'event';
   kind: TamperKind;
   /** `findingOf`'s answer: what an acknowledgement names (engine/api/tamper.ts). */
   finding: string;
+  /** For the log line only, in English: what about a signature did not hold. */
+  reason?: string;
 }
 
 /**
@@ -214,7 +223,7 @@ export interface TamperReport {
  * LATER tampering of the same field, which is the one thing an alert that can be acknowledged must
  * never do.
  */
-export function findingOf(event: string, field: TextField, kind: TamperKind, observed: string): string {
+export function findingOf(event: string, field: TextField | 'event', kind: TamperKind, observed: string): string {
   return createHash('sha256').update([event, field, kind, observed].join('\u0000'), 'utf8').digest('hex');
 }
 
@@ -263,6 +272,14 @@ export function observedOf(recorded: string | null, row: TextRow | undefined, re
  * line ahead of the document breaks parsing exactly when the reader most needs `tampered: true`.
  */
 export function reportTampered(report: TamperReport, write?: (line: string) => void): void {
+  if (report.field === 'event') {
+    // Its own event name, `event_unsigned` or `event_forged`, so an alert rule can tell a row with
+    // no signature from a text edited in place without parsing the English.
+    console.error(`holdrim: CRITICAL — event ${report.event} is not signed by this server (${report.reason ?? report.kind}): `
+      + 'it was written to the store outside the product, and counts for nothing. Rotate the store\'s credentials.');
+    log('CRITICAL', `event_${report.kind}`, { eventId: report.event, reason: report.reason, finding: report.finding }, write);
+    return;
+  }
   console.error(`holdrim: CRITICAL — event ${report.event}, field ${report.field} reads as tampered ` +
     `(${report.kind}): the store was written to outside the product. Rotate its credentials.`);
   // `eventId`, not `event`: `log()`'s own second argument IS `event` — the stable, greppable NAME
