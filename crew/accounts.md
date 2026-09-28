@@ -8,6 +8,7 @@ owner merges.
 |---|---|---|---|
 | @Garbiati | 7923867 | Alessandro Garbiati, the owner | owner |
 | @holdrim-orchestrator | 333497607 | machine account, operated by the owner, running Claude Code | orchestrator (triage) |
+| @holdrim-reviewer | 333201923 | machine account, operated by the owner, running ChatGPT (OpenAI); was @kazukimazda | reviewer (read) |
 
 The numeric id is what counts: a login can be renamed and then taken by someone else, an id cannot
 (`autonomy.md` matches an event's actor by it).

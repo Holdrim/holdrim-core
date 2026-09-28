@@ -20,7 +20,9 @@ services:
     volumes:
       - secrets:/home/crew/.secrets
       - gh-config:/home/crew/.config/gh
+      - state:/home/crew/.state
 
 volumes:
   secrets:
   gh-config:
+  state:

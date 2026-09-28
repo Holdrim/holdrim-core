@@ -3,6 +3,23 @@
 One unattended pass of the orchestrator, in a container that holds only the machine account's
 credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this folder only starts it.
 
+## What a pass does
+
+1. Checks that the GitHub token is @holdrim-orchestrator's and that `../accounts.md` still lists it.
+2. `board.js snapshot` reads every open issue and pull request into files: labels, comments, the
+   label timeline, head commit and checks. If the owner put `paused` on the handoff issue, the
+   pass ends here; if nothing changed since the last pass that ran the model, it ends here too.
+3. The model reads those files and the crew rules and answers in JSON. It runs with `Read`, `Grep`
+   and `Glob` only, confined to `/work`, with no MCP server and no GitHub token in its environment:
+   it cannot run a command, reach the network, or read the tokens under the home directory.
+4. `board.js publish` applies the answer, and only the part the orchestrator may do: comments and
+   `needs:`/`working:` labels on items already open, one comment per item, never twice under the
+   same key, never removing `needs:owner`, never carrying a token. Everything else is refused and
+   logged.
+
+Pause it from GitHub by adding `paused` to the handoff issue from the owner's account; remove the
+label to resume. A `paused` from any other account is logged and ignored.
+
 ## Credentials
 
 Two, both passed at `docker run` and kept in a file that lives on the host, never in git:
