@@ -144,7 +144,10 @@ export async function brief(root: string, source: Pick<Source, 'events'> & Parti
     lines.push('## Thread');
     lines.push('');
     for (const e of r.history) {
-      lines.push(`- ${formatWhen(e.when)} ${personLabel(peopleShow, roles, e.author)}: ${e.type === 'supplement' ? 'added more' : String(e.data?.state ?? e.type)}${e.text ? ` — ${e.text.replace(/\n/g, ' ')}` : ''}`);
+      // Marked, and never left out: an entry the server did not sign may be somebody's forgery, and
+      // an agent that took its words for the owner's would act on them (#50).
+      const unsigned = e.signed ? '' : ' [NOT SIGNED by the server: not the owner\'s word, and counts for nothing]';
+      lines.push(`- ${formatWhen(e.when)} ${personLabel(peopleShow, roles, e.author)}: ${e.type === 'supplement' ? 'added more' : String(e.data?.state ?? e.type)}${unsigned}${e.text ? ` — ${e.text.replace(/\n/g, ' ')}` : ''}`);
     }
   }
   lines.push('');

@@ -6,7 +6,9 @@
     "",
     "  docker run -p 8080:8080 -v data:/data \\",
     "    -v $PWD/examples/hello-world:/content -e HOLDRIM_SITE=/content \\",
-    "    -e HOLDRIM_OWNER=you@example.org holdrim",
+    "    -e HOLDRIM_OWNER=you@example.org -e HOLDRIM_SIGNING_KEY=\"$(cat holdrim-signing.key)\" holdrim",
+    "",
+    "  The signing key is made once: README.md, \"In two minutes\".",
     "",
     "  Without Docker, from the repository root:  bash engine/run-local.sh examples/hello-world"
   ],

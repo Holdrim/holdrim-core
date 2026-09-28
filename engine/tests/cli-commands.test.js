@@ -409,14 +409,10 @@ function duplicateA0111(dir) {
   writeFileSync(page, html.replace(tag, '<p data-id="A01.1.1" hidden>copy</p>' + tag));
 }
 
-/** An events file holding the owner's ✓ on A01.1.1's current text, after the store's baseline. */
+/** An events file holding the owner's ✓ on A01.1.1's current text, signed with the test key. */
 async function approvedA0111(dir) {
   const db = join(dir, 'events.db');
   const store = new SqliteEventStore(db, signing);
-  await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, 'you@example.org');
-  // `append` stamps its own time: without a gap, the ✓ could share the baseline's millisecond and
-  // read as predating it, which is a different rule (`legacyLock`) than the one this is about.
-  await new Promise((resolve) => setTimeout(resolve, 5));
   const fingerprint = (await readBlocks(dir)).get('A01.1.1').fingerprint;
   await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint, data: { locks: 'true' } },
     'you@example.org');
@@ -747,7 +743,7 @@ function projectFiles(dir) {
     .map((f) => { const file = join(f.parentPath, f.name); return [file, readFileSync(file)]; }));
 }
 
-/** A store holding the lock baseline and one owner's ✓ on A01.1.1, at `fingerprint`, and its id. */
+/** A store holding one owner's ✓ on A01.1.1, at `fingerprint`, signed with the test key, and its id. */
 async function approvedDb(dir, fingerprint) {
   const db = join(dir, 'events.db');
   const store = new SqliteEventStore(db, signing);

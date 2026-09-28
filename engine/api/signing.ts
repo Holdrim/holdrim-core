@@ -332,24 +332,25 @@ export type Verdict =
   | { signed: false; kind: SignatureKind; reason: string };
 
 /**
- * Seals already checked, per key. Events never change, so a seal that verified once verifies again,
- * and without this a whole-site read pays one Ed25519 check per event on every request — about a
- * tenth of a millisecond each, seconds for a long history. Only successes are kept, keyed by the key
- * object itself, so a reader with another keyring — a key retired — never inherits an answer given
- * under a key it does not hold. An entry is a digest of the signature AND the envelope together: a
- * memo keyed by the signature alone would accept a genuine signature beside a forged envelope.
+ * Seals already checked. Events never change, so a seal that verified once verifies again, and
+ * without this a whole-site read pays one Ed25519 check per event on every request — about a tenth
+ * of a millisecond each, seconds for a long history. Only successes are kept. An entry is a digest of
+ * the key id, the signature AND the envelope together: a memo keyed by the signature alone would
+ * accept a genuine signature beside a forged envelope. It is asked only once the reader has found
+ * the kid in its own keyring (`verifyRow`), so an entry made under a key can never vouch for an
+ * event to a reader that no longer trusts that key — a retired one is refused before the memo.
  */
-const verified = new WeakMap<KeyObject, Set<string>>();
+const verified = new Set<string>();
 /**
- * A ceiling on the memo, per key: past it the memo starts over, which costs time, never an answer.
- * Well above any history a whole-site read already holds in memory on every request.
+ * A ceiling on the memo: past it the memo starts over, which costs time, never an answer. Well above
+ * any history a whole-site read already holds in memory on every request.
  */
 const MEMO_CEILING = 1_000_000;
 
-function checks(key: KeyObject, envelope: string, sig: string): boolean {
-  const memo = verified.get(key) ?? new Set<string>();
-  const entry = createHash('sha256').update(sig, 'utf8').update('\n').update(envelope, 'utf8').digest('base64');
-  if (memo.has(entry)) return true;
+function checks(kid: string, key: KeyObject, envelope: string, sig: string): boolean {
+  const entry = createHash('sha256').update(kid, 'utf8').update('\n').update(sig, 'utf8').update('\n')
+    .update(envelope, 'utf8').digest('base64');
+  if (verified.has(entry)) return true;
   let ok = false;
   try {
     ok = verify(null, Buffer.from(envelope, 'utf8'), key, Buffer.from(sig, 'base64url'));
@@ -357,9 +358,8 @@ function checks(key: KeyObject, envelope: string, sig: string): boolean {
     ok = false; // a signature of the wrong length, say: not signed, never a crash of the read
   }
   if (ok) {
-    if (memo.size >= MEMO_CEILING) memo.clear();
-    memo.add(entry);
-    verified.set(key, memo);
+    if (verified.size >= MEMO_CEILING) verified.clear();
+    verified.add(entry);
   }
   return ok;
 }
@@ -389,7 +389,7 @@ export function verifyRow(row: SealedRow, keyring: Keyring): Verdict {
   }
   const key = keyring.get(kid);
   if (!key) return { signed: false, kind: 'forged', reason: `signed by key ${kid.slice(0, 32)}, which this reader does not trust` };
-  if (!checks(key, envelope, sig)) return { signed: false, kind: 'forged', reason: 'a signature that does not verify' };
+  if (!checks(kid, key, envelope, sig)) return { signed: false, kind: 'forged', reason: 'a signature that does not verify' };
   const fields = fieldsOf(envelope);
   if (!fields) return { signed: false, kind: 'forged', reason: 'an envelope of a shape this version does not read' };
   for (const c of COLUMNS) {

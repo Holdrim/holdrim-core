@@ -63,6 +63,21 @@ test('every field is bound: editing any one inside the envelope breaks the signa
   assert.equal(verifyRow({ ...row, data: a[11], envelope: JSON.stringify(a) }, keyring).signed, false, 'data.locks edited');
 });
 
+/**
+ * The memo of seals already checked must not become a way round the check: a genuine signature, once
+ * verified, beside an envelope edited afterwards, is checked again and fails. A memo keyed by the
+ * signature alone would answer "verified" from the first read.
+ */
+test('a signature already verified does not vouch for an envelope it was not made over', () => {
+  const row = sealedRow({ ...FIELDS, id: 'memo-1' });
+  assert.equal(verifyRow(row, keyring).signed, true, 'verified once, and remembered');
+  const a = JSON.parse(row.envelope);
+  a[11] = { ...a[11], locks: 'false' };
+  const edited = { ...row, data: a[11], envelope: JSON.stringify(a) };
+  assert.equal(verifyRow(edited, keyring).signed, false, 'the same signature, another envelope');
+  assert.equal(verifyRow(row, keyring).signed, true, 'and the genuine one still verifies');
+});
+
 /** A column changed beside a genuine envelope: the envelope still verifies, and the row is a forgery. */
 test('a row column that disagrees with its envelope reads as forged, whichever column it is', () => {
   const row = sealedRow(FIELDS);
@@ -111,6 +126,7 @@ test('a key the reader does not trust signs nothing, and only the key the kid na
   // holds, or took the first, would accept it under the wrong name.
   const both = loadKeyring({ HOLDRIM_PUBLIC_KEYS: other.publicKey }, signer);
   assert.equal(verifyRow(byOther, both).signed, true, 'trusted once the reader names it');
+  assert.equal(verifyRow(byOther, keyring).signed, false, 'and a reader that does not, after it was verified once, still does not');
   const relabelled = { ...byOther, kid: signer.kid };
   assert.equal(verifyRow(relabelled, both).signed, false, 'right kid, another key\'s signature');
   assert.equal(verifyRow(relabelled, both).reason, 'a signature that does not verify');

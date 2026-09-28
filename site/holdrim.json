@@ -4,7 +4,7 @@
     "approves, and a claim that stops being true turns yellow or red like anyone else's. It is served",
     "by the engine itself.",
     "",
-    "  HOLDRIM_OWNER=you@example.org HOLDRIM_SITE=$PWD/site docker compose up",
+    "  HOLDRIM_OWNER=you@example.org HOLDRIM_SIGNING_KEY=\"$(cat holdrim-signing.key)\" HOLDRIM_SITE=$PWD/site docker compose up",
     "",
     "The owner is set where it is deployed, never here: this file travels in a public repository."
   ],

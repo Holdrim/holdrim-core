@@ -62,8 +62,9 @@ const emulator = (): string | undefined => process.env.FIRESTORE_EMULATOR_HOST |
  * A Firestore `timestampValue`, normalized to the plain ms ISO string the server itself writes and
  * compares (round 2's review, MINOR). Firestore's own JSON mapping for a timestamp
  * (`google.protobuf.Timestamp`) emits 0, 3, 6 or 9 fractional digits depending on the value, while
- * every comparison of `when` in this codebase (`legacyLock`, `earliestLockBaseline`, this file's own
- * history sort) is a plain `<`/`localeCompare` on the raw string. Left un-normalized, a whole-second
+ * every comparison of `when` in this codebase (the cycle's own ordering, `removalsOf`, this file's
+ * own history sort) is a plain `<`/`localeCompare` on the raw string, and the `when` a signed
+ * envelope carries is compared with this one character for character. Left un-normalized, a whole-second
  * timestamp sorts AFTER a fractional one from the same second — `'…10:00:00Z' > '…10:00:00.5Z'`
  * lexically, because `Z` (0x5A) sorts after `.` (0x2E) — even though the first is the LATER instant.
  * `Date` accepts any of the four shapes and always answers back with exactly three digits, matching

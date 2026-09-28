@@ -153,10 +153,9 @@ Worth knowing before you run it:
     Such a row is not signed, though: it reads as `event_unsigned`, CRITICAL, and counts for
     nothing, whatever text it carries. The text check and the signature answer two questions — was
     this text changed, and did the server write this event — and a forgery has to beat both.
-  - **Firestore.** No equivalent boundary exists, and none is cheap to build: a direct writer sets
-    `when` as a plain field, not a value Firestore itself enforces came from `FieldValue.serverTimestamp()`
-    — there are no Firestore Security Rules in this project restricting it (identity is IAM, not
-    per-field rules) — so a forged document can claim any `when`, including one that predates the
+  - **Firestore.** No equivalent boundary exists, and none is cheap to build: `when` is a plain
+    field — there are no Firestore Security Rules in this project restricting it (identity is IAM,
+    not per-field rules) — so a forged document can claim any `when`, including one that predates the
     real migration. The downgrade this closes for SQLite is therefore open for Firestore: a forged
     event with a stripped hash and an inline value, backdated, reads as a genuine pre-extraction row
     as far as its text goes. The signature closes it: such a document is not signed, reads as

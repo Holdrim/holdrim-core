@@ -200,10 +200,11 @@ export const GUARDS: Record<string, string> = {
   // in a warning (holdrim#89) — that catches a guard left dropped, not a person who puts it back:
   // dropping this guard, deleting the row and recreating the trigger by its exact text leaves
   // nothing this check can see, and neither does emptying every table. `removalsOf` (engine/api/texts.ts)
-  // refuses a forged event dated, or placed, no later than the event it names, which closes the
-  // easy version of the forgery path; one dated and ordered correctly, or a trigger dropped
-  // outright, is not caught here and needs signed events (docs/PRIVACY.md, phase E) to close for
-  // good.
+  // refuses a forged event dated, or placed, no later than the event it names, and counts only a
+  // removal this server signed (engine/api/signing.ts, #50): the forged one this WHEN clause lets
+  // through explains nothing, and the row it let go reads as `unaccounted`. What neither closes is
+  // a genuine event deleted with its texts, which leaves nothing to compare (SECURITY.md, "Known
+  // limits").
   texts_no_delete: `BEFORE DELETE ON texts
     WHEN NOT EXISTS (
       SELECT 1 FROM events WHERE type = '${TEXT_REMOVED}'
@@ -234,8 +235,9 @@ export const GUARDS: Record<string, string> = {
  * never had this guard to begin with. That catches a guard left dropped, not a person who puts it
  * back: dropping a guard, changing the rows it protected and recreating the trigger by its exact
  * text leaves nothing this check can see, and neither does emptying every table in the same
- * sitting — both leave a file indistinguishable from a real first install. Only signed events
- * (docs/PRIVACY.md, phase E) close that.
+ * sitting — both leave a file indistinguishable from a real first install. Signed events (#50,
+ * engine/api/signing.ts) make whatever was written in the meantime count for nothing; an event
+ * deleted in the meantime stays invisible (SECURITY.md, "Known limits").
  *
  * The repair runs in one IMMEDIATE transaction: between a DROP and its CREATE the table would have
  * no guard, and another process with the file open could REPLACE a ✓ in that gap. A failure halfway
