@@ -379,7 +379,9 @@ test('a changed board runs the model as its own user, with the Claude token and 
   assert.equal(r.status, 0, r.out);
   assert.match(r.calls, /setpriv --reuid=model\nargv --reuid=model --regid=model --init-groups --no-new-privs env -i [\s\S]*?\nclaude GH_TOKEN=none CLAUDE=cl-secret HOME=\/home\/model/);
   assert.doesNotMatch(r.calls.replace(/^claude GH_TOKEN=.*$/m, ''), /cl-secret|gh-secret/, 'no token is ever an argument, where any process could read it');
-  assert.doesNotMatch(r.calls, /setpriv --reuid=model\n(?:(?!board).)*gh/s, 'nothing but the model runs as model');
+  const start = r.calls.indexOf('setpriv --reuid=model');
+  const modelStep = r.calls.slice(start, r.calls.indexOf('setpriv --reuid=crew', start));
+  assert.doesNotMatch(modelStep, /^(gh|git|board) /m, 'nothing but the model runs as model');
   assert.match(r.calls, /setpriv --reuid=crew\nargv [^\n]*board\.js snapshot[^\n]*\nboard snapshot/);
   assert.match(r.calls, /setpriv --reuid=crew\nargv [^\n]*board\.js publish[^\n]*\nboard publish/);
   assert.equal(r.recorded, 'new', 'a pass that answered records the digest');
