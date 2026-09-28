@@ -67,6 +67,15 @@ These are always CRITICAL, whatever the change says about them:
   and whoever needs the construct changes the guard on purpose. A check that read `.dockerignore`'s
   `!` lines for the names of the test-only paths stayed green for a glob that named none of them
   and still re-included one.
+- **The guarantee, at every later step.** When a finding is an escalation and the fix closes it at
+  one step, ask the finding's original question again at every later step of the same flow before
+  calling it closed. Making a request filed by a triager limited to some pages start at triage did
+  not yet give "a scoped triager never decides their own request": the step that ends triage still
+  had to be asked, and it was the next round's finding.
+- **A tie that only older data holds.** A lock or a guard that holds through a link only older data
+  carries — the lock baseline's author id, read as an address through that person's row — is named,
+  and an operation that would cut the link refuses instead. Removing the person whose row makes
+  their oldest ✓s locks is refused, because forgetting the row would silently un-lock them.
 
 ## Severity
 

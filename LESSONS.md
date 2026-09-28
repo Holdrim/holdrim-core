@@ -129,6 +129,24 @@ Locks, tamper detection, the stores, and who holds authority.
   `engine/tests/workflows.test.js`, "the image ships no test-only paths", and as a general rule in
   `.claude/agents/review-locks.md`, under "What else you look for".
 
+- **When a fix closes an escalation at one step, the finding's original question is asked again at
+  every later step of the same flow.** Taught by round 2 of #176: round 1 made a request filed by a
+  triager limited to some pages start at triage, and the step that ends triage still had to hold
+  "a scoped triager never decides their own request". Lives in: `.claude/agents/review-locks.md`,
+  under "What else you look for".
+- **A lock that holds through a link only older data carries is never cut by a later operation,
+  which refuses instead.** Taught by round 1 of #180: the oldest ✓s are locks because the lock
+  baseline's author id reads as the first owner's address through their row, so removing that
+  person is refused while such a ✓ names them. Lives in: `removePerson`
+  (`engine/api/person-removal.ts`, `api.removal.holdsOldLocks`), and
+  `.claude/agents/review-locks.md`, under "What else you look for".
+- **An operation of several writes that cannot be undone keeps every guarantee it claims at each
+  step boundary, a stop after a failure included, and a second run finishes it.** Taught by round 1
+  of #180, whose first order freed a person's address before forgetting the row that leads from it
+  to them, and by its round 2, which found the same guarantee held only for a person with an
+  account. Lives in: the order of `removePerson` (`engine/api/person-removal.ts`), and
+  `.claude/agents/review-correctness.md`, under "What you look for".
+
 ## Proof
 
 - **A test whose expected value is computed by the function under test proves nothing.** Taught by
@@ -149,8 +167,12 @@ Locks, tamper detection, the stores, and who holds authority.
   for the resolved values.** Taught by #28. Lives in: not yet.
 - **A test that cannot fail, guarding a lock, is CRITICAL whatever the tier.** Taught by #34. Lives
   in: `.claude/agents/review-proof.md`, under Severity.
-- **An equivalent mutant is read as a sign that the comment's reason is wrong, not only that the
-  test is.** Taught by round 1 of #109. Lives in: not yet.
+- **An equivalent mutant is read as a sign that the code or its comment should change, not only
+  that the test is weak: the redundant part goes, or the reason it stays is written beside it.**
+  Taught by round 1 of #109, and by #179, whose `isOwnRequest` conjunct no input can tell from its
+  absence; its reason was in a commit body until the review asked for it in the code. Lives in:
+  `.claude/agents/review-proof.md`, under "An equivalent mutant", and the comment on `ownOnly` in
+  `engine/api/server.ts`.
 
 - **A test that must tell two refusal layers apart asserts the refusal's sentence, not only its
   status.** Taught by #138: "nor acknowledge a finding → 403" stayed green with the allowlist opened,
@@ -181,6 +203,24 @@ Locks, tamper detection, the stores, and who holds authority.
   Lives in: that test, in `engine/tests/login-throttle.test.js`, and
   `.claude/agents/review-proof.md`, under "What you look for".
 
+- **A fixture proves a term only when it reaches what the term decides: an address in another case
+  for a comparison that normalises, two entities in one store for a guard that matches its own,
+  times across a second for a comparator's seconds term.** Taught by #176, where a bystander who had
+  never acted let grants survive applying to everyone, and appends inside one second let the
+  Firestore comparator survive losing its seconds term; and by round 2 of #180, where an
+  all-lowercase fixture let `namesAddress` survive losing `normalizeEmail`, and one removal per
+  store let the resume guard survive ignoring whose event it found. Lives in:
+  `.claude/agents/review-proof.md`, under "What you look for".
+- **Resuming a stopped operation is proved at every step boundary, not at one.** Taught by round 1
+  of #180. Lives in: the "a run stopped at …" tests in `engine/tests/person-removal.test.js`, and
+  `.claude/agents/review-proof.md`, under "What you look for".
+- **A wait for a server fails loudly, naming the server, its port and why, and a port check tells
+  answering, silent and free apart.** Taught by #179: a server that died on start surfaced ten
+  seconds later as a bare `ERR_CONNECTION_REFUSED` in an unrelated step of the browser run, a cost
+  the review of #176 paid, and a port bound by something that never answers made the pre-start
+  guard hang. Lives in: `waitForHealth` and `portProbe` (`engine/test-browser.js`), and curl's exit
+  28 in the port guard of `engine/test-contract.sh`.
+
 ## Correctness
 
 - **A read-consistency fix on Firestore stays inside the 270-second transaction limit: read
@@ -204,6 +244,23 @@ Locks, tamper detection, the stores, and who holds authority.
   and #168: only someone who can already write to the server's disk can swap a folder between the
   check and the use, and that person is outside what these guards defend. Lives in: not yet.
 
+- **Every path that reaches one decision asks the same question of the same value, and that value
+  is the stored one, never a row built for display.** Taught by round 3 of #176: the home asked
+  whether a request was the viewer's own of a row whose author had been swapped for the name they
+  are shown, so it offered a scoped triager a decision the API then refused; and by #179, where a
+  comment called the browser run's and the contract test's port guards the same guard after only
+  one had learned a third outcome. Lives in: `.claude/agents/review-correctness.md`, under "What you
+  look for"; for the home, `serveHome` asks `statusFor` of the stored request
+  (`engine/api/server.ts`), held by "the home offers a scoped triager no decision on their own
+  request, named or not" (`engine/test-contract.sh`).
+- **A new operation that reads by today's shape names every older shape the stores still hold:
+  events authored by address, from before authors were ids, and texts held inside the event.**
+  Taught by round 1 of #180, whose first removal found texts by author id alone. Lives in:
+  `removePerson` (`engine/api/person-removal.ts`), held by "texts from before ids and before texts
+  moved out are removed where they can be, and counted where they cannot"
+  (`engine/tests/person-removal.test.js`), and `.claude/agents/review-correctness.md`, under "What
+  you look for".
+
 ## Process
 
 The crew, and the review.
@@ -225,13 +282,23 @@ The crew, and the review.
   into every lens prompt.** Taught by #91. Lives in: `.claude/skills/full-review/SKILL.md`, step 3,
   the parts of the prompt.
 - **Before a merge, every lens the tier requires has read the final head, not an earlier round.**
-  Taught by #29, #35, #91. Lives in: not yet. `crew/orchestrator.md` asks for the tier's review,
-  not which commit it read.
+  Taught by #29, #35, #91, and by #176, merged while its proof lens's round 3 still ran; that
+  lens's findings became #179 within the hour, which is the cheap way out when the owner chooses
+  to merge first. Lives in: `crew/orchestrator.md`, "Handing a merge to the owner", for naming a
+  lens still running and turning its findings into a follow-up; not yet for checking which commit
+  each lens read.
 - **From round 3, a fix goes to a fresh developer with a brief, not to a resumed one whose context
   has grown to hundreds of thousands of tokens.** Taught by #28, #107 (see Cost). Lives in: not yet.
-- **Every run that boots a server gets its own `PORT`.** Taught by #104, #128. Lives in:
-  `engine/test-contract.sh`, which spreads its default port and refuses one already taken. Not yet
-  for `npm run browser`, which defaults to one fixed port.
+- **Every run that boots a server gets its own `PORT`.** Taught by #104, #128, and a browser run
+  during #176 whose server lost its port to another run. Lives in: `engine/test-contract.sh`, which
+  spreads its default port and refuses one already taken. Not yet for `npm run browser`, which
+  still defaults to one fixed port, though since #179 it names the port when that goes wrong.
+- **Every test run gets a store of its own, and a failure seen while other runs share a resource
+  is run again alone before it is reported.** Taught by the proof runs of #180, where parallel runs
+  shared one Postgres database, as recorded by the crew rather than on the pull request. Lives in:
+  the Firestore conformance suites, which open a fresh project every time for this reason
+  (`engine/tests/users-conformance.test.js`). Not yet for Postgres, whose suite empties and reuses
+  one database by default (`HOLDRIM_TEST_POSTGRES`).
 - **Before trusting a contract failure as your own, run it on the base.** Taught by #126, #127.
   Lives in: not yet.
 - **Before pushing, check that the remote branch does not already exist; never force.** Taught by
@@ -270,8 +337,9 @@ The crew, and the review.
   finding assumes, or whether the actor it needs is inside the threat model.
 - **Every pull request answers the three questions in its body.** Taught by the fourteen pull
   requests merged between #145 and this pass, #154 to #171: none has the section, though the
-  template asks for it, so none recorded its cost either. Lives in: not yet.
-  `.github/PULL_REQUEST_TEMPLATE.md` asks, and nothing refuses a body without the answers.
+  template asks for it, so none recorded its cost either. Since then #174 to #180 all answer them,
+  though none gives tokens. Lives in: not yet. `.github/PULL_REQUEST_TEMPLATE.md` asks, and nothing
+  refuses a body without the answers.
 
 ## Cost
 
