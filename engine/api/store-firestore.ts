@@ -1,6 +1,6 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { byServerTime } from './firestore-order.ts';
-import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
+import { claimGiven, stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
 import { noText, saltFields, textKey, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent, type TextField, type TamperReport } from './texts.ts';
@@ -182,6 +182,29 @@ export class FirestoreEventStore implements EventStore {
       const held = current.data()![LAYOUT.email] as string | null;
       if (held != null) tx.delete(this.#db.collection(LAYOUT.pointers).doc(LAYOUT.pointerId(held)));
       tx.update(row, { [LAYOUT.email]: null });
+    });
+  }
+
+  // The removal claims, `removal_claims/{person id}`: `{ holder, expires }`. Read and written in one
+  // transaction, which Firestore retries when another claim commits in between, so two server
+  // instances claiming one removal cannot both be answered true.
+
+  async claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean> {
+    const claim = this.#db.collection('removal_claims').doc(person);
+    return this.#db.runTransaction(async (tx) => {
+      const h = (await tx.get(claim)).data();
+      const held = h ? { holder: h.holder as string, expires: h.expires as string } : null;
+      if (!claimGiven(held, person, holder, now, until)) return false;
+      tx.set(claim, { holder, expires: until });
+      return true;
+    });
+  }
+
+  async releaseRemoval(person: string, holder: string): Promise<void> {
+    const claim = this.#db.collection('removal_claims').doc(person);
+    await this.#db.runTransaction(async (tx) => {
+      const held = await tx.get(claim);
+      if (held.data()?.holder === holder) tx.update(claim, { expires: '' });
     });
   }
 

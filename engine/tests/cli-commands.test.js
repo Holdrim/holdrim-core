@@ -530,6 +530,15 @@ test('list --db exits non-zero and names a trigger that is not a guard at all', 
   assertNamed(db, dir, 'x_ignore', 'foreign', /the database holds a trigger this version does not install, "x_ignore"/);
 });
 
+test('list --db names a trigger on the removal claims, a table the server writes beside the events', async (t) => {
+  const dir = project(t);
+  const { db } = await guardedDb(dir);
+  outside(db, `CREATE TRIGGER x_claims AFTER INSERT ON removal_claims BEGIN
+    INSERT INTO events (id, type, page, author, happened_at) VALUES ('forged' || NEW.person, 'approval', 'A01', 'someone', '2020-01-01T00:00:00.000Z');
+  END`);
+  assertNamed(db, dir, 'x_claims', 'foreign', /the database holds a trigger this version does not install, "x_claims"/);
+});
+
 test('list --db with every guard in place: guardsTampered false, exit 0, and nothing said about a guard', async (t) => {
   const dir = project(t);
   const { db, id } = await guardedDb(dir);

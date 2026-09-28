@@ -25,6 +25,8 @@ import { PERSON_ID } from '../api/people.ts';
 import { createRoles } from '../core/roles.js';
 import { hashText, newSalt, TEXT_REMOVED, NoText } from '../api/texts.ts';
 import { openFindings, acknowledgementOf } from '../api/tamper.ts';
+import { UsersSqlite } from '../api/users-sqlite.ts';
+import { removedTwiceAtOnce, assertOneRemoval } from './helpers/removal.js';
 
 const stores = [
   { name: 'memory', open: async () => new MemoryEventStore() },
@@ -345,6 +347,135 @@ for (const store of stores.filter((s) => s.name !== 'firestore')) {
     } finally { await s.close(); }
   });
 }
+
+// ===================================================================== one removal of a person at a time (#181)
+// `claimRemoval` is what keeps two removals of one person from running side by side, across server
+// instances too: engine/api/person-removal.ts, "One run at a time".
+
+const P = `p_${'a'.repeat(24)}`;
+const at = (minute) => `2026-09-28T10:${String(minute).padStart(2, '0')}:00.000Z`;
+
+forEachStore('a removal is claimed by one holder at a time, renewed by it, and taken over once it ended', async (s) => {
+  assert.equal(await s.claimRemoval(P, 'a', at(0), at(2)), true, 'nobody held it');
+  assert.equal(await s.claimRemoval(P, 'b', at(1), at(3)), false, 'held by another until later than now');
+  assert.equal(await s.claimRemoval(`p_${'b'.repeat(24)}`, 'b', at(1), at(3)), true, 'another person\'s removal is its own');
+  assert.equal(await s.claimRemoval(P, 'a', at(1), at(4)), true, 'its own holder renews it');
+  assert.equal(await s.claimRemoval(P, 'b', at(3), at(5)), false, 'renewed: held past the end it first had');
+  assert.equal(await s.claimRemoval(P, 'b', at(4), at(6)), true, 'ended exactly now: a run that died holding it');
+  assert.equal(await s.claimRemoval(P, 'a', at(5), at(7)), false, 'and the holder it lapsed from has lost it');
+});
+
+forEachStore('a claim ending further off than any run asks for is set aside, and said; one a clock ahead wrote is not', async (s) => {
+  // Written by nothing that honours the claim's length: kept, it would refuse this person's removal
+  // for as long as it says.
+  assert.equal(await s.claimRemoval(P, 'x', at(0), '9999-12-31T00:00:00.000Z'), true);
+  const logged = [];
+  const info = console.log;
+  console.log = (line) => logged.push(line);
+  let given;
+  try {
+    given = await s.claimRemoval(P, 'b', at(1), at(3));
+  } finally {
+    console.log = info;
+  }
+  assert.equal(given, true, 'set aside');
+  const said = logged.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((l) => l?.event === 'removal_claim_void');
+  assert.ok(said.length >= 1 && said.every((l) => l.person === P && l.severity === 'WARNING'), 'and said, by person id');
+  // Another instance whose clock runs a minute ahead: its genuine claim ends a minute past the end
+  // this one would ask for, inside the slack, and holds. Exactly one claim's length past it holds too.
+  const Q = `p_${'c'.repeat(24)}`;
+  assert.equal(await s.claimRemoval(Q, 'ahead', at(1), at(3)), true);
+  assert.equal(await s.claimRemoval(Q, 'here', at(0), at(2)), false, 'a clock ahead is not a forgery');
+  const R = `p_${'d'.repeat(24)}`;
+  assert.equal(await s.claimRemoval(R, 'far', at(0), at(4)), true);
+  assert.equal(await s.claimRemoval(R, 'here', at(0), at(2)), false, 'one whole claim past the end asked for still holds');
+});
+
+forEachStore('a claim is let go of by its holder alone', async (s) => {
+  assert.equal(await s.claimRemoval(P, 'a', at(0), at(2)), true);
+  await s.releaseRemoval(P, 'b');
+  assert.equal(await s.claimRemoval(P, 'c', at(1), at(3)), false, 'let go of by somebody else, it holds');
+  await s.releaseRemoval(P, 'a');
+  assert.equal(await s.claimRemoval(P, 'c', at(1), at(3)), true, 'let go of by its holder, it is free before its end');
+  await s.releaseRemoval(`p_${'b'.repeat(24)}`, 'c');
+  assert.equal(await s.claimRemoval(P, 'a', at(2), at(4)), false, 'nor does letting go of another person\'s touch it');
+});
+
+forEachStore('two claims of one removal at once: one holder', async (s) => {
+  const answers = await Promise.all(['a', 'b', 'c'].map((h) => s.claimRemoval(P, h, at(0), at(2))));
+  assert.equal(answers.filter(Boolean).length, 1, `one of three claims is given it: ${answers}`);
+});
+
+test('[sqlite] two connections to one file — two server processes — share one claim', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-claims-'));
+  const path = join(dir, 'events.db');
+  const one = new SqliteEventStore(path);
+  const two = new SqliteEventStore(path);
+  try {
+    assert.equal(await one.claimRemoval(P, 'a', at(0), at(2)), true);
+    assert.equal(await two.claimRemoval(P, 'b', at(1), at(3)), false, 'the other process sees the claim');
+    await one.releaseRemoval(P, 'a');
+    assert.equal(await two.claimRemoval(P, 'b', at(1), at(3)), true, 'and sees it let go of');
+  } finally {
+    await one.close();
+    await two.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('[sqlite] a claim made while another process is writing one waits for it, and sees it', async () => {
+  // IMMEDIATE takes the write lock before the read: a plain BEGIN would read, then fail to write
+  // with "database is locked" instead of waiting for the other process and answering from its claim.
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-claims-'));
+  const path = join(dir, 'events.db');
+  const store = new SqliteEventStore(path);
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['-e', `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(process.argv[1]);
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('BEGIN IMMEDIATE');
+    db.prepare("INSERT INTO removal_claims (person, holder, expires) VALUES (?, 'a', ?)").run(process.argv[2], process.argv[3]);
+    console.log('locked');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+    db.exec('COMMIT');
+  `, path, P, at(2)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    await new Promise((resolve) => child.stdout.on('data', (d) => { if (String(d).includes('locked')) resolve(); }));
+    let answer;
+    try { answer = await store.claimRemoval(P, 'b', at(0), at(2)); } catch (error) { answer = `threw: ${error.message}`; }
+    assert.equal(answer, false, 'refused, having waited for the other process\'s claim');
+  } finally {
+    await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.on('exit', resolve)));
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('[sqlite] a claim whose write fails leaves no transaction open: the next claim, and another connection\'s write, go through', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-claims-'));
+  const path = join(dir, 'events.db');
+  const store = new SqliteEventStore(path);
+  const raw = new DatabaseSync(path);
+  try {
+    raw.exec("CREATE TRIGGER x_fail BEFORE INSERT ON removal_claims BEGIN SELECT RAISE(ABORT, 'refused'); END");
+    await assert.rejects(store.claimRemoval(P, 'a', at(0), at(2)), /refused/);
+    raw.exec('DROP TRIGGER x_fail');
+    assert.equal(await store.claimRemoval(P, 'a', at(0), at(2)), true, 'the next claim on this connection');
+    raw.exec('PRAGMA busy_timeout = 200');
+    raw.exec("INSERT INTO removal_claims (person, holder, expires) VALUES ('p_other', 'z', '')");
+  } finally {
+    raw.close();
+    await store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+forEachStore('two removals of one person at once: the second is refused while the first runs, and one person_removed says what it did',
+  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(s, new UsersSqlite(':memory:'))); });
+
+forEachStore('two removals of one person at once behind an identity proxy: the same, with no account',
+  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(s, null)); });
 
 // ===================================================================== the stored rows, around the code
 // Asked with SQL written here, not through the store: the claim is about what the file holds.

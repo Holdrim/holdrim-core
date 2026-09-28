@@ -176,6 +176,10 @@ export class UsersSqlite extends UserStoreBase {
 
   protected async writeRemoved(email: string, change: RemovedChange): Promise<boolean> {
     return this.#immediate(() => {
+      if (change.onlyClosed) {
+        const row = this.#db.prepare('SELECT removed FROM users WHERE email = ?').get(email) as { removed: number } | undefined;
+        if (!row?.removed) return false;
+      }
       this.#db.prepare('DELETE FROM sessions WHERE email = ?').run(email);
       const r = this.#db.prepare(
         'UPDATE users SET email = ?, name = COALESCE(?, name), salt = COALESCE(?, salt), hash = COALESCE(?, hash), '

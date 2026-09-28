@@ -188,6 +188,7 @@ export class UsersPostgres extends UserStoreBase {
     // In the address's turn, as creating an account is: an account created for the address while this
     // runs lands before or after it, never half-way through.
     return this.#inAddressTurn(email, async (q) => {
+      if (change.onlyClosed && !(await q('SELECT 1 FROM users WHERE email = $1 AND removed', [email])).rows.length) return false;
       await q('DELETE FROM sessions WHERE email = $1', [email]);
       const moved = await q(
         'UPDATE users SET email = $1, name = COALESCE($2::text, name), salt = COALESCE($3::bytea, salt), '

@@ -31,6 +31,7 @@
   "api.removal.holdsOldLocks": "{email} dio ✓s antes de que esta versión arrancara por primera vez, y esos son bloqueos solo por su fila en la tabla de personas: quitarla desbloquearía esos ✓s, así que no se puede quitar de este almacenamiento. Desactivar su acceso le quita la entrada",
   "api.removal.onlyOlderEvents": "solo eventos escritos antes de que los autores fueran ids nombran {email}, y nada reescribe un evento: aquí no hay acceso ni fila en la tabla de personas que quitar",
   "api.removal.nobody": "nadie aquí usa {email}: ni acceso ni nada en el historial, así que no se quitó nada",
+  "api.removal.inProgress": "ya se está quitando a {email}, en una ejecución empezada hace un momento: espere a que termine. Si se detuvo a medias, vuelva a intentarlo dentro de dos minutos y la eliminación seguirá donde se detuvo",
   "api.approval.needsBlockAndFingerprint": "una aprobación necesita un bloque y una huella",
   "api.approval.ownerOnly": "solo el owner y los admin aprueban; pide un cambio o deja un comentario",
   "api.approval.sessionOnly": "un ✓ se da con la sesión iniciada, nunca con un token de agente",

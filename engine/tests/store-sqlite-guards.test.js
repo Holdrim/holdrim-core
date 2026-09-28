@@ -102,6 +102,36 @@ test('a trigger on the tables that this version does not install is dropped on t
   await store.close();
 }));
 
+test('a trigger on any table the server writes — the removal claims, or one this version does not know — is dropped on the next open, out loud', withFile(async (path, said) => {
+  await reopen(path);
+  // The server writes `removal_claims` too, and a table a later version adds is covered the same way,
+  // with no list to keep in step.
+  outside(path, `
+    CREATE TRIGGER x_claims AFTER INSERT ON removal_claims BEGIN
+      INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data)
+      VALUES ('forged' || NEW.person, 'approval', 'A01', 'A01.1.1', 'f', 'someone', '2020-01-01T00:00:00.000Z', '{}');
+    END;
+    CREATE TABLE later (x TEXT);
+    CREATE TRIGGER x_later AFTER INSERT ON later BEGIN SELECT 1; END;
+  `);
+  const before = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.deepEqual(guardMismatches(before).filter((m) => m.kind === 'foreign'),
+      [{ name: 'x_claims', kind: 'foreign' }, { name: 'x_later', kind: 'foreign' }].sort(byName));
+  } finally {
+    before.close();
+  }
+  const store = new SqliteEventStore(path);
+  for (const name of ['x_claims', 'x_later']) assert.ok(said.some((line) => line.includes(`"${name}"`)), `${name} has to be said`);
+  assert.equal(await store.claimRemoval(`p_${'a'.repeat(24)}`, 'h', '2026-01-01T00:00:00.000Z', '2026-01-01T00:02:00.000Z'), true);
+  assert.deepEqual(await store.list(null), [], 'no ✓ forged: the trigger went at boot');
+  await store.close();
+  const db = new DatabaseSync(path);
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all().map((r) => r.name);
+  db.close();
+  assert.deepEqual(names, Object.keys(GUARDS).sort(), 'exactly the guards remain');
+}));
+
 test('an insert the database drops in silence is an error, never an event handed back as recorded', withFile(async (path) => {
   const store = new SqliteEventStore(path);
   // Created while the store is open, so the check on open has not seen it.
