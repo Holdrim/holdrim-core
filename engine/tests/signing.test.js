@@ -219,8 +219,9 @@ test('the key comes from the variable or the file, never both, and a bad one nam
   const secretish = 'MC4CAQAwBQYDK2VwBCIEIDEFINITELYNOTAKEYATALLxxxxxxxxxxxxxxxxxxx';
   assert.throws(() => loadSigner({ HOLDRIM_SIGNING_KEY: secretish }, noFile, true),
     (e) => /does not hold an Ed25519 private key/.test(e.message) && !e.message.includes(secretish));
-  const rsa = generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
-  assert.throws(() => loadSigner({ HOLDRIM_SIGNING_KEY: rsa }, noFile, true), /an rsa key, not Ed25519/);
+  // A key of another kind, strong enough for its own kind: the refusal is about the algorithm, not the size.
+  const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+  assert.throws(() => loadSigner({ HOLDRIM_SIGNING_KEY: ec }, noFile, true), /an ec key, not Ed25519/);
 });
 
 test('the keyring trusts its own key and every key HOLDRIM_PUBLIC_KEYS names, by a derived kid', () => {
