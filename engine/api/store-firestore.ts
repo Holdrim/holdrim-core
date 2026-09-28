@@ -1,10 +1,10 @@
 import { Firestore, Timestamp } from '@google-cloud/firestore';
 import { byServerTime } from './firestore-order.ts';
 import { claimGiven, stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, trustedEmail, trustedPeople, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
 import { noText, saltFields, textKey, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent, type TextField, type TamperReport } from './texts.ts';
-import { sealEvent, withSignatures, type Seal, type Signing } from './signing.ts';
+import { sealEvent, sealPerson, withSignatures, type Seal, type Signing } from './signing.ts';
 
 /**
  * Firestore, `events` collection. INSERT ONLY: `create` fails if the document already exists, so
@@ -22,11 +22,12 @@ export class FirestoreEventStore implements EventStore {
 
   /**
    * The time an event is written with: this process's clock, to the millisecond, and never the same
-   * as or earlier than the last one this store wrote. `FieldValue.serverTimestamp()` used to decide
-   * it, and a time Firestore fills in on commit cannot be signed before the write (owner decision 7
-   * on #50). Held strictly increasing within the process so two events one instance writes inside a
-   * millisecond still sort in the order they were written; two instances writing inside the same
-   * millisecond fall back to the document id, which is the cost that decision accepted.
+   * as or earlier than the last one this store wrote. Not `FieldValue.serverTimestamp()`: a time
+   * Firestore fills in on commit is not known before the write, and the time is part of what is
+   * signed (owner decision 7 on #50). Held strictly increasing within the process so two events one
+   * instance writes inside a millisecond still sort in the order they were written; two instances
+   * writing inside the same millisecond fall back to the document id, which is the cost that
+   * decision accepted.
    */
   #last = 0;
   #nextTime(notBefore = 0): number {
@@ -64,7 +65,9 @@ export class FirestoreEventStore implements EventStore {
     // `authorId: personId`, the same value `withAuthors` would capture off this document a moment
     // later, so a fresh append and the list right after it answer it identically
     // (events-conformance.test.js, "the answer to an append is what a list says a moment later").
-    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId,
+    // The author as a list will read it: the address, or the id when the row holding it is nobody's.
+    const address = (await this.person(personId))?.email ?? personId;
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: address, authorId: personId,
       signed: true };
   }
 
@@ -105,7 +108,7 @@ export class FirestoreEventStore implements EventStore {
         when: Timestamp.fromMillis(at), ...sealed,
       });
     });
-    return { ...removal!, author: personEmail(by), authorId: personId, signed: true };
+    return { ...removal!, author: (await this.person(personId))?.email ?? personId, authorId: personId, signed: true };
   }
 
   /**
@@ -125,9 +128,12 @@ export class FirestoreEventStore implements EventStore {
     if (page != null) q = q.where('page', '==', page);
     const r = await q.get();
     const people = await this.#db.collection(LAYOUT.rows).get();
-    // By the server's timestamp itself, to the nanosecond (`byServerTime`, firestore-order.ts).
+    // By `when`, the signing process's own clock in milliseconds, strictly increasing for the events
+    // one instance writes; a tie between instances keeps the query's order, the document id's
+    // (`byServerTime`, firestore-order.ts).
     const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => d.data().when as FirebaseFirestore.Timestamp | undefined;
-    const peopleMap = new Map(people.docs.map((p) => [p.id, (p.data()[LAYOUT.email] as string | null) ?? null]));
+    const peopleMap = trustedPeople(people.docs.map((p) => ({ id: p.id, email: (p.data()[LAYOUT.email] as string | null) ?? null,
+      seal: p.data()[LAYOUT.seal] })), this.#signing.keyring);
     // `reports`: see store-sqlite.ts's `list` for why this is raised here rather than left to whoever
     // reads the answer — an event not signed included.
     const reports: TamperReport[] = [];
@@ -178,8 +184,9 @@ export class FirestoreEventStore implements EventStore {
   // fails when the document exists, so two first sightings of one address inside a transaction
   // cannot both make a person — a query for the address could not promise that. Forgetting deletes
   // the pointer, the one copy of the address outside the row; the row itself is never deleted.
-  // Nothing here stops a direct writer: in Firestore this rule holds by this code alone
-  // (docs/PRIVACY.md, section 3).
+  // In Firestore this rule holds by this code alone; what makes a row count is its seal, on the row
+  // and on its pointer (`sealPerson`, engine/api/signing.ts): a row or pointer without one that
+  // holds is nobody (docs/PRIVACY.md, section 3).
 
   async personFor(email: string): Promise<string> {
     const e = personEmail(email);
@@ -188,20 +195,33 @@ export class FirestoreEventStore implements EventStore {
       const found = await tx.get(pointer);
       if (found.exists) return found.data()![LAYOUT.id] as string;
       const id = newPersonId();
-      tx.create(this.#db.collection(LAYOUT.rows).doc(id), { [LAYOUT.email]: e });
-      tx.create(pointer, { [LAYOUT.id]: id });
+      const seal = sealPerson(id, e, this.#signing.signer);
+      tx.create(this.#db.collection(LAYOUT.rows).doc(id), { [LAYOUT.email]: e, [LAYOUT.seal]: seal });
+      tx.create(pointer, { [LAYOUT.id]: id, [LAYOUT.seal]: seal });
       return id;
     });
   }
 
+  // The pointer's own seal is checked, over the id it names and the address it is filed under: a
+  // pointer written without the key, or moved to another id, is nobody's, whatever row it names.
   async personOf(email: string): Promise<string | null> {
+    const e = personEmail(email);
+    const pointer = await this.#db.collection(LAYOUT.pointers).doc(LAYOUT.pointerId(e)).get();
+    if (!pointer.exists) return null;
+    const id = String(pointer.data()![LAYOUT.id]);
+    return trustedEmail({ id, email: e, seal: pointer.data()![LAYOUT.seal] }, this.#signing.keyring) === null ? null : id;
+  }
+
+  async heldBy(email: string): Promise<string | null> {
     const pointer = await this.#db.collection(LAYOUT.pointers).doc(LAYOUT.pointerId(personEmail(email))).get();
-    return pointer.exists ? (pointer.data()![LAYOUT.id] as string) : null;
+    return pointer.exists ? String(pointer.data()![LAYOUT.id]) : null;
   }
 
   async person(id: string): Promise<Person | null> {
     const doc = await this.#db.collection(LAYOUT.rows).doc(id).get();
-    return doc.exists ? { id: doc.id, email: doc.data()![LAYOUT.email] ?? null } : null;
+    if (!doc.exists) return null;
+    const email = (doc.data()![LAYOUT.email] as string | null | undefined) ?? null;
+    return { id: doc.id, email: trustedEmail({ id: doc.id, email, seal: doc.data()![LAYOUT.seal] }, this.#signing.keyring) };
   }
 
   async setEmail(id: string, email: string | null): Promise<void> {
@@ -214,7 +234,8 @@ export class FirestoreEventStore implements EventStore {
       if (email !== null) throw new Error(ONLY_LOSES);
       const held = current.data()![LAYOUT.email] as string | null;
       if (held != null) tx.delete(this.#db.collection(LAYOUT.pointers).doc(LAYOUT.pointerId(held)));
-      tx.update(row, { [LAYOUT.email]: null });
+      // The seal goes with the address it vouched for.
+      tx.update(row, { [LAYOUT.email]: null, [LAYOUT.seal]: null });
     });
   }
 

@@ -56,12 +56,21 @@ function notTheAgents(cycle: ReturnType<typeof createCycle>, state: string) {
     : `${now}: nothing is left to do on it.`);
 }
 
+/** The refusal for a request this server did not sign: `state` and `apply` alike. */
+function notSigned() {
+  return new Error('no: this request was not signed by the server, so nobody filed it through Holdrim and '
+    + 'nobody can have approved it. It is left as it is, marked, for the owner to see.');
+}
+
 /**
  * Refuses a request outside the agent's queue. Without it, `apply` would brief the agent on any
  * request, saying "the request was approved by the owner" about one still open, or rejected — and
- * the agent, told so, would edit content nobody agreed to change.
+ * the agent, told so, would edit content nobody agreed to change. A request this server did not
+ * sign is refused whatever state it reads as: its words, its author and its place are whatever was
+ * written into the store, and nobody filed them.
  */
-export function mustBeQueued(r: { state: string }) {
+export function mustBeQueued(r: { state: string; signed?: boolean }) {
+  if (r.signed !== true) throw notSigned();
   const cycle = loadCycle();
   if (!cycle.table.agent_queue.includes(r.state)) throw notTheAgents(cycle, r.state);
 }
@@ -98,6 +107,8 @@ function checkAuthority(root: string): void {
  * `request_state` written into the store directly, "approved" say, would otherwise put a request
  * nobody approved into the agent's queue. The history shows every event of the thread, signed or not,
  * each with its own `signed`: what a direct writer inserted is shown for what it is, never hidden.
+ * A request this server did not sign moves on nothing at all: it stays where every request starts,
+ * outside the agent's queue, whatever transitions name it — the server refuses to record one on it.
  */
 export function requests(events: Event[]): Request[] {
   const cycle = loadCycle();
@@ -107,7 +118,7 @@ export function requests(events: Event[]): Request[] {
     const thread = threads.get(r.id) ?? [];
     return {
       ...r,
-      state: cycle.currentState(r.id, decided.get(r.id) ?? [], authorCouldTriage(r)),
+      state: cycle.currentState(r.id, r.signed === true ? decided.get(r.id) ?? [] : [], authorCouldTriage(r)),
       history: thread.filter((e) => e.type !== 'request').sort((a, b) => a.when.localeCompare(b.when)),
     };
   });
@@ -202,12 +213,17 @@ export async function queue(root: string,
 
 /**
  * Whether what was read holds something written outside the product: a text that fails its hash, or
- * an event this server did not sign (engine/api/signing.ts). In a store where every genuine event is
- * signed, one that is not is a forgery — or signed by a key this reader was not told of — and the
- * same exit code says so. `signed` exactly true: a reader that set no answer grants nothing.
+ * an event with no seal, or one whose seal does not hold (engine/api/signing.ts). In a store where
+ * every genuine event is signed, such an event is a forgery, and the exit code says so. An event
+ * sealed by a key this reader was not given (`unverified`) is not: it may be genuine, it counts for
+ * nothing all the same, and the missing key is said once, as a WARNING. So `holdrim list` with no
+ * HOLDRIM_PUBLIC_KEYS warns and exits 0 — reading never refuses, and nothing it read is approved —
+ * while `sync`, `apply` and `state` refuse outright (`refuseToActUnverified`).
  */
-export function readsAsTampered(events: Pick<Event, 'id' | 'signed' | 'textTampered' | 'snapshotTampered'>[]): boolean {
-  return suspectsOf(events).length > 0 || events.some((e) => e.signed !== true);
+export function readsAsTampered(
+  events: Pick<Event, 'id' | 'signed' | 'unverified' | 'textTampered' | 'snapshotTampered'>[],
+): boolean {
+  return suspectsOf(events).length > 0 || events.some((e) => e.signed !== true && e.unverified !== true);
 }
 
 /**
@@ -421,6 +437,7 @@ export async function setState(root: string,
   const events = await source.events();
   refuseToActOnBrokenGuards(source);
   const r = find(requests(events), prefix);
+  if (r.signed !== true) throw notSigned();
 
   if (!cycle.agentStates.includes(target)) {
     throw new Error(`the agent only uses: ${cycle.agentStates.join(', ')} ` +

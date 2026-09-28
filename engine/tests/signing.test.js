@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   verifyRow, withSignatures, loadSigner, loadKeyring, kidOf, publicKeyText, signerOf, parsePrivateKey,
-  namesPublicKeys, canonical, ENVELOPE_TAG,
+  canonical, ENVELOPE_TAG,
 } from '../api/signing.ts';
 import { newKey } from '../cli/keys.ts';
 import { signer, keyring, other, sealedRow } from './helpers/signing.js';
@@ -121,7 +121,8 @@ test('a row with no seal at all is unsigned; one with part of a seal is forged',
 test('a key the reader does not trust signs nothing, and only the key the kid names is asked', () => {
   const byOther = sealedRow(FIELDS, other);
   assert.equal(verifyRow(byOther, keyring).signed, false, 'the other key is in no keyring here');
-  assert.match(verifyRow(byOther, keyring).reason, /which this reader does not trust/);
+  assert.equal(verifyRow(byOther, keyring).kind, 'unverified', 'a key it was not given: it cannot check, which is not a forgery');
+  assert.match(verifyRow(byOther, keyring).reason, /which this reader was not given/);
   // Signed by the other key, labelled with the trusted key's kid: a reader that tried every key it
   // holds, or took the first, would accept it under the wrong name.
   const both = loadKeyring({ HOLDRIM_PUBLIC_KEYS: other.publicKey }, signer);
@@ -154,6 +155,30 @@ test('malformed seals are answers, never a crash of the read', () => {
 });
 
 // ---------------------------------------------------------------- over a list
+/**
+ * A genuine event whose key the reader was not given — a key retired, a machine with no
+ * HOLDRIM_PUBLIC_KEYS — counts for nothing, but is not a forgery: no CRITICAL report per event, no
+ * advice to rotate credentials, and one WARNING per key per process, naming it. A seal that does not
+ * hold under a key the reader DOES have is still reported as forged, beside it.
+ */
+test('an event signed by a key the reader was not given is unverified: said once, never reported as tampering', async () => {
+  const lines = [];
+  const write = (line) => lines.push(JSON.parse(line));
+  const byOther = [1, 2, 3].map((i) => sealedRow({ ...FIELDS, id: `u${i}` }, other));
+  const broken = { ...sealedRow({ ...FIELDS, id: 'b1' }), page: 'A09' };
+  const reports = [];
+  const out = withSignatures([...byOther, broken], keyring, reports, write);
+  assert.deepEqual(out.map((e) => [e.id, e.signed, e.unverified]),
+    [['u1', false, true], ['u2', false, true], ['u3', false, true], ['b1', false, false]]);
+  assert.deepEqual(reports.map((r) => [r.event, r.kind]), [['b1', 'forged']], 'only the one that does not hold is reported');
+  const warned = lines.filter((l) => l.event === 'events_unverified');
+  assert.equal(warned.length, 1, 'one line for the key, not one per event');
+  assert.deepEqual([warned[0].severity, warned[0].kids, warned[0].events], ['WARNING', [other.kid], 3]);
+  assert.doesNotMatch(JSON.stringify(warned[0]), /rotate/i);
+  withSignatures(byOther, keyring, [], write);
+  assert.equal(lines.filter((l) => l.event === 'events_unverified').length, 1, 'and said once per process, not on every read');
+});
+
 test('withSignatures marks each row, reports each one not signed, and lets no seal through', () => {
   const good = sealedRow(FIELDS);
   const bare = unsealed(sealedRow({ ...FIELDS, id: 'e2' }));
@@ -214,6 +239,9 @@ test('the key comes from the variable or the file, never both, and a bad one nam
 
   assert.throws(() => loadSigner({ HOLDRIM_SIGNING_KEY: key, HOLDRIM_SIGNING_KEY_FILE: '/k' }, () => key, true), /both/);
   assert.throws(() => loadSigner({ HOLDRIM_SIGNING_KEY: '' }, noFile, false), /HOLDRIM_SIGNING_KEY is empty/);
+  // What compose.yaml passes when the key is given as a file: the variable, empty, beside it.
+  assert.equal(loadSigner({ HOLDRIM_SIGNING_KEY: '', HOLDRIM_SIGNING_KEY_FILE: '/k' }, (p) => (p === '/k' ? key : noFile()), true)
+    .signer.kid, kid, 'an empty variable beside the file is no second key');
   assert.throws(() => loadSigner({ HOLDRIM_SIGNING_KEY_FILE: '' }, noFile, true), /names no file/);
   assert.throws(() => loadSigner({ HOLDRIM_SIGNING_KEY_FILE: '/missing' }, noFile, true), /could not be read \(ENOENT\)/);
   const secretish = 'MC4CAQAwBQYDK2VwBCIEIDEFINITELYNOTAKEYATALLxxxxxxxxxxxxxxxxxxx';
@@ -234,8 +262,23 @@ test('the keyring trusts its own key and every key HOLDRIM_PUBLIC_KEYS names, by
   assert.equal(publicKeyText(pub), other.publicKey);
   assert.equal(loadKeyring({}).size, 0, 'a reader with nothing set trusts nothing');
   assert.throws(() => loadKeyring({ HOLDRIM_PUBLIC_KEYS: `${other.publicKey};not-a-key` }), /entry 2 of 2/);
-  assert.equal(namesPublicKeys({ HOLDRIM_PUBLIC_KEYS: ' ; ' }), false);
-  assert.equal(namesPublicKeys({ HOLDRIM_PUBLIC_KEYS: other.publicKey }), true);
+  // A public key is only a public key: a private one pasted where readers keep their configuration is
+  // refused, named as leaked, and never echoed — in PEM, or as one line of DER.
+  const pair = generateKeyPairSync('ed25519');
+  const privatePem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const privateDer = pair.privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64url');
+  for (const pasted of [privatePem, privateDer]) {
+    assert.throws(() => loadKeyring({ HOLDRIM_PUBLIC_KEYS: pasted }),
+      (e) => /PRIVATE key.*treat it as leaked/.test(e.message) || /is not an Ed25519 public key/.test(e.message), 'refused');
+    assert.throws(() => loadKeyring({ HOLDRIM_PUBLIC_KEYS: pasted }), (e) => !e.message.includes(pasted.split('\n')[1] ?? pasted));
+  }
+  assert.throws(() => loadKeyring({ HOLDRIM_PUBLIC_KEYS: privatePem }), /a PRIVATE key, where only a public one belongs/);
+  const publicPem = pair.publicKey.export({ type: 'spki', format: 'pem' });
+  assert.equal(loadKeyring({ HOLDRIM_PUBLIC_KEYS: publicPem }).size, 1, 'a PUBLIC KEY block is taken');
+  // Exactly one PUBLIC KEY block: node reads the first block of a longer text and ignores the rest,
+  // so a file holding a key plus whatever else was pasted after it would pass for just the key.
+  assert.throws(() => loadKeyring({ HOLDRIM_PUBLIC_KEYS: `${publicPem}-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----` }),
+    /a PEM block that is not a PUBLIC KEY/);
 });
 
 // ---------------------------------------------------------------- holdrim key new

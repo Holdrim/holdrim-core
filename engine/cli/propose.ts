@@ -1,7 +1,7 @@
 import { readBlocks, ofProject, projectRoles, type Block } from './pages.ts';
 import { refuseToActOnBrokenGuards } from './requests.ts';
 import type { Source } from './remote.ts';
-import type { Event } from '../api/types.ts';
+import { authoritative, type Event } from '../api/types.ts';
 
 /**
  * `holdrim propose-deps`: a missing `data-depends` is invisible until something breaks. Two blocks
@@ -49,7 +49,9 @@ function marker(a: string, b: string): string {
  */
 export function existingProposalMarkers(events: Event[]): Set<string> {
   const found = new Set<string>();
-  for (const e of events) {
+  // Only what this server signed counts: without it, a row written straight into the store would
+  // silence a proposal nobody ever made or decided on.
+  for (const e of authoritative(events)) {
     if (e.type !== 'request' || e.data?.category !== 'dependency' || typeof e.text !== 'string') continue;
     const m = /^Proposed dependency: (\S+) ⇄ (\S+)/.exec(e.text);
     if (m) found.add(m[1] < m[2] ? marker(m[1], m[2]) : marker(m[2], m[1]));

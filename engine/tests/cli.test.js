@@ -1420,7 +1420,8 @@ test('sync never locks a ✓ the server did not sign, however it is written', as
   let r;
   try {
     r = await sync(tmp, { events: async () => [approval('genuine', 'A01.1.1', true, '2026-09-22T10:00:00Z'),
-      approval('forged', 'A01.1.2', false, '2026-09-22T11:00:00Z'), approval('no-answer', 'A02.1.1', undefined, '2026-09-22T11:00:00Z')] },
+      approval('forged', 'A01.1.2', false, '2026-09-22T11:00:00Z'), approval('no-answer', 'A02.1.1', undefined, '2026-09-22T11:00:00Z'),
+      { ...approval('retired', 'A01.1.3', false, '2026-09-22T11:00:00Z'), unverified: true }] },
     { owner: 'owner@example.org' });
   } finally {
     log.mock.restore();
@@ -1432,6 +1433,9 @@ test('sync never locks a ✓ the server did not sign, however it is written', as
   assert.equal(loadRegistry(tmp)['A01.1.2'], undefined, 'a ✓ written into the store never reaches approvals.json');
   assert.equal(loadRegistry(tmp)['A02.1.1'], undefined, 'nor one a reader set no answer on');
   assert.ok(logged.some((l) => l.includes('2 approval(s) not signed by the server ignored')), logged.join('\n'));
+  assert.equal(loadRegistry(tmp)['A01.1.3'], undefined, 'nor one signed by a key this reader was not given');
+  assert.ok(logged.some((l) => l.includes('1 approval(s) signed by a key HOLDRIM_PUBLIC_KEYS does not name ignored')),
+    'which is said apart from a forgery');
 });
 
 /**

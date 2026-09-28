@@ -549,8 +549,8 @@ async function stalledIn(where, meanwhile, { withUsers = true } = {}) {
     }
     async forget(id) { await super.forget(id); if (where === 'forget') await pause(); }
     // The second read of the row is the one under the claim; the first is before it.
-    async personOf(email) {
-      const read = await super.personOf(email);
+    async heldBy(email) {
+      const read = await super.heldBy(email);
       if (where === 'reread' && armed && ++this.reads === 2) await pause();
       return read;
     }
@@ -799,5 +799,26 @@ test('somebody only older events name is refused as such, and no person is made 
     { status: 409, key: 'api.removal.onlyOlderEvents', params: { email: ANA } });
   assert.equal(await events.personOf(ANA), null, 'no row made for them');
   assert.deepEqual((await events.list(null)).map((e) => e.id), ['inline-address'], 'and nothing written');
+  await events.close();
+});
+
+test('a person whose row the server did not seal is removed all the same, and the address is then a new, sealed person', async () => {
+  // A row written into the file without the key is nobody (`trustedEmail`, people.ts), but it still
+  // holds the address: removing the person is how the address is freed.
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-removal-'));
+  const events = new SqliteEventStore(join(dir, 'events.db'), signing);
+  const users = new UsersSqlite(':memory:');
+  await users.create(ANA, 'Ana Lima');
+  const unsealed = 'p_' + '12'.repeat(12);
+  const raw = new DatabaseSync(join(dir, 'events.db'));
+  raw.prepare('INSERT INTO people (id, email) VALUES (?, ?)').run(unsealed, ANA);
+  raw.close();
+  assert.equal(await events.personOf(ANA), null, 'setup: the row is nobody');
+  const outcome = await removePerson({ events, users, deployment, by: OWNER, byAgent: false }, { email: ANA, confirmed: true });
+  assert.equal(outcome.status, 201);
+  assert.deepEqual(await events.person(unsealed), { id: unsealed, email: null }, 'the row that held the address is emptied');
+  const fresh = await events.personFor(ANA);
+  assert.notEqual(fresh, unsealed);
+  assert.equal(await events.personOf(ANA), fresh);
   await events.close();
 });

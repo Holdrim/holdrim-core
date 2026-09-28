@@ -23,22 +23,36 @@ who ran the engine from `main` before it.
   `holdrim key new <file>` (it writes the private key readable by its owner alone, never over an
   existing file, and prints the public half; `openssl genpkey -algorithm ed25519 -out <file>` makes an
   equivalent PEM), and give it to the server as `HOLDRIM_SIGNING_KEY_FILE=<file>` or
-  `HOLDRIM_SIGNING_KEY` holding its contents — never both. Keep it out of the repository and off the
-  store's own volume: whoever holds it can sign a lock. A SQLite file or Firestore store with no key
+  `HOLDRIM_SIGNING_KEY` holding its contents — never both (an empty `HOLDRIM_SIGNING_KEY` beside the
+  file, as `compose.yaml` passes it, counts as unset). Keep it out of the repository and off the
+  store's own volume: whoever holds it can sign a lock. A `HOLDRIM_SIGNING_KEY_FILE` inside the site,
+  or inside the folder of a SQLite store, refuses to start. A SQLite file or Firestore store with no key
   now refuses to start, in Development too, naming both variables; an events store in memory
   (`bash engine/run-local.sh`, the default of `HOLDRIM_MODE=local`) gets a throwaway key and says so
-  (`signing_key_ephemeral`, WARNING). `docker compose up` needs the key too (README, "Try it").
+  (`signing_key_ephemeral`, WARNING). `docker compose up` needs the key too (README, "In two minutes").
   Wherever `holdrim` reads the events file or the cloud directly, export
   `HOLDRIM_PUBLIC_KEYS` with the public key — printed by `holdrim key new`, logged at every start
   (`signing_key`) and answered by `GET /api/signing-keys` — `;` separated when a rotation keeps an
-  old key trusted (SECURITY.md, "Rotating the signing key"); without it every event read that way is
-  not signed. A `holdrim.json` naming `signing`, `signingKey` or `publicKeys` refuses to load, as one
+  old key trusted (SECURITY.md, "Rotating the signing key"). An event signed by a key the reader
+  was not given is `unverified`: it counts for nothing, and the missing key is said once, as a
+  WARNING naming it (`events_unverified`) — never as tampering. Without the variable, `holdrim list`
+  warns and exits 0 with nothing approved, and `sync`, `apply` and `state` refuse. A public key given
+  as a private one is refused, and named as leaked. A `holdrim.json` naming `signing`, `signingKey` or `publicKeys` refuses to load, as one
   naming `owner` does. New on the surface: the variables `HOLDRIM_SIGNING_KEY`,
   `HOLDRIM_SIGNING_KEY_FILE` and `HOLDRIM_PUBLIC_KEYS`, the command `holdrim key new`, the route
-  `GET /api/signing-keys` (public: the keys are no secret), and the field `signed` on every event the
-  API answers. Three columns join `events` in SQLite (`envelope`, `sig`, `kid`), added on start, and
+  `GET /api/signing-keys` (public: the keys are no secret), and the fields `signed` and `unverified`
+  on every event the API answers. Three columns join `events` in SQLite (`envelope`, `sig`, `kid`), added on start, and
   three fields each Firestore event document. An event with no valid signature is shown, marked, and
-  raised as CRITICAL (`event_unsigned`, `event_forged`) on the banner, beside tampered texts. On
+  raised as CRITICAL (`event_unsigned`, `event_forged`) on the banner, beside tampered texts. A
+  request the server did not sign cannot be triaged, added to or applied: it is shown, marked, and
+  stays where every request starts. Each row of the people table is sealed with the same key, over
+  its id and address (the column `seal` in SQLite, beside a guard that refuses writing one afterwards;
+  the field `seal` on the Firestore row and its pointer): a row with no seal, or one that does not
+  hold, is nobody — no grant reaches it, and its events read as its id — and is said once, by id
+  (`person_unsealed`, WARNING; `person_forged`, CRITICAL). **Every row made before this version has
+  no seal**, and no row is sealed afterwards, since that would vouch for whatever was written into
+  it: a grant to such a person is refused until the owner removes them on the settings screen, after
+  which their address is a new, sealed person (docs/PRIVACY.md, section 3). On
   Firestore, an event's `when` now comes from the clock of the server that signs it, not
   `serverTimestamp()`, since it has to be known before it is signed; one instance never dates two
   events alike, and two instances writing inside one millisecond fall back to the document id. Every

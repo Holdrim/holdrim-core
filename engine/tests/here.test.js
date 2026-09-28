@@ -61,11 +61,19 @@ test('adding details: the author, or whoever may approve where the request was f
 
 test('a request\'s status keeps its triage destinations only for a viewer who may triage it there', () => {
   const status = { state: 'open', triage: ['approved', 'rejected', 'question'], requiresReason: ['rejected'] };
-  assert.deepEqual(statusFor(stub, TRIAGER, { page: 'P03', block: 'P03.1', author: 'x' }, status).triage, status.triage);
-  assert.deepEqual(statusFor(stub, TRIAGER, { page: 'P09', block: 'P09.1', author: 'x' }, status).triage, []);
-  assert.deepEqual(statusFor(stub, null, { page: 'P03', block: 'P03.1', author: 'x' }, status).triage, [], 'nobody signed in');
-  assert.deepEqual(statusFor(stub, TRIAGER, { page: 'P09', block: 'P09.1', author: 'x' }, status).requiresReason, ['rejected'],
+  assert.deepEqual(statusFor(stub, TRIAGER, { page: 'P03', block: 'P03.1', author: 'x', signed: true }, status).triage, status.triage);
+  assert.deepEqual(statusFor(stub, TRIAGER, { page: 'P09', block: 'P09.1', author: 'x', signed: true }, status).triage, []);
+  assert.deepEqual(statusFor(stub, null, { page: 'P03', block: 'P03.1', author: 'x', signed: true }, status).triage, [], 'nobody signed in');
+  assert.deepEqual(statusFor(stub, TRIAGER, { page: 'P09', block: 'P09.1', author: 'x', signed: true }, status).requiresReason, ['rejected'],
     'only the destinations go; the rest of the status is the cycle\'s, for everyone');
+});
+
+test('a request this server did not sign offers no triage to anybody, whoever may triage there', () => {
+  const status = { state: 'open', triage: ['approved', 'rejected', 'question'], requiresReason: ['rejected'] };
+  const request = { page: 'P03', block: 'P03.1', author: 'x' };
+  assert.deepEqual(statusFor(stub, TRIAGER, { ...request, signed: true }, status).triage, status.triage, 'setup: signed, it is theirs');
+  assert.deepEqual(statusFor(stub, TRIAGER, { ...request, signed: false }, status).triage, []);
+  assert.deepEqual(statusFor(stub, TRIAGER, request, status).triage, [], 'no answer is no signature');
 });
 
 test('here answers per page and per block named, in booleans only', () => {
@@ -164,7 +172,7 @@ const withWide = {
 };
 
 test('a triager limited to some pages never moves their own request, there or anywhere', () => {
-  const own = { page: 'P03', block: 'P03.2.1', author: TRIAGER };
+  const own = { page: 'P03', block: 'P03.2.1', author: TRIAGER, signed: true };
   assert.equal(mayMove(stub, TRIAGER, own, 'approved', OPTS), false);
   assert.equal(mayMove(stub, TRIAGER, own, 'rejected', OPTS), false);
   assert.equal(mayMove(stub, TRIAGER, { ...own, author: 'x@example.org' }, 'approved', OPTS), true,

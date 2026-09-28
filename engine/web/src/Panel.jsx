@@ -194,9 +194,6 @@ function withCode(sentence, name, ids) {
   return <>{before}{ids.map((c, i) => <span key={c}>{i ? ', ' : ''}<code>{c}</code></span>)}{after}</>;
 }
 
-// `tamper_acknowledged` is written on the tampered event's own page and block (engine/api/tamper.ts),
-// so it lands in that block's history; named here, the owner's acknowledgement reads as a sentence
-// rather than as the contract value it is stored under.
 /**
  * The mark on an event this server did not sign (engine/api/signing.ts): shown, never hidden — hiding
  * it would hide the evidence of whoever wrote it into the store — and never read as anybody's word.
@@ -206,6 +203,9 @@ function Unsigned({ event }) {
   return event.signed === false ? <strong className="rv-unsigned">{' ⚠ '}{t('panel.unsigned')}</strong> : null;
 }
 
+// `tamper_acknowledged` is written on the tampered event's own page and block (engine/api/tamper.ts),
+// so it lands in that block's history; named here, the owner's acknowledgement reads as a sentence
+// rather than as the contract value it is stored under.
 const DID = { approval: 'panel.did.approval', request: 'panel.did.request', comment: 'panel.did.comment',
   tamper_acknowledged: 'panel.did.tamperAcknowledged' };
 

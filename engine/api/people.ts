@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { normalizeEmail } from './users.ts';
 import { log } from './log.ts';
+import { personVerdict, type Keyring, type PersonVerdict } from './signing.ts';
 import type { EventStore, Event, NewEvent, PeopleTable } from './types.ts';
 
 /**
@@ -34,8 +35,8 @@ export function personEmail(email: string): string {
 /**
  * How the people table is laid out in Firestore, for the two writers that reach it: the server's
  * store (engine/api/store-firestore.ts) and the CLI's direct path over REST (engine/cli/remote.ts).
- * `rows/{id}` holds `{ email }`, and `pointers/{pointerId(email)}` holds `{ id }` for an address still
- * held. Written once because the two must agree to the character: a person the CLI made under a
+ * `rows/{id}` holds `{ email, seal }`, and `pointers/{pointerId(email)}` holds `{ id, seal }` for an
+ * address still held. Written once because the two must agree to the character: a person the CLI made under a
  * pointer the server spells another way is a second person for one address.
  */
 export const FIRESTORE_PEOPLE = {
@@ -43,9 +44,74 @@ export const FIRESTORE_PEOPLE = {
   pointers: 'people_by_email',
   email: 'email',
   id: 'id',
+  /** On the row and on its pointer alike: the same `sealPerson` over the same id and address. */
+  seal: 'seal',
   /** The pointer's document id. Encoded, since a raw `/` in an address would name a sub-collection. */
   pointerId: (email: string): string => encodeURIComponent(email),
 } as const;
+
+/** One row of the people table as a store reads it: the seal beside the binding it vouches for. */
+export interface PersonRow {
+  id: string;
+  email: string | null;
+  seal?: unknown;
+}
+
+/** The rows already said to be nobody's, in this process: each is said once, not on every read. */
+const untrustedSaid = new Set<string>();
+
+/**
+ * The address a row binds its id to, if this server sealed that binding (`personVerdict`,
+ * engine/api/signing.ts), and null otherwise — the same null a forgotten row answers, so a row whose
+ * seal does not hold is nobody: no grant reaches it, no event reads as its author's, and no request
+ * reads as their own. The rule every lasting store — SQLite, Firestore — and every reader of one
+ * applies to every row it reads, for authority and display alike, since `author` is what both
+ * compare. The memory store keeps no seal: nothing outside its process can write it.
+ *
+ * Said once per row, naming only the id: CRITICAL for a seal that does not hold — written from
+ * outside — and WARNING for a row with none, which is also every row made before rows were sealed,
+ * or one sealed by a key this reader was not given. Such a row is not sealed afterwards by anybody:
+ * sealing a row as found would vouch for whatever was written into it. Forgetting it
+ * (docs/PRIVACY.md, section 5) frees the address, which is a new, sealed person the next time it is
+ * seen.
+ */
+export function trustedEmail(row: PersonRow, keyring: Keyring, write?: (line: string) => void): string | null {
+  return trustedPeople([row], keyring, write).get(row.id) ?? null;
+}
+
+/**
+ * `trustedEmail` over a table, as the map of id to address `withAuthors` takes. What it says, it
+ * says in one line per kind for the whole read, naming the ids: a file from before rows were sealed
+ * holds nothing but unsealed rows, and a line for each would bury everything else a read says.
+ */
+export function trustedPeople(
+  rows: readonly PersonRow[], keyring: Keyring, write?: (line: string) => void,
+): Map<string, string | null> {
+  const untrusted: Record<Exclude<PersonVerdict, 'sealed'>, string[]> = { forged: [], unsealed: [], unverified: [] };
+  const out = new Map(rows.map((r) => {
+    if (r.email == null) return [r.id, null];
+    const verdict = personVerdict(r.id, r.email, r.seal, keyring);
+    if (verdict === 'sealed') return [r.id, r.email];
+    if (!untrustedSaid.has(r.id)) {
+      untrustedSaid.add(r.id);
+      untrusted[verdict].push(r.id);
+    }
+    return [r.id, null];
+  }));
+  if (untrusted.forged.length) {
+    log('CRITICAL', 'person_forged', { people: untrusted.forged, reason: 'a seal that does not hold for its id and '
+      + 'address: written from outside the product, and read as nobody' }, write);
+  }
+  if (untrusted.unsealed.length) {
+    log('WARNING', 'person_unsealed', { people: untrusted.unsealed, reason: 'no seal: made before rows were sealed, or '
+      + 'written from outside, and read as nobody. Forgetting it (docs/PRIVACY.md, section 5) frees the address' }, write);
+  }
+  if (untrusted.unverified.length) {
+    log('WARNING', 'person_unverified', { people: untrusted.unverified, reason: 'sealed by a key this reader was not '
+      + 'given: read as nobody until HOLDRIM_PUBLIC_KEYS lists it' }, write);
+  }
+  return out;
+}
 
 /** The message every store refuses a re-pointed row with, so a caller sees one reason. */
 export const ONLY_LOSES = 'a person keeps their id and can only lose their e-mail: a new address is a new person';

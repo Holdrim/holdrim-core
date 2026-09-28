@@ -19,6 +19,7 @@
   "api.agentTokens.notForTheOwner": "the owner is never an agent: an agent token cannot be issued for the owner's address",
   "api.agentTokens.notFound": "{email} holds no agent token",
   "api.agentTokens.ownerOnly": "only the owner issues and revokes agent tokens",
+  "api.grants.personUnsealed": "{email} is held by a row of the people table this server did not seal, so no grant can reach it. Remove the person from this screen first; the address is then a new person, and can be granted a role",
   "api.roles.ownerOnly": "only the owner defines roles, grants them and revokes grants",
   "api.roles.nameInvalid": "a role's name is lower-case words of letters, digits and -, one space between words, at most {max} characters, and none of owner, admin or member",
   "api.roles.capabilitiesInvalid": "a role holds one or more of {capabilities}, each once: never lock, never people",

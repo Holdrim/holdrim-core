@@ -219,9 +219,10 @@ export async function removePerson(
     return { status: 409, key: 'api.removal.holdsAgentToken', params: { email: address } };
   }
   // No ✓ ties a lock to this person's row: a lock is the signed `locks` on the event, whoever its
-  // author's id leads to, so forgetting the row un-locks nothing (#50 retired the lock baseline, which
-  // read an old ✓ as a lock through the row of the owner it named, and made this refuse for it).
-  const known = await events.personOf(address);
+  // author's id leads to, so forgetting the row un-locks nothing, and nothing here refuses for it.
+  // `heldBy`, not `personOf`: a row whose seal does not hold is nobody, but it still holds the
+  // address, and forgetting it is what frees the address to be a new, sealed person.
+  const known = await events.heldBy(address);
   const account = users ? await users.find(address) : null;
   if (!known && !account) return nobodyLeft(events, address);
   // An account whose person never acted has no row yet: one is made, to be emptied at once, so the
@@ -257,7 +258,7 @@ async function removeClaimed(
   // A run that finished meanwhile forgot the row, and this one answers as a second run does. Nor is
   // an account whose row this run just made still there, if a removal took it meanwhile: the row
   // names nothing, and is forgotten again rather than removed as a person.
-  if ((await events.personOf(address)) !== person) return nobodyLeft(events, address);
+  if ((await events.heldBy(address)) !== person) return nobodyLeft(events, address);
   if (!hadRow && users && !(await users.find(address))) {
     await events.forget(person);
     return nobodyLeft(events, address);
@@ -269,7 +270,7 @@ async function removeClaimed(
   // otherwise act after it, on an address somebody new may have taken since.
   const stillMine = async () => {
     await claim.keep(true);
-    if ((await events.personOf(address)) !== person) throw new ClaimLost();
+    if ((await events.heldBy(address)) !== person) throw new ClaimLost();
   };
 
   let hadAccount = false;

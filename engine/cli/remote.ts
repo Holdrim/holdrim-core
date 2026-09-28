@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
-import { withAuthors, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
+import { withAuthors, trustedPeople, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
 import { textKey, withTexts, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent as Raw, type TextField, type TextRow, type TamperReport } from '../api/texts.ts';
 import { log } from '../api/log.ts';
@@ -12,7 +12,7 @@ import { loadKeyring, withSignatures, type Keyring } from '../api/signing.ts';
 type RawEvent = Raw<Event>;
 
 /** A document's event, before its seal is checked: the seal still beside it. */
-type SealedRaw = Omit<RawEvent, 'signed'> & { envelope: unknown; sig: unknown; kid: unknown };
+type SealedRaw = Omit<RawEvent, 'signed' | 'unverified'> & { envelope: unknown; sig: unknown; kid: unknown };
 
 /**
  * One Firestore REST value, as the JavaScript value the server's own client wrote it from. Every
@@ -342,10 +342,12 @@ export class Source {
         // still the table the server reads, and a case-sensitive lookup here would read it as absent,
         // no author resolved, where the server resolves them all.
         const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people' COLLATE NOCASE").get();
-        people = new Map(hasPeople
-          ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
-            .map((p) => [p.id, p.email ?? null])
-          : []);
+        // `*`, not the seal by name: a file from before rows were sealed has no such column, and its
+        // rows read as unsealed — nobody's — rather than failing the read.
+        people = trustedPeople(hasPeople
+          ? (db.prepare('SELECT * FROM people').all() as Record<string, unknown>[])
+            .map((p) => ({ id: String(p.id), email: (p.email ?? null) as string | null, seal: p.seal }))
+          : [], this.#keyring, console.error);
         // A file written before texts were extracted has no `texts` table either, and every row's
         // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
         // an empty people map gives an author (docs/PRIVACY.md, section 4).
@@ -402,7 +404,7 @@ export class Source {
       const reports: TamperReport[] = [];
       const events = withAuthors(withSignatures(rows.map((row) => ({
         ...rowOf(row), afterExtraction: boundary != null && (row.rowid as number) >= boundary,
-      })), this.#keyring, reports), people);
+      })), this.#keyring, reports, console.error), people);
       const out = withTexts(events, texts, reports);
       // console.error, not `log()`'s default stdout (issue #129): this reader feeds `list --json`,
       // whose stdout a caller `JSON.parse`s as the queue — the same reason `sqlite_guard_missing`
@@ -430,10 +432,11 @@ export class Source {
     const out = (await this.#collection(headers, 'events')).map((d) => firestoreEventOf(d));
     // The people after the events, as the server's Firestore store reads them and for its reason:
     // a person is made before their first event, so every author read above is in this read.
-    const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
-      [String(d.name).split('/').pop()!, (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null]));
+    const people = trustedPeople((await this.#collection(headers, LAYOUT.rows)).map((d) => ({
+      id: String(d.name).split('/').pop()!, email: (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null,
+      seal: d.fields?.[LAYOUT.seal]?.stringValue })), this.#keyring, console.error);
     const reports: TamperReport[] = [];
-    const events = withAuthors(withSignatures(out, this.#keyring, reports), people)
+    const events = withAuthors(withSignatures(out, this.#keyring, reports, console.error), people)
       .sort((a, b) => a.when.localeCompare(b.when));
     // The texts after the events, as the server's Firestore store reads them, for the same reason.
     const texts = new Map((await this.#collection(headers, 'texts')).map((d) => {
@@ -455,7 +458,7 @@ export class Source {
       // re-read that skipped it would let an unsigned removal back in.
       const removed = await this.#collection(headers, 'events',
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
-      return withAuthors(withSignatures(removed.map((d) => firestoreEventOf(d)), this.#keyring), people);
+      return withAuthors(withSignatures(removed.map((d) => firestoreEventOf(d)), this.#keyring, undefined, console.error), people);
     }, reports);
     // console.error, for the same reason as the file reader above: this is the CLI's answer, not
     // the server's log, and `list --json` must stay parseable JSON on stdout.

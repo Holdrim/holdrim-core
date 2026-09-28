@@ -377,8 +377,8 @@ for (const store of stores) {
       assert.equal(e.signed, true, 'as answered, by the store that just sealed it');
       const found = [];
       const [read] = await s.list('A01', found);
-      assert.equal(read.signed, false);
-      assert.deepEqual(found.map((r) => [r.field, r.kind]), [['event', 'forged']]);
+      assert.deepEqual([read.signed, read.unverified], [false, true], 'not signed as far as it can tell: unverified');
+      assert.deepEqual(found, [], 'and not reported as tampering: a key not given is no forgery');
       assert.equal((await s.listBare('A01'))[0].signed, false);
     } finally { await s.close(); }
   });

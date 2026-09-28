@@ -12,6 +12,7 @@
   "api.agentTokens.notForTheOwner": "el propietario nunca es un agente: no se emite un token de agente para la dirección del propietario",
   "api.agentTokens.notFound": "{email} no tiene token de agente",
   "api.agentTokens.ownerOnly": "solo el propietario emite y revoca tokens de agente",
+  "api.grants.personUnsealed": "{email} está en una fila de la tabla de personas que este servidor no selló, así que ninguna concesión llega a ella. Quite a la persona en esta pantalla primero; la dirección pasa a ser una persona nueva, a la que se puede otorgar un rol",
   "api.roles.ownerOnly": "solo el propietario define roles, los otorga y revoca concesiones",
   "api.roles.nameInvalid": "el nombre de un rol son palabras en minúsculas, con letras, dígitos y -, un espacio entre palabras, como máximo {max} caracteres, y no es owner, admin ni member",
   "api.roles.capabilitiesInvalid": "un rol tiene una o más de {capabilities}, cada una una vez: nunca lock, nunca people",

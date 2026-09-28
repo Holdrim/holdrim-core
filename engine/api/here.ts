@@ -21,8 +21,11 @@ export interface Asks {
   isAgent(who: Who): boolean;
 }
 
-/** A request as the store holds it: where it was filed, and by whom. */
-export interface StoredRequest { page: string; block?: string | null; author: string }
+/**
+ * A request as the store holds it: where it was filed, by whom, and whether this server signed it
+ * (engine/api/signing.ts) — absent reads as not.
+ */
+export interface StoredRequest { page: string; block?: string | null; author: string; signed?: boolean }
 
 /**
  * Whether `request` is `who`'s own. `author` is what the store resolved from the person id the event
@@ -78,7 +81,9 @@ export function mayAddDetails(roles: Asks, who: Who, address: string, request: S
 export function statusFor<S extends { triage: string[] }>(
   roles: Asks, who: Who | null, request: StoredRequest, status: S,
 ): S {
-  const may = who !== null && mayTriage(roles, who, request);
+  // Nothing on a request this server did not sign: `recordEvent` refuses every decision on it, and a
+  // button offered here would be one that fails on click.
+  const may = who !== null && request.signed === true && mayTriage(roles, who, request);
   return may ? status : { ...status, triage: [] };
 }
 

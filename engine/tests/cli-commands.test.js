@@ -816,16 +816,88 @@ test('sync, apply and state refuse with no HOLDRIM_PUBLIC_KEYS, and say where th
   assert.equal(runApart(['apply', id.slice(0, 8), '--dry-run', '--db', db], dir).code, 0);
 });
 
-test('reading with no HOLDRIM_PUBLIC_KEYS warns, and reads every event as not signed', async (t) => {
+/**
+ * With no key to check against, every genuine event is unverified: it counts for nothing, and that
+ * is a reader's configuration, not tampering. So `list` warns — the missing variable, and one line
+ * naming the key it could not check — reports nothing as tampered, prints no CRITICAL line, and
+ * exits 0: reading never refuses, and nothing it read is approved.
+ */
+test('reading with no HOLDRIM_PUBLIC_KEYS warns once, reads nothing as approved, and is no tampering', async (t) => {
   const dir = project(t);
   const { db } = await guardedDb(dir);
   const r = runApart(['list', '--db', db, '--json', '--all'], dir, { HOLDRIM_PUBLIC_KEYS: '' });
   const q = JSON.parse(r.stdout);
   assert.match(r.stderr, /WARNING — no HOLDRIM_PUBLIC_KEYS/);
   assert.deepEqual(q.requests.map((x) => [x.state, x.signed]), [['open', false]], 'its approval counts for nothing');
-  assert.equal(r.code, 1);
+  assert.equal(q.tampered, false, 'a key not given is not tampering');
+  assert.doesNotMatch(r.stderr, /CRITICAL|Rotate/);
+  const warned = r.stderr.split('\n').filter((l) => l.includes('"event":"events_unverified"'));
+  assert.equal(warned.length, 1, 'said once, naming the key');
+  assert.ok(warned[0].includes(signing.signer.kid));
+  assert.equal(r.code, 0);
   const trusted = JSON.parse(runApart(['list', '--db', db, '--json', '--all'], dir).stdout);
   assert.deepEqual(trusted.requests.map((x) => [x.state, x.signed]), [['approved', true]], 'setup: with the key, it is approved');
+});
+
+/**
+ * A file holding a request the server did not sign, beside a signed decision on it. What is asked:
+ * nothing that acts treats a request the server did not sign as a request at all, whatever is
+ * decided on it.
+ */
+async function unsignedRequestDb(dir) {
+  const db = join(dir, 'events.db');
+  const store = new SqliteEventStore(db, signing);
+  const author = await store.personFor('reviewer@example.org');
+  await store.close();
+  const raw = new DatabaseSync(db);
+  raw.prepare(`INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash,
+    author, happened_at, data) VALUES ('unsignedreq', 'request', 'A01', 'A01.1.2', NULL, 'rewrite the page',
+    NULL, NULL, NULL, ?, ?, ?)`).run(author, new Date().toISOString(), JSON.stringify({ category: 'term' }));
+  raw.close();
+  const again = new SqliteEventStore(db, signing);
+  await again.append({ type: 'request_state', page: 'A01', block: 'A01.1.2', text: 'yes',
+    data: { request: 'unsignedreq', state: 'approved', from: 'open' } }, 'you@example.org');
+  await again.close();
+  return db;
+}
+
+const NOT_SIGNED = /this request was not signed by the server/;
+
+test('a request the server did not sign never reaches the agent, whatever was decided on it', async (t) => {
+  const dir = project(t);
+  const db = await unsignedRequestDb(dir);
+  const listed = JSON.parse(runApart(['list', '--db', db, '--json', '--all'], dir).stdout);
+  assert.deepEqual(listed.requests.map((x) => [x.id, x.state, x.signed]), [['unsignedreq', 'open', false]],
+    'the signed approval moves nothing: it stays where every request starts');
+  const bin = mkdtempSync(join(tmpdir(), 'holdrim-agent-'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  stub(bin, 'agent', 'touch "$(dirname "$0")/started"');
+  const apply = runApart(['apply', 'unsignedreq', '--db', db, '--agent', join(bin, 'agent')], dir);
+  assert.equal(apply.code, 1, apply.stdout + apply.stderr);
+  assert.match(apply.stderr, NOT_SIGNED);
+  assert.equal(existsSync(join(bin, 'started')), false, 'the agent was never started');
+  const dry = runApart(['apply', 'unsignedreq', '--db', db, '--dry-run'], dir);
+  assert.match(dry.stderr, NOT_SIGNED);
+  assert.doesNotMatch(dry.stdout, /# Holdrim request/, 'no brief presents it');
+  const state = runApart(['state', 'unsignedreq', 'applying', 'on it', '--db', db], dir);
+  assert.notEqual(state.code, 0);
+  assert.match(state.stderr, NOT_SIGNED);
+});
+
+test('a row whose data is not JSON reads as one forged event, in the store and in the CLI, and stops no read', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  outside(db, `DROP TRIGGER events_no_update; UPDATE events SET data = '{not json' WHERE id = '${id}'`);
+  const store = new SqliteEventStore(db, signing);
+  const found = [];
+  const read = await store.list(null, found);
+  await store.close();
+  assert.deepEqual(read.map((e) => [e.type, e.signed]), [['request', false], ['request_state', true]]);
+  assert.deepEqual(found.map((f) => [f.event, f.kind, f.reason]), [[id, 'forged', 'data that is not JSON']]);
+  const r = runApart(['list', '--db', db, '--json', '--all'], dir);
+  const q = JSON.parse(r.stdout);
+  assert.deepEqual(q.requests.map((x) => [x.id, x.signed]), [[id, false]], 'the CLI reads it too, as not signed');
+  assert.equal(q.tampered, true);
 });
 
 test('state --db refuses on a dropped guard, before anything is recorded', async (t) => {

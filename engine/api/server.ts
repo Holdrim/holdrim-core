@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { join, extname, normalize, relative, sep } from 'node:path';
+import { dirname, join, extname, normalize, relative, resolve, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
@@ -261,6 +261,39 @@ for (const { what, variable, file } of fileStores) {
 }
 
 /**
+ * Refuses a signing key file that sits where it is read by others: inside the site, which serves
+ * every file in it to whoever is signed in, or inside the folder a SQLite store keeps its files in,
+ * which is what gets copied, backed up and handed over as "the data". Whoever reads the key signs
+ * locks, so it lives apart from both. Judged by where each REALLY is, links followed, with the same
+ * `realContainment` the served-store check reads (engine/cli/fs.ts). A key given inline, or no key,
+ * has no file to check.
+ */
+const keyFile = process.env.HOLDRIM_SIGNING_KEY_FILE;
+if (keyFile !== undefined && keyFile.trim() !== '') {
+  const keep = 'keep HOLDRIM_SIGNING_KEY_FILE outside the site and outside every store\'s folder: whoever can read it can sign locks';
+  try {
+    refuseServedStore(cfg.site, keyFile, 'the signing key (HOLDRIM_SIGNING_KEY_FILE)');
+  } catch (error) {
+    refuseToStart(new Error(`${error instanceof Error ? error.message : String(error)}. The key is not read; ${keep}.`));
+  }
+  for (const { what, variable, file } of fileStores) {
+    const folder = dirname(resolve(file));
+    let inside = false;
+    try {
+      inside = realContainment(folder, resolve(keyFile)).inside;
+    } catch (error) {
+      // A store folder that does not exist yet holds nothing, the key included; anything else is
+      // a filesystem that cannot answer, and a key nobody can place is not read.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') refuseToStart(error);
+    }
+    if (inside) {
+      refuseToStart(new Error(`the signing key (HOLDRIM_SIGNING_KEY_FILE), ${keyFile}, is in the folder of ${what} `
+        + `(${variable}), ${folder}. The key is not read; ${keep}.`));
+    }
+  }
+}
+
+/**
  * The key every event is signed with, and the keys events are verified with (engine/api/signing.ts;
  * SECURITY.md, "The signing key"). Loaded before the store opens, so a store that keeps what it
  * writes never opens without one: a SQLite file or Firestore with no key refuses to start, naming
@@ -332,8 +365,8 @@ const threadsOf = (all: Event[]) => cycle.threadsOf(authoritative(all));
 
 /**
  * The owner's row in the people table, made at the first start if it is not there yet, so every log
- * line about the owner names them by id from their first sign-in on (docs/PRIVACY.md, section 6) —
- * which the lock baseline this version retired used to do as a side effect of recording its author.
+ * line about the owner names them by id from their first sign-in on (docs/PRIVACY.md, section 6):
+ * without it, the owner has no id until their first event, and the lines before it name nobody.
  * The owner is configuration, named by `HOLDRIM_OWNER`, and the one person a removal refuses.
  */
 await events.personFor(deployment.owner);
@@ -687,12 +720,13 @@ function refusalOf(
  * was FILED, on a request this server signed — the one implementation this file and requests.ts (the
  * agent's CLI) both call, so there is no second copy of the rule to drift from it.
  */
-const withStatus = (e: Event, thread: Event[], viewer: Who | null, roles: Roles) => ({
-  ...e,
+const withStatus = (e: Event, thread: Event[], viewer: Who | null, roles: Roles) => {
   // Triage destinations only for a viewer who may triage THIS request, where it was filed (`statusFor`):
   // the panel draws its triage buttons from this list alone.
-  status: statusFor(roles, viewer, e, cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e)))),
-});
+  const status = statusFor(roles, viewer, e, cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e))));
+  // Nor details to add, on a request this server did not sign: `recordEvent` refuses both.
+  return { ...e, status: e.signed === true ? status : { ...status, acceptsSupplement: false } };
+};
 
 /**
  * An event as a reader gets it: a request with its state, and an approval saying whether it is the
@@ -796,7 +830,10 @@ async function recordEvent(
     const requestId = incoming.data?.request;
     if (!requestId) return { status: 400, body: { error: say('api.request.needsRequestId') } };
     const ofPage = await events.list(incoming.page);
-    const request = ofPage.find((e) => e.id === requestId && e.type === 'request');
+    // A request this server did not sign is no request to decide or add to: its author, its place and
+    // its words are whatever was written into the store, and a triager's ✓ on it would put words
+    // nobody filed into the agent's queue. The same answer as no request at all — there is none.
+    const request = ofPage.find((e) => e.id === requestId && e.type === 'request' && e.signed === true);
     if (!request) return { status: 404, body: { error: say('api.request.notFound') } };
     // Overwritten with the STORED request's own place — never trusted from what this event claims,
     // and never merely refused either (holdrim#152, orchestrator decision): `mayAddDetails` and
@@ -972,6 +1009,11 @@ async function grantRole(who: Who, asked: { email: unknown; role: unknown; scope
   // The row made here, before the event, so the grant names an id the person will be found by when
   // they next ask — the same order `recordAuthored` keeps for an event's author.
   const person = await events.personFor(address);
+  // A row this server did not seal is nobody, and `rolesAt` never finds a grant naming it: a grant
+  // written anyway would sit on the screen reaching nobody. Refused, saying how to free the address.
+  if ((await events.personOf(address)) !== person) {
+    return { status: 409, key: 'api.grants.personUnsealed', params: { email: address } };
+  }
   const { author, event } = await recordAuthored(events, grantedEvent(role, person, scope, deployment.isAgent(who)), addressOf(who));
   log('INFO', 'role_granted', { id: event.id, role, scope, person, by: author });
   return { status: 201, event };
@@ -1225,7 +1267,8 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
   if (req.method === 'GET' && route === '/requests/open') {
     const all = await events.list(null);
     const threads = threadsOf(all);
-    const toTriage = all.filter((e) => e.type === 'request')
+    // Signed only: an unsigned request is shown, marked, and nobody can triage it (`recordEvent`).
+    const toTriage = authoritative(all).filter((e) => e.type === 'request')
       .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r)) === 'open').length;
     return json(res, 200, { toTriage });
   }

@@ -119,7 +119,11 @@ Each has a test. If you change the code around one, run the contract test and re
   the people table takes the same shape: `people_only_lose_email`, `people_no_delete` and
   `people_no_replace` (`engine/api/store-sqlite.ts`) let `EventStore.forget` empty its e-mail and
   never its id or the row itself, so a forgotten person's id still names every event and lock they
-  ever gave. Both are reached together, by the owner alone, from the settings screen: removing a
+  ever gave. Each row's binding of id to address is sealed with the signing key when the row is made
+  (`sealPerson`, `engine/api/signing.ts`), `people_seal_only_goes` refuses writing a seal onto a row
+  afterwards, and forgetting empties the seal with the address. A row whose seal does not hold, or
+  that has none — every row from before seals included — is nobody to every reader (`trustedEmail`,
+  `engine/api/people.ts`): no grant, no own request, and its events read as the id. Both are reached together, by the owner alone, from the settings screen: removing a
   person (`docs/PRIVACY.md`, section 5, `engine/api/person-removal.ts`) empties their account and
   their row, removes their texts and revokes their grants, and leaves every event, snapshot and lock
   as it was: a lock is the signed `locks` on its event, so no row makes a ✓ a lock and forgetting one
@@ -131,7 +135,8 @@ Each has a test. If you change the code around one, run the contract test and re
   and every reader uses what was written, never a recomputation from who holds `lock` now — an owner
   who hands over must not silently un-lock every ✓ they gave before — and only on an event the
   server signed: every reader, `holdrim sync` included, trusts `data.locks` only where the signature
-  verifies against a key the deployment names. There is no date before which an unsigned ✓ counts. An agent may *close* an impact
+  verifies against a key the deployment names. There is no date before which an unsigned ✓ counts,
+  and a request the server did not sign is never triaged, added to or applied. An agent may *close* an impact
   — "this change did not reach here" — and never *approve* — "this text is correct", and never gives
   a ✓ at all. An address in `HOLDRIM_AGENTS`, and anyone who comes in with an agent token the owner
   issued, is refused `triage`, `approve`, `lock` and `people` by `can` before any grant is read.

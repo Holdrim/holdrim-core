@@ -122,6 +122,7 @@
     "textRemoved",
     "textTampered",
     "type",
+    "unverified",
     "when"
   ],
   "event-data-keys": [

@@ -304,8 +304,8 @@ test('a database the previous version made: the changed guards are replaced, the
   // included: SQLite keeps the text as written, so a comparison that minds spacing would replace
   // all five, and one that ignores the text would replace none. This fixture also predates
   // events_no_replace, events_no_low_rowid, events_no_high_rowid, events_no_first_rowid_below_one,
-  // people_no_rowid_below_one and the whole texts table — the guard set an older release shipped
-  // with, not tampering — so those nine are said as missing,
+  // people_no_rowid_below_one, people_seal_only_goes and the whole texts table — the guard set an
+  // older release shipped with, not tampering — so those ten are said as missing,
   // the same as any other guard this open does not find, rather than staying the silent case
   // (holdrim#89).
   outside(path, `
@@ -330,7 +330,7 @@ test('a database the previous version made: the changed guards are replaced, the
   const named = (line) => line.match(/guard "(\w+)"/)?.[1];
   assert.deepEqual(said.map(named).sort(),
     ['events_no_first_rowid_below_one', 'events_no_high_rowid', 'events_no_low_rowid', 'events_no_replace', 'people_no_replace',
-      'people_no_rowid_below_one', 'people_only_lose_email', 'texts_no_delete', 'texts_no_replace', 'texts_no_rowid_below_one', 'texts_no_update'],
+      'people_no_rowid_below_one', 'people_only_lose_email', 'people_seal_only_goes', 'texts_no_delete', 'texts_no_replace', 'texts_no_rowid_below_one', 'texts_no_update'],
     'the guards whose text changed are replaced, the ones this fixture never had are installed, and each is said once');
   const store = new SqliteEventStore(path, signing);
   const ana = await store.personFor('ana@example.org');
@@ -909,7 +909,7 @@ async function readWithCli(path) {
   const error = console.error;
   console.error = (line) => errors.push(String(line));
   try {
-    const source = new Source({ db: path });
+    const source = new Source({ db: path, keyring: signing.keyring });
     const events = await source.events();
     return { tampered: source.guardsTampered, errors, events };
   } finally {

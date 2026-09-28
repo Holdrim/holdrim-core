@@ -43,9 +43,14 @@ export interface Event {
   // event can leave it out and have it read as either answer by accident; an event that is not
   // signed is shown, marked, and counts for nothing (`isLocked`, `authorCouldTriage` below).
   signed: boolean;
+  // Whether it was not signed only because it names a key this reader was not given — a key retired,
+  // or a reader told of none — rather than because its seal is missing or does not hold. Still of no
+  // authority; told apart only so that a missing key reads as a configuration to fix, not as a
+  // store written from outside (`withSignatures`, engine/api/signing.ts).
+  unverified: boolean;
 }
 
-export type NewEvent = Omit<Event, 'id' | 'author' | 'authorId' | 'when' | 'textRemoved' | 'snapshotRemoved' | 'textTampered' | 'snapshotTampered' | 'signed'>;
+export type NewEvent = Omit<Event, 'id' | 'author' | 'authorId' | 'when' | 'textRemoved' | 'snapshotRemoved' | 'textTampered' | 'snapshotTampered' | 'signed' | 'unverified'>;
 
 /**
  * The event as every store answers it, to an append and to a list alike: each optional field
@@ -66,6 +71,7 @@ export function stored(event: NewEvent, id: string, author: string, when: string
     id, type: event.type, page: event.page, block: event.block ?? null, fingerprint: event.fingerprint ?? null,
     text: event.text ?? null, snapshot: event.snapshot ?? null, author, when, data: event.data ?? null,
     textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false, signed: false,
+    unverified: false,
   };
 }
 
@@ -133,9 +139,20 @@ export interface PeopleTable {
    * after the fact must not conjure a row into existence, and must especially never conjure one
    * back for an address a person was just forgotten from (docs/PRIVACY.md, section 5) — the very
    * next admin action naming that address would otherwise silently undo the forgetting.
+   *
+   * Only a row whose binding this server sealed is anybody (`trustedEmail`, engine/api/people.ts):
+   * for a row with no seal, or one that does not hold, this answers null, and so every grant, every
+   * "own request" and every author read through it is nobody's.
    */
   personOf(email: string): Promise<string | null>;
-  /** The row behind an id; null when no row has that id. */
+  /**
+   * The id of the row that holds this e-mail, sealed or not, or null — never creating one. For
+   * forgetting alone (engine/api/person-removal.ts): a row that is nobody's still holds its address
+   * until it is emptied, and emptying it is how the address becomes a new, sealed person. Never an
+   * answer about who anybody is: that is `personOf`.
+   */
+  heldBy(email: string): Promise<string | null>;
+  /** The row behind an id; null when no row has that id. Its e-mail only where its seal holds. */
   person(id: string): Promise<Person | null>;
   /**
    * The one change a row takes after it is made. Only `null` gets through; anything else is
@@ -143,7 +160,7 @@ export interface PeopleTable {
    * and a test can prove it holds in each store.
    */
   setEmail(id: string, email: string | null): Promise<void>;
-  /** Empties the row's e-mail and keeps its id. The same e-mail, seen again, is a new person. */
+  /** Empties the row's e-mail, and its seal, and keeps its id. The same e-mail, seen again, is a new person. */
   forget(id: string): Promise<void>;
 }
 
@@ -228,12 +245,12 @@ export const EVENT_TYPES = new Set([
 // request's state, a supplement, a text removal, a tamper acknowledgement, a role defined, granted
 // or revoked, a person removed — counts only when this server signed it (engine/api/signing.ts; owner
 // decision 3 on #50). The written fields above are the server's answer at the moment it recorded the
-// event, and the signature is what says the server gave it: before signing, anybody who could write
-// the store could write `locks:"true"` beside the owner's id and have `holdrim sync` lock it.
+// event, and the signature is what says the server gave it: without it, anybody who could write the
+// store could write `locks:"true"` beside the owner's id and have `holdrim sync` lock it.
 //
 // There is no fallback for an event with no signature, and no date before which one is trusted
-// (owner decision 4): the lock baseline that used to trust old unwritten ✓s by date is gone, because
-// whoever writes the store also writes the date. An event not signed is still shown — hiding it would
+// (owner decision 4): whoever writes the store also writes the date, so a cut-off by date is one
+// they can step past. An event not signed is still shown — hiding it would
 // hide the evidence — and is raised as CRITICAL where it is read; it decides nothing.
 
 /**

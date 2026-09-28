@@ -189,12 +189,11 @@ export function resolveRemovedBy(removed: Removed | null | undefined, displays: 
  *   (a field never given, or a row from before extraction — see `RawEvent`'s own comment). Only a
  *   store that can tell "before extraction" from "after, with the hash stripped" reports this kind;
  *   see `afterExtraction` on `RawEvent` for which ones can.
- */
-/**
  * - `unsigned`, `forged`: not a text but the event itself (field `event`), found by `withSignatures`
- *   (engine/api/signing.ts) — a row with no signature, or one whose signature, key or columns do not
+ *   (engine/api/signing.ts) — a row with no signature, or one whose signature or columns do not
  *   hold. Reported through this same door so the banner, the acknowledgement, `holdrim list`'s
- *   `tampered` and `sync`'s exit code need no second channel.
+ *   `tampered` and `sync`'s exit code need no second channel. A row sealed by a key the reader was
+ *   not given is neither: it is `unverified`, said once as a WARNING and never reported here.
  */
 export const TAMPER_KINDS = ['overwritten', 'unaccounted', 'double_removal', 'downgraded', 'unsigned', 'forged'] as const;
 /** Derived from `TAMPER_KINDS`, never written out a second time: that list is what the panel's

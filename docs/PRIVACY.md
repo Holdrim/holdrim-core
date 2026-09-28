@@ -77,7 +77,7 @@ write the database directly, it holds only as far as the database is made to hol
 
 - **SQLite**, by trigger, and by the file belonging to the server's user.
 - **Firestore**, by the code alone. Whoever the project's IAM lets write can write anything, events
-  included — the gap events already have there, now shared by the people table.
+  and people included; what they write without the signing key counts for nothing (below).
 - **The CLI** (`engine/cli/remote.ts`) no longer writes around the server: every event it records
   goes through `POST /api/events` with the agent's own token, and is held to the same checks, and
   given the same `asAgent`, as any other (`docs/ROLES.md`, section 4). It still READS the cloud and
@@ -101,11 +101,18 @@ What the signature binds and what it leaves out, on purpose:
   `data` — the written role included — and the salted hashes of its `text` and `snapshot`. The
   texts themselves stay outside, in their own table: removing one (section 4) takes its row and its
   salt, and leaves the signed hash untestable against a guess, as it must.
-- **Not bound: the people table.** A signed address could never be emptied, and a keyed hash of it
-  would be the pseudonymisation section 1 rejects. So `forget` works exactly as before; the cost is
-  that a direct writer who re-points a row re-attributes that person's events on screen, and hands
-  the address the project grants the id holds — never a lock and never `people`, which the
-  deployment decides by address (SECURITY.md, "Known limits").
+- **The people table, by a seal of its own on each row**, never by the event: an address signed
+  into an event could never be emptied, and a keyed hash of it would be the pseudonymisation
+  section 1 rejects. Each row carries a seal over its id and its address (`sealPerson`,
+  `engine/api/signing.ts`), made with the same key when the row is made — in SQLite a column beside
+  the row, in Firestore a field on the row and on its pointer. Forgetting empties the seal with the
+  address, so nothing is left that could confirm a guess of it. A row whose seal does not hold for
+  its id and address — re-pointed, or inserted, by someone without the key — is nobody: no grant
+  reaches it, no request reads as theirs, and their events read as the id, as a forgotten person's
+  do (`trustedEmail`, `engine/api/people.ts`); it is said once, by id, CRITICAL. A row with no seal
+  at all — every row made before rows were sealed — reads as nobody too, said as a WARNING: sealing
+  it afterwards would vouch for whatever was written into it, so nothing does. Removing the person
+  (section 5) empties it, and their address is then a new, sealed person.
 - **What a signature cannot show** is an event that is gone. Deleting a genuine event leaves nothing
   to check; that needs the events chained in a signed sequence, planned for 0.2.
 

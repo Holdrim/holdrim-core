@@ -2,11 +2,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { claimGiven, stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
-import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
+import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, trustedEmail, trustedPeople, type PersonRow } from './people.ts';
 import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
   type TextField, type TamperReport } from './texts.ts';
 import { log, jsonForTerminal } from './log.ts';
-import { sealEvent, withSignatures, type Signing } from './signing.ts';
+import { sealEvent, sealPerson, withSignatures, type Signing } from './signing.ts';
 
 /**
  * SQLite persistence on the built-in `node:sqlite` — **no external dependency**.
@@ -150,6 +150,15 @@ export const GUARDS: Record<string, string> = {
   people_only_lose_email: `BEFORE UPDATE ON people
     WHEN NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.email IS NOT NULL
     BEGIN SELECT RAISE(ABORT, '${ONLY_LOSES}'); END`,
+  // Nothing writes a seal onto a row already there (engine/api/signing.ts, `sealPerson`): a row
+  // sealed after the fact would vouch for whatever was written into it. Forgetting empties it with
+  // the address; a seal left beside an empty address vouches for nothing, since only a row that
+  // holds an address is read through its seal. Its own trigger, not a longer
+  // `people_only_lose_email`: a changed text would read, on every existing file, as "not the one
+  // this version installs".
+  people_seal_only_goes: `BEFORE UPDATE ON people
+    WHEN NEW.seal IS NOT NULL AND NEW.seal IS NOT OLD.seal
+    BEGIN SELECT RAISE(ABORT, 'a seal is never written onto a person already there: it goes when the e-mail goes'); END`,
   people_no_delete: `BEFORE DELETE ON people
     BEGIN SELECT RAISE(ABORT, 'a person is not deleted: forgetting empties the e-mail and keeps the id'); END`,
   // REPLACE again: with a held id or rowid it re-points or erases that row, and with a new id and a
@@ -538,17 +547,31 @@ export function eventStoreFile(
  * One row of `events`, as a store and the CLI's reader of the file both read it: the columns, and
  * the seal beside them for `withSignatures` to check. The author is the stored id, not yet resolved.
  * A file from before a column existed answers `undefined` for it, read as null.
+ *
+ * `data` is parsed here, before any seal is checked, so it is parsed without throwing: a value that
+ * is not JSON reads as null and `dataUnreadable`, which `verifyRow` answers "forged" — one bad row
+ * written into the file is one forged event, never a reader that stops and shows nothing.
  */
 export function rowOf(r: Record<string, any>) {
+  const { data, dataUnreadable } = dataOf(r.data);
   return {
     id: String(r.id), type: String(r.type), page: String(r.page), block: (r.block ?? null) as string | null,
     fingerprint: (r.fingerprint ?? null) as string | null, text: (r.text ?? null) as string | null,
     snapshot: (r.snapshot ?? null) as string | null, textHash: (r.text_hash ?? null) as string | null,
     snapshotHash: (r.snapshot_hash ?? null) as string | null, author: String(r.author), when: String(r.happened_at),
-    data: r.data ? JSON.parse(String(r.data)) as Record<string, unknown> : null,
+    data, ...(dataUnreadable ? { dataUnreadable } : {}),
     textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
     envelope: (r.envelope ?? null) as string | null, sig: (r.sig ?? null) as string | null, kid: (r.kid ?? null) as string | null,
   };
+}
+
+function dataOf(raw: unknown): { data: Record<string, unknown> | null; dataUnreadable: boolean } {
+  if (!raw) return { data: null, dataUnreadable: false };
+  try {
+    return { data: JSON.parse(String(raw)) as Record<string, unknown>, dataUnreadable: false };
+  } catch {
+    return { data: null, dataUnreadable: true };
+  }
 }
 
 export class SqliteEventStore implements EventStore {
@@ -623,6 +646,9 @@ export class SqliteEventStore implements EventStore {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS people_by_email ON people (email) WHERE email IS NOT NULL;
     `);
+    // The seal on each row's binding of id to address (`sealPerson`, engine/api/signing.ts). A row
+    // from before seals has none, and reads as nobody (`trustedEmail`, engine/api/people.ts).
+    ensureColumn(this.#db, 'people', 'seal', 'TEXT');
 
     // The texts table: one row per event and field, holding what `events.text_hash` and
     // `events.snapshot_hash` are a hash OF (docs/PRIVACY.md, section 4). `removeText` is the only
@@ -689,7 +715,7 @@ export class SqliteEventStore implements EventStore {
     if (found) return found;
     const id = newPersonId();
     try {
-      const r = this.#db.prepare('INSERT INTO people (id, email) VALUES (?, ?)').run(id, e);
+      const r = this.#db.prepare('INSERT INTO people (id, email, seal) VALUES (?, ?, ?)').run(id, e, sealPerson(id, e, this.#signing.signer));
       if (r.changes !== 1) throw new Error('the person was not recorded: the database dropped the insert');
     } catch (err) {
       const winner = this.#heldBy(e);
@@ -700,6 +726,11 @@ export class SqliteEventStore implements EventStore {
   }
 
   async personOf(email: string): Promise<string | null> {
+    const id = this.#heldBy(personEmail(email));
+    return id !== undefined && (await this.person(id))?.email != null ? id : null;
+  }
+
+  async heldBy(email: string): Promise<string | null> {
     return this.#heldBy(personEmail(email)) ?? null;
   }
 
@@ -708,13 +739,13 @@ export class SqliteEventStore implements EventStore {
   }
 
   async person(id: string): Promise<Person | null> {
-    const r = this.#db.prepare('SELECT id, email FROM people WHERE id = ?').get(id) as Person | undefined;
-    return r ? { id: r.id, email: r.email ?? null } : null;
+    const r = this.#db.prepare('SELECT id, email, seal FROM people WHERE id = ?').get(id) as PersonRow | undefined;
+    return r ? { id: r.id, email: trustedEmail(r, this.#signing.keyring) } : null;
   }
 
   async setEmail(id: string, email: string | null): Promise<void> {
     // No check in code: the trigger is the guard, so a test that drops it sees this go through.
-    const r = this.#db.prepare('UPDATE people SET email = ? WHERE id = ?').run(email, id);
+    const r = this.#db.prepare('UPDATE people SET email = ?, seal = NULL WHERE id = ?').run(email, id);
     if (r.changes === 0) throw noPerson(id);
   }
 
@@ -760,7 +791,9 @@ export class SqliteEventStore implements EventStore {
     // `authorId: personId`, the same value `withAuthors` would capture off this row a moment later,
     // so a fresh append and the list right after it answer it identically (events-conformance.test.js,
     // "the answer to an append is what a list says a moment later").
-    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: personEmail(author), authorId: personId,
+    // The author as a list will read it: the address, or the id when the row holding it is nobody's.
+    const address = (await this.person(personId))?.email ?? personId;
+    return { ...e, text: event.text ?? null, snapshot: event.snapshot ?? null, author: address, authorId: personId,
       signed: true };
   }
 
@@ -809,7 +842,7 @@ export class SqliteEventStore implements EventStore {
     return {
       id, type: TEXT_REMOVED, page: original.page, block: original.block ?? null, fingerprint: null,
       text: null, snapshot: null, textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-      author: personEmail(by), authorId: personId, when, data, signed: true,
+      author: (await this.person(personId))?.email ?? personId, authorId: personId, when, data, signed: true, unverified: false,
     };
   }
 
@@ -839,8 +872,8 @@ export class SqliteEventStore implements EventStore {
         // genuine append is.
         ? this.#db.prepare('SELECT *, CAST(rowid AS REAL) AS rowid FROM events ORDER BY happened_at, rowid').all()
         : this.#db.prepare('SELECT *, CAST(rowid AS REAL) AS rowid FROM events WHERE page = ? ORDER BY happened_at, rowid').all(page);
-      people = new Map((this.#db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
-        .map((p) => [p.id, p.email]));
+      people = trustedPeople(this.#db.prepare('SELECT id, email, seal FROM people').all() as unknown as PersonRow[],
+        this.#signing.keyring);
       texts = new Map((this.#db.prepare('SELECT event, field, value, salt FROM texts').all() as
         { event: string; field: TextField; value: string; salt: string }[])
         .map((t) => [textKey(t.event, t.field), { value: t.value, salt: t.salt }]));

@@ -243,7 +243,8 @@ signed by this server", raised as CRITICAL, and counts for nothing.
   with it, like the events.
 - **Keep it away from the store.** Not in the repository, not in `holdrim.json` (refused there), not
   on the volume that holds the database: the person signing exists to stop is the one who can write
-  the store, and a key beside it is theirs. The server never writes it anywhere, and never logs it;
+  the store, and a key beside it is theirs. A `HOLDRIM_SIGNING_KEY_FILE` whose real location is inside
+  the site, which serves every file in it, or inside the folder of a SQLite store refuses to start. The server never writes it anywhere, and never logs it;
   the boot log prints only its id and its public half.
 - **One key per deployment.** A staging and a production that share a key accept each other's
   events: a ✓ given in staging, copied into production's store, would read there as signed.
@@ -291,19 +292,26 @@ listed. No event is ever re-signed: an event is never altered.
   The panel cannot tell an erased event from one never made. Closing that needs the events chained
   in a signed sequence, so a reader can see a link missing; on Firestore, with several instances
   writing, that needs one head every write goes through. Planned for 0.2, not built.
-- **The people table is not signed**, on purpose: an address in a signed event could never be
-  emptied (`docs/PRIVACY.md`, sections 1 and 5). A direct writer who re-points a person's row — with
-  SQLite's guards dropped, or on Firestore — makes that person's events show another address, and
-  hands that address the project grants the row's id holds (a grant names an id, and a request finds
-  its roles by the id the address leads to). It moves no lock and no `people`: whether a ✓ was a
-  lock is on the signed event, and who holds `lock` or `people` is asked of the deployment's
-  variables, by address. Rows re-pointed that way are what the guards' warnings exist to name.
+- **A person's row is sealed, not signed into events**: an address in a signed event could never be
+  emptied (`docs/PRIVACY.md`, sections 1, 3 and 5). Each row of the people table carries its own seal
+  over its id and address, made with the signing key and emptied with the address. A direct writer
+  who re-points a row, or inserts one, without the key makes that row nobody: no grant reaches it,
+  no request reads as theirs, and their events read as the id — raised as CRITICAL, or, for a row with
+  no seal at all, said as a WARNING. What they can still do is empty a row, the one change a row
+  takes — the same as the owner forgetting that person, and a denial rather than a takeover — or
+  delete one on Firestore, which leaves the person's events naming an id nobody holds. Every row
+  made before rows were sealed reads as nobody from the upgrade on: nothing seals a row afterwards,
+  since that would vouch for whatever was in it. Removing such a person on the settings screen frees
+  their address for a new, sealed person.
 - **Whoever holds the signing key can sign anything**, with any date: a key is the one secret the
   store's trust rests on, kept where the server runs and nowhere else. A key that leaked is retired
   as "Rotating the signing key" says, and every event it signed loses its authority with it.
 - **A reader trusts the keys it was told.** `holdrim` reading the file or the cloud needs
-  `HOLDRIM_PUBLIC_KEYS`, and a machine told a wrong key reads nothing as signed; one told a key
-  from another deployment trusts that deployment's events. `--local` trusts what the local runner
+  `HOLDRIM_PUBLIC_KEYS`, and a machine told a wrong key, or none, reads every event as unverified:
+  counted for nothing, and the missing key said once, as a WARNING naming it — not as tampering,
+  since a reader cannot tell a key it was not given from one nobody issued. One told a key from
+  another deployment trusts that deployment's events. A private key given there is refused, and
+  named as leaked: `HOLDRIM_PUBLIC_KEYS` sits wherever readers keep their configuration. `--local` trusts what the local runner
   answers, a server on this machine with a key that dies with it.
 - **A store written by a version before signing** reads, whole, as not signed: every ✓ in it is no
   lock and every request is at triage, and the banner lists every event. `holdrim sync` before the

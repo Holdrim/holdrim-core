@@ -749,13 +749,18 @@ export async function sync(root: string, source: Pick<Source, 'events'> & Partia
   // (`isLocked`, types.ts; #50): a `locks:"true"` written into the store directly, beside the
   // owner's id, is no lock, and never reaches approvals.json.
   const theOwners = approvals.filter((e) => isLocked(e));
-  const unsigned = approvals.filter((e) => !e.signed).length;
+  const unsigned = approvals.filter((e) => !e.signed && !e.unverified).length;
+  const unverified = approvals.filter((e) => !e.signed && e.unverified).length;
   if (unsigned) {
-    console.log(`  ⚠ ${unsigned} approval(s) not signed by the server ignored: written into the store from outside, `
-      + 'or signed by a key HOLDRIM_PUBLIC_KEYS does not name');
+    console.log(`  ⚠ ${unsigned} approval(s) not signed by the server ignored: written into the store from outside`);
   }
-  if (approvals.length - unsigned !== theOwners.length) {
-    console.log(`  · ${approvals.length - unsigned - theOwners.length} approval(s) by somebody else ignored: only the owner's ✓ locks`);
+  if (unverified) {
+    console.log(`  ⚠ ${unverified} approval(s) signed by a key HOLDRIM_PUBLIC_KEYS does not name ignored: `
+      + 'list its public key there if it is this deployment\'s, then sync again');
+  }
+  if (approvals.length - unsigned - unverified !== theOwners.length) {
+    console.log(`  · ${approvals.length - unsigned - unverified - theOwners.length} approval(s) by somebody else ignored: `
+      + 'only the owner\'s ✓ locks');
   }
 
   const registry = loadRegistry(root);

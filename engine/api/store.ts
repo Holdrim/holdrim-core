@@ -102,6 +102,9 @@ export class MemoryEventStore implements EventStore {
 
   // The people table. No database to hold the rule here, so `setEmail` is the only code that
   // changes a row and it refuses everything but emptying it (docs/PRIVACY.md, sections 1 and 3).
+  // Not sealed, unlike the rows of every store that lasts (`sealPerson`, engine/api/signing.ts):
+  // nothing outside this process can write here, so there is no row a seal could ever refuse, and a
+  // check no row can fail would prove nothing. A row here is always the one this code made.
   #people = new Map<string, Person>();
 
   // Synchronous, and called from both methods below without an `await` in front of it: an `await`
@@ -124,6 +127,10 @@ export class MemoryEventStore implements EventStore {
   }
 
   async personOf(email: string): Promise<string | null> {
+    return this.#findByEmail(personEmail(email));
+  }
+
+  async heldBy(email: string): Promise<string | null> {
     return this.#findByEmail(personEmail(email));
   }
 

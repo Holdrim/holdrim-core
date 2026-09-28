@@ -7,6 +7,7 @@
   "api.agentTokens.notForTheOwner": "o dono nunca é um agente: não se emite token de agente para o endereço do dono",
   "api.agentTokens.notFound": "{email} não tem token de agente",
   "api.agentTokens.ownerOnly": "só o dono emite e revoga tokens de agente",
+  "api.grants.personUnsealed": "{email} está numa linha da tabela de pessoas que este servidor não selou, então nenhuma concessão chega a ela. Remova a pessoa nesta tela primeiro; o endereço passa a ser uma pessoa nova, que pode receber um papel",
   "api.roles.ownerOnly": "só o dono define papéis, os concede e revoga concessões",
   "api.roles.nameInvalid": "o nome de um papel é feito de palavras em minúsculas, com letras, dígitos e -, um espaço entre palavras, no máximo {max} caracteres, e não é owner, admin nem member",
   "api.roles.capabilitiesInvalid": "um papel tem uma ou mais de {capabilities}, cada uma uma vez: nunca lock, nunca people",

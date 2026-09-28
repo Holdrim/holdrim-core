@@ -2,6 +2,7 @@ import {
   createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, type KeyObject,
 } from 'node:crypto';
 import { findingOf, type TamperReport } from './texts.ts';
+import { log } from './log.ts';
 
 /**
  * Events signed by the server (docs/PRIVACY.md, section 3; SECURITY.md, "The signing key").
@@ -98,10 +99,24 @@ export function publicKeyText(publicKey: KeyObject): string {
 /** A PEM block, or one line of base64 (either alphabet) holding DER. Nothing else is a key here. */
 const BASE64 = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
+/** Said when a private key is found where only a public one may go. Names nothing of the key. */
+const PRIVATE_WHERE_PUBLIC = 'a PRIVATE key, where only a public one belongs: whoever could read it can sign '
+  + 'locks, so treat it as leaked — make a new key (holdrim key new) and retire this one';
+
 function parseKey(text: string, kind: 'private' | 'public'): KeyObject {
   const t = text.trim();
   let key: KeyObject;
+  // A public key is taken from exactly one PUBLIC KEY block or SPKI DER, and nothing else: node's
+  // `createPublicKey` also accepts a private key and derives its public half — so the KeyObject it
+  // returns is public either way, and only the text can tell — and a private key pasted into
+  // HOLDRIM_PUBLIC_KEYS would be read without a word, while it sits wherever readers keep their
+  // configuration, the one place a signing key must never be. A PKCS8 key as one line of DER fails
+  // to parse as SPKI below.
+  if (kind === 'public' && /PRIVATE KEY/.test(t)) throw new Error(PRIVATE_WHERE_PUBLIC);
   if (t.startsWith('-----BEGIN')) {
+    if (kind === 'public' && !/^-----BEGIN PUBLIC KEY-----\s[\s\S]*\s-----END PUBLIC KEY-----$/.test(t)) {
+      throw new Error('a PEM block that is not a PUBLIC KEY');
+    }
     key = kind === 'private' ? createPrivateKey(t) : createPublicKey(t);
   } else {
     if (!BASE64.test(t)) throw new Error('not PEM and not base64');
@@ -165,8 +180,11 @@ const HOW_TO_MAKE_ONE = 'Make one with  holdrim key new <file>  (or  openssl gen
 export function loadSigner(
   env: Record<string, string | undefined>, readFile: (path: string) => string, lasting: boolean,
 ): { signer: Signer; ephemeral: boolean } {
-  const inline = env.HOLDRIM_SIGNING_KEY;
   const file = env.HOLDRIM_SIGNING_KEY_FILE;
+  // An empty HOLDRIM_SIGNING_KEY beside a file is no second key: compose.yaml passes the variable
+  // through whether or not it is set, so a deployment that gives the key as a file would otherwise
+  // be refused for naming both. Empty and alone, it is still refused below, as set and empty.
+  const inline = file !== undefined && env.HOLDRIM_SIGNING_KEY?.trim() === '' ? undefined : env.HOLDRIM_SIGNING_KEY;
   if (inline !== undefined && file !== undefined) {
     throw new Error('both HOLDRIM_SIGNING_KEY and HOLDRIM_SIGNING_KEY_FILE are set: set one, so there is no '
       + 'question which key signs');
@@ -225,11 +243,6 @@ export function loadKeyring(env: Record<string, string | undefined>, own?: Signe
     ring.set(kidOf(key), key);
   }
   return ring;
-}
-
-/** Whether `HOLDRIM_PUBLIC_KEYS` names any key at all — what `sync`, `apply` and `state` ask first. */
-export function namesPublicKeys(env: Record<string, string | undefined>): boolean {
-  return (env.HOLDRIM_PUBLIC_KEYS ?? '').split(';').some((s) => s.trim() !== '');
 }
 
 // ---------------------------------------------------------------- the envelope
@@ -322,14 +335,27 @@ export interface SealedRow {
   envelope?: unknown;
   sig?: unknown;
   kid?: unknown;
+  /** Set by the reader when the stored `data` was not JSON at all, and `data` read as null. */
+  dataUnreadable?: boolean;
 }
 
-/** Not signed: no seal at all, or one that does not hold. The reason is English, for the log. */
+/**
+ * Not signed: no seal at all (`unsigned`), or one that does not hold (`forged`) — both written
+ * outside the product, and raised as CRITICAL. The reason is English, for the log.
+ */
 export type SignatureKind = 'unsigned' | 'forged';
 
+/**
+ * A seal this reader cannot check: it names a key the reader was not given. The event may be
+ * genuine — signed by a key since retired, or read by a machine whose HOLDRIM_PUBLIC_KEYS is not set —
+ * and a reader cannot tell that from a row naming a key nobody issued, so it counts for nothing all
+ * the same; but it is not evidence of tampering, and is said once, as a WARNING naming the key, never
+ * as a CRITICAL line per event telling anyone to rotate credentials.
+ */
 export type Verdict =
   | { signed: true; kid: string; fields: Sealable }
-  | { signed: false; kind: SignatureKind; reason: string };
+  | { signed: false; kind: SignatureKind; reason: string }
+  | { signed: false; kind: 'unverified'; kid: string; reason: string };
 
 /**
  * Seals already checked. Events never change, so a seal that verified once verifies again, and
@@ -364,6 +390,45 @@ function checks(kid: string, key: KeyObject, envelope: string, sig: string): boo
   return ok;
 }
 
+// ---------------------------------------------------------------- the people table's bindings
+
+/** What a person's seal binds: this tag, the version, the id and the normalised address. */
+export const PERSON_TAG = 'holdrim-person';
+
+function personEnvelope(id: string, email: string): string {
+  return JSON.stringify([PERSON_TAG, ENVELOPE_VERSION, id, email]);
+}
+
+/**
+ * The seal on one row of the people table: the key's id and the signature over which id holds which
+ * address, as one string, `<kid>.<signature>`. An event names its author by id, so whoever could
+ * point an id at another address would take over every event and every grant behind it; sealed, a
+ * row changed or inserted without the key reads as nobody's. Made when the row is made, and never
+ * again: a forgotten row loses its seal with its address.
+ */
+export function sealPerson(id: string, email: string, signer: Signer): string {
+  return `${signer.kid}.${signer.sign(personEnvelope(id, email))}`;
+}
+
+/**
+ * Whether a row's binding holds: `sealed`, `unsealed` (no seal at all — a row from before seals,
+ * or one written by anyone without the key), `unverified` (sealed by a key this reader was not
+ * given) or `forged` (a seal that does not hold for this id and address). Only `sealed` is anybody.
+ * Never throws: a malformed seal is an answer.
+ */
+export type PersonVerdict = 'sealed' | 'unsealed' | 'unverified' | 'forged';
+
+export function personVerdict(id: string, email: string, seal: unknown, keyring: Keyring): PersonVerdict {
+  if (seal == null) return 'unsealed';
+  if (typeof seal !== 'string') return 'forged';
+  const dot = seal.indexOf('.');
+  if (dot < 1) return 'forged';
+  const kid = seal.slice(0, dot);
+  const key = keyring.get(kid);
+  if (!key) return 'unverified';
+  return checks(kid, key, personEnvelope(id, email), seal.slice(dot + 1)) ? 'sealed' : 'forged';
+}
+
 /** The columns a row carries that the envelope also says, compared one by one. */
 const COLUMNS = ['id', 'type', 'page', 'block', 'fingerprint', 'textHash', 'snapshotHash', 'author', 'when'] as const;
 
@@ -387,8 +452,13 @@ export function verifyRow(row: SealedRow, keyring: Keyring): Verdict {
   if (typeof envelope !== 'string' || typeof sig !== 'string' || typeof kid !== 'string') {
     return { signed: false, kind: 'forged', reason: 'an incomplete signature' };
   }
+  // Before the key is asked: the server only ever writes JSON there, so whoever holds the key, a
+  // sealed row whose data is not JSON was written from outside.
+  if (row.dataUnreadable) return { signed: false, kind: 'forged', reason: 'data that is not JSON' };
   const key = keyring.get(kid);
-  if (!key) return { signed: false, kind: 'forged', reason: `signed by key ${kid.slice(0, 32)}, which this reader does not trust` };
+  if (!key) {
+    return { signed: false, kind: 'unverified', kid: kid.slice(0, 32), reason: `signed by key ${kid.slice(0, 32)}, which this reader was not given` };
+  }
   if (!checks(kid, key, envelope, sig)) return { signed: false, kind: 'forged', reason: 'a signature that does not verify' };
   const fields = fieldsOf(envelope);
   if (!fields) return { signed: false, kind: 'forged', reason: 'an envelope of a shape this version does not read' };
@@ -411,25 +481,54 @@ function observedRow(row: SealedRow): string {
     snapshotHash, author, when, data, envelope, sig, kid }), 'utf8').digest('hex');
 }
 
+/** The keys already said to be missing, in this process: each is said once, not on every read. */
+const unverifiedSaid = new Set<string>();
+
+/**
+ * Says, once per process for each key, that events signed by it were read and could not be checked.
+ * WARNING, never CRITICAL: a missing key is a reader's configuration, not a store written from
+ * outside, and a line per event per read would bury the one CRITICAL line that matters.
+ */
+function sayUnverified(kids: Map<string, number>, write?: (line: string) => void): void {
+  const fresh = [...kids].filter(([kid]) => !unverifiedSaid.has(kid));
+  if (fresh.length === 0) return;
+  for (const [kid] of fresh) unverifiedSaid.add(kid);
+  log('WARNING', 'events_unverified', {
+    kids: fresh.map(([kid]) => kid), events: fresh.reduce((n, [, count]) => n + count, 0),
+    reason: 'signed by a key this reader was not given: list its public key in HOLDRIM_PUBLIC_KEYS, '
+      + 'or it is a key retired on purpose. Until then these events count for nothing',
+  }, write);
+}
+
 /**
  * Every row, verified: `signed: true` with its fields from the envelope, or `signed: false` with the
- * row as found and one report each, for `reportTampered` to raise (engine/api/texts.ts) — CRITICAL,
- * like a text that fails its hash, since in a store where every genuine event is signed, one that is
- * not was written from outside the product. Readers show it, marked, and give it no authority
- * (`isLocked`, `authorCouldTriage` and the rest, engine/api/types.ts): hidden, it would hide the
- * evidence of the forgery. `envelope`, `sig` and `kid` never leave: what a reader needs is `signed`.
+ * row as found. A row with no seal, or one that does not hold, is reported, for `reportTampered` to
+ * raise (engine/api/texts.ts) — CRITICAL, like a text that fails its hash, since in a store where
+ * every genuine event is signed, one that is not was written from outside the product. A row sealed
+ * by a key this reader was not given is `unverified` instead: not reported as tampering, said once
+ * by `sayUnverified` (on `write`, as the reports are), and still of no authority. Readers show every
+ * one of them, marked, and give none of them authority (`isLocked`, `authorCouldTriage` and the
+ * rest, engine/api/types.ts): hidden, a forgery's evidence would be hidden with it. `envelope`, `sig`
+ * and `kid` never leave: what a reader needs is `signed`, and `unverified`.
  *
  * Runs on rows as stored — `author` still the person's id — before `withAuthors` resolves anybody.
  */
 export function withSignatures<R extends SealedRow>(
-  rows: R[], keyring: Keyring, reports?: TamperReport[],
-): (Omit<R, 'envelope' | 'sig' | 'kid'> & { signed: boolean })[] {
-  return rows.map((row) => {
-    const { envelope: _e, sig: _s, kid: _k, ...rest } = row;
+  rows: R[], keyring: Keyring, reports?: TamperReport[], write?: (line: string) => void,
+): (Omit<R, 'envelope' | 'sig' | 'kid' | 'dataUnreadable'> & { signed: boolean; unverified: boolean })[] {
+  const missing = new Map<string, number>();
+  const out = rows.map((row) => {
+    const { envelope: _e, sig: _s, kid: _k, dataUnreadable: _d, ...rest } = row;
     const verdict = verifyRow(row, keyring);
-    if (verdict.signed) return { ...rest, ...verdict.fields, text: null, snapshot: null, signed: true };
+    if (verdict.signed) return { ...rest, ...verdict.fields, text: null, snapshot: null, signed: true, unverified: false };
+    if (verdict.kind === 'unverified') {
+      missing.set(verdict.kid, (missing.get(verdict.kid) ?? 0) + 1);
+      return { ...rest, signed: false, unverified: true };
+    }
     reports?.push({ event: row.id, field: 'event', kind: verdict.kind, reason: verdict.reason,
       finding: findingOf(row.id, 'event', verdict.kind, observedRow(row)) });
-    return { ...rest, signed: false };
+    return { ...rest, signed: false, unverified: false };
   });
+  sayUnverified(missing, write);
+  return out;
 }

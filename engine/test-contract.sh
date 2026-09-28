@@ -1746,7 +1746,7 @@ expect "the home counts the signed one as waiting for the repository"   "1 appro
 expect "and not the one written into the file"                          "" "$(home_page_awaiting A02)"
 expect "a request claiming its author could triage it starts at triage" open "$(event_of forged-request | jfield status.state)"
 expect "an \"approved\" nobody signed moves the genuine request nowhere" open "$(event_of $UNSIGNED_ASKED | jfield status.state)"
-expect "and the open count still counts both at triage"                 2 "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/requests/open | jfield toTriage)"
+expect "and the open count counts only the signed one, the one anybody may triage" 1 "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/requests/open | jfield toTriage)"
 expect "a role defined and granted in the file grants the member nothing" "false false" "$(may_on $UNSIGNED_MEMBER A01 A01.1.1)"
 expect "each one is raised as CRITICAL, by id" "forged-approval forged-grant forged-lock forged-request forged-role" \
   "$(grep '"event":"event_unsigned"' $WORK/unsigned.log | sed -E -n 's/.*"eventId":"([^"]*)".*/\1/p' | sort -u | tr '\n' ' ' | sed 's/ $//')"
@@ -1758,6 +1758,14 @@ expect "the home marks the request nobody signed"                       0 \
 expect "(the owner approves the genuine request)"                        201 \
   "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"A01\",\"text\":\"ok\",\"data\":{\"request\":\"$UNSIGNED_ASKED\",\"state\":\"approved\"}}")"
 expect "and now it is approved"                                          approved "$(event_of $UNSIGNED_ASKED | jfield status.state)"
+# A request the server did not sign is no request to decide, add to or apply: only what the server
+# signed was filed by anybody.
+expect "the owner is offered no triage on the request nobody signed"     "[]" "$(event_of forged-request | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.stringify(JSON.parse(s).status.triage)))")"
+expect "nor offered to add details to it"                                false "$(event_of forged-request | jfield status.acceptsSupplement)"
+expect "and deciding it is refused as no request at all → 404"           404 \
+  "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"A02\",\"text\":\"ok\",\"data\":{\"request\":\"forged-request\",\"state\":\"approved\"}}")"
+expect "as is adding details to it → 404"                               404 \
+  "$(post $OWNER "{\"type\":\"supplement\",\"page\":\"A02\",\"text\":\"more\",\"data\":{\"request\":\"forged-request\"}}")"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 # `holdrim sync` and `list`, reading the file directly with the public key: the same answers.
 SYNC_OUT=$(HOLDRIM_OWNER=$OWNER node engine/cli/holdrim.ts sync --db "$UNSIGNED_DIR/events.db" --root "$UNSIGNED_SITE" 2>&1); SYNC_EXIT=$?
@@ -1766,10 +1774,50 @@ expect "holdrim sync --db locks the signed ✓ and exits 1 for what is not signe
 expect "and says what it ignored"                                        0 "$(echo "$SYNC_OUT" | has '1 approval(s) not signed by the server ignored'; echo $?)"
 expect "holdrim list --json hands the agent only what the server signed as approved" "$UNSIGNED_ASKED" \
   "$(HOLDRIM_OWNER=$OWNER node engine/cli/holdrim.ts list --json --db "$UNSIGNED_DIR/events.db" --root "$UNSIGNED_SITE" 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).requests.map(r=>r.id).join(' ')))")"
+APPLY_UNSIGNED=$(HOLDRIM_OWNER=$OWNER node engine/cli/holdrim.ts apply forged-request --dry-run --db "$UNSIGNED_DIR/events.db" --root "$UNSIGNED_SITE" 2>&1); APPLY_UNSIGNED_EXIT=$?
+expect "holdrim apply refuses the request nobody signed, exit 1, and writes no brief" "1 1" \
+  "$APPLY_UNSIGNED_EXIT $(echo "$APPLY_UNSIGNED" | has -F '# Holdrim request'; echo $?)"
+expect "and says why"                                                    0 "$(echo "$APPLY_UNSIGNED" | has 'not signed by the server'; echo $?)"
 SYNC_NOKEY=$(HOLDRIM_OWNER=$OWNER run_for 20 env -u HOLDRIM_PUBLIC_KEYS node engine/cli/holdrim.ts sync --db "$UNSIGNED_DIR/events.db" --root "$UNSIGNED_SITE" 2>&1); SYNC_NOKEY_EXIT=$?
 expect "holdrim sync with no HOLDRIM_PUBLIC_KEYS refuses, exit 1"       1 "$SYNC_NOKEY_EXIT"
 expect "and names the variable"                                          0 "$(echo "$SYNC_NOKEY" | has 'refusing to act: no HOLDRIM_PUBLIC_KEYS'; echo $?)"
 rm -rf "$UNSIGNED_DIR"
+
+echo "a person's row is sealed, and a row the server did not seal is nobody (#50):"
+# The people table binds each id to an address, and events and grants name the id. A grant reaches
+# a person only through a row this server sealed: a row changed or added in the file without the
+# key is nobody, and a grant for the address such a row holds is refused rather than written to
+# reach no one.
+SEAL_DIR=$(mktemp -d); SEAL_GRANTEE=sealed-grantee@example.org; SEAL_INTRUDER=intruder@example.org
+SEAL_UNSEALED=unsealed@example.org
+start_seal_server() {
+  HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite \
+    HOLDRIM_EVENTS_PATH=$SEAL_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
+    node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >>$WORK/seal.log 2>&1 & PID=$!
+  for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+}
+seal_api() { curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: application/json' -d "$2" "$B/api/$1"; }
+start_seal_server
+expect "(the owner defines a role that approves)"                   201 "$(seal_api roles '{"role":"sealer","capabilities":["approve"]}')"
+expect "(and grants it)"                                            201 "$(seal_api grants "{\"email\":\"$SEAL_GRANTEE\",\"role\":\"sealer\"}")"
+expect "the grantee may approve"                                    "false true" "$(may_on $SEAL_GRANTEE A01 A01.1.1)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+node --no-warnings -e "
+const { DatabaseSync } = require('node:sqlite');
+const [path, from, to, fresh] = process.argv.slice(1);
+const db = new DatabaseSync(path);
+db.exec('DROP TRIGGER people_only_lose_email; DROP TRIGGER people_seal_only_goes');
+db.prepare('UPDATE people SET email = ? WHERE email = ?').run(to, from);
+db.prepare('INSERT INTO people (id, email) VALUES (?, ?)').run('p_' + 'ab'.repeat(12), fresh);
+db.close();" "$SEAL_DIR/events.db" "$SEAL_GRANTEE" "$SEAL_INTRUDER" "$SEAL_UNSEALED"
+start_seal_server
+expect "the address the row was pointed at gets nothing of the grant" "false false" "$(may_on $SEAL_INTRUDER A01 A01.1.1)"
+expect "nor does the address it was taken from"                      "false false" "$(may_on $SEAL_GRANTEE A01 A01.1.1)"
+expect "the row is raised as CRITICAL, by id alone"                  "0 1" \
+  "$(has '"severity":"CRITICAL","event":"person_forged"' "$WORK/seal.log"; echo $?) $(grep '"event":"person_forged"' "$WORK/seal.log" | has -F "$SEAL_INTRUDER"; echo $?)"
+expect "a grant for the address of a row nobody sealed → 409"        409 "$(seal_api grants "{\"email\":\"$SEAL_UNSEALED\",\"role\":\"sealer\"}")"
+expect "and that row is said, as a WARNING"                           0 "$(has '"severity":"WARNING","event":"person_unsealed"' "$WORK/seal.log"; echo $?)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$SEAL_DIR"
 
 echo "the local runner pins its own environment, even when the caller's shell has one:"
 # A shell already exporting HOLDRIM_EVENTS=sqlite or HOLDRIM_IDENTITY=password, left over from some
@@ -3221,6 +3269,30 @@ HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRI
 expect "a key file that holds no key → exits 1"                    1 "$?"
 expect "and names the file's variable, not its contents"           "0 1" \
   "$(has 'HOLDRIM_SIGNING_KEY_FILE does not hold an Ed25519 private key' "$WORK/bad-key.log"; echo $?) $(has 'not a key' "$WORK/bad-key.log"; echo $?)"
+# Where the key file may not sit: inside the site, which serves it, or beside a store, whose folder
+# is what gets copied as "the data". Refused before any store opens, and the key is never echoed.
+KEYED_SITE="$WORK/keyed-site"; cp -r "$SITE" "$KEYED_SITE"; cp "$WORK/signing.key" "$KEYED_SITE/signing.key"
+HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$NOKEY/events.db" HOLDRIM_SITE="$KEYED_SITE" PORT=$PORT HOLDRIM_SIGNING_KEY_FILE="$KEYED_SITE/signing.key" \
+  run_for 15 node engine/api/server.ts >"$WORK/key-in-site.log" 2>&1
+expect "a key file inside the site → exits 1"                      1 "$?"
+expect "and says the site would serve it, naming no key material"  "0 1 1" \
+  "$(has 'the signing key (HOLDRIM_SIGNING_KEY_FILE).*would be served by the site' "$WORK/key-in-site.log"; echo $?) $(has "$(sed -n 2p "$WORK/signing.key")" "$WORK/key-in-site.log"; echo $?) $([ -e "$NOKEY" ]; echo $?)"
+KEYED_STORE="$WORK/keyed-store"; mkdir -p "$KEYED_STORE"; cp "$WORK/signing.key" "$KEYED_STORE/signing.key"
+HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$KEYED_STORE/events.db" HOLDRIM_SITE="$SITE" PORT=$PORT HOLDRIM_SIGNING_KEY_FILE="$KEYED_STORE/signing.key" \
+  run_for 15 node engine/api/server.ts >"$WORK/key-in-store.log" 2>&1
+expect "a key file in the events store's folder → exits 1"         1 "$?"
+expect "and names the store, and opened none"                      "0 1" \
+  "$(has 'the signing key (HOLDRIM_SIGNING_KEY_FILE).*is in the folder of the events store' "$WORK/key-in-store.log"; echo $?) $([ -e "$KEYED_STORE/events.db" ]; echo $?)"
+# What compose.yaml hands a service given its key as a file: HOLDRIM_SIGNING_KEY passed through, empty.
+HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH="$WORK/file-key/events.db" HOLDRIM_SITE="$SITE" PORT=$PORT HOLDRIM_SIGNING_KEY= \
+  node engine/api/server.ts >"$WORK/file-key.log" 2>&1 & PID=$!
+for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+expect "an empty HOLDRIM_SIGNING_KEY beside its _FILE: the file's key signs" "$(sed -n 's/^  key id: //p' "$WORK/signing.out")" \
+  "$(log_field "$WORK/file-key.log" signing_key kid)"
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
 # holdrim.json naming a public key is authority from the repository, refused like an owner there.
 FILE_KEYS=$(mktemp -d); cp -r "$SITE/." "$FILE_KEYS"
 node -e "const f=process.argv[1]+'/holdrim.json', c=JSON.parse(require('fs').readFileSync(f,'utf8'));

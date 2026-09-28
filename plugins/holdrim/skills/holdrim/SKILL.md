@@ -38,8 +38,13 @@ check it is the person you expect before trusting what it locked.
 
 A non-zero exit from `sync` or `list`, or a `sync` that says it is refusing to act, means stop:
 report no request as ready, and tell the owner the store needs its guards restored — or, if the
-message says `tampered`, that a text does not match its hash. A broken guard makes even the plain
+message says `tampered`, that something read back is not what the server wrote: a text that does
+not match its hash, or an event the server did not sign. A broken guard makes even the plain
 `list` table show forged requests as **Approved**; there is nothing in that output worth reporting.
+A refusal naming `HOLDRIM_PUBLIC_KEYS` means this machine was not given the server's public key:
+nothing reads as approved until it is exported, so ask the owner for it rather than report the
+queue as empty. A warning that events were signed by a key this reader was not given is the same
+missing key, not tampering.
 
 Tell the owner, in a few lines: how many new blocks were validated, how many requests are ready to
 apply, and from whom. **Never offer to validate block by block in chat** — validation happens on
