@@ -51,6 +51,12 @@ export interface PageSummary {
 export interface RequestRow {
   id: string; page: string; block: string | null; href: string | null;
   state: string; category: string | null; author: string; when: string; text: string;
+  /**
+   * Whether this server signed the request (engine/api/signing.ts). One that is not is still listed —
+   * hiding it would hide the evidence — and marked, so nobody takes a row a direct writer inserted
+   * for somebody's request.
+   */
+  signed: boolean;
   /** Where the viewer may send it, from the cycle; absent for whoever may not decide. */
   triage?: string[];
   /** The destinations among those that need a reason. */
@@ -157,7 +163,7 @@ export function requestsInProgress(
       id: e.id, page: e.page, block: e.block ?? null,
       href: page && e.block ? `${page}#${encodeURIComponent(e.block)}` : page,
       state, category: typeof e.data?.category === 'string' ? e.data.category : null,
-      author: authorOf(e.author), when: e.when, text: e.text ?? '',
+      author: authorOf(e.author), when: e.when, text: e.text ?? '', signed: e.signed === true,
     });
   }
   return rows.sort((a, b) => a.when.localeCompare(b.when));
@@ -180,6 +186,7 @@ export const HOME_KEYS = [
   'home.graph.heading', 'home.graph.lede', 'home.graph.loading', 'home.graph.failed',
   'home.graph.missing', 'home.graph.label', 'home.graph.zoomIn', 'home.graph.zoomOut', 'home.graph.reset',
   'home.graph.filterPrefix', 'home.graph.filterStates', 'home.graph.filterMayAct', 'home.graph.noMatch',
+  'home.unsigned',
 ] as const;
 
 /**
@@ -297,7 +304,8 @@ export function renderHomePage(
     const link = r.href ? `<a href="${forHtml(r.href)}">${where}</a>` : where;
     const category = r.category ? ` <span class="holdrim-faint">· ${t(`cycle.category.${r.category}`)}</span>` : '';
     return `<tr><td>${t(`cycle.${r.state}`)}${category}</td><td>${link}</td>`
-      + `<td>${forHtml(excerpt(r.text))}</td>`
+      + `<td>${forHtml(excerpt(r.text))}`
+      + `${r.signed ? '' : ` <strong class="holdrim-unsigned">⚠ ${t('home.unsigned')}</strong>`}</td>`
       + `<td class="holdrim-muted">${forHtml(r.author)}<br>${forHtml(r.when.slice(0, 10))}</td>`
       + `${deciding ? `<td>${triageForm(r)}</td>` : ''}</tr>`;
   }).join('\n');

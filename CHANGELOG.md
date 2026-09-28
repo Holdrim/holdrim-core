@@ -160,25 +160,29 @@ who ran the engine from `main` before it.
   requests back to triage with no event recording either change. The server writes `locks` (an
   approval) and `authorCouldTriage` (a request) at the moment it records the event; every reader —
   the panel, the home, `holdrim sync` and `holdrim list`/`show`/`summary`/`state` — reads what was
-  written. A request with nothing written reads as "at triage" (the safe direction: the owner
-  triages it again, once). A ✓ with nothing written needs a **baseline**: on its first boot against a
-  store, a server of this version writes one `lock_baseline` event, recording who `HOLDRIM_OWNER` was
-  at that exact moment; an unwritten ✓ then locks only if its author matches the baseline's and it
-  predates the baseline, and a store with no baseline at all trusts no unwritten ✓ from anyone. A
-  field written before this version existed is trusted the same way — only when it is dated after
-  the store's own baseline — since a client's own POST body could shape `data` freely before this
-  change; one that predates the baseline is decided by the baseline rule instead, whatever it claims.
-  One exception: a ✓ written `locks:"false"` is trusted even before the baseline, since a forged field
-  can only ever help an attacker by claiming `"true"`, never `"false"` — guarding a former owner's own
-  ✓ from misreading as a lock should this server's clock ever run behind the baseline's.
-  **What to change, before anyone uses this version against a real store:** move ALL traffic to the
-  new revision first — an old revision left serving alongside it can still record events with
-  client-forged `locks`/`authorCouldTriage`, dated after the new baseline, which the new version would
-  then trust as if it had written them itself. **And boot this version once under the `HOLDRIM_OWNER`
-  who gave the existing ✓s** (Cloud Run: a revision serving 100% of traffic; anywhere else, once at
-  startup): the baseline freezes whoever `HOLDRIM_OWNER` is at that first boot, **permanently** — a
-  later handover does not move it, and there is no second chance to set it once a store already holds
-  one. `SECURITY.md` has the same two steps, in the place an operator reads before upgrading.
+  written, and only on an event the server signed (the first entry above). A request with nothing
+  written reads as "at triage" (the safe direction: the owner triages it again, once); a ✓ with
+  nothing written is no lock.
+- **An event not signed by the server now counts for nothing, and the lock baseline is gone (#50).**
+  Before signing, a ✓ with nothing written was a lock when a `lock_baseline` event — written at a
+  server's first start, naming `HOLDRIM_OWNER` then — said so by author and date. Whoever writes the
+  store also writes dates, so that rule trusted exactly what signing now refuses: the
+  `lock_baseline` event type is no longer written or read, and what a store already holds of it is
+  shown as any other event. Not only locks: a request's author could triage it, a request moves
+  through its states, a text removal accounts for a missing text, an acknowledgement quiets the
+  banner, a role is defined, granted or revoked, and a `person_removed` stands for a removal only on
+  a signed event. One that is not signed — a row written into the file or the project, or signed by a
+  key `HOLDRIM_PUBLIC_KEYS` no longer names — is still shown, marked "not signed by this server" in
+  the panel, on the home and in `holdrim list`/`show` (and `signed: false` in `list --json`), and is
+  raised as CRITICAL; `holdrim list` and `holdrim sync` exit non-zero while one is there. **What to
+  change:** nothing on a store this version started: every event it writes is signed. A store kept
+  from before it reads every older event as not signed — run `holdrim sync` on it before upgrading,
+  and give again, after, any ✓ still waiting for the repository. Removing a person is no longer
+  refused because older ✓s name them (`api.removal.holdsOldLocks` is gone): no row makes a ✓ a lock
+  any more. `sync`, `apply` and `state` reading the file or the cloud directly refuse to act without
+  `HOLDRIM_PUBLIC_KEYS`, and the reading commands warn; `--local` reads the local runner, which
+  verifies each event itself. New on the surface: `requests[].signed` and
+  `requests[].history[].signed` in `list --json`; gone: the `lock_baseline` event type.
 - **`holdrim apply`'s commit no longer carries `Requested-by:`.** Only `Request: <full id>` is
   written; who asked is found from the request, through the people table, the one place it can be
   removed. What to change: anything reading a commit for who asked now reads the request instead.

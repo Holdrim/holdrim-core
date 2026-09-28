@@ -1143,6 +1143,20 @@ try {
     await stranded.page.goto(url);
     await must('a page whose events cannot load says so', () => stranded.page.locator('.rv-alert').waitFor());
     expect('and the banner stays up while the rest of the panel switches off', 1, await stranded.page.locator('.rv-tamper').count());
+
+    // #50: an event written into the file by someone without the key — a ✓ by the owner, with
+    // `locks:"true"` — is shown in the block's history, marked as not signed, and paints nothing green.
+    directly("INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data) VALUES " +
+      "('forged-lock', 'approval', 'A01', 'A01.1.2', ?, ?, ?, ?)",
+    (await readBlocks(site)).get('A01.1.2').fingerprint, OWNER, new Date().toISOString(), JSON.stringify({ locks: 'true', asAgent: 'false' }));
+    await owner.page.reload();
+    await settled(owner.page);
+    await block(owner.page, 'A01.1.2').click();
+    await must('the block\'s history shows the ✓ nobody signed, marked',
+      () => owner.page.locator('.rv-history .rv-unsigned', { hasText: en['panel.unsigned'] }).waitFor());
+    expect('and the block is not painted as locked', 0, await owner.page.locator('.rv-panel .rv-badge--ok').count());
+    await owner.page.keyboard.press('Escape');
+    await must('and the banner names it', () => owner.page.locator('.rv-tamper-line', { hasText: 'forged-lock' }).waitFor());
   }
 
   console.log('the sign-in screen, under its own policy:');

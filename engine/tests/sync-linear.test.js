@@ -18,8 +18,6 @@ import { readBlocks, spliceAll } from '../cli/pages.ts';
 import { check, loadRegistry, sync } from '../cli/validation.ts';
 
 const OWNER = 'owner@example.org';
-const BASELINE = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER,
-  when: '2026-01-01T09:00:00Z', data: null };
 
 /** A throwaway project whose one page is `html`, with an empty approvals record. */
 function onePage(t, html) {
@@ -38,7 +36,7 @@ async function everyBlockApproved(root, day) {
   const blocks = await readBlocks(root);
   return [...blocks.values()].map((b, i) => ({ id: `${day}-${i}`, type: 'approval', page: 'X01', block: b.id,
     fingerprint: b.fingerprint, author: OWNER, when: `${day}T10:${String(Math.floor(i / 60) % 60).padStart(2, '0')}:`
-      + `${String(i % 60).padStart(2, '0')}Z`, data: { locks: 'true' } }));
+      + `${String(i % 60).padStart(2, '0')}Z`, data: { locks: 'true' }, signed: true }));
 }
 
 /** `sync` over `events`, with what it printed, and how long it took. */
@@ -47,7 +45,7 @@ async function syncing(t, root, events) {
   const log = t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
   try {
     const started = performance.now();
-    const value = await sync(root, { events: async () => [BASELINE, ...events] }, { owner: OWNER });
+    const value = await sync(root, { events: async () => events }, { owner: OWNER });
     return { value, out: lines.join('\n'), took: performance.now() - started };
   } finally {
     log.mock.restore();
@@ -217,7 +215,7 @@ function pages(t, files) {
 async function approvedInOrder(root, ids) {
   const blocks = await readBlocks(root);
   return ids.map((id, i) => ({ id: `e${i}`, type: 'approval', page: blocks.get(id).page, block: id,
-    fingerprint: blocks.get(id).fingerprint, author: OWNER, when: `2026-09-22T1${i}:00:00Z`, data: { locks: 'true' } }));
+    fingerprint: blocks.get(id).fingerprint, author: OWNER, when: `2026-09-22T1${i}:00:00Z`, data: { locks: 'true' }, signed: true }));
 }
 
 /**
@@ -247,7 +245,7 @@ test('sync refuses a ✓ whose page changed, keeping its length, between locatin
       });
       let r;
       try {
-        r = await sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER });
+        r = await sync(tmp, { events: async () => events }, { owner: OWNER });
       } finally {
         log.mock.restore();
       }
@@ -300,7 +298,7 @@ test('sync completes when a page is deleted mid-run, sealing and recording the o
     });
     let r;
     try {
-      r = await sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER });
+      r = await sync(tmp, { events: async () => events }, { owner: OWNER });
     } finally {
       log.mock.restore();
     }
@@ -337,7 +335,7 @@ test('sync that aborts half-way records exactly the seals already written, and c
       }
     });
     try {
-      await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+      await assert.rejects(sync(tmp, { events: async () => events }, { owner: OWNER }),
         { code: 'EISDIR' }, 'the run still fails loudly');
     } finally {
       log.mock.restore();
@@ -412,7 +410,7 @@ test('sync whose page write fails records neither of that page\'s ✓, and saves
     const lines = [];
     const log = t.mock.method(console, 'log', (...args) => { lines.push(args.join(' ')); });
     try {
-      await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+      await assert.rejects(sync(tmp, { events: async () => events }, { owner: OWNER }),
         { code: 'EIO' }, 'the run still fails loudly');
     } finally {
       log.mock.restore();
@@ -443,7 +441,7 @@ test('sync whose page write fails on the per-block path does not record that ✓
     if (String(args[0]).includes('✓ a validated')) real(join(tmp, 'p', 'X02.html'), moved);
   });
   try {
-    await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+    await assert.rejects(sync(tmp, { events: async () => events }, { owner: OWNER }),
       { code: 'EIO' }, 'the run still fails loudly');
   } finally {
     log.mock.restore();
@@ -474,7 +472,7 @@ test('sync whose registry save fails while it is aborting ends with the abort\'s
     const log = t.mock.method(console, 'log', () => {});
     const error = t.mock.method(console, 'error', (...args) => { errors.push(args.join(' ')); });
     try {
-      await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }),
+      await assert.rejects(sync(tmp, { events: async () => events }, { owner: OWNER }),
         { code: 'EIO' }, 'the error that aborted the run, not the save\'s');
     } finally {
       log.mock.restore();
@@ -491,7 +489,7 @@ test('sync whose registry save fails on a run that otherwise finished throws the
   failingWrites(t, (path) => (path.includes('r.json') ? 'ENOSPC' : null));
   const log = t.mock.method(console, 'log', () => {});
   try {
-    await assert.rejects(sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }), { code: 'ENOSPC' });
+    await assert.rejects(sync(tmp, { events: async () => events }, { owner: OWNER }), { code: 'ENOSPC' });
   } finally {
     log.mock.restore();
   }

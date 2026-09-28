@@ -175,6 +175,7 @@ function Request({ request, here, onRecord }) {
     <div className="rv-request" data-request={request.id}>
       <p>
         {t('panel.request.from', { who: who(request.own, request.author) })} <em className={`rv-state rv-state--${s.state}`}>{labelOf(s.state)}</em>
+        <Unsigned event={request} />
       </p>
       <Triage request={request} onDecide={onRecord} />
       {(request.own || mayOn(here, request.block).approve) && s.acceptsSupplement
@@ -196,6 +197,15 @@ function withCode(sentence, name, ids) {
 // `tamper_acknowledged` is written on the tampered event's own page and block (engine/api/tamper.ts),
 // so it lands in that block's history; named here, the owner's acknowledgement reads as a sentence
 // rather than as the contract value it is stored under.
+/**
+ * The mark on an event this server did not sign (engine/api/signing.ts): shown, never hidden — hiding
+ * it would hide the evidence of whoever wrote it into the store — and never read as anybody's word.
+ * `signed === false` exactly: an answer from a server that does not send the field marks nothing.
+ */
+function Unsigned({ event }) {
+  return event.signed === false ? <strong className="rv-unsigned">{' ⚠ '}{t('panel.unsigned')}</strong> : null;
+}
+
 const DID = { approval: 'panel.did.approval', request: 'panel.did.request', comment: 'panel.did.comment',
   tamper_acknowledged: 'panel.did.tamperAcknowledged' };
 
@@ -209,6 +219,7 @@ function History({ events }) {
           <span className="rv-state">{day(e.when)}</span> {who(e.own, e.author)}
           {' '}{DID[e.type] ? t(DID[e.type]) : e.type}
           {e.text ? <>: {e.text}</> : null}
+          <Unsigned event={e} />
           {e.snapshot ? (
             <details className="rv-snapshot">
               <summary>{t('panel.history.snapshot')}</summary>

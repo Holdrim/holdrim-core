@@ -240,6 +240,8 @@ h1, h2, h3, p { margin: 0; }
 .holdrim-prose { max-width: var(--holdrim-measure); }
 .holdrim-muted { color: var(--holdrim-ink-muted); }
 .holdrim-faint { color: var(--holdrim-ink-faint); }
+/* An event this server did not sign (engine/api/signing.ts): never hidden, and never quiet. */
+.holdrim-unsigned { color: var(--holdrim-danger); font-weight: 600; }
 
 /* Visible to a screen reader, invisible on screen. For the label a control needs and the layout
  * does not — the alternative is `aria-label`, which cannot be translated by the page and is lost

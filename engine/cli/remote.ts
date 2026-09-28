@@ -277,6 +277,18 @@ export class Source {
   }
 
   /**
+   * Whether what this source reads is checked against keys the deployment named: `--local` reads the
+   * local runner, which verified each event with its own key and says so in `signed`; a direct read
+   * of the file or the cloud needs `HOLDRIM_PUBLIC_KEYS`. `sync`, `apply` and `state` refuse without
+   * it, and the reading commands warn (requests.ts).
+   */
+  get verifies(): boolean {
+    // The same order `events()` reads in: a file named and present is read first, even with --local.
+    const fromFile = Boolean(this.#db && existsSync(this.#db));
+    return (this.#local && !fromFile) || this.#keyring.size > 0;
+  }
+
+  /**
    * Reads events straight from the SQLite file. READ ONLY — never writes: writing through here
    * would bypass the cycle, the roles and the limits.
    *

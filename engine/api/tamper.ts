@@ -23,7 +23,7 @@ type Who = string | ReturnType<typeof agentByToken>;
 /**
  * The event an acknowledgement is recorded as. Written by `POST /api/tampered/acknowledge` alone —
  * never by `POST /events`, which validates against `EVENT_TYPES` (types.ts) and so refuses this name
- * as unknown, as it does `text_removed` and `lock_baseline`. The general path takes `data` from the
+ * as unknown, as it does `text_removed` and the role events. The general path takes `data` from the
  * client; this event's `data` has to be what the SERVER found on its own read (which event, which
  * field, which case, which finding), or a client could acknowledge a finding nobody was shown — or
  * one that does not exist yet.
@@ -85,9 +85,13 @@ export function openFindings(reports: readonly TamperReport[], events: readonly 
  * agent before it writes anything and always stamps `asAgent: "false"`, and no acknowledgement older
  * than that stamp exists. Anything else — `"true"`, a boolean, the field missing — did not come
  * through that route, and asking only `!== "true"` would let the last two quiet the banner.
+ * And only one this server signed (engine/api/signing.ts): the same writer who tampered with a text
+ * could otherwise insert the acknowledgement of their own tampering, and the banner would go quiet
+ * while the CRITICAL line went on firing.
  */
 function isAcknowledgement(e: Event): boolean {
-  return e.type === TAMPER_ACKNOWLEDGED && typeof e.data?.finding === 'string' && e.data?.[AS_AGENT_FIELD] === 'false';
+  return e.signed === true && e.type === TAMPER_ACKNOWLEDGED && typeof e.data?.finding === 'string'
+    && e.data?.[AS_AGENT_FIELD] === 'false';
 }
 
 /**

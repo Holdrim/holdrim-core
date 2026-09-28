@@ -19,7 +19,7 @@ import { UsersSqlite } from '../api/users-sqlite.ts';
 import { createRoles } from '../core/roles.js';
 import { removePerson, removedPersonEvent, PERSON_REMOVED, PEOPLE_PAGE } from '../api/person-removal.ts';
 import { ROLES_PAGE, definedEvent, grantedEvent, projectRolesOf, GRANT_REVOKED } from '../api/role-grants.ts';
-import { EVENT_TYPES, ensureLockBaseline, earliestLockBaseline, isLocked, LOCK_BASELINE_PAGE } from '../api/types.ts';
+import { EVENT_TYPES, isLocked } from '../api/types.ts';
 import { TEXT_REMOVED, noText, hashText, newSalt } from '../api/texts.ts';
 import { PERSON_ID } from '../api/people.ts';
 import { signing } from './helpers/signing.js';
@@ -397,21 +397,23 @@ async function olderStore() {
 const INSERT = 'INSERT INTO events (id, type, page, block, fingerprint, text, text_hash, author, happened_at, data) '
   + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
-test('the first owner is refused while a ✓ from before the lock baseline names their address, and it stays a lock', async () => {
+/**
+ * #50 retired the lock baseline, through which an older ✓ naming a former owner's address read as a
+ * lock by way of that person's row — the reason a removal of that person used to be refused. With no
+ * signature, such a ✓ was never a lock, so removing the person un-locks nothing, and they are
+ * removed like anybody whose older events name their address.
+ */
+test('a former owner whose older ✓ names their address is removed like anybody: that ✓ was never a lock', async () => {
   const old = await olderStore();
-  // A ✓ an older version recorded, its author the address itself — spelled as the person typed it,
-  // which `legacyLock` reads as the same address — then this version's first start.
   old.raw(INSERT, 'old-approval', 'approval', 'A01', 'A01.1.1', 'f', null, null, 'Bea@Example.ORG', '2026-01-01T00:00:00.000Z', null);
   const events = old.open();
-  const baseline = await ensureLockBaseline(events, BEA);
+  await events.personFor(BEA);
   const approval = async () => (await events.list('A01')).find((e) => e.id === 'old-approval');
-  assert.equal(isLocked(await approval(), baseline), true, '(a lock, through the baseline\'s author)');
-  // Bea hands over to the owner, who is asked to remove her.
-  const before = JSON.stringify(await events.list(null));
-  assert.deepEqual(await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true }),
-    { status: 409, key: 'api.removal.holdsOldLocks', params: { email: BEA } });
-  assert.equal(JSON.stringify(await events.list(null)), before, 'nothing was touched');
-  assert.equal(isLocked(await approval(), earliestLockBaseline(await events.list(LOCK_BASELINE_PAGE))), true, 'and it is still a lock');
+  assert.deepEqual([(await approval()).signed, isLocked(await approval())], [false, false], '(not signed, so no lock)');
+  const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true });
+  assert.equal(outcome.status, 201);
+  assert.equal(outcome.removal.legacyEvents, 1, 'the older ✓ still names the address, and is counted');
+  assert.ok(await approval(), 'and stays in the trail');
   await events.close();
 });
 
@@ -419,7 +421,7 @@ test('the first owner whose older events are only comments is removed: a comment
   const old = await olderStore();
   old.raw(INSERT, 'old-comment', 'comment', 'A01', 'A01.1.1', null, 'an old remark', null, BEA, '2026-01-01T00:00:00.000Z', '{}');
   const events = old.open();
-  await ensureLockBaseline(events, BEA);
+  await events.personFor(BEA);
   const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true });
   assert.equal(outcome.status, 201);
   assert.equal(outcome.removal.legacyEvents, 1);
@@ -438,15 +440,34 @@ test('two people removed from one store: one person_removed each, each naming it
   assert.deepEqual(removed.map((e) => e.data.person), [w.person, bea]);
 });
 
-test('the first owner with no ✓ from before the baseline is removed, and their ✓s since stay locks', async () => {
+test('a former owner is removed, and the ✓s they gave stay locks: the lock is on the signed event, not their row', async () => {
   const events = new MemoryEventStore(signing);
-  const baseline = await ensureLockBaseline(events, BEA);
-  // Later than the baseline by the clock, as a ✓ given after a start always is: in the same
-  // millisecond, `isLocked` would not trust what is written on it.
-  await new Promise((resolve) => setTimeout(resolve, 5));
   const given = await events.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: 'f', data: { locks: 'true' } }, BEA);
   assert.equal((await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true })).status, 201);
-  assert.equal(isLocked(await byId(events, given.id), baseline), true);
+  assert.equal(isLocked(await byId(events, given.id)), true);
+});
+
+/**
+ * #50: a run is finished, never repeated, by the `person_removed` an earlier run wrote — only one
+ * this server signed. One written into the store directly, naming the person, would otherwise stop
+ * every later removal of them from being recorded, and the screen would report someone else's words.
+ */
+test('a person_removed not signed by the server does not stand for a removal that happened', async () => {
+  const old = await olderStore();
+  const seed = old.open();
+  const bea = await seed.personFor(BEA);
+  await seed.append({ type: 'comment', page: 'A01', text: 'Bea says' }, BEA);
+  await seed.close();
+  old.raw(INSERT, 'forged-removed', PERSON_REMOVED, PEOPLE_PAGE, null, null, null, null, bea, '2026-01-01T00:00:00.000Z',
+    JSON.stringify({ person: bea, texts: '0', textsTampered: '0', textsInline: '0', legacyEvents: '0', grants: '0',
+      account: 'false', asAgent: 'false' }));
+  const events = old.open();
+  const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false }, { email: BEA, confirmed: true });
+  assert.equal(outcome.status, 201);
+  assert.notEqual(outcome.event.id, 'forged-removed', 'the removal is recorded by its own, signed event');
+  assert.equal(outcome.event.signed, true);
+  assert.equal(outcome.removal.texts, 1);
+  await events.close();
 });
 
 test('texts from before ids and before texts moved out are removed where they can be, and counted where they cannot', async () => {

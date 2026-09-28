@@ -24,7 +24,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CLI_COMMANDS, CLI_FLAGS } from './helpers/cli-source.js';
-import { EVENT_TYPES, stored, LOCK_BASELINE_TYPE, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD } from '../api/types.ts';
+import { EVENT_TYPES, stored, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD } from '../api/types.ts';
 import { AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED } from '../api/agent-tokens.ts';
 import { ROLE_DEFINED, ROLE_GRANTED, GRANT_REVOKED } from '../api/role-grants.ts';
 import { TAMPER_ACKNOWLEDGED } from '../api/tamper.ts';
@@ -136,25 +136,21 @@ test('the data- attributes the engine reads and writes are the ones engine/surfa
 
 // ---------------------------------------------------------------- events
 test('the event types are the ones engine/surface.json lists', () => {
-  // `LOCK_BASELINE_TYPE` is unioned in here, by hand, rather than added to `EVENT_TYPES` itself:
-  // `EVENT_TYPES` is also the client-accepted list `refusalOf` (server.ts) checks a POST's `type`
-  // against, and `lock_baseline` is written only by the server (types.ts, `ensureLockBaseline`).
+  // The events only the server writes are unioned in here, by hand, rather than added to
+  // `EVENT_TYPES` itself: `EVENT_TYPES` is also the client-accepted list `refusalOf` (server.ts)
+  // checks a POST's `type` against.
   //
-  // ⚠️ This test does NOT guard `lock_baseline` staying out of `EVENT_TYPES` (round 2's review,
-  // M-3): `sameAs` dedupes through `new Set(derived)`, so if a future edit merged `LOCK_BASELINE_TYPE`
-  // INTO `EVENT_TYPES` — which WOULD let a client post one and forge who the baseline owner was — the
-  // union here would list the exact same names either way, and this assertion would keep passing in
-  // silence. The actual guard is `refusalOf` refusing an unknown `type`, and `engine/test-contract.sh`
-  // (`lock_baseline via POST /events → 400, even from a member`) proves it stays refused.
-  // The two agent-token events the same way, for the same reason: only the owner's own routes write
-  // them (agent-tokens.ts), and the guard that keeps them out of `POST /events` is the contract test's.
+  // ⚠️ This test does NOT guard any of them staying out of `EVENT_TYPES`: `sameAs` dedupes through
+  // `new Set(derived)`, so a name merged INTO `EVENT_TYPES` would list the same either way. The guard
+  // is `refusalOf` refusing an unknown `type`, which `engine/test-contract.sh` proves for each.
+  // The two agent-token events: only the owner's own routes write them (agent-tokens.ts).
   // `TAMPER_ACKNOWLEDGED` the same way too: only its own route writes it (tamper.ts), and the guard
   // that keeps it out of `POST /events` is the contract test's, not this one. And the three events of
   // the project's roles (role-grants.ts), written only by the owner's own routes. And the two a
   // person's removal writes (person-removal.ts): `person_removed`, and a `text_removed` for each text
   // it lets go of — written by `EventStore.removeText` alone, never accepted from a client.
   sameAs('event types',
-    [...EVENT_TYPES, LOCK_BASELINE_TYPE, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED, TAMPER_ACKNOWLEDGED,
+    [...EVENT_TYPES, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED, TAMPER_ACKNOWLEDGED,
       ROLE_DEFINED, ROLE_GRANTED, GRANT_REVOKED, PERSON_REMOVED, TEXT_REMOVED],
     SURFACE['event-types']);
 });

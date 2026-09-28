@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { ofProject, projectRoles } from './pages.ts';
-import { impactOf, formatWhen, mustBeQueued, personLabel, refuseToActOnBrokenGuards } from './requests.ts';
+import { impactOf, formatWhen, mustBeQueued, personLabel, refuseToActOnBrokenGuards, refuseToActUnverified } from './requests.ts';
 import type { Source } from './remote.ts';
 
 /**
@@ -80,8 +80,10 @@ export function onPath(binary: string, env: Record<string, string | undefined> =
  * blocks need the owner, the commit carries the trailers, the request is closed with the tool —
  * because the agent reading it may have no other context: a fresh session in a fresh checkout.
  */
-export async function brief(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'guardsTampered'>>,
+export async function brief(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'guardsTampered' | 'verifies'>>,
                             prefix: string): Promise<string> {
+  // First: with no key to check the store against, no request can be known to be approved.
+  refuseToActUnverified(source);
   const { request: r, terms } = await impactOf(root, source, prefix, []);
   // Here, not in `apply`: `--dry-run` prints this brief, and a brief is already the act of handing
   // a request over — whoever reads it next is an agent about to apply it.

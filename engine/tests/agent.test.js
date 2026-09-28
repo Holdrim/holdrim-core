@@ -62,10 +62,10 @@ async function sourceWithARequest() {
   const block = blocks.get('A01.1.3');
   return {
     events: async () => [
-      { id: 'req00001', type: 'request', page: 'A01', block: 'A01.1.3', fingerprint: block.fingerprint,
+      { id: 'req00001', type: 'request', signed: true, page: 'A01', block: 'A01.1.3', fingerprint: block.fingerprint,
         text: 'Say "one letter" instead of "one word"', snapshot: block.text,
         author: 'reviewer@example.org', when: '2026-09-22T10:00:00Z', data: { category: 'text' } },
-      { id: 'st000001', type: 'request_state', page: 'A01', block: 'A01.1.3', text: 'agreed',
+      { id: 'st000001', type: 'request_state', signed: true, page: 'A01', block: 'A01.1.3', text: 'agreed',
         author: 'owner@example.org', when: '2026-09-22T10:05:00Z',
         data: { request: 'req00001', state: 'approved', from: 'open' } },
     ],
@@ -143,9 +143,9 @@ test('apply runs the command it resolved and returns its exit code; --dry-run on
 test('a request for a new page tells the agent to write one, shaped like its neighbour, and lock nothing', async () => {
   const source = {
     events: async () => [
-      { id: 'page0001', type: 'request', page: 'A01', block: null, text: 'Explain how a request is closed',
+      { id: 'page0001', type: 'request', signed: true, page: 'A01', block: null, text: 'Explain how a request is closed',
         author: 'reviewer@example.org', when: '2026-09-23T10:00:00Z', data: { category: 'page' } },
-      { id: 'st000002', type: 'request_state', page: 'A01', author: 'owner@example.org',
+      { id: 'st000002', type: 'request_state', signed: true, page: 'A01', author: 'owner@example.org',
         when: '2026-09-23T10:05:00Z', data: { request: 'page0001', state: 'approved', from: 'open' } },
     ],
   };
@@ -169,9 +169,9 @@ test('the brief\'s Who and Thread lines route the author through people.show, no
   const root = project(t, { people: { show: 'role' } });
   const source = {
     events: async () => [
-      { id: 'req00003', type: 'request', page: 'A01', block: null, text: 'Explain how a day is closed',
+      { id: 'req00003', type: 'request', signed: true, page: 'A01', block: null, text: 'Explain how a day is closed',
         author: 'reviewer@example.org', when: '2026-09-24T10:00:00Z', data: { category: 'page' } },
-      { id: 'st000004', type: 'request_state', page: 'A01', author: 'owner@example.org',
+      { id: 'st000004', type: 'request_state', signed: true, page: 'A01', author: 'owner@example.org',
         when: '2026-09-24T10:05:00Z', data: { request: 'req00003', state: 'approved', from: 'open' } },
     ],
   };

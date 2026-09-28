@@ -459,11 +459,11 @@ test('a forged text_removed dated before its target reads as tampered, not as th
   await s.close();
 }));
 
-test('a forged text_removed dated and ordered after its target is not caught: the gap that remains until events are signed', withFile(async (path) => {
-  // The other half of finding F(c), documented rather than fixed: a forgery dated and ordered
-  // correctly — after the event it names, exactly as a genuine removal would be — passes as one.
-  // Closing this needs the events themselves signed (docs/PRIVACY.md, "not built", phase E), so a
-  // reader can tell the server wrote an event from one anybody holding the file could insert.
+test('a forged text_removed dated and ordered after its target is caught: it is not signed (#50)', withFile(async (path) => {
+  // The other half of finding F(c), left open until events were signed: a forgery dated and ordered
+  // correctly — after the event it names, exactly as a genuine removal would be — used to pass as
+  // one. Without the server's key it carries no signature, so it explains nothing, and the row it
+  // let the forger delete reads as unaccounted (engine/api/texts.ts, `removalsOf`).
   const store = new SqliteEventStore(path, signing);
   const late = await store.append({ ...approval, text: 'another real comment' }, 'r@example.org');
   await store.close();
@@ -477,8 +477,12 @@ test('a forged text_removed dated and ordered after its target is not caught: th
 
   const s = new SqliteEventStore(path, signing);
   const read = (await s.list('A01')).find((e) => e.id === late.id);
-  assert.equal(read.textTampered, false, 'a correctly dated and ordered forgery is NOT caught by this check — the documented gap');
-  assert.ok(read.textRemoved, 'it reads as a legitimate removal, by whoever the forger named as the remover');
+  assert.equal(read.textTampered, true, 'a correctly dated and ordered forgery no longer passes as a removal');
+  assert.equal(read.textRemoved, null, 'and it credits nobody as the remover');
+  const found = [];
+  await s.list('A01', found);
+  assert.deepEqual(found.map((r) => [r.event, r.field, r.kind]).sort(),
+    [['forged-late', 'event', 'unsigned'], [late.id, 'text', 'unaccounted']].sort(), 'both are raised');
   await s.close();
 }));
 

@@ -27,12 +27,10 @@ import { log } from './log.ts';
  * gap, holdrim#89, that this file does not close either.) `removalsOf` below closes part of the
  * forged-event path, by dating (round 2, finding F): a removal only counts once it is later, in time
  * and in the list, than the event it names, so it cannot be backdated ahead of a text that, by its
- * own clock, did not exist yet. It does not close the rest — a removal dated and ordered after its
- * target, forged by the same direct writer who also deletes the row, still reads as genuine (beside
- * a row left there and edited, it reads as tampered: `resolveOne`), and dropping a trigger outright
- * is not dated at all. Closing either needs the events themselves signed, so a reader can tell the
- * server wrote one from one anybody with the file could insert (docs/PRIVACY.md, section 3, "not
- * built"; SECURITY.md says the same of the file as a whole).
+ * own clock, did not exist yet. And it counts only a removal this server signed (engine/api/signing.ts,
+ * #50): a removal inserted by a direct writer, however it is dated and ordered, explains nothing, so
+ * the row it let them delete reads as `unaccounted`. What signing cannot show is a genuine removal
+ * and its target both deleted — an erasure leaves nothing to compare (SECURITY.md, "Known limits").
  */
 export const TEXT_REMOVED = 'text_removed';
 
@@ -135,9 +133,8 @@ export function noText(event: string, field: TextField): Error {
  * by insertion — SQLite's `ORDER BY happened_at, rowid`, Memory's stable sort on equal keys — since
  * a removal is always INSERTED after the event it names, whatever the clock says.
  *
- * Firestore needs none of this: `FieldValue.serverTimestamp()` is the server's own clock, already
- * monotonic across everything one project writes, torn reads and clock skew on any one caller's
- * machine included.
+ * Firestore has no rowid to break a tie, so its `removeText` dates a removal strictly after its
+ * target instead (store-firestore.ts, `#nextTime`), since its `when` is the signing process's clock too.
  */
 export function notBefore(when: string, target: string): string {
   return when < target ? target : when;
@@ -305,8 +302,8 @@ export function reportTampered(report: TamperReport, write?: (line: string) => v
  * `textHash: null` and writes the value straight into `text`), because both arrive here in exactly
  * the same shape, a value with no hash. A store omits it, or gives `false`, when it has no such
  * proof — Firestore's own ordering is a direct writer's to set (`when` is a plain field, not a
- * server-enforced one, once someone is writing outside the SDK's own path — see store-firestore.ts's
- * own comment), so it never claims one; `SqliteEventStore` and the CLI's own file reader can, and do
+ * server-enforced one), so it never claims one, and a signed event there needs none: its envelope
+ * says which hashes it has, and a text written into its row reads as forged (engine/api/signing.ts); `SqliteEventStore` and the CLI's own file reader can, and do
  * — see `afterExtraction`'s own comment in store-sqlite.ts for the forge-proof reason `rowid` gives
  * them one where Firestore has none.
  */
@@ -342,9 +339,8 @@ export type RawEvent<E> = E & { textHash?: string | null; snapshotHash?: string 
  * cannot explain anything either: that field reads as tampered, as the case above says, and the
  * removal's id is part of the finding. `removalsOf` also refuses one dated, or placed, no later than
  * the event it names — a forgery cannot back-date itself ahead of a text that, by its own clock,
- * did not exist yet. What it cannot refuse is a forgery dated and ordered correctly, paired with
- * deleting the row it names: that is a real erasure passed off as a real removal, closed only once
- * events are signed (see the note on `TEXT_REMOVED` above).
+ * did not exist yet, and one this server did not sign, however it is dated (see the note on
+ * `TEXT_REMOVED` above): a forged removal paired with deleting the row it names reads as `unaccounted`.
  *
  * `reports`, given, is appended to — never replaced — with one `TamperReport` per field this pass
  * finds tampered. It is an accumulator rather than a return value so this function's own shape stays
@@ -370,7 +366,7 @@ interface Removals {
   ids: Map<string, string[]>;
 }
 
-function removalsOf<E extends { id: string; type: string; author: string; when: string;
+function removalsOf<E extends { id: string; type: string; author: string; when: string; signed?: boolean;
                                 data?: { [k: string]: unknown } | null }>(
   events: E[],
 ): Removals {
@@ -380,6 +376,11 @@ function removalsOf<E extends { id: string; type: string; author: string; when: 
   const ids = new Map<string, string[]>();
   for (const [i, e] of events.entries()) {
     if (e.type !== TEXT_REMOVED) continue;
+    // Only a removal this server signed (engine/api/signing.ts): `removeText` signs every removal it
+    // writes, so one with no valid signature was inserted by somebody without the key — who could
+    // then also delete the row it names, and pass an erasure off as a removal (#133). Not signed,
+    // it explains nothing, and the missing row reads as `unaccounted`, the tampering it is.
+    if (e.signed !== true) continue;
     const target = e.data?.event;
     const field = e.data?.field;
     if (typeof target !== 'string' || (field !== 'text' && field !== 'snapshot')) continue;

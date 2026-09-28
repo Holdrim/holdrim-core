@@ -1,4 +1,4 @@
-import { AS_AGENT_FIELD, type Event, type NewEvent } from './types.ts';
+import { AS_AGENT_FIELD, authoritative, type Event, type NewEvent } from './types.ts';
 import { PERSON_ID } from './people.ts';
 import { isValidRoleName, isValidScope, projectCapabilitiesOf } from '../core/roles.js';
 
@@ -13,7 +13,7 @@ import { isValidRoleName, isValidScope, projectCapabilitiesOf } from '../core/ro
  *                  nothing is erased, and a revocation is a later event (AGENTS.md).
  *
  * None of the three is in `EVENT_TYPES` (types.ts), so `POST /events` refuses each as unknown before
- * anything else runs — the guard `text_removed`, `lock_baseline` and the agent-token events already
+ * anything else runs — the guard `text_removed` and the agent-token events already
  * rely on. A client able to post one could grant itself `triage` with nobody having decided it.
  *
  * `data` names the person by their id, never their address: an event cannot be emptied of an e-mail
@@ -36,8 +36,8 @@ export const ROLES_PAGE = '_roles';
 
 /**
  * How capabilities travel inside `data`: one string, names joined by `,`. A string and not an array
- * for the reason every other value in `data` is one (`writtenBoolean`, types.ts): the CLI's Firestore
- * reader keeps only string values, and a list would come back empty there.
+ * for the reason every other value in `data` is one (`writtenBoolean`, types.ts): one type every store
+ * and reader agrees on.
  */
 const CAPABILITY_SEPARATOR = ',';
 
@@ -91,9 +91,14 @@ const text = (data: Event['data'], key: string): string | undefined => {
  * (`engine/tests/events-conformance.test.js`, `list` and `listBare` alike), so "latest" means the
  * last one written. Nothing here reads an event's author or text, which `listBare` leaves unresolved.
  *
+ * Only events this server signed count (engine/api/signing.ts; owner decision 3 on #50): a direct
+ * writer to the store can insert a grant, a definition or a revocation, and without the key none of
+ * them is read. A revocation not signed is left out too, although it could only take away: letting
+ * a writer with no key revoke the owner's grants is still a decision the owner never made.
+ *
  * Everything is checked again on the way in, and fails closed. The routes never write a malformed
- * event, so one here came from somewhere else — a direct writer to the store (docs/ROLES.md, section
- * 5), or a later version this one does not understand:
+ * event, so one here came from somewhere else — a later version this one does not understand, or a
+ * key that signed what it should not have:
  *   - a definition whose name or capabilities do not read still becomes the role's latest, holding
  *     nothing: falling back to the definition before it would let a stale one stand for a role the
  *     owner meant to change;
@@ -105,7 +110,7 @@ export function projectRolesOf(events: readonly Event[]): ProjectRoles {
   const roles = new Map<string, RoleDefinition>();
   const given: Grant[] = [];
   const revoked = new Set<string>();
-  for (const e of events) {
+  for (const e of authoritative(events)) {
     if (e.type === ROLE_DEFINED) {
       const role = text(e.data, 'role');
       if (!isValidRoleName(role)) continue;

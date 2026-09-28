@@ -20,8 +20,6 @@ import { fingerprintOfText } from '../core/fingerprint.js';
 import { trafficLightOf, blockState } from '../web/src/state.js';
 
 const OWNER = 'owner@example.org';
-const BASELINE = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER,
-  when: '2026-01-01T09:00:00Z', data: null };
 
 /** A throwaway project whose one page is `html`, with `registry` as its approvals record. */
 function onePage(t, html, registry = {}) {
@@ -60,11 +58,11 @@ async function printed(t, fn) {
 async function approvedOn(root, ids, day) {
   const blocks = await readBlocks(root);
   return ids.map((id, i) => ({ id: `${day}-${id}`, type: 'approval', page: 'X01', block: id,
-    fingerprint: blocks.get(id).fingerprint, author: OWNER, when: `${day}T1${i}:00:00Z`, data: { locks: 'true' } }));
+    fingerprint: blocks.get(id).fingerprint, author: OWNER, when: `${day}T1${i}:00:00Z`, data: { locks: 'true' }, signed: true }));
 }
 
 const syncing = (t, tmp, events) =>
-  printed(t, () => sync(tmp, { events: async () => [BASELINE, ...events] }, { owner: OWNER }));
+  printed(t, () => sync(tmp, { events: async () => events }, { owner: OWNER }));
 
 /** The seal attributes of the block `id` on `html`, names as written, in source order. */
 function sealOn(html, id) {

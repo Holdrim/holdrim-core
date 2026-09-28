@@ -1,4 +1,4 @@
-import { AS_AGENT_FIELD, LOCK_BASELINE_PAGE, earliestLockBaseline, type Event, type EventStore, type NewEvent } from './types.ts';
+import { AS_AGENT_FIELD, authoritative, type Event, type EventStore, type NewEvent } from './types.ts';
 import { normalizeEmail, isEmailAddress, type UserStore } from './users.ts';
 import { recordAuthored } from './people.ts';
 import { NoText } from './texts.ts';
@@ -109,9 +109,6 @@ const namesAddress = (e: Event, address: string) => normalizeEmail(e.authorId ??
  *   Out of the variable and restarted first, then removed;
  * - an address holding an agent token: the token would go on writing, as a new person, the moment
  *   the row was emptied. Revoked first;
- * - the person whose row makes their oldest ✓s locks: the author of the lock baseline, when a ✓ from
- *   before it still names their address (`legacyLock`, types.ts). Such a ✓ is a lock only because
- *   the baseline's author id reads as that address, and forgetting the row would un-lock it;
  * - an address with no account and no row in the people table: nobody to remove. This is also what
  *   a second run answers, since the first emptied both — or, when events from before authors were
  *   ids name it, nothing that can be let go of, and it says so.
@@ -138,17 +135,11 @@ export async function removePerson(
   if (users && (await users.listAgentTokens()).some((t) => t.email === address)) {
     return { status: 409, key: 'api.removal.holdsAgentToken', params: { email: address } };
   }
+  // No ✓ ties a lock to this person's row: a lock is the signed `locks` on the event, whoever its
+  // author's id leads to, so forgetting the row un-locks nothing (#50 retired the lock baseline, which
+  // read an old ✓ as a lock through the row of the owner it named, and made this refuse for it).
   const known = await events.personOf(address);
   const account = users ? await users.find(address) : null;
-  if (known) {
-    const baseline = earliestLockBaseline(await events.listBare(LOCK_BASELINE_PAGE));
-    // Any ✓ naming the address, not only those dated before the baseline: one dated after it is no
-    // lock anyway, and refusing for it costs a removal nothing that the rule does not already cost.
-    if (baseline && (baseline.authorId ?? baseline.author) === known
-      && (await events.list(null)).some((e) => e.type === 'approval' && namesAddress(e, address))) {
-      return { status: 409, key: 'api.removal.holdsOldLocks', params: { email: address } };
-    }
-  }
   if (!known && !account) {
     // Named only by events from before authors were ids: nothing rewrites them, and there is no row
     // or account to let go of. Made into a person here, every later run would make another.
@@ -189,8 +180,10 @@ export async function removePerson(
 
   const removal: Removal = { person, texts, textsTampered, textsInline, legacyEvents, grants: mine.length, account: hadAccount };
   // Once per person: a run that a failure stopped after the event was written finishes without a
-  // second one, and answers with the first.
-  const earlier = (await events.list(PEOPLE_PAGE)).find((e) => e.type === PERSON_REMOVED && e.data?.person === person);
+  // second one, and answers with the first. Only one this server signed: a `person_removed` inserted
+  // by a direct writer would otherwise stop every later removal of that person from being recorded.
+  const earlier = authoritative(await events.list(PEOPLE_PAGE))
+    .find((e) => e.type === PERSON_REMOVED && e.data?.person === person);
   const event = earlier ?? (await recordAuthored(events, removedPersonEvent(removal, context.byAgent), by)).event;
   if (users) await users.emptyAccount(address, true);
   await events.forget(person);

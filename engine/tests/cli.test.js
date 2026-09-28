@@ -348,12 +348,8 @@ test('sync approves the block inside main, and never a same-id element outside i
 
   const blocks = await readBlocks(tmp);
   const mainFingerprint = blocks.get('y').fingerprint;
-
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
   const events = [
-    baseline,
-    { id: 'e1', type: 'approval', page: 'X01', block: 'y', fingerprint: mainFingerprint,
+    { id: 'e1', type: 'approval', signed: true, page: 'X01', block: 'y', fingerprint: mainFingerprint,
       author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
@@ -615,13 +611,11 @@ function onePage(t, html, registry = {}) {
 /** One recorded ✓ for `y`, as `restamp` reads it. */
 const Y_RECORDED = { y: { file: 'X01.html', date: '2026-09-22', fingerprint: 'ffffffffffffffff' } };
 
-/** The owner's ✓ on each of `ids`, on the text `readBlocks` sees now, after a baseline. */
+/** The owner's ✓ on each of `ids`, on the text `readBlocks` sees now, as the server signs it. */
 async function ownersApprovals(root, ids) {
   const blocks = await readBlocks(root);
   return [
-    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: 'owner@example.org',
-      when: '2026-09-22T09:00:00Z', data: null },
-    ...ids.map((id, i) => ({ id: `e${i}`, type: 'approval', page: 'X01', block: id,
+    ...ids.map((id, i) => ({ id: `e${i}`, type: 'approval', signed: true, page: 'X01', block: id,
       fingerprint: blocks.get(id).fingerprint, author: 'owner@example.org',
       when: `2026-09-22T1${i}:00:00Z`, data: { locks: 'true' } })),
   ];
@@ -1204,18 +1198,12 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
   cpSync(EXAMPLE, tmp, { recursive: true });
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const blocks = await readBlocks(tmp);
-  // A baseline dated before every approval below: without one, a written `locks` on an event that
-  // predates it (here, every event — there is no baseline at all) is ignored outright (round 2's
-  // review, CRITICAL "fields written before this version are trusted"), and none of them would lock.
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
   const events = [
-    baseline,
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+    { id: 'e1', type: 'approval', signed: true, page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
       author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
-    { id: 'e2', type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: 'stale-fingerprint',
+    { id: 'e2', type: 'approval', signed: true, page: 'A01', block: 'A01.1.2', fingerprint: 'stale-fingerprint',
       author: 'owner@example.org', when: '2026-09-22T10:01:00Z', data: { locks: 'true' } },
-    { id: 'e3', type: 'approval', page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
+    { id: 'e3', type: 'approval', signed: true, page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
       author: 'reviewer@example.org', when: '2026-09-22T10:02:00Z', data: { locks: 'false' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
@@ -1230,7 +1218,7 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
 });
 
 /**
- * The filter above (`isLocked(e, baseline)`) is exercised only against `holdrim.json`'s DEFAULT
+ * The filter above (`isLocked(e)`) is exercised only against `holdrim.json`'s DEFAULT
  * toggles by the test before this one — every toggle this project ships at the value it ships
  * with. A filter that secretly asked something toggle-shaped instead of what the server wrote — the
  * same worry `engine/test-contract.sh`'s "every toggle off" section answers for the SERVER — would
@@ -1238,12 +1226,12 @@ test('sync brings in the owner\'s ✓ and nobody else\'s, and only for the curre
  * its default, on the CLI's own path (`projectRoles`, real `HOLDRIM_OWNER`/`HOLDRIM_ADMINS`, no
  * `options.owner` standing in for either).
  *
- * `isLocked` never recomputes a role live (decision B, `engine/api/types.ts`): it reads `data.locks`
- * as the SERVER wrote it, at the moment the ✓ was given, against a `lock_baseline`. So each event
- * here carries the `locks` field the server would itself have written for that author's role —
- * `true` only for the owner — the same shape the test above this one (`sync brings in the owner's
- * ✓...`) already seeds; a bare `data: null` with no baseline would fail closed to "not a lock" for
- * every author here, owner included, and prove nothing about the toggles at all.
+ * `isLocked` never recomputes a role live (`engine/api/types.ts`): it reads `data.locks` as the
+ * SERVER wrote it, and signed it, at the moment the ✓ was given. So each event here carries the
+ * `locks` field the server would itself have written for that author's role — `true` only for the
+ * owner — the same shape the test above this one (`sync brings in the owner's ✓...`) already seeds;
+ * a bare `data: null` would fail closed to "not a lock" for every author here, owner included, and
+ * prove nothing about the toggles at all.
  */
 test('sync\'s owner filter holds with every toggle at its non-default value', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-toggles-'));
@@ -1257,12 +1245,8 @@ test('sync\'s owner filter holds with every toggle at its non-default value', as
   writeFileSync(join(tmp, 'holdrim.json'), JSON.stringify(config));
 
   const blocks = await readBlocks(tmp);
-  // Dated before every approval below, so each one is read against a real baseline instead of
-  // falling back to `legacyLock` with none — the same shape `sync brings in the owner's ✓...` uses.
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
   const approval = (author, when, locks) => ({
-    id: `approval-${author}`, type: 'approval', page: 'A01', block: 'A01.1.1',
+    id: `approval-${author}`, type: 'approval', signed: true, page: 'A01', block: 'A01.1.1',
     fingerprint: blocks.get('A01.1.1').fingerprint, author, when, data: { locks: String(locks) },
   });
 
@@ -1276,13 +1260,13 @@ test('sync\'s owner filter holds with every toggle at its non-default value', as
 
   // No `options.owner`: each call resolves through `projectRoles`, the real HOLDRIM_OWNER/
   // HOLDRIM_ADMINS path `options.owner` exists only to bypass.
-  const reviewerRun = await sync(tmp, { events: async () => [baseline, approval('reviewer@example.org', '2026-09-22T10:00:00Z', false)] });
+  const reviewerRun = await sync(tmp, { events: async () => [approval('reviewer@example.org', '2026-09-22T10:00:00Z', false)] });
   assert.equal(reviewerRun.added, 0, 'a reviewer\'s ✓ never locks, every toggle at its non-default value or not');
 
-  const adminRun = await sync(tmp, { events: async () => [baseline, approval('admin@example.org', '2026-09-22T10:01:00Z', false)] });
+  const adminRun = await sync(tmp, { events: async () => [approval('admin@example.org', '2026-09-22T10:01:00Z', false)] });
   assert.equal(adminRun.added, 0, 'an admin\'s ✓ never locks either, same toggles');
 
-  const ownerRun = await sync(tmp, { events: async () => [baseline, approval('owner@example.org', '2026-09-22T10:02:00Z', true)] });
+  const ownerRun = await sync(tmp, { events: async () => [approval('owner@example.org', '2026-09-22T10:02:00Z', true)] });
   assert.equal(ownerRun.added, 1, 'the owner\'s ✓ still locks with every toggle at its non-default value');
 });
 
@@ -1296,7 +1280,7 @@ test('sync warns and reports tampered when a field in the read comes back tamper
   cpSync(EXAMPLE, tmp, { recursive: true });
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const events = [
-    { id: 'e1', type: 'comment', page: 'A01', block: 'A01.1.1', author: 'r@example.org',
+    { id: 'e1', type: 'comment', signed: true, page: 'A01', block: 'A01.1.1', author: 'r@example.org',
       when: '2026-09-22T10:00:00Z', data: null, textTampered: true },
   ];
   const err = console.error;
@@ -1332,7 +1316,7 @@ test('sync reports tampered: false when the cloud is unreachable, same as an ord
 test('queue() names a tampered field with `tampered: true`, for `holdrim list --json` to carry', async () => {
   process.env.HOLDRIM_OWNER ??= 'owner@example.org';
   const events = [
-    { id: 'e1', type: 'comment', page: 'A01', author: 'r@example.org', when: '2026-01-01T00:00:00Z',
+    { id: 'e1', type: 'comment', signed: true, page: 'A01', author: 'r@example.org', when: '2026-01-01T00:00:00Z',
       data: null, snapshotTampered: true },
   ];
   const q = await queue(EXAMPLE, { events: async () => events }, true);
@@ -1348,7 +1332,7 @@ test('queue() reports tampered: false when nothing in the read is tampered', asy
 test('list() prints the warning and its return says whether to exit non-zero', async () => {
   process.env.HOLDRIM_OWNER ??= 'owner@example.org';
   const tampered = [
-    { id: 'e1', type: 'request', page: 'A01', block: 'A01.1.1', text: 'x', author: 'r@example.org',
+    { id: 'e1', type: 'request', signed: true, page: 'A01', block: 'A01.1.1', text: 'x', author: 'r@example.org',
       when: '2026-01-01T00:00:00Z', data: { category: 'text' }, textTampered: true },
   ];
   const err = console.error;
@@ -1391,11 +1375,8 @@ test('sync locks a ✓ from what was written on it, even once somebody else is H
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const blocks = await readBlocks(tmp);
   const events = [
-    // Dated before the ✓ below, so the written `locks` on it is trusted at all (round 2's review).
-    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: 'owner@example.org',
-      when: '2026-09-22T09:00:00Z', data: null },
     // Given while owner@example.org held HOLDRIM_OWNER, and written as a lock then.
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+    { id: 'e1', type: 'approval', signed: true, page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
       author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
   ];
   // This process's own HOLDRIM_OWNER has since moved on — a handover, or a stale shell variable.
@@ -1412,7 +1393,7 @@ test('sync does not lock a ✓ written as no lock, even once its author becomes 
   const blocks = await readBlocks(tmp);
   const events = [
     // Given by an admin, not a lock at the time — written as such.
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+    { id: 'e1', type: 'approval', signed: true, page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
       author: 'admin@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'false' } },
   ];
   // Now, in THIS process, that same address is HOLDRIM_OWNER. A recompute would lock it.
@@ -1421,240 +1402,54 @@ test('sync does not lock a ✓ written as no lock, even once its author becomes 
 });
 
 /**
- * Decision B (round 1's review): a ✓ with nothing written at all is measured against the BASELINE —
- * who HOLDRIM_OWNER was the moment a server of this version first read the store — never against
- * `sync`'s own `--owner`/HOLDRIM_OWNER, which is exactly the value a stale shell or a handover since
- * would get wrong (the bug this whole change exists to close, moved one step earlier if it fell back
- * to live roles here instead).
+ * #50: a ✓ counts only as the server signed it. One written into the store directly — the owner's own
+ * id as its author and `locks:"true"` on it, everything a lock needs but the signature — is no lock,
+ * and `sync` says it ignored it; the same ✓ signed is one. The forged one's `when` is later, so a sync
+ * that merely took the latest ✓ per block would take it.
  */
-test('sync measures an unwritten ✓ against the baseline, never against its own --owner', async (t) => {
+test('sync never locks a ✓ the server did not sign, however it is written', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
   cpSync(EXAMPLE, tmp, { recursive: true });
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const blocks = await readBlocks(tmp);
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
-  const before = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
-    fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
-    when: '2026-09-22T08:00:00Z', data: null }; // predates the baseline, same author: locks
-  const after = { id: 'e2', type: 'approval', page: 'A01', block: 'A01.1.2',
-    fingerprint: blocks.get('A01.1.2').fingerprint, author: 'owner@example.org',
-    when: '2026-09-22T10:00:00Z', data: null }; // AFTER the baseline: not a lock, whoever wrote it
-  const strangersToo = { id: 'e3', type: 'approval', page: 'A01', block: 'A01.1.3',
-    fingerprint: blocks.get('A01.1.3').fingerprint, author: 'somebody-else@example.org',
-    when: '2026-09-22T08:30:00Z', data: null }; // predates the baseline, WRONG author: not a lock
-
-  const r = await sync(tmp, { events: async () => [baseline, before, after, strangersToo] },
-    { owner: 'somebody-else@example.org' }); // this call's own --owner must not matter at all
-  assert.equal(r.added, 1, 'only the one that predates the baseline, by the baseline\'s own author, locks');
-  assert.ok(loadRegistry(tmp)['A01.1.1'], 'A01.1.1 (before, same author) locks');
-  assert.equal(loadRegistry(tmp)['A01.1.2'], undefined, 'A01.1.2 (after the baseline) does not');
-  assert.equal(loadRegistry(tmp)['A01.1.3'], undefined, 'A01.1.3 (a stranger to the baseline) does not');
-});
-
-/**
- * M-2 (round 2's review): `legacyLock` compares the ✓'s author against the baseline's own author —
- * a NEW string comparison this version introduces, next to the one every store already normalizes
- * (docs/PRIVACY.md, section 1) — and it has to normalize the same way, both sides, or the same
- * address typed with different case or surrounding space on the ✓ than on the baseline (itself
- * whatever `HOLDRIM_OWNER` was typed as, at boot) reads as two different people.
- */
-test('legacyLock normalizes both the baseline\'s author and the ✓\'s, case and whitespace alike', async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
-  cpSync(EXAMPLE, tmp, { recursive: true });
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const blocks = await readBlocks(tmp);
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: ' Owner@Example.org ', when: '2026-09-22T09:00:00Z', data: null };
-  const events = [
-    baseline,
-    // Unwritten, predating the baseline, and typed with different case than the baseline's own author.
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
-      author: 'OWNER@example.org', when: '2026-09-22T08:00:00Z', data: null },
-  ];
-  const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-  assert.equal(r.added, 1, 'the same address, typed differently on each side, still locks via legacyLock');
-});
-
-test('sync fails closed with no baseline event in the store at all, and warns exactly once', async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
-  cpSync(EXAMPLE, tmp, { recursive: true });
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const blocks = await readBlocks(tmp);
-  const events = [
-    // No baseline anywhere in this store, and nothing written on either ✓ — a store no server of
-    // this version has ever started against (read straight from a file, or the cloud). TWO
-    // approvals, not one: with only one, "warned once for the run" and "warned once per approval"
-    // look identical, and the mutation this test exists to catch would slip through in silence.
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
-      author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: null },
-    { id: 'e2', type: 'approval', page: 'A01', block: 'A01.1.2', fingerprint: blocks.get('A01.1.2').fingerprint,
-      author: 'owner@example.org', when: '2026-09-22T10:01:00Z', data: null },
-  ];
+  const approval = (id, block, signed, when) => ({ id, type: 'approval', signed, page: block.slice(0, 3), block,
+    fingerprint: blocks.get(block).fingerprint, author: 'owner@example.org', when, data: { locks: 'true', asAgent: 'false' } });
   const logged = [];
-  const original = console.log;
-  console.log = (...args) => logged.push(args.join(' '));
+  const log = t.mock.method(console, 'log', (...args) => { logged.push(args.join(' ')); });
+  const errors = t.mock.method(console, 'error', () => {});
+  let r;
   try {
-    const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-    assert.equal(r.added, 0, 'no baseline: fails closed, not a lock, whoever the owner is');
+    r = await sync(tmp, { events: async () => [approval('genuine', 'A01.1.1', true, '2026-09-22T10:00:00Z'),
+      approval('forged', 'A01.1.2', false, '2026-09-22T11:00:00Z'), approval('no-answer', 'A02.1.1', undefined, '2026-09-22T11:00:00Z')] },
+    { owner: 'owner@example.org' });
   } finally {
-    console.log = original;
+    log.mock.restore();
+    errors.mock.restore();
   }
-  // MINOR (round 2's review): `.some` would still pass if `sync` printed the warning on every
-  // approval it skips instead of once for the whole run — this only ran ONE ✓ through, so `.some`
-  // could not actually tell the two apart. Counted, not merely found.
-  const warnings = logged.filter((l) => l.includes('no lock_baseline event'));
-  assert.equal(warnings.length, 1, `warned ${warnings.length} time(s), wanted exactly one`);
-});
-
-/**
- * Round 4's review, CRITICAL: with no baseline anywhere in the store, `isLocked` must trust NOTHING
- * written, `'true'` included — the previous test only proves this for an unwritten ✓ (`data: null`),
- * which cannot tell "no baseline means nothing written is trusted" apart from "no baseline means an
- * unwritten ✓ never locks" (`legacyLock`'s own `if (!baseline) return false;`). Written here as an
- * admin's ✓ carrying an explicit, forged `locks:"true"`: reverting `isLocked`'s guard from
- * `if (baseline && …)` to `if (!baseline || …)` would trust it the moment there is no baseline to
- * compare against, and this is the one shape that tells the two apart.
- */
-test('sync fails closed with no baseline at all, even over an admin\'s forged locks:"true"', async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
-  cpSync(EXAMPLE, tmp, { recursive: true });
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const blocks = await readBlocks(tmp);
-  const events = [
-    // No lock_baseline event anywhere in this store — read straight from a file, or the cloud.
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
-      author: 'admin@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
-  ];
-  const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-  assert.equal(r.added, 0, 'no baseline: a forged locks:"true" is trusted no more than an unwritten ✓ would be');
-});
-
-/** The other half of the MINOR above: with a real baseline in the store, sync says nothing about a
- *  missing one — the warning names a gap this run is actually in, not a stock line on every run. */
-test('sync prints no baseline warning at all once the store holds one', async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
-  cpSync(EXAMPLE, tmp, { recursive: true });
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const blocks = await readBlocks(tmp);
-  const events = [
-    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: 'owner@example.org',
-      when: '2026-09-22T09:00:00Z', data: null },
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
-      author: 'owner@example.org', when: '2026-09-22T08:00:00Z', data: null },
-  ];
-  const logged = [];
-  const original = console.log;
-  console.log = (...args) => logged.push(args.join(' '));
-  try {
-    const r = await sync(tmp, { events: async () => events }, { owner: 'owner@example.org' });
-    assert.equal(r.added, 1, 'a baseline is there, so the unwritten ✓ locks via legacyLock as usual');
-  } finally {
-    console.log = original;
-  }
-  assert.ok(!logged.some((l) => l.includes('no lock_baseline event')), 'nothing warns about a baseline that is there');
+  assert.equal(r.added, 1, 'only the signed ✓ locks');
+  assert.equal(r.tampered, true, 'and what was not signed makes the run exit non-zero');
+  assert.ok(loadRegistry(tmp)['A01.1.1']);
+  assert.equal(loadRegistry(tmp)['A01.1.2'], undefined, 'a ✓ written into the store never reaches approvals.json');
+  assert.equal(loadRegistry(tmp)['A02.1.1'], undefined, 'nor one a reader set no answer on');
+  assert.ok(logged.some((l) => l.includes('2 approval(s) not signed by the server ignored')), logged.join('\n'));
 });
 
 /**
  * Decision C (round 1's review): a `locks` value that is present but not exactly `'true'`/`'false'`
- * fails closed too, and is never treated as absent — so it must never reach `legacyLock` either, even
- * for a ✓ that would otherwise have locked against it. Dated AFTER the baseline, and from the
- * baseline's own author, so the ONLY thing standing between this ✓ and a lock is decision C itself:
- * `legacyLock` would say yes given the chance (same author, and it would be a fallback for an absent
- * field), but a value this malformed is never absent, so it is never asked.
+ * fails closed, on a ✓ the server signed and from the owner — so the only thing standing between this
+ * ✓ and a lock is the value itself.
  */
-test('a malformed locks value fails closed, even from the baseline\'s own author, after it', async (t) => {
+test('a malformed locks value fails closed, even signed and from the owner', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
   cpSync(EXAMPLE, tmp, { recursive: true });
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const blocks = await readBlocks(tmp);
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
   for (const malformed of ['TRUE', true, 1, ' true']) {
-    const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
+    const approval = { id: 'e1', type: 'approval', signed: true, page: 'A01', block: 'A01.1.1',
       fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
-      when: '2026-09-22T10:00:00Z', data: { locks: malformed } }; // AFTER the baseline: its field is trusted, or not at all
-    const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
+      when: '2026-09-22T10:00:00Z', data: { locks: malformed } };
+    const r = await sync(tmp, { events: async () => [approval] }, { owner: 'owner@example.org' });
     assert.equal(r.added, 0, `locks: ${JSON.stringify(malformed)} must fail closed`);
-  }
-});
-
-/**
- * Round 2's review, CRITICAL "fields written before this version are trusted": a ✓ that PREDATES the
- * baseline is answered by `legacyLock` alone — whatever `data.locks` on it claims, well-formed,
- * malformed or a forgery, since an event that old could not have been written by this mechanism at
- * all. That still holds for `'true'` (round 4's review carves out exactly ONE exception, for a
- * written `'false'` — see the next test, and `isLocked`'s own comment). Written here as an explicit
- * `'true'`, by somebody who is NOT the baseline's own author: if the field were trusted this early, it
- * would read as a lock; `legacyLock` says the opposite (the wrong author, whatever `when` says), and
- * `legacyLock` is what decides for anything this old — the mismatched-author trick proves the field
- * is genuinely ignored, not merely consistent with it by accident.
- */
-test('before the baseline, a written "true" is ignored outright — legacyLock alone decides', async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
-  cpSync(EXAMPLE, tmp, { recursive: true });
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const blocks = await readBlocks(tmp);
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
-  const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
-    fingerprint: blocks.get('A01.1.1').fingerprint, author: 'somebody-else@example.org',
-    when: '2026-09-22T08:00:00Z', data: { locks: 'true' } }; // predates the baseline, wrong author
-  const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
-  assert.equal(r.added, 0, 'predating the baseline: the written "true" is ignored, and legacyLock says no (wrong author)');
-});
-
-/**
- * Round 4's review, MINOR "clock stepped back": the one exception to the rule above. If a server's
- * clock runs behind, a former owner's brand-new ✓ — given by THIS version, and correctly written
- * `locks:"false"` at the moment it was recorded — can land dated BEFORE the baseline it actually
- * follows in real time. `legacyLock` alone would read it as a lock (same author as the baseline, and
- * `when` says "predates it"), silently reviving a lock its own author just gave up. Written here by
- * the baseline's OWN author, predating it, with an explicit `locks:"false"`: if the field were still
- * ignored this early, `legacyLock` would say yes; trusting the written `"false"` says no instead —
- * proving the exception fires, not merely that nothing here locks by coincidence.
- */
-test('a written "false" wins even before the baseline, unlike every other written value', async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
-  cpSync(EXAMPLE, tmp, { recursive: true });
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const blocks = await readBlocks(tmp);
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
-  const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
-    fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
-    // The clock ran behind: dated before the baseline, by the baseline's own author — exactly the
-    // shape `legacyLock` would otherwise lock.
-    when: '2026-09-22T08:00:00Z', data: { locks: 'false' } };
-  const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
-  assert.equal(r.added, 0, 'a written "false" fails closed even predating the baseline, clock or not');
-});
-
-/**
- * The exception above only fires because `isLocked` asks `writtenBoolean(...) === false`, and
- * `writtenBoolean` already answers `false` for a malformed value too (decision C), not only for the
- * well-formed string `'false'` itself. So a malformed value, dated BEFORE the baseline and from the
- * baseline's own author, must fail closed the same way a real `"false"` does: `legacyLock` would
- * say yes given the chance (same author, predates the baseline), and only that carve-out stands
- * between this ✓ and a lock. Checking `approval.data?.locks === 'false'` instead would miss every
- * malformed value here and fall through to `legacyLock` — exactly the mutation this test is written
- * to catch.
- */
-test('a malformed locks value fails closed too, from the baseline\'s own author, before it', async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-sync-'));
-  cpSync(EXAMPLE, tmp, { recursive: true });
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const blocks = await readBlocks(tmp);
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@example.org', when: '2026-09-22T09:00:00Z', data: null };
-  for (const malformed of ['TRUE', true, 1, ' true']) {
-    const approval = { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1',
-      fingerprint: blocks.get('A01.1.1').fingerprint, author: 'owner@example.org',
-      // Same author as the baseline, and predates it — the clock-stepped-back shape, but with a
-      // malformed value where the exception's own test used a well-formed "false".
-      when: '2026-09-22T08:00:00Z', data: { locks: malformed } };
-    const r = await sync(tmp, { events: async () => [baseline, approval] }, { owner: 'owner@example.org' });
-    assert.equal(r.added, 0, `locks: ${JSON.stringify(malformed)} must fail closed before the baseline too`);
   }
 });
 
@@ -1667,7 +1462,7 @@ test('a malformed locks value fails closed too, from the baseline\'s own author,
 test('list() shows the address by default, and the role when people.show asks for it', async (t) => {
   process.env.HOLDRIM_OWNER ??= 'owner@example.org';
   const events = [
-    { id: 'e1', type: 'request', page: 'A01', block: null, text: 'change this', author: 'owner@example.org',
+    { id: 'e1', type: 'request', signed: true, page: 'A01', block: null, text: 'change this', author: 'owner@example.org',
       when: '2026-01-01T00:00:00Z', data: { category: 'text' } },
   ];
   const log = console.log;
@@ -1693,9 +1488,9 @@ test('list() shows the address by default, and the role when people.show asks fo
 test('show() shows the address by default, and the role when people.show asks for it', async (t) => {
   process.env.HOLDRIM_OWNER ??= 'owner@example.org';
   const events = [
-    { id: 'req0000001', type: 'request', page: 'A01', block: null, text: 'change this', author: 'reviewer@example.org',
+    { id: 'req0000001', type: 'request', signed: true, page: 'A01', block: null, text: 'change this', author: 'reviewer@example.org',
       when: '2026-01-01T00:00:00Z', data: { category: 'text' } },
-    { id: 'st00000001', type: 'request_state', page: 'A01', author: 'owner@example.org',
+    { id: 'st00000001', type: 'request_state', signed: true, page: 'A01', author: 'owner@example.org',
       when: '2026-01-01T00:05:00Z', data: { request: 'req0000001', state: 'approved', from: 'open' } },
   ];
   const log = console.log;
@@ -1740,12 +1535,9 @@ test('sync knows the owner however the address is typed, in the configuration or
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const blocks = await readBlocks(tmp);
   const events = [
-    // Dated before both ✓s below, so their written `locks` is trusted at all (round 2's review).
-    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: 'owner@example.org',
-      when: '2026-09-22T09:00:00Z', data: null },
-    { id: 'e1', type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+    { id: 'e1', type: 'approval', signed: true, page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
       author: 'owner@example.org', when: '2026-09-22T10:00:00Z', data: { locks: 'true' } },
-    { id: 'e2', type: 'approval', page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
+    { id: 'e2', type: 'approval', signed: true, page: 'A02', block: 'A02.1.1', fingerprint: blocks.get('A02.1.1').fingerprint,
       author: ' OWNER@example.org ', when: '2026-09-22T10:01:00Z', data: { locks: 'true' } },
   ];
   const r = await sync(tmp, { events: async () => events }, { owner: '  Owner@Example.org ' });
@@ -1855,16 +1647,10 @@ function trail(t, ...events) {
   // with nothing written reads as "at triage" no matter whose it is, so an id claiming to be
   // "approved-by-the-owner" has to carry the field itself to actually read as approved.
   const request = (id, author, authorCouldTriage) => ({
-    id, type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'f', text: 'please', snapshot: 's',
+    id, type: 'request', signed: true, page: 'A01', block: 'A01.1.1', fingerprint: 'f', text: 'please', snapshot: 's',
     author, when: '2026-09-20T10:00:00.000Z', data: { category: 'text', authorCouldTriage: String(authorCouldTriage) },
   });
-  // Dated before every request below: without one, the written `authorCouldTriage` above is ignored
-  // outright (round 2's review, CRITICAL "fields written before this version are trusted") and
-  // "approved-by-the-owner" would read as open, at triage, like everything else here.
-  const baseline = { id: 'lock-baseline', type: 'lock_baseline', page: '_lock_baseline',
-    author: 'owner@y.org', when: '2026-09-19T00:00:00.000Z', data: null };
   const all = [
-    baseline,
     request('open-by-a-reader', 'reader@y.org', false),
     request('approved-by-the-owner', 'owner@y.org', true),
     ...events,
@@ -1886,7 +1672,7 @@ test('the agent only moves a request the owner APPROVED, and never into the owne
 });
 
 test('a request already in the agent\'s hands is refused by where it can go, not by "the owner APPROVED"', async (t) => {
-  const moved = (id, state, from) => ({ id: `st-${id}`, type: 'request_state', page: 'A01', block: 'A01.1.1',
+  const moved = (id, state, from) => ({ id: `st-${id}`, type: 'request_state', signed: true, page: 'A01', block: 'A01.1.1',
     author: 'agent@y.org', when: '2026-09-20T11:00:00.000Z', data: { request: 'approved-by-the-owner', state, from } });
   const applied = trail(t, moved(1, 'applying', 'approved'), moved(2, 'applied', 'applying'));
   await assert.rejects(() => setState(applied.root, applied.source, 'approved-by', 'applied', 'again', { commit: 'abc1234' }),
@@ -1939,13 +1725,13 @@ test('a local server that answers but refuses says why, not "is it running?"', a
 });
 
 test('a request\'s history comes from its own thread, oldest first, whatever order it was stored in', () => {
-  const move = (id, state, from, when) => ({ id, type: 'request_state', page: 'A01', author: 'owner@y.org', when,
+  const move = (id, state, from, when) => ({ id, type: 'request_state', signed: true, page: 'A01', author: 'owner@y.org', when,
     data: { request: 'q', state, from } });
   const [found] = requests([
-    { id: 'q', type: 'request', page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:00Z',
+    { id: 'q', type: 'request', signed: true, page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:00Z',
       data: { authorCouldTriage: 'false' } },
     move('m3', 'applied', 'applying', '2026-09-22T10:03:00Z'),
-    { id: 'other', type: 'request', page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:30Z',
+    { id: 'other', type: 'request', signed: true, page: 'A01', author: 'r@x.org', when: '2026-09-22T10:00:30Z',
       data: { authorCouldTriage: 'false' } },
     move('m1', 'approved', 'open', '2026-09-22T10:01:00Z'),
     move('m2', 'applying', 'approved', '2026-09-22T10:02:00Z'),
@@ -1963,17 +1749,13 @@ test('a request\'s history comes from its own thread, oldest first, whatever ord
  */
 test('a request starts where it was written to start, whatever grants change afterwards', () => {
   const [grantedSince] = requests([
-    { id: 'q', type: 'request', page: 'A01', author: 'later-admin@x.org', when: '2026-09-22T10:00:00Z',
+    { id: 'q', type: 'request', signed: true, page: 'A01', author: 'later-admin@x.org', when: '2026-09-22T10:00:00Z',
       data: { authorCouldTriage: 'false' } },
   ]);
   assert.equal(grantedSince.state, 'open', 'granting triage afterwards must not retroactively approve it');
 
   const [revokedSince] = requests([
-    // Dated before it: without a baseline, the written `authorCouldTriage: 'true'` below is ignored
-    // outright (round 2's review, CRITICAL "fields written before this version are trusted") and
-    // this would read 'open' regardless of what was written.
-    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: 'owner@y.org', when: '2026-09-22T09:00:00Z', data: null },
-    { id: 'q', type: 'request', page: 'A01', author: 'former-admin@x.org', when: '2026-09-22T10:00:00Z',
+    { id: 'q', type: 'request', signed: true, page: 'A01', author: 'former-admin@x.org', when: '2026-09-22T10:00:00Z',
       data: { authorCouldTriage: 'true' } },
   ]);
   assert.equal(revokedSince.state, 'approved', 'revoking triage afterwards must not retroactively un-approve it');
@@ -1988,7 +1770,7 @@ test('a request starts where it was written to start, whatever grants change aft
  */
 test('a request with no written field at all fails closed to "at triage"', () => {
   const [absent] = requests([
-    { id: 'q', type: 'request', page: 'A01', author: 'admin@x.org', when: '2026-09-22T10:00:00Z', data: null },
+    { id: 'q', type: 'request', signed: true, page: 'A01', author: 'admin@x.org', when: '2026-09-22T10:00:00Z', data: null },
   ]);
   assert.equal(absent.state, 'open', 'missing entirely: at triage, never pre-approved');
 });
@@ -2000,7 +1782,7 @@ test('a request with no written field at all fails closed to "at triage"', () =>
 test('a malformed authorCouldTriage fails closed, and is never treated as absent', () => {
   for (const malformed of ['TRUE', true, 1, ' true']) {
     const [r] = requests([
-      { id: 'q', type: 'request', page: 'A01', author: 'admin@x.org', when: '2026-09-22T10:00:00Z',
+      { id: 'q', type: 'request', signed: true, page: 'A01', author: 'admin@x.org', when: '2026-09-22T10:00:00Z',
         data: { authorCouldTriage: malformed } },
     ]);
     assert.equal(r.state, 'open', `authorCouldTriage: ${JSON.stringify(malformed)} must fail closed`);
@@ -2008,35 +1790,47 @@ test('a malformed authorCouldTriage fails closed, and is never treated as absent
 });
 
 /**
- * Round 2's review, CRITICAL "fields written before this version are trusted": before this version,
- * `recordEvent` stored whatever `data` a client sent, so a member could POST a request carrying
- * `authorCouldTriage:"true"` straight from their own browser. Read by THIS version, a request that old
- * still reads at triage — `earliestLockBaseline`, computed here from the very `events` `requests()` is
- * given (there is no server process's `LOCK_BASELINE` to ask from the agent's own CLI), gates it the
- * same way the server does.
+ * #50: a request's author could triage it only as the server signed it, and a request moves only on
+ * transitions the server signed. A member's request written into the store with
+ * `authorCouldTriage:"true"`, or a genuine request with an "approved" written in beside it, would
+ * otherwise land in the agent's queue with nobody having approved it — the agent would then apply a
+ * change the owner never saw.
  */
-test('requests() ignores a forged pre-baseline authorCouldTriage, straight into nobody\'s queue', () => {
-  const baseline = { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: 'owner@x.org',
-    when: '2026-09-22T09:00:00Z', data: null };
-  const forged = { id: 'q', type: 'request', page: 'A01', author: 'member@x.org',
-    when: '2026-09-22T08:00:00Z', data: { authorCouldTriage: 'true' } }; // predates the baseline
-  const [r] = requests([baseline, forged]);
-  assert.equal(r.state, 'open', 'a forged pre-baseline authorCouldTriage is ignored: still at triage');
+test('requests() starts an unsigned request at triage, and moves nothing on an unsigned transition', () => {
+  const request = (signed, data) => ({ id: 'q', type: 'request', signed, page: 'A01', author: 'member@x.org',
+    when: '2026-09-22T10:00:00Z', data });
+  assert.equal(requests([request(false, { authorCouldTriage: 'true' })])[0].state, 'open', 'not signed: at triage');
+  assert.equal(requests([request(true, { authorCouldTriage: 'true' })])[0].state, 'approved', 'setup: signed, past triage');
+  const approved = (signed) => ({ id: 'st', type: 'request_state', signed, page: 'A01', author: 'owner@x.org',
+    when: '2026-09-22T11:00:00Z', data: { request: 'q', state: 'approved', from: 'open' } });
+  const [forged] = requests([request(true, { authorCouldTriage: 'false' }), approved(false)]);
+  assert.equal(forged.state, 'open', 'an "approved" nobody signed moves nothing');
+  assert.deepEqual(forged.history.map((e) => [e.id, e.signed]), [['st', false]], 'and is still shown, marked, in the thread');
+  assert.equal(requests([request(true, { authorCouldTriage: 'false' }), approved(true)])[0].state, 'approved', 'setup: signed, it moves');
 });
 
 /**
- * Round 4's review, CRITICAL: with no `lock_baseline` event among the events at all, `authorCouldTriage`
- * must trust NOTHING written — the previous test only proves this for events that predate a REAL
- * baseline, which cannot tell "no baseline exists" apart from "this one predates the baseline that
- * does". Reverting the guard from `if (baseline && …)` to `if (!baseline || …)` would trust a forged
- * `authorCouldTriage:"true"` the moment `earliestLockBaseline(events)` finds none at all — exactly the
- * shape this pins.
+ * The same, through the queue an agent reads (`list --json`): a request "approved" only by an event
+ * the server did not sign is not in it.
  */
-test('requests() ignores a forged authorCouldTriage with no baseline in the events at all', () => {
-  const forged = { id: 'q', type: 'request', page: 'A01', author: 'member@x.org',
-    when: '2026-09-22T10:00:00Z', data: { authorCouldTriage: 'true' } }; // no lock_baseline event anywhere
-  const [r] = requests([forged]);
-  assert.equal(r.state, 'open', 'no baseline at all: a forged authorCouldTriage is trusted no more than an absent one');
+test('a forged approval does not reach the agent\'s queue', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'holdrim-queue-'));
+  cpSync(EXAMPLE, tmp, { recursive: true });
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  process.env.HOLDRIM_OWNER ??= 'owner@example.org';
+  const events = [
+    { id: 'genuine', type: 'request', signed: true, page: 'A01', block: 'A01.1.1', author: 'member@x.org',
+      when: '2026-09-22T10:00:00Z', data: { authorCouldTriage: 'false' }, text: 'a real one' },
+    { id: 'g-ok', type: 'request_state', signed: true, page: 'A01', block: 'A01.1.1', author: 'owner@example.org',
+      when: '2026-09-22T10:01:00Z', data: { request: 'genuine', state: 'approved', from: 'open' } },
+    { id: 'forged', type: 'request', signed: true, page: 'A01', block: 'A01.1.2', author: 'member@x.org',
+      when: '2026-09-22T10:00:00Z', data: { authorCouldTriage: 'false' }, text: 'nobody approved this' },
+    { id: 'f-ok', type: 'request_state', signed: false, page: 'A01', block: 'A01.1.2', author: 'owner@example.org',
+      when: '2026-09-22T10:01:00Z', data: { request: 'forged', state: 'approved', from: 'open' } },
+  ];
+  const q = await queue(tmp, { events: async () => events }, false);
+  assert.deepEqual(q.requests.map((r) => r.id), ['genuine']);
+  assert.equal(q.tampered, true, 'and the event not signed is raised');
 });
 
 test('the request list is linear in its history: 30 000 requests read in well under a second', () => {
@@ -2046,8 +1840,8 @@ test('the request list is linear in its history: 30 000 requests read in well un
   const events = [];
   for (let i = 0; i < 30000; i++) {
     const id = `r${i}`;
-    events.push({ id, type: 'request', page: `P${i % 50}`, author: 'r@x.org', when: '2026-09-22T10:00:00Z' });
-    events.push({ id: `s${i}`, type: 'request_state', page: `P${i % 50}`, author: 'o@x.org',
+    events.push({ id, type: 'request', signed: true, page: `P${i % 50}`, author: 'r@x.org', when: '2026-09-22T10:00:00Z' });
+    events.push({ id: `s${i}`, type: 'request_state', signed: true, page: `P${i % 50}`, author: 'o@x.org',
       when: '2026-09-22T10:01:00Z', data: { request: id, state: 'approved', from: 'open' } });
   }
   const started = performance.now();

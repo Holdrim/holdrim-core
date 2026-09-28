@@ -146,6 +146,9 @@ node engine/cli/holdrim.ts key new "$WORK/signing.key" >"$WORK/signing.out" || {
 export HOLDRIM_SIGNING_KEY_FILE="$WORK/signing.key"
 PUBLIC_KEY=$(sed -n 's/^HOLDRIM_PUBLIC_KEYS=//p' "$WORK/signing.out")
 [ -n "$PUBLIC_KEY" ] || { echo "holdrim key new printed no public key"; exit 1; }
+# And its public half for every `holdrim` run below that reads a store directly, as a machine that
+# reads the store is told it; the boots that prove what a reader without it does take it away.
+export HOLDRIM_PUBLIC_KEYS="$PUBLIC_KEY"
 
 # A port already in use is the most treacherous failure there is here: the new server dies with
 # EADDRINUSE, the old one keeps answering, and the whole suite ends up testing the previous code —
@@ -249,10 +252,6 @@ expect "unknown type → 400"            400 "$(post $OWNER '{"type":"delete","p
 # deletes (engine/api/texts.ts) — never by this general path, even signed in as the owner: a route
 # that accepted it could claim a removal with nothing to back it, no row actually gone.
 expect "text_removed via POST /events → 400, even as the owner" 400 "$(post $OWNER '{"type":"text_removed","page":"D01","data":{"event":"x","field":"text"}}')"
-# lock_baseline is written only by ensureLockBaseline, at boot, from HOLDRIM_OWNER — never by a
-# client (round 2's review, M-3): a member's own POST could otherwise plant a baseline naming
-# themselves as its author, and every one of their unwritten future ✓s would read as a lock.
-expect "lock_baseline via POST /events → 400, even from a member" 400 "$(post $REVIEWER '{"type":"lock_baseline","page":"A01"}')"
 # A body that parses as JSON but does not say so is what a form on another site can send without the
 # browser asking first. Refused before it is read, whoever it claims to come from.
 expect "an approval sent as text/plain → 415" 415 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Dev-Email: $OWNER" -H 'Content-Type: text/plain' -d '{"type":"approval","page":"D01","block":"D01.1.9","fingerprint":"forged"}' $B/api/events)"
@@ -1150,10 +1149,9 @@ expect "and not the cookie the browser holds" 0 "$(grep -cxF -e "$OWNER_SESSION"
 COPIED_ANSWERS=$(while read -r v; do curl -s -o /dev/null -w '%{http_code}\n' -H "Cookie: holdrim_session=$v" $B/api/me; done < "$WORK/session-values.txt" | sort -u | tr '\n' ' ')
 expect "and none of its values, sent as the cookie, signs anyone in" "401 " "$COPIED_ANSWERS"
 # Signing in does not ITSELF name a person — but the owner's row already exists by the time anyone
-# can sign in: this store's first boot wrote the `lock_baseline` event authored by the owner (decision
-# B), which mints their row before any request, comment or ✓ of theirs ever could. So the log finds a
-# real person here, never the e-mail — the id it finds is a real one, not merely something id-shaped.
-expect "and a sign-in finds the owner's row, made by the baseline at boot" 1 \
+# can sign in: the server makes it at its first start (server.ts, before `idForLog`). So the log
+# finds a real person here, never the e-mail — the id it finds is a real one, not merely id-shaped.
+expect "and a sign-in finds the owner's row, made at the first start" 1 \
   "$(log_field $WORK/password.log signed_in person | grep -cE '^p_[0-9a-f]{24}$')"
 expect "and the owner truly approves"  201 "$(curl -s -b $COOKIES -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"type":"approval","page":"D01","block":"D01.1.4","fingerprint":"abc123"}' $B/api/events)"
 # The owner's first real act mints their row. Captured once here, by name, so every later line that
@@ -1661,11 +1659,9 @@ expect "no second server was started"  1 "$(echo "$RUNNER" | has 'Holdrim local'
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
 # The recorded events have to survive shutdown — that's the difference between sqlite and memory.
-# Four by now: the owner's two approvals (D01.1.4 and A01.1.1) and the member's comment, minted for
-# the exact-id checks above, plus the one `lock_baseline` event this store's first boot wrote and
-# every restart since found already there (round 1's review, decision B) — the fact this whole
-# section's ✓-through-a-handover checks rest on.
-expect "the events are still there after shutdown" 4 "$(node -e "
+# Three by now: the owner's two approvals (D01.1.4 and A01.1.1) and the member's comment, minted for
+# the exact-id checks above.
+expect "the events are still there after shutdown" 3 "$(node -e "
   const {DatabaseSync}=require('node:sqlite');
   console.log(new DatabaseSync('$DATA_DIR/events.db').prepare('SELECT COUNT(*) c FROM events').get().c)")"
 rm -rf $DATA_DIR
@@ -1703,99 +1699,77 @@ expect "a transition only valid from open is refused on the true, frozen state" 
   "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"A02\",\"block\":\"A02.1.1\",\"text\":\"no\",\"data\":{\"request\":\"$GRANT_REQUEST\",\"state\":\"rejected\"}}")"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$GRANT_DIR"
 
-echo "a field written before this version is trusted only after the baseline (round 2's review, CRITICAL):"
-# Before this version, recordEvent stored whatever `data` a client sent — so a store from that time can
-# hold a plain, unwritten ✓ (`data: null`) from the owner and from an admin, and a CLIENT-FORGED
-# `locks:"true"`/`authorCouldTriage:"true"` on someone else's event, exactly as the finding reproduced
-# it against the pre-change build. All four are inserted straight into a fresh SQLite file, BEFORE any
-# server of this version ever starts against it — so all four predate the ONE `lock_baseline` event the
-# boot below is about to write, whichever of them carries a written field and whichever does not.
-BASELINE_DIR=$(mktemp -d)
-BASELINE_ADMIN=baseline-admin@example.org
-BASELINE_MEMBER=baseline-member@example.org
-BASELINE_FP=$(cli_fingerprint A01.1.1)
-# The admin's unwritten ✓ needs its block's REAL fingerprint, not a placeholder (s4b, round 4's
-# review): the home's "awaiting sync" count (below) only ever looks at approvals whose fingerprint
-# matches the block's CURRENT one — a mismatched one, like the placeholder every other seeded ✓ here
-# still uses, is skipped there regardless of what `isLocked` says about it, so a bug that made this ✓
-# lock would pass unnoticed however it was seeded. It also sits on a DIFFERENT page than the owner's
-# (A02, not A01): both landing on one page would let a bug swap WHICH of the two counts — the admin's
-# in, the owner's now out, since neither is owner any more once HOLDRIM_OWNER moves — while the
-# PAGE's total stays "1" either way, hiding the very thing this seeds to catch. On separate pages,
-# the owner's page must always read "1" and the admin's must never read anything at all.
-BASELINE_FP2=$(cli_fingerprint A02.1.2)
-SEEDED=$(node --input-type=module -e "
+echo "an event the server did not sign carries no authority (#50):"
+# Written into the file by someone without the key, beside genuine events the server signed: a ✓ by
+# the owner's own id with `locks:"true"`, a member's request claiming `authorCouldTriage:"true"`, an
+# "approved" for a genuine request, and a role defined and granted to the member. Every one of them is
+# what a lock, a queue or a grant needs but the signature. The site is a copy, so `holdrim sync` below
+# may write into it.
+UNSIGNED_DIR=$(mktemp -d); UNSIGNED_SITE="$UNSIGNED_DIR/site"; cp -r "$SITE" "$UNSIGNED_SITE"
+UNSIGNED_MEMBER=unsigned-member@example.org
+SEEDED=$(node --no-warnings --input-type=module -e "
 const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
 const { signingFromEnv } = await import('./engine/tests/helpers/signing-env.js');
-const store = new SqliteEventStore(process.argv[1], signingFromEnv());
-const [owner, admin, member, fp, fp2] = process.argv.slice(2);
-// A genuine pre-version ✓, never written on: locks only via legacyLock, and only for the OWNER.
-const ownerNull = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: fp, data: null }, owner);
-const adminNull = await store.append({ type: 'approval', page: 'A02', block: 'A02.1.2', fingerprint: fp2, data: null }, admin);
-// The forgeries the finding reproduced: a field this version never wrote, on an event this old.
-const adminForged = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.3', fingerprint: 'x', data: { locks: 'true' } }, admin);
-const memberForged = await store.append({ type: 'request', page: 'A02', block: 'A02.1.1', fingerprint: 'x', text: 'a forged request', data: { authorCouldTriage: 'true' } }, member);
-console.log(JSON.stringify({ ownerNull: ownerNull.id, adminNull: adminNull.id, adminForged: adminForged.id, memberForged: memberForged.id }));
+const { readBlocks } = await import('./engine/cli/pages.ts');
+const { DatabaseSync } = await import('node:sqlite');
+const [path, site, owner, member] = process.argv.slice(1);
+const blocks = await readBlocks(site);
+const store = new SqliteEventStore(path, signingFromEnv());
+const genuine = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint: blocks.get('A01.1.1').fingerprint,
+  data: { locks: 'true', asAgent: 'false' } }, owner);
+const asked = await store.append({ type: 'request', page: 'A01', block: 'A01.1.2', fingerprint: 'x', text: 'a genuine request',
+  data: { category: 'text', authorCouldTriage: 'false', asAgent: 'false' } }, member);
+const ownerId = await store.personOf(owner); const memberId = await store.personOf(member);
 await store.close();
-" "$BASELINE_DIR/events.db" "$OWNER" "$BASELINE_ADMIN" "$BASELINE_MEMBER" "$BASELINE_FP" "$BASELINE_FP2")
-OWNER_NULL_ID=$(echo "$SEEDED" | jfield ownerNull)
-ADMIN_NULL_ID=$(echo "$SEEDED" | jfield adminNull)
-ADMIN_FORGED_ID=$(echo "$SEEDED" | jfield adminForged)
-MEMBER_FORGED_ID=$(echo "$SEEDED" | jfield memberForged)
-
-HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$BASELINE_ADMIN \
-  HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$BASELINE_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
-  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/baseline-forged.log 2>&1 & PID=$!
+const db = new DatabaseSync(path);
+const insert = db.prepare('INSERT INTO events (id, type, page, block, fingerprint, text, author, happened_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const later = new Date(Date.now() + 1000).toISOString();
+insert.run('forged-lock', 'approval', 'A02', 'A02.1.2', blocks.get('A02.1.2').fingerprint, null, ownerId, later, JSON.stringify({ locks: 'true', asAgent: 'false' }));
+insert.run('forged-request', 'request', 'A02', 'A02.1.1', 'x', null, memberId, later, JSON.stringify({ category: 'text', authorCouldTriage: 'true', asAgent: 'false' }));
+insert.run('forged-approval', 'request_state', 'A01', 'A01.1.2', null, null, ownerId, later, JSON.stringify({ request: asked.id, state: 'approved', from: 'open', asAgent: 'false' }));
+insert.run('forged-role', 'role_defined', '_roles', null, null, null, ownerId, later, JSON.stringify({ role: 'forged', capabilities: 'triage,approve', asAgent: 'false' }));
+insert.run('forged-grant', 'role_granted', '_roles', null, null, null, ownerId, later, JSON.stringify({ role: 'forged', person: memberId, scope: '', asAgent: 'false' }));
+db.close();
+console.log(JSON.stringify({ genuine: genuine.id, asked: asked.id }));
+" "$UNSIGNED_DIR/events.db" "$UNSIGNED_SITE" "$OWNER" "$UNSIGNED_MEMBER")
+UNSIGNED_GENUINE=$(echo "$SEEDED" | jfield genuine); require_id "$UNSIGNED_GENUINE" "the genuine ✓'s id"
+UNSIGNED_ASKED=$(echo "$SEEDED" | jfield asked); require_id "$UNSIGNED_ASKED" "the genuine request's id"
+HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite \
+  HOLDRIM_EVENTS_PATH=$UNSIGNED_DIR/events.db PORT=$PORT HOLDRIM_SITE="$UNSIGNED_SITE" \
+  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/unsigned.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
 event_of() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$1"; }
-home_waiting() { curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | has -F 'not yet in the repository'; echo $?; }
-# s4b (round 4's review): the OWNER'S and the ADMIN'S unwritten ✓s are seeded on DIFFERENT pages (A01,
-# A02) exactly so each page's own row can be read apart from the other's — `summarisePages` tallies
-# `awaitingSync` per PAGE, and once HOLDRIM_OWNER moves to the admin, `roles.can('lock', …)` recomputed
-# live (round 1's rule, s4b reverts to it) flips FROM the owner TO the admin: a check on the TOTAL
-# count across both pages would read "1" either way and never notice the swap. Per page, the answer
-# must never move: the owner's page always "1", the admin's page never any count at all.
-home_page_row() { curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | grep "pages/$1.html\">"; }
-home_page_awaiting() { home_page_row "$1" | grep -oE '[0-9]+ approved on the site, not yet in the repository'; }
-# Decision B (round 1's review): a genuinely unwritten ✓ from before the field existed at all.
-expect "the owner's unwritten pre-version ✓ locks via the baseline"       true  "$(event_of $OWNER_NULL_ID | jfield locks)"
-expect "an admin's unwritten pre-version ✓ does not"                      false "$(event_of $ADMIN_NULL_ID | jfield locks)"
-expect "and the home counts the owner's as waiting for the repository"    0     "$(home_waiting)"
-# s4b: reverting `ownerApprovals` (server.ts) to round 1's rule — an absent `locks` recomputed LIVE as
-# `roles.can('lock', author)` — agrees with the correct answer here, since the admin is not yet owner
-# in THIS boot either way (`roles.can('lock', admin)` is false regardless). The real proof is after
-# the handover below; this is the "before" half a total count could never anchor.
-expect "the owner's own page reads exactly 1 awaiting sync"                "1 approved on the site, not yet in the repository" "$(home_page_awaiting A01)"
-expect "and the admin's real-fingerprint ✓, on its OWN page, counts toward NOTHING" "" "$(home_page_awaiting A02)"
-# Round 2's review, CRITICAL: the forged fields must not fare any better than the unwritten ones above.
-expect "an admin's FORGED pre-version locks:true does not lock either"    false "$(event_of $ADMIN_FORGED_ID | jfield locks)"
-expect "a member's FORGED pre-version authorCouldTriage:true starts at triage, straight into nobody's queue" \
-  open "$(event_of $MEMBER_FORGED_ID | jfield status.state)"
+home_page_awaiting() { curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | grep "pages/$1.html\">" | grep -oE '[0-9]+ approved on the site, not yet in the repository'; }
+expect "the owner's signed ✓ is a lock"                                 "true true" "$(event_of $UNSIGNED_GENUINE | jfield signed) $(event_of $UNSIGNED_GENUINE | jfield locks)"
+expect "the ✓ written into the file, by the owner's own id, is not"     "false false" "$(event_of forged-lock | jfield signed) $(event_of forged-lock | jfield locks)"
+expect "the home counts the signed one as waiting for the repository"   "1 approved on the site, not yet in the repository" "$(home_page_awaiting A01)"
+expect "and not the one written into the file"                          "" "$(home_page_awaiting A02)"
+expect "a request claiming its author could triage it starts at triage" open "$(event_of forged-request | jfield status.state)"
+expect "an \"approved\" nobody signed moves the genuine request nowhere" open "$(event_of $UNSIGNED_ASKED | jfield status.state)"
+expect "and the open count still counts both at triage"                 2 "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/requests/open | jfield toTriage)"
+expect "a role defined and granted in the file grants the member nothing" "false false" "$(may_on $UNSIGNED_MEMBER A01 A01.1.1)"
+expect "each one is raised as CRITICAL, by id" "forged-approval forged-grant forged-lock forged-request forged-role" \
+  "$(grep '"event":"event_unsigned"' $WORK/unsigned.log | sed -E -n 's/.*"eventId":"([^"]*)".*/\1/p' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+expect "and shown on the banner, five findings"                         5 \
+  "$(curl -s -H "X-Dev-Email: $OWNER" $B/api/tampered | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).findings.filter(f=>f.kind==='unsigned').length))")"
+expect "the home marks the request nobody signed"                       0 \
+  "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/home | has -F 'not signed by this server'; echo $?)"
+# The owner triages the genuine request for real: the signed decision is the one that counts.
+expect "(the owner approves the genuine request)"                        201 \
+  "$(post $OWNER "{\"type\":\"request_state\",\"page\":\"A01\",\"text\":\"ok\",\"data\":{\"request\":\"$UNSIGNED_ASKED\",\"state\":\"approved\"}}")"
+expect "and now it is approved"                                          approved "$(event_of $UNSIGNED_ASKED | jfield status.state)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
-
-# Restarted with HOLDRIM_OWNER moved to the admin: the baseline is FROZEN at the first boot (round 2's
-# review, CRITICAL(proof), catching the baseline held as `null`) — it does not move with a LATER
-# HOLDRIM_OWNER, and an admin who becomes owner earns no lock, retroactively, for a ✓ they gave before
-# anyone was, forged field or not.
-HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$BASELINE_ADMIN HOLDRIM_ADMINS= \
-  HOLDRIM_DEV_EMAIL= HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$BASELINE_DIR/events.db PORT=$PORT HOLDRIM_SITE="$SITE" \
-  node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >$WORK/baseline-forged.log 2>&1 & PID=$!
-for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
-expect "the admin is owner here now"                                       owner "$(curl -s -H "X-Dev-Email: $BASELINE_ADMIN" $B/api/me | jfield role)"
-expect "yet the old owner's pre-version ✓ still locks (the baseline is frozen)" true  "$(event_of $OWNER_NULL_ID | jfield locks)"
-expect "and the now-owner's own pre-version ✓ still does not"              false "$(event_of $ADMIN_NULL_ID | jfield locks)"
-expect "nor does their forged locks:true, even as owner now"               false "$(event_of $ADMIN_FORGED_ID | jfield locks)"
-expect "and the forged request still starts at triage"                     open  "$(event_of $MEMBER_FORGED_ID | jfield status.state)"
-# s4b, the real proof: round 1's rule would recompute `roles.can('lock', …)` LIVE — the admin IS the
-# owner now, so their own page would newly count their old, real-fingerprint ✓ as "awaiting sync",
-# while the OWNER, no longer holding `lock` live, would drop OUT of theirs. A check on the TOTAL
-# across both pages would still read "1" — one swapped for the other — and miss exactly this; reading
-# each page on its own is what catches the swap.
-expect "the owner's page still reads exactly 1, even once the admin is owner (s4b)" \
-  "1 approved on the site, not yet in the repository" "$(home_page_awaiting A01)"
-expect "and the admin's page still counts nothing, even as owner now (s4b)" \
-  "" "$(home_page_awaiting A02)"
-kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$BASELINE_DIR"
+# `holdrim sync` and `list`, reading the file directly with the public key: the same answers.
+SYNC_OUT=$(HOLDRIM_OWNER=$OWNER node engine/cli/holdrim.ts sync --db "$UNSIGNED_DIR/events.db" --root "$UNSIGNED_SITE" 2>&1); SYNC_EXIT=$?
+expect "holdrim sync --db locks the signed ✓ and exits 1 for what is not signed" "1 0 1" \
+  "$SYNC_EXIT $(node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.exit(r['A01.1.1']?0:1)" "$UNSIGNED_SITE/approvals.json"; echo $?) $(node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.exit(r['A02.1.2']?0:1)" "$UNSIGNED_SITE/approvals.json"; echo $?)"
+expect "and says what it ignored"                                        0 "$(echo "$SYNC_OUT" | has '1 approval(s) not signed by the server ignored'; echo $?)"
+expect "holdrim list --json hands the agent only what the server signed as approved" "$UNSIGNED_ASKED" \
+  "$(HOLDRIM_OWNER=$OWNER node engine/cli/holdrim.ts list --json --db "$UNSIGNED_DIR/events.db" --root "$UNSIGNED_SITE" 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).requests.map(r=>r.id).join(' ')))")"
+SYNC_NOKEY=$(HOLDRIM_OWNER=$OWNER run_for 20 env -u HOLDRIM_PUBLIC_KEYS node engine/cli/holdrim.ts sync --db "$UNSIGNED_DIR/events.db" --root "$UNSIGNED_SITE" 2>&1); SYNC_NOKEY_EXIT=$?
+expect "holdrim sync with no HOLDRIM_PUBLIC_KEYS refuses, exit 1"       1 "$SYNC_NOKEY_EXIT"
+expect "and names the variable"                                          0 "$(echo "$SYNC_NOKEY" | has 'refusing to act: no HOLDRIM_PUBLIC_KEYS'; echo $?)"
+rm -rf "$UNSIGNED_DIR"
 
 echo "the local runner pins its own environment, even when the caller's shell has one:"
 # A shell already exporting HOLDRIM_EVENTS=sqlite or HOLDRIM_IDENTITY=password, left over from some
@@ -2655,9 +2629,9 @@ expect "and the address, seen again, holds none of them" "false false" "$(may_on
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$ROLES_DIR"
 
 # Removing a person from a store an older version wrote (#37): a ✓ and a comment whose author is the
-# address itself, from before authors were ids, the ✓ given by the owner this version first started
-# under, and the comment's text held inside the event. Built the way such a file is: rows first, then
-# this version's first start (which writes the lock baseline), then a handover.
+# address itself, from before authors were ids, the ✓ given by the owner of that time, and the
+# comment's text held inside the event. Built the way such a file is: rows first, then this version's
+# first start, then a handover. None of those rows is signed, so none is a lock (#50).
 echo "removing a person from a store an older version wrote (#37):"
 OLDER_DIR=$(mktemp -d); OLOG=$WORK/older.log
 FORMER=former@example.org; ELDER=elder@example.org
@@ -2682,14 +2656,13 @@ kill $PID 2>/dev/null; wait $PID 2>/dev/null
 start_older $OWNER
 older_lock() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/older-approval" | jfield locks; }
 older_post() { curl -s -H "X-Dev-Email: $OWNER" -H "Origin: $B" -H 'Accept-Language: en' --data-urlencode action=remove --data-urlencode confirm=yes "$@" $B/engine/settings; }
-expect "(the former owner's ✓ from before this version is a lock, through the baseline)" true "$(older_lock)"
-expect "removing the former owner while that ✓ names their address → 409, saying why" "409 0" \
-  "$(older_post -o /dev/null -w '%{http_code}' --data-urlencode "email=$FORMER") $(older_post --data-urlencode "email=$FORMER" | has -F "$(r_say api.removal.holdsOldLocks email=$FORMER)"; echo $?)"
-# After a restart: the server reads the baseline once, at start, so only a fresh one would see a
-# row forgotten beneath it.
-kill $PID 2>/dev/null; wait $PID 2>/dev/null
-start_older $OWNER
-expect "and their ✓ is still a lock, after a restart" true "$(older_lock)"
+# The lock baseline (retired by #50) made this ✓ a lock through the former owner's row, and refused
+# their removal for it; not signed, it is no lock, and nothing ties one to their row any more.
+expect "(the former owner's ✓ from before this version is no lock: it is not signed)" false "$(older_lock)"
+expect "removing the former owner goes through → 303, their older ✓ counted" 0 \
+  "$(older_post -D- -o /dev/null --data-urlencode "email=$FORMER" | tr -d '\r' | has -F 'location: /engine/settings?done=remove&legacy=1#settings-remove'; echo $?)"
+expect "and that ✓ is still in the trail, as it was" "approval false" \
+  "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/older-approval" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s);console.log(e.type+' '+e.locks)})")"
 expect "removing somebody only older events name → 409, saying nothing can be let go of" "409 0" \
   "$(older_post -o /dev/null -w '%{http_code}' --data-urlencode "email=$ELDER") $(older_post --data-urlencode "email=$ELDER" | has -F "$(r_say api.removal.onlyOlderEvents email=$ELDER)"; echo $?)"
 expect "(they comment again, on this version)"  201 "$(post $ELDER '{"type":"comment","page":"A01","block":"A01.1.1","text":"a newer comment"}')"
@@ -2733,7 +2706,7 @@ t_owner()  { curl -s -b $TOC -H 'Content-Type: application/json' -H 'Accept-Lang
 t_admin()  { curl -s -b $TAC -H 'Content-Type: application/json' -H 'Accept-Language: en' "$@"; }
 t_member() { curl -s -b $TMC -H 'Content-Type: application/json' -H 'Accept-Language: en' "$@"; }
 t_signin $TOC $OWNER "$T_OWNER_PASSWORD"
-# The owner's row exists from boot (the lock baseline), so their sign-in names them by id.
+# The owner's row exists from the first start (server.ts), so their sign-in names them by id.
 OWNER_LOG_ID=$(log_field $TLOG signed_in person)
 require_id "$OWNER_LOG_ID" OWNER_LOG_ID
 t_signin $TAC $T_ADMIN "$(t_owner -d "{\"email\":\"$T_ADMIN\",\"name\":\"An Admin\"}" $B/api/users | jfield password)"
@@ -3316,7 +3289,7 @@ expect "and a new event carries B's kid, not A's"                  "$KID_B" \
   "$(node --no-warnings -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[1],{readOnly:true});console.log(db.prepare('SELECT kid FROM events WHERE id = ?').get(process.argv[2]).kid)" "$SIGNED_DIR/events.db" "$AFTER")"
 expect "the fixture: A and B are two keys"                         1 "$([ "$KID_A" = "$KID_B" ]; echo $?)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
-start_signed HOLDRIM_SIGNING_KEY_FILE="$WORK/signing-b.key"
+start_signed -u HOLDRIM_PUBLIC_KEYS HOLDRIM_SIGNING_KEY_FILE="$WORK/signing-b.key"
 expect "A retired (no longer listed): its ✓ reads not signed, with no date to save it" \
   "$GENUINE:false forged:false $AFTER:true" "$(signed_of)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null

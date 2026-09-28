@@ -35,7 +35,7 @@ import { PasswordIdentity } from './identity-password.ts';
 import { provisionFirstAccess, retireFirstAccessFile } from './first-access.ts';
 import { IapIdentity } from './identity-iap.ts';
 import {
-  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, AS_AGENT_FIELD, ensureLockBaseline, isLocked, authorCouldTriage,
+  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, AS_AGENT_FIELD, authoritative, isLocked, authorCouldTriage,
   type Event, type NewEvent, type EventStore,
 } from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
@@ -322,19 +322,21 @@ const events: EventStore = await (async () => {
 }
 
 /**
- * The fact an unwritten ✓ is measured against (decision B, round 1's review): who HOLDRIM_OWNER was
- * the moment THIS server first read this store. Resolved once, at boot, before anything is served —
- * "on the first start of this version" means whatever the store already holds, checked here, never a
- * flag this process could lose track of. See `ensureLockBaseline`'s own comment (types.ts) for the
- * write it makes, and why it is never reachable from a client POST.
- *
- * It also decides which events' WRITTEN fields are trusted at all (round 2's review): `isLocked` and
- * `authorCouldTriage` (types.ts) read `data.locks`/`data.authorCouldTriage` only for an event dated
- * after this one — anything this server itself recorded, this boot or an earlier one of this
- * version — never for one that predates it, which is a store from before this mechanism existed and
- * could hold whatever a client's own POST body once put in `data`.
+ * Each request's own events, for the cycle — only those this server signed (`authoritative`,
+ * types.ts; #50): a `request_state` written into the store directly would otherwise move a request
+ * nobody moved, and an "approved" one would queue work for the agent. The one door every state the
+ * server computes goes through, so the panel, the home, the open count and `recordEvent`'s own guard
+ * cannot come to disagree about which transitions count.
  */
-const LOCK_BASELINE = await ensureLockBaseline(events, deployment.owner);
+const threadsOf = (all: Event[]) => cycle.threadsOf(authoritative(all));
+
+/**
+ * The owner's row in the people table, made at the first start if it is not there yet, so every log
+ * line about the owner names them by id from their first sign-in on (docs/PRIVACY.md, section 6) —
+ * which the lock baseline this version retired used to do as a side effect of recording its author.
+ * The owner is configuration, named by `HOLDRIM_OWNER`, and the one person a removal refuses.
+ */
+await events.personFor(deployment.owner);
 
 /** Wraps `idForLog`/`actedOn` (engine/api/people.ts) around this server's own store. */
 const idForLog = (email: string) => peopleIdForLog(events, email);
@@ -680,33 +682,29 @@ function refusalOf(
 
 /**
  * A request plus the state the server computed. The front end does not reimplement the cycle.
- * `thread` is the request's own events (`cycle.threadsOf`), not the whole list: see there why.
- * `authorCouldTriage` (types.ts) is what reads what `recordEvent` wrote onto the request when it was
- * FILED — the one implementation this file and requests.ts (the agent's CLI) both call, so there is
- * no second copy of the fallback to drift from it (round 1's review, finding 2). It trusts that
- * written field only when the request itself is dated after `LOCK_BASELINE` (round 2's review): a
- * request from before this whole mechanism existed could hold a client-forged `authorCouldTriage`
- * `recordEvent` never wrote, back when it stored whatever `data` a client sent.
+ * `thread` is the request's own signed events (`threadsOf`, above), not the whole list: see there
+ * why. `authorCouldTriage` (types.ts) is what reads what `recordEvent` wrote onto the request when it
+ * was FILED, on a request this server signed — the one implementation this file and requests.ts (the
+ * agent's CLI) both call, so there is no second copy of the rule to drift from it.
  */
 const withStatus = (e: Event, thread: Event[], viewer: Who | null, roles: Roles) => ({
   ...e,
   // Triage destinations only for a viewer who may triage THIS request, where it was filed (`statusFor`):
   // the panel draws its triage buttons from this list alone.
-  status: statusFor(roles, viewer, e, cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e, LOCK_BASELINE)))),
+  status: statusFor(roles, viewer, e, cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e)))),
 });
 
 /**
  * An event as a reader gets it: a request with its state, and an approval saying whether it is the
  * lock. Only the owner's ✓ is — `holdrim sync` and the home count theirs alone — and a panel that
  * painted any ✓ green, an admin's included, would show an opinion as if it were the lock. `isLocked`
- * (types.ts) reads what `recordEvent` wrote onto the ✓ when it was GIVEN — but only when the ✓ is
- * dated after `LOCK_BASELINE`, for the same reason `withStatus`, above, gates `authorCouldTriage` the
- * same way — falling back to `legacyLock` against `LOCK_BASELINE` for one that predates it, or holds
- * nothing at all. The one implementation this file and validation.ts (`holdrim sync`) both call.
+ * (types.ts) reads what `recordEvent` wrote onto the ✓ when it was GIVEN, and only on a ✓ this server
+ * signed: one written into the store directly paints nothing green. The one implementation this file
+ * and validation.ts (`holdrim sync`) both call.
  */
 const asRead = (e: Event, threads: Map<string, Event[]>, viewer: Who | null, roles: Roles) => {
   if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? [], viewer, roles);
-  if (e.type === 'approval') return { ...e, locks: isLocked(e, LOCK_BASELINE) };
+  if (e.type === 'approval') return { ...e, locks: isLocked(e) };
   return e;
 };
 
@@ -815,7 +813,7 @@ async function recordEvent(
     // so neither can drift from the other the next time one of them changes shape.
     incoming.page = request.page;
     incoming.block = request.block;
-    const current = cycle.currentState(requestId, ofPage, authorCouldTriage(request, LOCK_BASELINE));
+    const current = cycle.currentState(requestId, authoritative(ofPage), authorCouldTriage(request));
 
     if (incoming.type === 'supplement') {
       // Judged on the STORED request's place, never on the page and block this event claims.
@@ -1120,7 +1118,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // ALL events of a request live on its own page (triage and the agent write with the request's
     // page), so the filtered query is enough — no need to scan the whole collection.
     const all = await events.list(page);
-    const threads = cycle.threadsOf(all);
+    const threads = threadsOf(all);
     const lang = languageOf(req);
     const displays = await authorDisplaysFor(all, who, roles, lang);
     // `own`, never a raw address the panel could compare `me` against: `author` below is already
@@ -1147,7 +1145,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
     const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], who, roles, lang);
     return json(res, 200, {
-      ...asRead(found, cycle.threadsOf(all), who, roles), author: displays.get(found.author) ?? found.author,
+      ...asRead(found, threadsOf(all), who, roles), author: displays.get(found.author) ?? found.author,
       textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
       own: found.author === email,
     });
@@ -1226,9 +1224,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
 
   if (req.method === 'GET' && route === '/requests/open') {
     const all = await events.list(null);
-    const threads = cycle.threadsOf(all);
+    const threads = threadsOf(all);
     const toTriage = all.filter((e) => e.type === 'request')
-      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)) === 'open').length;
+      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r)) === 'open').length;
     return json(res, 200, { toTriage });
   }
 
@@ -1953,17 +1951,17 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   const all = await events.list(null);
   // Only a ✓ from someone who holds `lock` can become one, so only those are worth counting as
   // waiting for one.
-  const ownerApprovals = all.filter((e) => e.type === 'approval' && isLocked(e, LOCK_BASELINE));
+  const ownerApprovals = all.filter((e) => e.type === 'approval' && isLocked(e));
   const pages = summarisePages(await readBlocks(projectRoot), loadRegistry(projectRoot), cfg.site, ownerApprovals,
     (path) => readFileSync(path, 'utf8'));
-  const threads = cycle.threadsOf(all);
+  const threads = threadsOf(all);
   const viewer = await viewerOf(req);
   const roles = known ?? await rolesFor(viewer);
   // Resolved once for every request on the home, not once per row: `requestsInProgress` only reads
   // this for `type: "request"` events, so those are all `authorDisplaysFor` ever needs to look at.
   const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, roles, lang);
   const requests = requestsInProgress(all,
-    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)),
+    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r)),
     new Map(pages.map((p) => [p.page, p.href])),
     (email) => displays.get(email) ?? email);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the

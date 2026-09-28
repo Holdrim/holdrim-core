@@ -320,3 +320,16 @@ test('the CLI reading the cloud over REST verifies each document, with data of e
   const bare = restDocument(unsealed(row));
   assert.equal(withSignatures([firestoreEventOf(bare)], keyring)[0].signed, false, 'a document with no seal');
 });
+
+test('a Source verifies with the keys it was given, or by reading the local server, and never a file without keys', async () => {
+  const { Source } = await import('../cli/remote.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-verifies-'));
+  const file = join(dir, 'events.db');
+  writeFileSync(file, '');
+  assert.equal(new Source({ keyring }).verifies, true, 'a direct reader told of a key');
+  assert.equal(new Source({ keyring: new Map() }).verifies, false, 'a direct reader told of none');
+  // --local reads the local runner, which verified each event with its own key and says so.
+  assert.equal(new Source({ local: true, keyring: new Map() }).verifies, true, 'the local server');
+  // The file comes first when it is there, even with --local, and then the keys decide.
+  assert.equal(new Source({ local: true, db: file, keyring: new Map() }).verifies, false, 'a file read beside --local');
+});

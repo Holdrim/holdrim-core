@@ -26,7 +26,9 @@ const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
 /**
  * Runs the CLI and returns what the user would see plus the exit code. The owner is set the way a
  * deployment sets it, in HOLDRIM_OWNER: holdrim.json cannot name one. Set here rather than inherited,
- * so an owner exported in the shell running the suite does not decide whose triage counts.
+ * so an owner exported in the shell running the suite does not decide whose triage counts. And the
+ * test key's public half in HOLDRIM_PUBLIC_KEYS, as a machine that reads the store is told it: the
+ * files these tests write are signed with it (helpers/signing.js).
  */
 function run(args, cwd, env = {}) {
   const r = runApart(args, cwd, env);
@@ -40,7 +42,8 @@ function run(args, cwd, env = {}) {
 function runApart(args, cwd, env = {}) {
   const r = spawnSync(process.execPath, [CLI, ...args],
     { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '', ...env } });
+      env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '',
+        HOLDRIM_PUBLIC_KEYS: signing.signer.publicKey, ...env } });
   return { stdout: r.stdout, stderr: r.stderr, code: r.status };
 }
 
@@ -584,16 +587,19 @@ test('the locks lens\'s reproduction: a request forged below every hashed row, e
          '2026-01-01T00:00:01.000Z', '{"request":"forged","state":"approved","from":"open"}');`);
     const r = runApart(['list', '--db', db, '--json'], dir);
     const q = JSON.parse(r.stdout);
-    // The forgery reads as approved (the text check alone cannot see it) — but `--json` no longer
-    // hands it to an agent at all: `guardsTampered` empties `requests` (holdrim#108, decision 4).
+    // The text check alone cannot see the forgery, and `--json` hands an agent nothing anyway:
+    // `guardsTampered` empties `requests` (holdrim#108, decision 4). Neither row is signed (#50), so
+    // the "approved" decides nothing and both are raised as not signed.
     assert.deepEqual(q.requests, []);
-    assert.equal(q.tampered, false);
-    assert.equal(q.guardsTampered, true, 'the dropped guard is what gives it away');
+    assert.equal(q.tampered, true, 'rows not signed by the server read as tampering');
+    assert.equal(q.guardsTampered, true, 'the dropped guard gives it away too');
     assert.equal(r.code, 1);
     assert.match(r.stderr, /the database's guard "events_no_low_rowid" is missing/);
-    // The table (no --json) is where the owner still gets to see it and judge for themselves.
-    const table = runApart(['list', '--db', db], dir);
-    assert.match(table.stdout, /forged\s+Approved/);
+    assert.match(r.stderr, /"event":"event_unsigned".*"eventId":"forged-ok"/);
+    // The table (no --json) is where the owner still gets to see it and judge for themselves: at
+    // triage, since an "approved" nobody signed moves nothing, and marked as not signed.
+    const table = runApart(['list', '--db', db, '--all'], dir);
+    assert.match(table.stdout, /forged\s+To triage.*not signed by the server/);
   });
 
 test('plain list --db (the table) exits non-zero on a dropped guard, with approved requests to show', async (t) => {
@@ -736,10 +742,6 @@ function projectFiles(dir) {
 async function approvedDb(dir, fingerprint) {
   const db = join(dir, 'events.db');
   const store = new SqliteEventStore(db, signing);
-  await store.append({ type: 'lock_baseline', page: '_lock_baseline' }, 'you@example.org');
-  // `isLocked` trusts a written `locks` only on a ✓ dated AFTER the baseline, and two appends can
-  // share one millisecond.
-  await new Promise((resolve) => setTimeout(resolve, 5));
   const approval = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint,
     data: { locks: 'true' } }, 'you@example.org');
   await store.close();
@@ -767,6 +769,58 @@ test('sync --db refuses on a dropped guard, and writes neither approvals.json no
   assert.notEqual(r.code, 0, r.stdout + r.stderr);
   assert.match(r.stderr, REFUSED);
   assert.deepEqual(projectFiles(dir), files, 'approvals.json and every page byte for byte as they were');
+});
+
+// ---------------------------------------------------------------- signed events (#50), through the CLI
+/** The owner's person id in `db`, for a row written straight into the file. */
+const personIdIn = (db, address) => {
+  const d = new DatabaseSync(db, { readOnly: true });
+  try { return d.prepare('SELECT id FROM people WHERE email = ?').get(address).id; } finally { d.close(); }
+};
+
+test('sync --db brings in the owner\'s signed ✓ and never one written into the file beside it', async (t) => {
+  const dir = project(t);
+  const blocks = await readBlocks(dir);
+  const { db } = await approvedDb(dir, blocks.get('A01.1.1').fingerprint);
+  // Everything a lock needs but the signature: the owner's own id, `locks:"true"`, today's text.
+  outside(db, `INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data) VALUES
+    ('forged', 'approval', 'A01', 'A01.1.2', '${blocks.get('A01.1.2').fingerprint}', '${personIdIn(db, 'you@example.org')}',
+     '2099-01-01T00:00:00.000Z', '{"locks":"true","asAgent":"false"}')`);
+  const r = runApart(['sync', '--db', db], dir);
+  assert.equal(r.code, 1, 'an event not signed makes the run exit non-zero');
+  const registry = JSON.parse(readFileSync(join(dir, 'approvals.json'), 'utf8'));
+  assert.ok(registry['A01.1.1'], 'the signed ✓ locks');
+  assert.equal(registry['A01.1.2'], undefined, 'the one written into the file does not');
+  assert.match(r.stdout, /1 approval\(s\) not signed by the server ignored/);
+  assert.match(r.stderr, /"event":"event_unsigned".*"eventId":"forged"/);
+});
+
+test('sync, apply and state refuse with no HOLDRIM_PUBLIC_KEYS, and say where the key is', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  const files = projectFiles(dir);
+  for (const args of [['sync'], ['apply', id.slice(0, 8), '--dry-run'], ['state', id.slice(0, 8), 'applying', 'on it']]) {
+    const r = runApart([...args, '--db', db], dir, { HOLDRIM_PUBLIC_KEYS: '' });
+    assert.equal(r.code, 1, `${args[0]}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /refusing to act: no HOLDRIM_PUBLIC_KEYS/, args[0]);
+    assert.match(r.stderr, /GET \/api\/signing-keys/, args[0]);
+  }
+  assert.deepEqual(projectFiles(dir), files, 'nothing written into the project');
+  // With the key, the same commands go through: the refusal was the missing key, nothing else.
+  assert.equal(runApart(['sync', '--db', db], dir).code, 0);
+  assert.equal(runApart(['apply', id.slice(0, 8), '--dry-run', '--db', db], dir).code, 0);
+});
+
+test('reading with no HOLDRIM_PUBLIC_KEYS warns, and reads every event as not signed', async (t) => {
+  const dir = project(t);
+  const { db } = await guardedDb(dir);
+  const r = runApart(['list', '--db', db, '--json', '--all'], dir, { HOLDRIM_PUBLIC_KEYS: '' });
+  const q = JSON.parse(r.stdout);
+  assert.match(r.stderr, /WARNING — no HOLDRIM_PUBLIC_KEYS/);
+  assert.deepEqual(q.requests.map((x) => [x.state, x.signed]), [['open', false]], 'its approval counts for nothing');
+  assert.equal(r.code, 1);
+  const trusted = JSON.parse(runApart(['list', '--db', db, '--json', '--all'], dir).stdout);
+  assert.deepEqual(trusted.requests.map((x) => [x.state, x.signed]), [['approved', true]], 'setup: with the key, it is approved');
 });
 
 test('state --db refuses on a dropped guard, before anything is recorded', async (t) => {

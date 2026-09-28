@@ -28,7 +28,7 @@ const roles = createRoles(OWNER, ADMIN, '', AGENT);
 /** An event whose `text` was recorded under `salt`, resolved against whatever `rows` holds now. */
 function recorded(id, value, salt) {
   return { id, type: 'comment', page: 'A01', block: 'A01.1.1', author: MEMBER, when: '2026-01-01T00:00:00.000Z',
-    data: null, text: null, snapshot: null, textHash: hashText(value, salt), snapshotHash: null };
+    data: null, text: null, snapshot: null, textHash: hashText(value, salt), snapshotHash: null, signed: true };
 }
 function read(events, rows) {
   const reports = [];
@@ -38,7 +38,7 @@ function read(events, rows) {
 /** An acknowledgement as the route records it — `asAgent` stamped "false" — read back as an event. */
 const acknowledged = (found, id = 'ack1') => {
   const event = acknowledgementOf(found);
-  return { id, author: OWNER, when: '2026-01-02T00:00:00.000Z', ...event, data: { ...event.data, asAgent: 'false' } };
+  return { id, author: OWNER, when: '2026-01-02T00:00:00.000Z', ...event, data: { ...event.data, asAgent: 'false' }, signed: true };
 };
 
 // ---------------------------------------------------------------- what a finding is
@@ -72,7 +72,7 @@ test('an overwritten text is identified by its row\'s own salted hash — never 
 test('a second forged removal of a field is a new finding: the removals are what was found', () => {
   const target = { ...recorded('e1', 'gone', newSalt()) };
   const removal = (id, when) => ({ id, type: TEXT_REMOVED, page: 'A01', block: 'A01.1.1', author: OWNER, when,
-    data: { event: 'e1', field: 'text' }, text: null, snapshot: null, textHash: null, snapshotHash: null });
+    data: { event: 'e1', field: 'text' }, text: null, snapshot: null, textHash: null, snapshotHash: null, signed: true });
   const two = read([target, removal('r1', '2026-01-02T00:00:00.000Z'), removal('r2', '2026-01-03T00:00:00.000Z')], new Map()).reports;
   const three = read([target, removal('r1', '2026-01-02T00:00:00.000Z'), removal('r2', '2026-01-03T00:00:00.000Z'),
     removal('r3', '2026-01-04T00:00:00.000Z')], new Map()).reports;
@@ -82,7 +82,7 @@ test('a second forged removal of a field is a new finding: the removals are what
 
 /** A removal of `e1`'s text, dated after it — `removalsOf` counts it as valid. */
 const removalOfE1 = (id, when) => ({ id, type: TEXT_REMOVED, page: 'A01', block: 'A01.1.1', author: OWNER, when,
-  data: { event: 'e1', field: 'text' }, text: null, snapshot: null, textHash: null, snapshotHash: null });
+  data: { event: 'e1', field: 'text' }, text: null, snapshot: null, textHash: null, snapshotHash: null, signed: true });
 
 test('the same removals in any order are the same finding, however the read gathered them', async () => {
   // Firestore's torn-read retry (`withTextsRetrying`) appends the removals its own unordered query
@@ -197,7 +197,7 @@ test('only an acknowledgement quiets a finding: not another event naming it, not
   const [finding] = openFindings(reports, events);
   // What `POST /events` lets any member write: `data` is the client's.
   const comment = { id: 'c1', type: 'comment', page: 'A01', block: 'A01.1.1', author: MEMBER,
-    when: '2026-01-02T00:00:00.000Z', data: { finding: finding.finding, asAgent: 'false' } };
+    when: '2026-01-02T00:00:00.000Z', data: { finding: finding.finding, asAgent: 'false' }, signed: true };
   assert.equal(openFindings(reports, [...events, comment]).length, 1, 'a comment carrying the id quiets nothing');
   // The route stamps `asAgent: "false"` and nothing else; any other value did not come through it.
   const markedAs = (value) => {
@@ -210,6 +210,10 @@ test('only an acknowledgement quiets a finding: not another event naming it, not
     assert.equal(openFindings(reports, [...events, markedAs(value)]).length, 1, `an acknowledgement ${why} counts for nothing`);
   }
   assert.equal(openFindings(reports, [...events, markedAs('false')]).length, 0, 'the owner\'s, as the route writes it, does');
+  // #50: the same acknowledgement, written into the store by someone without the key — the writer
+  // who tampered with the text, quieting their own finding — counts for nothing.
+  assert.equal(openFindings(reports, [...events, { ...markedAs('false'), signed: false }]).length, 1,
+    'an acknowledgement this server did not sign counts for nothing');
 });
 
 test('a finding reported twice by one read is drawn once', () => {
