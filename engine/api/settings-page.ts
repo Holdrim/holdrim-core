@@ -84,6 +84,7 @@ export const SETTINGS_KEYS = [
   'settings.remove.legacy',
   'api.removal.unconfirmed', 'api.removal.notTheOwner', 'api.removal.namedByDeployment',
   'api.removal.holdsAgentToken', 'api.removal.onlyOlderEvents', 'api.removal.nobody',
+  'api.removal.inProgress',
 ];
 
 /** `HOLDRIM_LOCKS`'s value for these entries: `;`-separated, as `parseLocks` splits it. */

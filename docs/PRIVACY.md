@@ -167,6 +167,25 @@ is the address free while the row still leads to the person. A removal a failure
 by running it again, and writes `person_removed` once. If the very last step — freeing the address —
 fails, the address stays taken by the emptied account, as it does for older events.
 
+**One removal of a person at a time.** A removal sent twice — a form submitted twice, two tabs, two
+server instances — would otherwise run twice side by side, each writing a `person_removed` and each
+counting only what it reached first. So a removal first claims the person's id, in the events store
+every instance shares (`EventStore.claimRemoval`, `engine/api/person-removal.ts`), and a second one is
+refused while the claim holds, saying the removal is already running. The claim is let go of when
+the run ends, whether it finished or failed, so a removal a failure stopped is run again at once. A
+run whose process died cannot let go of it: the claim lapses two minutes later, and the removal is
+run again then. It holds across instances in every deployment: in memory there is only one process,
+a SQLite file is shared by every process on the machine, and Firestore decides the claim in a
+transaction. A run renews its claim as it goes, and again before closing the account and before
+each of its last writes, and stops if another run has taken it over, or if the address no longer
+leads to the person; its last steps only ever empty an account a removal closed, never one open at
+the address. What it cannot hold is a run that stalls, between a renewal and the write right after
+it, for longer than the claim itself: that one write can then land after another run has finished.
+Written that late, a `person_removed` is a second one for the person; an account closed that late
+can be one somebody new opened at the freed address — closed, not emptied, and theirs to have
+reopened; and an address freed that late can be one a later removal, of whoever took the address
+next, has closed and is still working on — left free before that person's row is forgotten.
+
 **Behind an identity proxy** there is no account to empty, and Holdrim holds no list of who the proxy
 admits: take the address out of the IAP, or whatever Cloud access policy is in front of Holdrim,
 before removing the person, not after. Until then their next visit makes them a new person — any

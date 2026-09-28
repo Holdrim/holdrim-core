@@ -37,6 +37,7 @@
   "api.removal.holdsAgentToken": "{email} holds an agent token: revoke it on the people screen first, or it goes on writing after the address is removed",
   "api.removal.onlyOlderEvents": "only events from before authors were ids name {email}, and nothing rewrites an event: there is no account and no row in the people table here to remove",
   "api.removal.nobody": "nobody here goes by {email}: no account and nothing in the trail, so nothing was removed",
+  "api.removal.inProgress": "{email} is already being removed, by a run started a moment ago: wait for it to finish. If it stopped half-way, try again in two minutes, and the removal picks up where it stopped",
   "api.approval.needsBlockAndFingerprint": "an approval needs a block and a fingerprint",
   "api.approval.ownerOnly": "only owner and admin approve; ask for a change or leave a comment instead",
   "api.approval.sessionOnly": "a ✓ is given signed in, in a session, never with an agent token",

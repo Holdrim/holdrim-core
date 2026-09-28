@@ -35,6 +35,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshFirestoreProject } from './helpers/firestore.js';
+import { removedTwiceAtOnce, assertOneRemoval } from './helpers/removal.js';
+import { MemoryEventStore } from '../api/store.ts';
+import { signing } from './helpers/signing.js';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
   ?? 'postgres://postgres:test@127.0.0.1:55432/postgres';
@@ -1267,4 +1270,46 @@ forEachStore('an account created while the address is being taken is the one clo
   assert.equal(await s.find('ana@example.org'), null, 'and nothing finds it now');
   const [row] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
   assert.deepEqual([row.name, row.enabled, row.removed], ['Ana Lima', false, true], 'closed, not left open');
+});
+
+forEachStore('two closings of an address with no account at once: neither calls the other\'s closed row an account', async (s) => {
+  // Both read no row, both insert, and one insert finds the address taken by the other's closed row.
+  // That row is no account the person had: answered `true`, it would reach their `person_removed`.
+  // Neither read goes on until both are done, so the two meet at the insert on every store, whatever
+  // its timing; the read in the refused one's catch comes after, and passes straight through.
+  const read = s.readUser.bind(s);
+  let waiting = [];
+  s.readUser = async (email) => {
+    const row = await read(email);
+    if (waiting) {
+      await new Promise((resolve) => {
+        waiting.push(resolve);
+        if (waiting.length === 2) { for (const go of waiting) go(); waiting = null; }
+      });
+    }
+    return row;
+  };
+  const insert = s.insertUser.bind(s);
+  let refused = 0;
+  s.insertUser = async (row) => {
+    try { return await insert(row); } catch (error) { refused++; throw error; }
+  };
+  const answers = await Promise.all([s.closeAccount('ana@example.org'), s.closeAccount('ana@example.org')]);
+  assert.equal(refused, 1, '(the two closings met: one insert found the other\'s row)');
+  assert.deepEqual(answers, [false, false], 'there was no account of theirs, whichever closing came second');
+  const rows = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  assert.deepEqual(rows.map((r) => [r.name, r.enabled, r.removed]), [['', false, true]], 'one closed row, nameless');
+});
+
+forEachStore('two removals of one person at once: the second is refused while the first runs, and one person_removed says what it did',
+  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(new MemoryEventStore(signing), s)); });
+
+forEachStore('emptying an address whose account is open leaves it as it is: only a closed account is emptied', async (s) => {
+  // A removal's run that reaches its last steps late, after the address was freed and somebody new
+  // made an account on it, must not empty that account.
+  const password = await s.create('dana@example.org', 'Dana', 'a password of her own');
+  const session = await s.openSession('dana@example.org');
+  for (const keep of [true, false]) assert.equal(await s.emptyAccount('dana@example.org', keep), false);
+  assert.equal((await s.check('dana@example.org', password))?.name, 'Dana', 'her account opens, as it was');
+  assert.equal((await s.fromSession(session))?.email, 'dana@example.org', 'and her session is still there');
 });

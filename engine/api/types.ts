@@ -1,4 +1,5 @@
 import type { Removed, TextField, TamperReport } from './texts.ts';
+import { log } from './log.ts';
 
 /** A fact from the review. Only created — never altered, never deleted. */
 export interface Event {
@@ -179,7 +180,42 @@ export interface EventStore extends PeopleTable {
    * Refuses with `noText` when the field was never given, or was already removed.
    */
   removeText(event: string, field: TextField, by: string): Promise<Event>;
+  /**
+   * Claims the removal of the person `person` names (engine/api/person-removal.ts) for `holder`,
+   * until `until`. Taken when nobody holds it, when `holder` already does — renewing it — or when
+   * whoever holds it was due to finish by `now`: a run whose process died holding it — or ends so far
+   * past `until` that no run wrote it (`claimGiven`, below, decides for every store). True when
+   * `holder` holds it now. Atomic in every store, so of two runs claiming at once one is answered
+   * true, whichever server instance each runs in: the claim lives where the removal's own writes do.
+   * `now` and `until` are ISO times, compared as strings.
+   */
+  claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean>;
+  /**
+   * Lets the claim go, when `holder` still holds it: a claim taken over meanwhile is the other run's
+   * to let go of. The row stays, expired, as `claimRemoval` then finds it.
+   */
+  releaseRemoval(person: string, holder: string): Promise<void>;
   close(): Promise<void>;
+}
+
+/**
+ * Whether a claim on a removal is given (`EventStore.claimRemoval`), decided in one place for every
+ * store, from the claim the store holds for that person, or none. Given when nobody holds it, when
+ * `holder` does, or when the claim held ended by `now`. And given, too, over a claim that ends more
+ * than one whole claim's length past the end asked for, `until`: no run of this engine asks for one
+ * that far off, so it was written by something else, and honoured it would keep that person's
+ * removal refused for as long as it says. The one claim's length of slack is for clocks: another
+ * instance's clock running ahead of this one's makes its genuine claim end a little later than this
+ * one would ask, never a whole claim later. A claim set aside that way is logged, by person id.
+ */
+export function claimGiven(
+  held: { holder: string; expires: string } | null, person: string, holder: string, now: string, until: string,
+): boolean {
+  if (!held || held.holder === holder || held.expires <= now) return true;
+  const farthest = new Date(2 * Date.parse(until) - Date.parse(now)).toISOString();
+  if (held.expires <= farthest) return false;
+  log('WARNING', 'removal_claim_void', { person, expires: held.expires });
+  return true;
 }
 
 export const EVENT_TYPES = new Set([

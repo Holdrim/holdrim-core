@@ -25,6 +25,7 @@
   "api.removal.holdsAgentToken": "{email} tem um token de agente: revogue-o na tela de pessoas primeiro, ou ele continua escrevendo depois que o endereço for removido",
   "api.removal.onlyOlderEvents": "só eventos gravados antes de os autores virarem ids nomeiam {email}, e nada reescreve um evento: não há acesso nem linha na tabela de pessoas para remover aqui",
   "api.removal.nobody": "ninguém aqui usa {email}: nem acesso, nem nada no histórico, então nada foi removido",
+  "api.removal.inProgress": "a remoção de {email} já está em andamento, iniciada há pouco: espere terminar. Se ela parou no meio, tente de novo daqui a dois minutos, e a remoção continua de onde parou",
   "api.approval.needsBlockAndFingerprint": "aprovação precisa de caixa e digital",
   "api.approval.ownerOnly": "só owner e admin aprovam; use pedir alteração ou comentar",
   "api.approval.sessionOnly": "um ✓ se dá com sessão aberta, nunca com um token de agente",

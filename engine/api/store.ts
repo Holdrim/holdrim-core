@@ -1,4 +1,4 @@
-import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
+import { claimGiven, stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
   type RawEvent, type TextField, type TextRow, type TamperReport } from './texts.ts';
@@ -140,6 +140,21 @@ export class MemoryEventStore implements EventStore {
   }
 
   async forget(id: string): Promise<void> { await this.setEmail(id, null); }
+
+  // The removal claims, by person id. No `await` between the read and the write, for the reason
+  // `#findByEmail` gives: of two claims made together, the second sees the first.
+  #claims = new Map<string, { holder: string; expires: string }>();
+
+  async claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean> {
+    if (!claimGiven(this.#claims.get(person) ?? null, person, holder, now, until)) return false;
+    this.#claims.set(person, { holder, expires: until });
+    return true;
+  }
+
+  async releaseRemoval(person: string, holder: string): Promise<void> {
+    const held = this.#claims.get(person);
+    if (held?.holder === holder) held.expires = '';
+  }
 
   async close(): Promise<void> {}
 }
