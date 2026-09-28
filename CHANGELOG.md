@@ -326,9 +326,8 @@ who ran the engine from `main` before it.
   signed in and refused by `POST /api/events`. The owner's alone, from the screen's own form, with no
   API route. Refused, touching nothing: without the box ticked; for the owner; for an address
   `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` or `HOLDRIM_AGENTS` still names (take it out and restart first);
-  for an address holding an agent token (revoke it first); for the owner this version first started
-  under, while a ✓ they gave before that start names their address (those ✓s are locks through
-  their row); for an address only events from before authors were ids name; and for an address
+  for an address holding an agent token (revoke it first); for an address only events from before
+  authors were ids name; and for an address
   nobody here goes by, which is also what a second run answers. A text that reads as tampered, or is
   held inside its event, is left, and the screen says how many; events from before authors were ids
   keep the address, which then stays taken by the closed account, and the screen says that too. A

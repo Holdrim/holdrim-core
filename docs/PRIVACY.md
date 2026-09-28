@@ -86,11 +86,31 @@ write the database directly, it holds only as far as the database is made to hol
   secret. The events that record issuing and revoking one name the agent by its person id and the
   token by a public id, never an address.
 
-A role on the event does not widen this: a direct writer can forge the owner's ✓ today by writing the
-owner's e-mail as its author, and the owner's e-mail is no secret. What closes it is a **signature**:
-the server signs each event with a key only it holds, and every reader — `holdrim sync` included —
-trusts a role only on a fact the server signed. Not built; see the table at the end. Until then,
-the store is part of what a deployment has to guard, like the machine the server runs on.
+A role on the event does not widen this: a direct writer could forge the owner's ✓ by writing the
+owner's id as its author and `locks:"true"` beside it, since neither is a secret. What closes it is
+a **signature** (#50): the server signs each event with a key only it holds — from its environment,
+never the store — and every reader, `holdrim sync` included, trusts a written role only on a fact
+the server signed, checked against the public keys the deployment names (`HOLDRIM_PUBLIC_KEYS`).
+An event a direct writer inserts, or a signed one they change, is shown, marked "not signed by this
+server", and decides nothing: no lock, no triage, no request state, no removal, no grant
+(`engine/api/signing.ts`; SECURITY.md, "The signing key").
+
+What the signature binds and what it leaves out, on purpose:
+
+- **Bound:** the event's id, type, page, block, fingerprint, its author's person id, its time, its
+  `data` — the written role included — and the salted hashes of its `text` and `snapshot`. The
+  texts themselves stay outside, in their own table: removing one (section 4) takes its row and its
+  salt, and leaves the signed hash untestable against a guess, as it must.
+- **Not bound: the people table.** A signed address could never be emptied, and a keyed hash of it
+  would be the pseudonymisation section 1 rejects. So `forget` works exactly as before; the cost is
+  that a direct writer who re-points a row re-attributes that person's events on screen, and hands
+  the address the project grants the id holds — never a lock and never `people`, which the
+  deployment decides by address (SECURITY.md, "Known limits").
+- **What a signature cannot show** is an event that is gone. Deleting a genuine event leaves nothing
+  to check; that needs the events chained in a signed sequence, planned for 0.2.
+
+The store is still part of what a deployment has to guard — a writer can delete, and can delay — but
+it is no longer where authority can be written.
 
 ### 4. Free text lives outside the trail
 
@@ -141,11 +161,6 @@ refused, with nothing touched:
 - for an address `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` or `HOLDRIM_AGENTS` still names: the deployment
   would go on naming it after the row was emptied. Out of the variable and restarted, first;
 - for an address holding an agent token, which would go on writing, as a new person: revoked first;
-- for the person this version first started under as owner, when a ✓ they gave before that start
-  still names their address. Such a ✓ is a lock only through the lock baseline (section 2), whose
-  author is their id, and only while their row ties that id to the address: forgetting the row would
-  un-lock it. Nothing rewrites that ✓, so on this store they stay; their account can still be
-  disabled. A former owner with no such ✓ is removed like anybody else;
 - for an address with no account and no row in the people table — nobody to remove, which is also
   what a second run answers. When only events from before authors were ids name it, the refusal says
   so: nothing rewrites them, and there is nothing else to let go of.
@@ -239,9 +254,7 @@ Said here so nobody promises it:
 - events written before authors were ids: they name the address itself, and keep it. Under password
   sign-in the address stays taken, by the removed person's emptied account;
 - a text held inside its event, from before texts moved out of events: it has no row of its own to
-  remove;
-- the ✓s the owner this version first started under gave before that start, and so that owner's row
-  in the people table: those ✓s are locks through it (section 5).
+  remove.
 
 ## What exists today
 
@@ -256,5 +269,6 @@ Said here so nobody promises it:
 | Commits without `Requested-by:`, ids in logs | ✅ built |
 | Removing a person, documented procedure | ✅ built — section 5 |
 | Removing a person, from a screen | ✅ built (#37) — the settings screen, the owner's alone (`engine/api/person-removal.ts`); section 5 |
-| Events signed by the server, and readers that trust only signed roles | ⬜ 0.1.0 (phase E) |
+| Events signed by the server, and readers that trust only signed roles | ✅ built (#50) — `engine/api/signing.ts`; every store seals on write and verifies on read, the CLI's readers too; section 3 |
+| A signed sequence, so a deleted event shows | ⬜ 0.2 |
 | The agent writing through the API with its own credential, and no direct write to the cloud | ✅ built (#122) — `docs/ROLES.md` §4 |

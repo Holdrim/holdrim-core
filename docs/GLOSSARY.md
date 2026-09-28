@@ -172,21 +172,24 @@ They are contract: a value that changes with the reader's locale is a value nobo
 | `text` | what the person wrote. Stored outside the event, in a table of texts (`engine/api/texts.ts`); the event keeps a salted hash. Reads as the plain value while its row holds one, as `null` with `textRemoved: {by, when}` once `EventStore.removeText` has let it go on purpose, and as `null` with `textTampered: true` when the hash no longer matches anything at hand and no such removal explains why — missing with nothing to say why, never shown as plain absence. An event from before texts were extracted holds its own value directly, with no hash, and reads as it |
 | `snapshot` | the text of the block at that instant. The same table, the same hash, the same three readings as `text` — `snapshotRemoved`, `snapshotTampered` |
 | `author` | who made it. Stored as the person's opaque id (`p_` and 24 hex characters) from the people table, never as an e-mail; resolved back to the address, as verified by whichever identity is in charge — or to the id, once the person is forgotten. What a READER is actually sent is then `people.show`'s decision (docs/ROLES.md, "How a person appears"): the name, the address, their current role (not yet the one they acted under — nothing writes that on the event), or the id — never the raw address to a viewer the setting was configured to hide it from. The owner, whoever holds `people`, and a person about their own event are always sent the address (or the name, under `people.show: "name"`). `textRemoved.by`/`snapshotRemoved.by` name the remover the same way, resolved the same way. An event written before ids holds the e-mail itself, and reads as it |
-| `when` | ISO, the server's clock. Stored in the column `happened_at`, since `WHEN` is an SQL keyword |
+| `when` | ISO, the clock of the server that signed it (Firestore included). Stored in the column `happened_at`, since `WHEN` is an SQL keyword |
+| `signed` | answered by every reader, never stored: whether the event is a **signed event** (below). What the store keeps beside the row is its seal — `envelope`, `sig` and `kid` — which no reader hands on |
 | `data` | a small map of scalars: `request`, `state` and `from` on `request_state`, `commit` and `blocks` on an applied one, `category` on a request, `related` on a request that follows an approved one, `locks` on an approval and `authorCouldTriage` on a request (below) |
 
 `locks` and `authorCouldTriage` are written by `recordEvent` itself, from the grants in force at that
 exact instant, never left for a later read to work out (docs/ROLES.md §3, "written at the moment, read
 forever after") — an owner who hands over must not silently un-lock every ✓ they gave before, and
 granting `triage` afterwards must not silently pre-approve a request already filed. Both are stored as
-the strings `'true'`/`'false'`, and trusted only on an event dated after the store's own `lock_baseline`
-(below); before it, or with none at all, they are ignored outright, since a store from before this
-existed could hold anything a client's own POST body once put there. One exception: a ✓ written
-`locks:"false"` is trusted even before the baseline, since a forged field can only ever help an
-attacker by claiming `"true"`, never `"false"` — guarding a former owner's own ✓ from misreading as a
-lock should the server's clock ever run behind the baseline's. `authorCouldTriage` has no matching
-exception — there, ignoring what was written already equals the fail-closed answer. `writtenBoolean`,
-`isLocked` and `authorCouldTriage` (`engine/api/types.ts`) are the one reading of them.
+the strings `'true'`/`'false'`, and trusted only on a **signed event** (below): anything else — an
+event not signed, a value that is not exactly `'true'` — grants nothing. `writtenBoolean`, `isLocked`
+and `authorCouldTriage` (`engine/api/types.ts`) are the one reading of them.
+
+| Term | Meaning |
+|---|---|
+| **signed event** | an event whose seal verifies: the server signed its envelope with its Ed25519 key when it recorded it, the key is one this reader trusts, and every column of the row agrees with what was signed. Answered as `signed: true` on every event a reader returns. Only a signed event carries authority — a lock, a triage decision, a request state, a removal, an acknowledgement, a role, a grant — and one that is not is shown, marked "not signed by this server", and raised as CRITICAL (`engine/api/signing.ts`; SECURITY.md, "The signing key") |
+| **envelope** | the bytes signed: a JSON array holding the event's id, type, page, block, fingerprint, the salted hashes of its texts, its author's person id, its time and its `data`, stored as it was signed and verified as stored, never rebuilt from the columns (`envelope`, `sig` and `kid` beside each row) |
+| **kid** | the id of the key that signed an event: the first 16 hex characters of the SHA-256 of its public key, derived, never chosen. A reader checks an event with the key its `kid` names, and no other |
+| **signing key** | the server's private Ed25519 key, from `HOLDRIM_SIGNING_KEY` or `HOLDRIM_SIGNING_KEY_FILE` and nowhere else; made by `holdrim key new`. Its public half is what readers list in `HOLDRIM_PUBLIC_KEYS` |
 
 ## Event types
 
@@ -203,7 +206,6 @@ exception — there, ignoring what was written already equals the fail-closed an
 | `role_granted` | a project role given to a person (`data.role`, `data.person` as an id, `data.scope`, empty for everywhere). The same door, the same refusal |
 | `grant_revoked` | a grant stopped, naming the grant event (`data.grant`). The grant stays in the trail; the same door, the same refusal |
 | `person_removed` | a person removed at their request (`docs/PRIVACY.md`, section 5), on the page `_people`: `data.person` as an id, and what that run did: texts removed (`data.texts`), texts left because they read as tampered (`data.textsTampered`) or are held inside their event (`data.textsInline`), events from before ids that still name the address (`data.legacyEvents`), grants revoked (`data.grants`), and whether there was an account (`data.account`) — ids and counts, never an address. One per person, however many runs it took. Written only by the owner's settings screen, never through `POST /events`, like `text_removed` |
-| `lock_baseline` | who `HOLDRIM_OWNER` was the moment a server of this version first read the store — written once, by `ensureLockBaseline` (`engine/api/types.ts`), at boot. Never through `POST /events`, and deliberately not in `EVENT_TYPES` either, for the same reason as `text_removed`: a client that could write one could forge who the baseline owner was |
 
 ## Request categories
 

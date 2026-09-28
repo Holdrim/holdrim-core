@@ -29,15 +29,19 @@ Worth knowing before you run it:
   approval, or an old ✓ onto today's text, where no text hash looks. Both checks catch a
   guard left dropped, not a person who puts it back: dropping a guard, changing rows and recreating
   it by its exact text before anything reads the file leaves nothing either check can see, and —
-  for the server — neither does emptying every table. Only signed events close that.) For an
-  event's own text, moved
-  out of the event into its own table, a forged removal dated and ordered after the text it targets
-  can still pass as a genuine one when the same writer also deletes the row it names; a backdated
-  one cannot, and neither can one beside a row left there and edited, which reads as tampered
-  ([holdrim#133](https://github.com/Holdrim/holdrim-core/issues/133): `removeText` deletes the row
-  with the removal, so the two together are never its work) (docs/PRIVACY.md, section 4). Closing this
-  for every kind of forgery, or for a trigger dropped outright, needs the events themselves signed —
-  not built yet.
+  for the server — neither does emptying every table.)
+  **What the triggers cannot stop, the signature makes worthless** (see "The signing key", below):
+  every event is signed by the server with a key the store's writer does not hold, and every reader
+  checks it. A row inserted, or a signed row changed — a rejection rewritten into an approval, an old
+  ✓'s fingerprint moved onto today's text, a `text` written into the row — reads as not signed
+  (`event_unsigned`) or forged (`event_forged`), raised as CRITICAL, and counts for nothing: no
+  lock, no triage decision, no request state, no text removal, no acknowledgement, no role or grant.
+  So an event's own text, moved out of the event into its own table, cannot be erased behind a forged
+  removal either: a removal the server did not sign accounts for nothing, and the row it let the
+  writer delete reads as `unaccounted`
+  ([holdrim#133](https://github.com/Holdrim/holdrim-core/issues/133)) (docs/PRIVACY.md, section 4).
+  What a signature cannot show is an event that is gone: a writer who deletes a genuine event, a
+  rejection or a revocation say, with its texts, leaves nothing to check ("Known limits", below).
   People are disabled, never deleted, so every ✓ keeps the name of whoever gave it. What that
   means for personal data, and how a person is removed without breaking the trail:
   [`docs/PRIVACY.md`](docs/PRIVACY.md).
@@ -64,15 +68,13 @@ Worth knowing before you run it:
   edited again (it has no salt of its own, and an unsalted hash of it is what docs/PRIVACY.md
   section 4 forbids), and a field put right and then tampered back into exactly the state that was
   acknowledged. Nor is anything the three do not hash a new finding: a removal event rewritten in
-  place — its author, say — keeps its id, and so the finding, which is the limit the first item
-  above already names for every event rewritten in place, closed only by signed events. Only a
-  `tamper_acknowledged` event counts, and only one marked `asAgent: "false"`, the one form the
-  route writes: the same id in any other event's `data`, which a client writes, quiets nothing.
-  The banner has a weaker footing than the log line, said plainly: the log line comes from code a
-  direct writer to the store does not reach, while an acknowledgement is an event, and that same
-  direct writer can insert one naming the finding — the banner then goes quiet while the CRITICAL
-  line keeps firing. Closing that needs the events signed, like every other forgery this file
-  names.
+  place — its author, say — keeps its id, and so the finding; but a signed event rewritten in place
+  reads as forged, a finding of its own. Only a `tamper_acknowledged` event counts, and only one
+  marked `asAgent: "false"`, the one form the route writes, and signed by the server: the same id in
+  any other event's `data`, which a client writes, quiets nothing, and neither does an
+  acknowledgement a direct writer inserts naming the finding — without the key it is not signed.
+  An event not signed, or forged, is a finding of its own on the same banner, and acknowledged the
+  same way; acknowledging it takes the line down and gives the event no authority.
 
   What a direct writer can still make this alert miss differs by store, and neither is a new gap —
   both are the same one write access to the file or the project always had, made visible for the
@@ -148,14 +150,19 @@ Worth knowing before you run it:
     a correct hash as strip one, and append a forged row at `MAX(rowid) + 1` with a matching
     `texts` row and a `text_hash` that checks out. Nothing here catches that: the
     rowid boundary only names a forgery that skips computing the hash and lands BELOW it instead.
+    Such a row is not signed, though: it reads as `event_unsigned`, CRITICAL, and counts for
+    nothing, whatever text it carries. The text check and the signature answer two questions — was
+    this text changed, and did the server write this event — and a forgery has to beat both.
   - **Firestore.** No equivalent boundary exists, and none is cheap to build: a direct writer sets
     `when` as a plain field, not a value Firestore itself enforces came from `FieldValue.serverTimestamp()`
     — there are no Firestore Security Rules in this project restricting it (identity is IAM, not
     per-field rules) — so a forged document can claim any `when`, including one that predates the
     real migration. The downgrade this closes for SQLite is therefore open for Firestore: a forged
-    event with a stripped hash and an inline value, backdated, reads as a genuine pre-extraction row.
-    Closing it needs the events themselves signed, the same "not built yet" this file already says of
-    every other forgery a direct writer can date and order correctly (see the bullet above).
+    event with a stripped hash and an inline value, backdated, reads as a genuine pre-extraction row
+    as far as its text goes. The signature closes it: such a document is not signed, reads as
+    `event_unsigned` and counts for nothing, and a signed event with a value written into it reads
+    as forged, since the envelope says its texts are kept by hash. `when` on a signed event is inside
+    the signature, taken from the signing server's own clock, so it cannot be moved either.
   - **The in-process, in-memory store** (`run-local.sh`'s default, and every unit test's) holds
     nothing an outside attacker could write to at all — there is no file, no project, no second
     process — so this class of attack does not apply to it.
@@ -181,12 +188,12 @@ Worth knowing before you run it:
   two and the service refuses to start. Nobody but the owner resets or creates the owner's account.
 - **Authority comes from the deployment only.** The owner and the admins are read from
   `HOLDRIM_OWNER` and `HOLDRIM_ADMINS` and from nowhere else; a `holdrim.json` that names any key in
-  `AUTHORITY_KEYS` (`engine/core/config.js`: `owner`, `admins`, `locks`, `agents`, `roles`, `grants`)
-  refuses to start the service and to run the CLI. Otherwise
+  `AUTHORITY_KEYS` (`engine/core/config.js`: `owner`, `admins`, `locks`, `agents`, `roles`, `grants`,
+  `signing`, `signingKey`, `publicKeys`) refuses to start the service and to run the CLI. Otherwise
   anyone who can commit to the repository — or an agent applying an approved request — could name a
   new owner. The one other source of what a person may do is the project's own roles: `triage`,
   `approve`, `read`, `comment` and `request`, never `lock` or `people`, from events on `_roles` that
-  only the owner's routes write (`docs/ROLES.md`, section 5).
+  only the owner's routes write, and only when the server signed them (`docs/ROLES.md`, section 5).
 - **The theme is untrusted input.** It lands inside CSS and HTML, so the brand colour is accepted
   only as hex and anything else is refused and logged.
 - **The sign-in screen runs only what the server wrote into it.** Its Content-Security-Policy
@@ -263,13 +270,11 @@ listed. No event is ever re-signed: an event is never altered.
   removals, acknowledgements and grants stop counting. There is no "trusted until" date: whoever
   holds a key can write any date into what they sign, so a date proves nothing. ✓s already brought
   into the repository by `holdrim sync` stay there — they were reviewed in a commit.
-- **Upgrading to a version that writes the lock baseline (CHANGELOG.md), move ALL traffic to the new
-  revision before anyone uses it, and boot it once under the `HOLDRIM_OWNER` who gave the existing
-  ✓s.** The first server of that version to read a store writes one `lock_baseline` event, freezing
-  who `HOLDRIM_OWNER` was at that exact instant — **permanently**: a later handover does not move it,
-  and there is no second chance to set it once a store already holds one. An old revision left
-  serving in parallel can still record events during the switch; see "Known limits" below for what
-  that costs if it does.
+- **Upgrading from a version that did not sign events, sync first.** Every event that version
+  wrote reads as not signed afterwards, and counts for nothing: run `holdrim sync` before the
+  upgrade, so every ✓ already given is in the repository, and give again, after it, any still
+  waiting. An old revision left serving during a rollout writes unsigned events too, which the new
+  one shows and ignores — so move all traffic to the new revision before anyone uses it.
 
 ## Known limits
 
@@ -280,22 +285,35 @@ listed. No event is ever re-signed: an event is never altered.
   new one, so a token that leaks is good until someone notices. Revoke it on the people screen the
   moment it may have been seen. The CLI sends it over https only, or over http to this machine, and
   never to the local runner `--local` names.
-- **An old revision still taking traffic after the new one has written its lock baseline can record
-  events the new version will trust as if it had written them itself.** `locks` and
-  `authorCouldTriage` are trusted on any event dated after the baseline, whichever revision recorded
-  it — there is no signature tying the field to the process that wrote it, only the timestamp. A
-  multi-instance rollout (Cloud Run gradually shifting traffic, a rolling Kubernetes deploy) can leave
-  an old-revision replica answering requests for a window after the new revision's first boot; if it
-  does, it still writes whatever `data` a client's own POST sends, unguarded by this version's checks,
-  and dated after the baseline that same window created. This is not closed in code: closing it needs
-  every writer to agree, cross-process, on when the baseline exists, which no store here can promise
-  without a lock this method does not have. It is closed by deployment discipline instead — move all
-  traffic to the new revision first, the same step named above — not by a check this file's tests run.
-- **Whoever can write the event store directly can forge a project grant**, as they can forge any
-  other event there until events are signed (phase E). What it buys is bounded: a grant of `triage`
-  or `approve`, recorded like any other, and never `lock` or `people` — a stored definition holding
-  either reads as holding nothing. A stored grant naming an agent is ignored and logged rather than
-  refusing to start, so such a write cannot stop the service either.
+- **A signature shows an event is genuine, not that none is missing.** Whoever can delete from the
+  store — SQLite with its guards dropped, Firestore with any IAM role that deletes — can remove a
+  genuine event, signed or not, and what is left still verifies: a rejection gone reads as a request
+  still waiting, a `grant_revoked` gone as a grant still in force, a `locks:"false"` ✓ gone as no ✓.
+  The panel cannot tell an erased event from one never made. Closing that needs the events chained
+  in a signed sequence, so a reader can see a link missing; on Firestore, with several instances
+  writing, that needs one head every write goes through. Planned for 0.2, not built.
+- **The people table is not signed**, on purpose: an address in a signed event could never be
+  emptied (`docs/PRIVACY.md`, sections 1 and 5). A direct writer who re-points a person's row — with
+  SQLite's guards dropped, or on Firestore — makes that person's events show another address, and
+  hands that address the project grants the row's id holds (a grant names an id, and a request finds
+  its roles by the id the address leads to). It moves no lock and no `people`: whether a ✓ was a
+  lock is on the signed event, and who holds `lock` or `people` is asked of the deployment's
+  variables, by address. Rows re-pointed that way are what the guards' warnings exist to name.
+- **Whoever holds the signing key can sign anything**, with any date: a key is the one secret the
+  store's trust rests on, kept where the server runs and nowhere else. A key that leaked is retired
+  as "Rotating the signing key" says, and every event it signed loses its authority with it.
+- **A reader trusts the keys it was told.** `holdrim` reading the file or the cloud needs
+  `HOLDRIM_PUBLIC_KEYS`, and a machine told a wrong key reads nothing as signed; one told a key
+  from another deployment trusts that deployment's events. `--local` trusts what the local runner
+  answers, a server on this machine with a key that dies with it.
+- **A store written by a version before signing** reads, whole, as not signed: every ✓ in it is no
+  lock and every request is at triage, and the banner lists every event. `holdrim sync` before the
+  upgrade is the one way across (above).
+- **Whoever can write the event store directly can still insert a project grant**, as any other
+  event, but not sign it: an unsigned grant, definition or revocation is read as nothing, and a
+  signed grant copied into another row under a new id reads as forged. A stored grant naming an
+  agent is ignored and logged rather than refusing to start, so such a write cannot stop the service
+  either.
 - Identity is password or an identity proxy. OIDC, Google and LDAP are not implemented.
 - **Wrong passwords are counted per address, in the user store, and nowhere else.** Five free
   attempts per address as typed, then a wait that doubles up to fifteen minutes; every instance

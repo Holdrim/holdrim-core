@@ -51,8 +51,10 @@ the site.
    `holdrim list --json` gives the same as data, for every approved request at once. If it reports
    `guardsTampered`, or exits non-zero, stop there: apply nothing, change no state, and tell the
    owner the store needs its guards restored before anything in it can be trusted. If it reports
-   `tampered`, stop the same way, but say instead that a text does not match its hash — that is not
-   a guard problem.
+   `tampered`, stop the same way, but say instead that something read back is not what the server
+   wrote — a text that does not match its hash, or an event the server did not sign — which is not
+   a guard problem. Reading the store directly needs the server's public key in
+   `HOLDRIM_PUBLIC_KEYS`: without it `apply` and `state` refuse, and nothing reads as approved.
 2. `holdrim state <id> applying "Received…"` — the reviewer sees the progress in the panel. Every
    `state` goes through the server with the agent's own token (`HOLDRIM_AGENT_TOKEN`, at
    `HOLDRIM_URL`); without one it refuses. Ask the owner for a token; never work around it.

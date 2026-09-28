@@ -81,6 +81,9 @@ holdrim — the agent's tool for the Holdrim method
     HOLDRIM_ACCOUNT             pins the gcloud account the cloud is read with (default: the first
                                   one to issue a token)
     HOLDRIM_EVENTS_PATH         the SQLite events file, when there is no cloud
+    HOLDRIM_PUBLIC_KEYS         the server's public signing key(s), ";" separated: read from the file
+                                  or the cloud, an event counts only if one of them signed it, and
+                                  sync, apply and state refuse without any (--local does not need it)
     HOLDRIM_LOCAL_URL           the local server (default: http://localhost:8095)
 `;
 

@@ -282,7 +282,10 @@ From a clone of this repository it is `npm run cli -- lights`, or
 
 `list`, `show`, `sync` and the rest of the request commands need to know where the events are:
 `--local` against `bash engine/run-local.sh`, `--db <file>` for a SQLite events file, or
-`cloud.project` in `holdrim.json` for Firestore. `state` writes, and writes only through the server:
+`cloud.project` in `holdrim.json` for Firestore. Read from the file or the cloud, an event counts only
+when the server signed it, checked against the public key in `HOLDRIM_PUBLIC_KEYS` (printed by
+`holdrim key new` and at every start of the server); `sync`, `apply` and `state` refuse without it.
+`state` writes, and writes only through the server:
 `HOLDRIM_URL` names it, and `HOLDRIM_AGENT_TOKEN` carries the token the owner issued the agent on the
 people screen. Run it with no command for the full help.
 
