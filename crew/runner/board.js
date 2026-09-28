@@ -34,8 +34,13 @@ const HAS = 'the item already carries that label';
 const LACKS = 'the item does not carry that label';
 const ALREADY = [POSTED, HAS, LACKS];
 
-/** The marker a published comment carries, so that no later pass posts it twice. */
-export const markerFor = (key) => `<!-- holdrim-key: ${key} -->`;
+// The marker a published comment carries, so that no later pass posts it twice. The word is one
+// constant, because the checks that keep it out of everything but the marker look for it too.
+const MARK = 'holdrim-key';
+export const markerFor = (key) => `<!-- ${MARK}: ${key} -->`;
+
+/** Whether the orchestrator already posted under `key` on this item. Only its own markers count. */
+const postedUnder = (item, key) => (item.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(key)));
 
 const pausedEvents = (timeline) => timeline.filter((e) => (e.event === 'labeled' || e.event === 'unlabeled') && e.label?.name === 'paused');
 
@@ -137,13 +142,15 @@ function refusal(a, open, commented, secrets, known) {
     if (typeof a.body !== 'string' || a.body.trim() === '' || a.body.length > MAX_BODY) return `a comment needs a body of at most ${MAX_BODY} characters`;
     if (typeof a.key !== 'string' || !KEY.test(a.key)) return 'a comment needs a key naming the item and what it answers';
     if (commented.has(a.number)) return 'one comment per item per pass';
+    // The refusal note's key is publish's: a model that took it could hide the note it is refused in.
+    if (a.key.startsWith('refused@')) return 'a comment key may not start with refused@';
     // Only the orchestrator's own markers count: anyone can write the marker into a comment, and
     // one written by a stranger would otherwise silence the orchestrator on that item.
-    if ((item.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(a.key)))) return POSTED;
+    if (postedUnder(item, a.key)) return POSTED;
     if (secrets.some((s) => s && a.body.includes(s))) return 'the body carries a credential';
     // The marker is this file's to write: one in a body would dedupe a key the orchestrator has
     // not answered yet, and silence its real answer when it comes.
-    if (a.body.includes('holdrim-key')) return 'the body carries a dedupe marker';
+    if (a.body.includes(MARK)) return 'the body carries a dedupe marker';
     return null;
   }
   if (a.type === 'add_label' || a.type === 'remove_label') {
@@ -176,7 +183,7 @@ export function parseAnswer(text) {
  */
 export function lastCheck(actions, secrets) {
   for (const a of actions.filter((x) => x.type === 'comment')) {
-    if (secrets.some((x) => x && a.body.includes(x)) || a.body.includes('holdrim-key')) throw new Error(`a comment on #${a.number} failed the last check: nothing published`);
+    if (secrets.some((x) => x && a.body.includes(x)) || a.body.includes(MARK)) throw new Error(`a comment on #${a.number} failed the last check: nothing published`);
   }
 }
 
@@ -269,13 +276,13 @@ export async function publish(resultFile, dir, { repo, fetch: fetchImpl = fetch,
   for (const r of refused) console.error(`refused: ${shown(r.action)}: ${r.reason}`);
   const worth = refused.filter((r) => !ALREADY.includes(r.reason));
   const handoff = items.find((i) => i.labels.includes('handoff'));
-  // Its own comment, under its own key, so that a retry after a partial publish finds it posted.
+  // Its own comment, under its own key, so that a retry of the same board finds it posted. A retry
+  // after a pass that also moved a label sees a new digest, and may say it once more.
   if (worth.length && handoff) {
     const note = `The runner refused ${worth.length} action(s) the orchestrator asked for:\n`
       + worth.map((r) => `- ${shown(r.action)}: ${r.reason}`).join('\n');
     const own = { type: 'comment', number: handoff.number, key: `refused@${digest.slice(0, 16)}`, body: note };
-    const posted = (handoff.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(own.key)));
-    if (!posted) accepted.push(own);
+    if (!postedUnder(handoff, own.key)) accepted.push(own);
   }
   lastCheck(accepted, secretList);
   const { gh } = client(repo, fetchImpl, token);

@@ -117,7 +117,8 @@ that will be merged:
   an operating-system user that cannot read the tokens, reads a snapshot and answers in JSON, and
   `board.js` applies only comments and existing `needs:`/`working:` labels on items already open,
   never removing `needs:owner`, and says on the `handoff` issue what it refused.
-- **One comment per item per pass**, and an agent never answers its own comment. Two rounds without
+- **One comment per item per pass**, and an agent never answers its own comment. The runner's note
+  of what it refused is the one exception: a comment of its own on the `handoff` issue. Two rounds without
   agreement send the item to `needs:owner`.
 
 ## Stalls, backlog, and dependencies

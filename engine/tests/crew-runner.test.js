@@ -89,6 +89,10 @@ test('a comment carrying a credential is refused, whatever the model was told', 
   assert.deepEqual(reasons([comment(80, '80@a', 'here: ghp_SECRETVALUE')], { secrets: ['ghp_SECRETVALUE'] }), ['the body carries a credential']);
 });
 
+test('the refusal note\'s key is the publisher\'s: a model comment may not take it', () => {
+  assert.deepEqual(reasons([comment(80, `refused@${'d'.repeat(16)}`)]), ['a comment key may not start with refused@']);
+});
+
 test('a comment body may not carry a dedupe marker, which only the publisher writes', () => {
   assert.deepEqual(reasons([comment(80, '80@a', `ok ${markerFor('185@next')}`)]), ['the body carries a dedupe marker']);
 });
@@ -267,10 +271,10 @@ test('asking for what is already so is left out of the note, and the same note i
   const { dir, answer } = board(t);
   const gh = fakeGitHub();
   const already = answer({ result: JSON.stringify({ actions: [comment(185, '185@abc'), { type: 'add_label', number: 185, label: 'working:claude' }] }) });
-  assert.equal(await publish(already, dir, { repo: 'o/r', fetch: gh.fetch, token: 't' }), 0);
+  assert.equal(await publish(already, dir, { repo: 'o/r', fetch: gh.fetch, token: 'tok-SECRET' }), 0);
   assert.equal(gh.calls.length, 0);
   const { dir: posted, answer: again } = board(t, { items: [{ ...ITEMS[0], comments: [{ id: 3, author: orch, body: markerFor(`refused@${'d'.repeat(16)}`) }] }, ITEMS[1]] });
-  assert.equal(await publish(again({ result: JSON.stringify({ actions: [{ type: 'merge', number: 185 }] }) }), posted, { repo: 'o/r', fetch: gh.fetch, token: 't' }), 0);
+  assert.equal(await publish(again({ result: JSON.stringify({ actions: [{ type: 'merge', number: 185 }] }) }), posted, { repo: 'o/r', fetch: gh.fetch, token: 'tok-SECRET' }), 0);
   assert.equal(gh.calls.length, 0);
 });
 
@@ -279,7 +283,7 @@ test('the digest publish leaves is the board as the pass left it, so its own lab
   const gh = fakeGitHub();
   await publish(answer({ result: JSON.stringify({ actions: [
     { type: 'remove_label', number: 185, label: 'working:claude' }, { type: 'add_label', number: 185, label: 'needs:chatgpt' },
-  ] }) }), dir, { repo: 'o/r', fetch: gh.fetch, token: 't' });
+  ] }) }), dir, { repo: 'o/r', fetch: gh.fetch, token: 'tok-SECRET' });
   const next = [ITEMS[0], { ...ITEMS[1], labels: ['needs:owner', 'needs:chatgpt'], timeline: [ev(orch, 'unlabeled', 'working:claude'), ev(orch, 'labeled', 'needs:chatgpt')] }];
   assert.equal(readFileSync(join(dir, 'digest'), 'utf8'), boardDigest(next, NOW), 'what the next snapshot will read');
 });
@@ -297,7 +301,7 @@ test('the digest publish leaves judges the stall limit at the time the board was
 
 test('a claim the orchestrator adds starts now, as the next snapshot will read it, and is not stale', async (t) => {
   const { dir, answer } = board(t, { items: [ITEMS[0], { number: 7, labels: [], comments: [], timeline: [] }] });
-  await publish(answer({ result: JSON.stringify({ actions: [{ type: 'add_label', number: 7, label: 'working:claude' }] }) }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 't' });
+  await publish(answer({ result: JSON.stringify({ actions: [{ type: 'add_label', number: 7, label: 'working:claude' }] }) }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 'tok-SECRET' });
   const at = new Date(NOW).toISOString();
   const next = [ITEMS[0], { number: 7, labels: ['working:claude'], comments: [], timeline: [{ event: 'labeled', label: { name: 'working:claude' }, actor: orch, created_at: at }] }];
   assert.deepEqual(staleClaims(next, NOW), []);
@@ -321,7 +325,7 @@ test('the last check stops a comment carrying a credential or a marker, whatever
 
 test('a board with no reading time is refused, since the stall limit could not be judged', async (t) => {
   const { dir, answer } = board(t, { read_at: undefined });
-  await assert.rejects(publish(answer({ result: '{"actions": []}' }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 't' }), /read_at/);
+  await assert.rejects(publish(answer({ result: '{"actions": []}' }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 'tok-SECRET' }), /read_at/);
 });
 
 test('a missing, failed or unreadable answer throws, so the pass is not recorded as done', async (t) => {
@@ -362,7 +366,7 @@ test('snapshot follows every page and maps what the rules read: authors, timelin
     const m = /^\/repos\/o\/r\/issues\/(\d+)\/(comments|timeline)$/.exec(path);
     return m && numbers.has(Number(m[1])) ? page([])(u) : undefined;
   });
-  assert.equal(await snapshot(dir, { repo: 'o/r', fetch: gh.fetch, token: 't', now: NOW }), true, 'the owner paused it');
+  assert.equal(await snapshot(dir, { repo: 'o/r', fetch: gh.fetch, token: 'tok-SECRET', now: NOW }), true, 'the owner paused it');
   const snap = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
   assert.equal(snap.items.length, 101, 'the second page was read');
   const pr = snap.items.find((i) => i.number === 187);
@@ -376,7 +380,44 @@ test('snapshot follows every page and maps what the rules read: authors, timelin
   assert.deepEqual(snap.labels, ['needs:owner']);
   assert.equal(readFileSync(join(dir, 'digest'), 'utf8'), snap.digest);
   assert.equal(snap.digest, boardDigest(snap.items, NOW));
-  assert.ok(gh.calls.every((c) => c.method === 'GET' && c.auth === 'Bearer t'), 'a snapshot only reads, with the token it was given');
+  assert.ok(gh.calls.every((c) => c.method === 'GET' && c.auth === 'Bearer tok-SECRET'), 'a snapshot only reads, with the token it was given');
+});
+
+test('run as a command, board.js reads REPO and the listed ids from its environment', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'holdrim-cli-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // GitHub answers with nothing at all: no open item, so no handoff issue, and the pass stays idle.
+  writeFileSync(join(dir, 'empty-github.mjs'), 'globalThis.fetch = async () => ({ ok: true, json: async () => [] });\n');
+  const cli = (env) => spawnSync(process.execPath, ['--import', join(dir, 'empty-github.mjs'), join(ROOT, 'crew', 'runner', 'board.js'), 'snapshot', join(dir, 'board')],
+    { encoding: 'utf8', env: { PATH: process.env.PATH, GH_TOKEN: 'tok-SECRET', ...env } });
+  const listed = cli({ REPO: 'o/r', LISTED: `${ORCHESTRATOR_ID},333201923` });
+  assert.equal(listed.status, 3, listed.stderr);
+  assert.match(listed.stdout, /no open handoff issue: staying idle/);
+  const snap = JSON.parse(readFileSync(join(dir, 'board', 'board.json'), 'utf8'));
+  assert.deepEqual([snap.repo, snap.listed], ['o/r', [ORCHESTRATOR_ID, 333201923]]);
+  assert.equal(cli({ REPO: 'o/r', LISTED: '' }).status, 3);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'board', 'board.json'), 'utf8')).listed, [], 'none listed reads as none, not as a stray 0');
+  const norepo = cli({});
+  assert.equal(norepo.status, 2);
+  assert.match(norepo.stderr, /REPO is not set/);
+});
+
+test('a board that lists no one counts no one\'s pull request toward a claim', async (t) => {
+  const claim = { ...claimed(25), number: 7, comments: [] };
+  const closer = { number: 9, labels: [], body: 'Closes #7', author: reviewer, head_date: new Date(NOW - 3600e3).toISOString(), comments: [], timeline: [] };
+  const { dir, answer } = board(t, { items: [ITEMS[0], claim, closer] });
+  await publish(answer({ result: '{"actions": []}' }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 'tok-SECRET' });
+  const written = readFileSync(join(dir, 'digest'), 'utf8');
+  assert.equal(written, boardDigest([ITEMS[0], claim, closer], NOW, []));
+  assert.notEqual(written, boardDigest([ITEMS[0], claim, closer], NOW, [reviewer.id]), 'with the author listed, the claim would not be stale');
+});
+
+test('a refusal-note marker a stranger wrote does not stop the note', async (t) => {
+  const forged = { ...ITEMS[0], comments: [{ id: 4, author: { login: 'stranger', id: 42 }, body: markerFor(`refused@${'d'.repeat(16)}`) }] };
+  const { dir, answer } = board(t, { items: [forged, ITEMS[1]] });
+  const gh = fakeGitHub();
+  assert.equal(await publish(answer({ result: JSON.stringify({ actions: [{ type: 'merge', number: 185 }] }) }), dir, { repo: 'o/r', fetch: gh.fetch, token: 'tok-SECRET' }), 1);
+  assert.match(gh.calls[0].body.body, /The runner refused 1 action/);
 });
 
 /**
@@ -384,7 +425,9 @@ test('snapshot follows every page and maps what the rules read: authors, timelin
  * with `snap` and writes `digest`, and whose publish prints `published` or fails. `setpriv` logs
  * the user it was asked for and runs the command; `claude` logs its environment and answers.
  */
-function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 applied', listed = true, id = String(ORCHESTRATOR_ID), env = {} } = {}) {
+const ACCOUNTS = `| Account | Numeric id | Who | Role |\n|---|---|---|---|\n| @orchestrator | ${ORCHESTRATOR_ID} | machine | orchestrator |\n| @reviewer2 | 333201923 | machine | reviewer |\n`;
+
+function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 applied', accounts = ACCOUNTS, id = String(ORCHESTRATOR_ID), env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-runner-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin');
@@ -397,7 +440,8 @@ function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 appli
   if (cached !== null) writeFileSync(join(state, 'board-digest'), cached);
   stub(bin, 'setpriv', `echo "setpriv $1" >> '${log}'; echo "argv $*" >> '${log}'; while [ "\${1#--}" != "$1" ]; do shift; done; exec "$@"`);
   stub(bin, 'gh', `echo "gh $*" >> '${log}'; [ "$1 $2" = "api user" ] && echo ${id}`);
-  stub(bin, 'git', `echo "git $*" >> '${log}'; mkdir -p "$4/crew"; echo '${listed ? `| @orchestrator | ${ORCHESTRATOR_ID} |` : ''}' > "$4/crew/accounts.md"`);
+  writeFileSync(join(dir, 'accounts.md'), accounts);
+  stub(bin, 'git', `echo "git $*" >> '${log}'; mkdir -p "$4/crew"; cp '${join(dir, 'accounts.md')}' "$4/crew/accounts.md"`);
   stub(bin, 'claude', `echo "claude GH_TOKEN=\${GH_TOKEN:-none} CLAUDE=\${CLAUDE_CODE_OAUTH_TOKEN:-none} HOME=$HOME" >> '${log}'; echo '{"result":"{\\"actions\\":[]}"}'`);
   writeFileSync(join(dir, 'board.js'), [
     `const [cmd, , out] = process.argv.slice(2);`,
@@ -436,16 +480,24 @@ test('the proxy the host needs reaches the model, and nothing reaches it when th
   assert.match(without.calls, /argv --reuid=model [^\n]*PATH=[^ ]* bash -c/, 'no empty argument where no proxy was set');
 });
 
-test('the crew steps are told which accounts crew/accounts.md lists, read from the clone', (t) => {
+test('the crew steps are told which accounts crew/accounts.md lists: the id column of every row', (t) => {
   const r = pass(t);
-  assert.match(r.calls, new RegExp(`argv --reuid=crew [^\\n]*LISTED=${ORCHESTRATOR_ID} node [^\\n]*board\\.js snapshot`));
+  assert.match(r.calls, new RegExp(`argv --reuid=crew [^\\n]*LISTED=${ORCHESTRATOR_ID},333201923 node [^\\n]*board\\.js snapshot`),
+    'both rows, and not the digit in a login');
+  const bare = pass(t, { accounts: ACCOUNTS.replace('| @orchestrator |', '| orchestrator |') });
+  assert.equal(bare.status, 1);
+  assert.match(bare.out, /not listed in crew\/accounts.md: not starting/, 'a row the list does not read is not listed, and says so');
 });
 
-test('a proxy URL carrying credentials is refused rather than shown to every process', (t) => {
-  const r = pass(t, { env: { HTTPS_PROXY: 'http://user:pw@proxy:3128' } });
-  assert.equal(r.status, 1);
-  assert.match(r.out, /a proxy URL carries credentials/);
-  assert.doesNotMatch(r.calls, /^claude /m);
+test('a proxy URL carrying credentials, with a scheme or without, stops the pass before anything runs', (t) => {
+  for (const [v, url] of [['HTTPS_PROXY', 'http://user:pw@proxy:3128'], ['HTTPS_PROXY', 'user:pw@proxy:3128'], ['HTTP_PROXY', 'http://TOKEN@proxy']]) {
+    const r = pass(t, { env: { [v]: url } });
+    assert.equal(r.status, 1, url);
+    assert.match(r.out, new RegExp(`${v} carries credentials`), url);
+    assert.equal(r.calls, '', `${url}: nothing ran`);
+  }
+  const ok = pass(t, { env: { HTTPS_PROXY: 'http://proxy:3128', NODE_EXTRA_CA_CERTS: '/certs/ops@corp/ca.pem', NO_PROXY: 'svc@x' } });
+  assert.equal(ok.status, 0, 'an @ in a certificate path or NO_PROXY is not a credential');
 });
 
 test('an unchanged board calls no model and publishes nothing', (t) => {
@@ -477,7 +529,7 @@ test('the pass refuses any account but the orchestrator, and one crew/accounts.m
   assert.equal(other.status, 1);
   assert.match(other.out, /not the orchestrator's: not starting/);
   assert.doesNotMatch(other.calls, /git clone|claude/);
-  const unlisted = pass(t, { listed: false });
+  const unlisted = pass(t, { accounts: ACCOUNTS.replace(`| @orchestrator | ${ORCHESTRATOR_ID} |`, '| @orchestrator | 1 |') });
   assert.equal(unlisted.status, 1);
   assert.match(unlisted.out, /not listed in crew\/accounts.md: not starting/);
   assert.doesNotMatch(unlisted.calls, /board snapshot|claude/);

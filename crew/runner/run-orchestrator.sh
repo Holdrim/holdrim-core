@@ -27,6 +27,13 @@ fi
 : "${GH_TOKEN:?no GitHub token: run setup first, or pass GH_TOKEN}"
 : "${CLAUDE_CODE_OAUTH_TOKEN:?no Claude token: run setup first, or pass CLAUDE_CODE_OAUTH_TOKEN}"
 
+# A proxy the host needs reaches the model as a command-line argument (below), which any process
+# in the container can read in /proc; one carrying a user or a password, with a scheme or without,
+# stops every pass here, where it is said at once rather than at the first changed board.
+for v in HTTPS_PROXY HTTP_PROXY; do
+  case "${!v:-}" in *@*) echo "$v carries credentials, which would be visible in /proc: not starting"; exit 1 ;; esac
+done
+
 # The run must be the orchestrator's machine account and nobody else. Refusing the owner's id
 # alone would let any other credential through; requiring the listed id refuses them all
 # (crew/accounts.md, crew/autonomy.md "Before selecting work").
@@ -40,10 +47,10 @@ rm -rf "$WORK/holdrim-core" "$WORK/board" "$WORK/result.json"
 as_crew git clone --quiet "https://github.com/$REPO" "$WORK/holdrim-core"
 
 # The account list is read from the clone, never from the image, so a change the owner merges
-# takes effect on the next pass; an id missing from it means the owner withdrew the account.
-grep -q "| $ORCHESTRATOR_ID |" "$WORK/holdrim-core/crew/accounts.md" \
-  || { echo "not listed in crew/accounts.md: not starting"; exit 1; }
-LISTED=$(grep -oE '^\| @[^|]+ \| [0-9]+ \|' "$WORK/holdrim-core/crew/accounts.md" | grep -oE '[0-9]+' | paste -sd, -)
+# takes effect on the next pass; an id missing from it means the owner withdrew the account. The
+# ids are the second column of the table's rows, read once: the same list decides both.
+LISTED=$(sed -nE 's/^[|] @[^|]+ [|] ([0-9]+) [|].*/\1/p' "$WORK/holdrim-core/crew/accounts.md" | paste -sd, -)
+case ",$LISTED," in *",$ORCHESTRATOR_ID,"*) ;; *) echo "not listed in crew/accounts.md: not starting"; exit 1 ;; esac
 
 code=0; as_crew node "$HERE/board.js" snapshot "$WORK/board" || code=$?
 if [ "$code" = 3 ]; then echo "paused by the owner: nothing done"; exit 0; fi
@@ -56,14 +63,13 @@ if [ -r "$STATE/board-digest" ] && cmp -s "$STATE/board-digest" "$WORK/board/dig
 fi
 
 # `env -i` passes the model exactly what it needs and nothing else: no GitHub token, whatever the
-# environment this script was started with, bar a proxy the host needs to reach the API (a proxy
-# URL must carry no password: it is an argument here). The Claude token reaches the model on stdin
+# environment this script was started with, bar a proxy the host needs to reach the API (checked
+# above for credentials: it is an argument here). The Claude token reaches the model on stdin
 # and is read into its environment there, never as an argument: any process can read another's
 # arguments in /proc, while only the owner can read its environment.
 cd "$WORK"
 proxy=()
 for v in HTTPS_PROXY HTTP_PROXY NO_PROXY NODE_EXTRA_CA_CERTS; do [ -n "${!v:-}" ] && proxy+=("$v=${!v}"); done
-case "${proxy[*]:-}" in *://*@*) echo "a proxy URL carries credentials, which would be visible in /proc: not starting"; exit 1 ;; esac
 setpriv --reuid=model --regid=model --init-groups --no-new-privs env -i HOME=/home/model PATH="$PATH" ${proxy[@]+"${proxy[@]}"} \
   bash -c 'IFS= read -r CLAUDE_CODE_OAUTH_TOKEN; export CLAUDE_CODE_OAUTH_TOKEN; exec claude "$@"' model \
   -p "You play the orchestrator role in the Holdrim crew, as one unattended pass.
@@ -92,7 +98,6 @@ applied=$(as_crew node "$HERE/board.js" publish "$WORK/result.json" "$WORK/board
 echo "$applied"
 # publish has just rewritten board/digest from the board as this pass left it, and the digest
 # leaves out the orchestrator's own writes, so the next pass skips the model unless someone else
-# moved. A pass whose answer
-# was missing or unreadable stops at the line above (set -e) and never records it, so the next pass
-# asks again.
+# moved. A pass whose answer was missing or unreadable stops at the line above (set -e) and never
+# records it, so the next pass asks again.
 cp "$WORK/board/digest" "$STATE/board-digest"

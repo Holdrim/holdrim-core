@@ -15,15 +15,16 @@ credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this fo
    runs with `Read`, `Grep` and `Glob` only, confined to `/work` by `--restricted`, with no MCP
    server: it cannot run a command, reach the network, or read the GitHub token.
 4. `board.js publish` applies the answer, and only the part the orchestrator may do: comments and
-   existing `needs:`/`working:` labels on items already open, one comment per item, never twice
+   existing `needs:`/`working:` labels on items already open, one comment per item (bar the note of
+   what it refused), never twice
    under the same key, never removing `needs:owner`, never carrying a token. Everything else is
    refused and said on the handoff issue. An answer that is missing or unreadable applies nothing
    and is tried again on the next pass.
 
 Behind a proxy, set `HTTPS_PROXY` (and `NO_PROXY`, `NODE_EXTRA_CA_CERTS` if needed) in the
-environment; the model gets them too. A proxy URL with a user or password in it is refused, and
-the pass does not start: it would reach the model as a command-line argument, which any process in
-the container can read.
+environment; the model gets them too. A proxy URL with a user or password in it, with a scheme or
+without, stops every pass before anything runs: it would reach the model as a command-line
+argument, which any process in the container can read.
 
 Pause it from GitHub by adding `paused` to the handoff issue from the owner's account; remove the
 label, from the owner's account too, to resume. A `paused` added or removed by any other account is
