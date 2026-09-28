@@ -524,8 +524,9 @@ test('a long run keeps its claim: another run is refused long after the first cl
 });
 
 /**
- * A removal of Ana stopped at `where` in its last steps — `event`, right after `person_removed` is
- * written, or `forget`, right after the row is forgotten — while `meanwhile` runs, with the clock moved
+ * A removal of Ana stopped at `where` — `reread`, right after it reads the row again under its
+ * claim, `event`, right after `person_removed` is written, or `forget`, right after the row is
+ * forgotten — while `meanwhile` runs, with the clock moved
  * past the end of the claim, as a run that stalled there would find it. Answers what the stalled
  * run answered, and the `person_removal_stopped` lines it logged.
  */
@@ -546,6 +547,13 @@ async function stalledIn(where, meanwhile) {
       return e;
     }
     async forget(id) { await super.forget(id); if (where === 'forget') await pause(); }
+    // The second read of the row is the one under the claim; the first is before it.
+    async personOf(email) {
+      const read = await super.personOf(email);
+      if (where === 'reread' && armed && ++this.reads === 2) await pause();
+      return read;
+    }
+    reads = 0;
   })();
   const users = new UsersSqlite(':memory:');
   await users.create(ANA, 'Ana Lima');
@@ -574,6 +582,18 @@ test('a run stalled after its event, while another finished and somebody new too
   assert.deepEqual(run.outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
   assert.equal(run.stopped.length, 1, 'and it says it stopped');
   assert.equal((await run.users.check(ANA, dana))?.name, 'Dana', 'Dana\'s account opens with her password, as it was');
+  assert.equal((await removedOnce(run.events)).length, 1);
+});
+
+test('a run stalled before closing the account, while another finished and somebody new took the address: never closes it', async () => {
+  let dana;
+  const run = await stalledIn('reread', async (ctx) => {
+    assert.equal((await removePerson(ctx, { email: ANA, confirmed: true })).status, 201, '(the other run finished it)');
+    dana = await ctx.users.create(ANA, 'Dana');
+  });
+  assert.deepEqual(run.outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
+  assert.equal(run.stopped.length, 1);
+  assert.equal((await run.users.check(ANA, dana))?.name, 'Dana', 'Dana\'s account is open, and opens with her password');
   assert.equal((await removedOnce(run.events)).length, 1);
 });
 

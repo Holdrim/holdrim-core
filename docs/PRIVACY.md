@@ -176,12 +176,15 @@ the run ends, whether it finished or failed, so a removal a failure stopped is r
 run whose process died cannot let go of it: the claim lapses two minutes later, and the removal is
 run again then. It holds across instances in every deployment: in memory there is only one process,
 a SQLite file is shared by every process on the machine, and Firestore decides the claim in a
-transaction. A run renews its claim as it goes and again before each of its last writes, and stops
-if another run has taken it over, or if the address no longer leads to the person; its last steps
-only ever empty an account a removal closed, never one open at the address. What it cannot hold is a
-run that stalls, between a renewal and the write right after it, for longer than the claim itself:
-that one write can then land beside another run's, and the trail can hold a second `person_removed`
-for the person.
+transaction. A run renews its claim as it goes, and again before closing the account and before
+each of its last writes, and stops if another run has taken it over, or if the address no longer
+leads to the person; its last steps only ever empty an account a removal closed, never one open at
+the address. What it cannot hold is a run that stalls, between a renewal and the write right after
+it, for longer than the claim itself: that one write can then land after another run has finished.
+Written that late, a `person_removed` is a second one for the person; an account closed that late
+can be one somebody new opened at the freed address — closed, not emptied, and theirs to have
+reopened; and an address freed that late can be one a later removal, of whoever took the address
+next, has closed and is still working on — left free before that person's row is forgotten.
 
 **Behind an identity proxy** there is no account to empty, and Holdrim holds no list of who the proxy
 admits: take the address out of the IAP, or whatever Cloud access policy is in front of Holdrim,
