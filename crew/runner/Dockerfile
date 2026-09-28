@@ -8,8 +8,9 @@ RUN apt-get update \
 RUN npm install -g @anthropic-ai/claude-code
 # Two users, so that the operating system, and not only a flag, keeps the model from the tokens:
 # `crew` holds them in a home only it can read and runs the steps that talk to GitHub; `model` runs
-# the model, with a home of its own and nothing else to read but /work. The container starts as
-# root only so that run-orchestrator.sh can hand each step to its user; setup.sh runs as crew.
+# the model, with a home of its own and nothing of crew's to read (its CLI flags then confine it to
+# /work). The container starts as root only so that run-orchestrator.sh can hand each step to its
+# user; setup.sh runs as crew.
 RUN useradd -m crew && useradd -m model \
  && mkdir -p /home/crew/.secrets /home/crew/.config/gh /home/crew/.state /work \
  && chown -R crew:crew /home/crew /work \

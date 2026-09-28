@@ -106,8 +106,9 @@ that will be merged:
   that names, per item it touched, the last comment it read, the head it acted on, the attempts so
   far and when its claim was taken. Nothing a pass needs is kept in a session. A pass that finds
   nothing changed since the last one that ran the model, leaving aside the orchestrator's own
-  writes, calls no model and writes nothing; a claim crossing the stall limit counts as a change,
-  since time passing writes nothing on the board.
+  comments and label moves, calls no model and writes nothing; a claim crossing the stall limit
+  counts as a change, since time passing writes nothing on the board. A claim's pushes are those
+  on the item or on an open pull request that closes it.
 - **Whatever runs the code holds no publishing credential.** A reviewer's reproduction runs the
   proofs in a clean clone of the exact head, with no token in its environment, and publishes an
   evidence record — command, SHA, environment, exit code, and what it skipped — through a

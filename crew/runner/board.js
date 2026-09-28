@@ -26,6 +26,10 @@ export const STALL_MS = 24 * 60 * 60 * 1000;
 // instruction"); every other queue label is the orchestrator's to move.
 const LABEL = /^(needs|working):[a-z0-9-]+$/;
 const KEY = /^[\w.:@#/-]{1,100}$/;
+const TYPES = ['comment', 'add_label', 'remove_label'];
+// Asking for what is already so is not a refusal worth the owner's attention: a retry after a
+// partial publish asks for exactly these. They are logged, and left out of the note.
+const ALREADY = ['already posted under this key', 'the item already carries that label', 'the item does not carry that label'];
 
 /** The marker a published comment carries, so that no later pass posts it twice. */
 export const markerFor = (key) => `<!-- holdrim-key: ${key} -->`;
@@ -52,18 +56,28 @@ export function pauseState(handoff) {
   return { paused: false, ignored: other.actor.login };
 }
 
+const time = (at) => (at ? Date.parse(at) : 0);
+
+/** The latest push that counts for an item: its own head, or that of an open PR that closes it. */
+function lastPush(item, items) {
+  const closes = new RegExp(`\\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #${item.number}\\b`, 'i');
+  const linked = items.filter((p) => p.head_date && (p === item || closes.test(p.body ?? '')));
+  return Math.max(0, ...linked.map((p) => time(p.head_date)));
+}
+
 /**
- * Claims older than the stall limit, as `<item>:<label>`. The limit is crossed by time passing, not
- * by anything written, so the digest carries this list: otherwise the pass that should report a
- * stalled claim would be the one skipped for "nothing changed".
+ * Claims older than the stall limit with no push since, as `<item>:<label>`. A claim sits on an
+ * issue and its pushes land on the pull request that closes it, so those count too. A claim whose
+ * start the timeline does not show counts from the beginning of time: reported, never trusted
+ * forever. The limit is crossed by time passing, not by anything written, so the digest carries
+ * this list: otherwise the pass that should report a stalled claim would be the one skipped.
  */
 export function staleClaims(items, now) {
   const out = [];
   for (const i of items) {
     for (const label of i.labels.filter((l) => l.startsWith('working:'))) {
       const at = (i.timeline ?? []).filter((e) => e.event === 'labeled' && e.label?.name === label).at(-1)?.created_at;
-      const since = Math.max(Date.parse(at ?? 0), Date.parse(i.head_date ?? 0));
-      if (now - since > STALL_MS) out.push(`${i.number}:${label}`);
+      if (now - Math.max(time(at), lastPush(i, items)) > STALL_MS) out.push(`${i.number}:${label}`);
     }
   }
   return out.sort();
@@ -117,6 +131,9 @@ function refusal(a, open, commented, secrets, known) {
     // one written by a stranger would otherwise silence the orchestrator on that item.
     if ((item.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(a.key)))) return 'already posted under this key';
     if (secrets.some((s) => s && a.body.includes(s))) return 'the body carries a credential';
+    // The marker is this file's to write: one in a body would dedupe a key the orchestrator has
+    // not answered yet, and silence its real answer when it comes.
+    if (a.body.includes('holdrim-key')) return 'the body carries a dedupe marker';
     return null;
   }
   if (a.type === 'add_label' || a.type === 'remove_label') {
@@ -124,7 +141,8 @@ function refusal(a, open, commented, secrets, known) {
     if (a.type === 'remove_label' && a.label === 'needs:owner') return 'only the owner removes needs:owner';
     if (a.type === 'remove_label' && !item.labels.includes(a.label)) return 'the item does not carry that label';
     if (a.type === 'add_label' && item.labels.includes(a.label)) return 'the item already carries that label';
-    if (a.type === 'add_label' && known && !known.includes(a.label)) return 'no such label in the repository';
+    // Without the repository's labels read, no label is known: the check fails closed, never open.
+    if (a.type === 'add_label' && !(known ?? []).includes(a.label)) return 'no such label in the repository';
     return null;
   }
   return `unknown action type ${JSON.stringify(a?.type)}`;
@@ -212,20 +230,29 @@ export async function snapshot(dir, { repo, fetch: fetchImpl = fetch, token = pr
  * not only in the container's log.
  */
 export async function publish(resultFile, dir, { repo, fetch: fetchImpl = fetch, token = process.env.GH_TOKEN, secrets = [] }) {
-  const { items, labels, digest } = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
+  const { items, labels, digest, read_at: readAt } = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
   const result = JSON.parse(readFileSync(resultFile, 'utf8'));
   if (result.is_error || typeof result.result !== 'string') throw new Error(`the model gave no answer (${result.subtype ?? 'no result'})`);
   const answer = parseAnswer(result.result);
   if (!Array.isArray(answer?.actions)) throw new Error('the model\'s answer is not a JSON object with an actions list');
   const { accepted, refused } = vetActions(answer, items, { secrets: [token, ...secrets], known: labels });
-  for (const r of refused) console.error(`refused: ${r.reason}: ${JSON.stringify(r.action)?.slice(0, 200)}`);
+  // What is said about a refused action, in the log and on GitHub alike, is only what this file
+  // wrote or checked: the reason, and the type and item when they are ones it knows. The action's
+  // own text never goes in: it may carry the very credential it was refused for, or a mention, a
+  // marker or markdown that would then appear in a comment signed by the orchestrator.
+  const shown = (a) => [TYPES.includes(a?.type) ? a.type : 'an action', Number.isInteger(a?.number) ? `on #${a.number}` : ''].join(' ').trim();
+  for (const r of refused) console.error(`refused: ${shown(r.action)}: ${r.reason}`);
+  const worth = refused.filter((r) => !ALREADY.includes(r.reason));
   const handoff = items.find((i) => i.labels.includes('handoff'));
-  if (refused.length && handoff) {
-    const note = `The runner refused ${refused.length} action(s) the orchestrator asked for:\n`
-      + refused.map((r) => `- ${r.reason}: \`${JSON.stringify(r.action)?.slice(0, 200)}\``).join('\n');
+  if (worth.length && handoff) {
+    const note = `The runner refused ${worth.length} action(s) the orchestrator asked for:\n`
+      + worth.map((r) => `- ${shown(r.action)}: ${r.reason}`).join('\n');
     const own = accepted.find((a) => a.type === 'comment' && a.number === handoff.number);
+    const key = `refused@${digest.slice(0, 16)}`;
     if (own) own.body = `${own.body}\n\n${note}`;
-    else accepted.push({ type: 'comment', number: handoff.number, key: `refused@${digest.slice(0, 16)}`, body: note });
+    else if (!vetActions({ actions: [{ type: 'comment', number: handoff.number, key, body: note }] }, items).refused.length) {
+      accepted.push({ type: 'comment', number: handoff.number, key, body: note });
+    }
   }
   const { gh } = client(repo, fetchImpl, token);
   for (const a of accepted) {
@@ -235,6 +262,15 @@ export async function publish(resultFile, dir, { repo, fetch: fetchImpl = fetch,
     if (a.type === 'remove_label') await gh(`${base}/labels/${encodeURIComponent(a.label)}`, { method: 'DELETE' });
     console.error(`applied: ${a.type} on #${a.number}${a.label ? ` ${a.label}` : ''}`);
   }
+  // The labels just moved are the orchestrator's own writes, and the digest leaves those out: the
+  // one the script records is taken from the board as this pass left it, or the next pass would
+  // wake to its own label and answer it.
+  for (const a of accepted) {
+    const item = items.find((i) => i.number === a.number);
+    if (a.type === 'add_label') item.labels.push(a.label);
+    if (a.type === 'remove_label') item.labels = item.labels.filter((l) => l !== a.label);
+  }
+  writeFileSync(join(dir, 'digest'), boardDigest(items, Date.parse(readAt)));
   return accepted.length;
 }
 

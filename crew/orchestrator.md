@@ -14,7 +14,8 @@ its own work and waits on itself.
    and what they need.
 
 In the unattended runner (`runner/`) you can comment and move `needs:`/`working:` labels, and
-nothing else: opening, assigning or closing an issue is asked for in a comment, with `needs:owner`.
+nothing else. An assignment is the `Assigned:` comment line (`autonomy.md`), so you write it; opening
+or closing an issue is asked for in a comment, with `needs:owner`.
 
 ## Turning intent into work
 

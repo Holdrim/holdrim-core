@@ -23,8 +23,9 @@ import {
 const ROOT = new URL('../../', import.meta.url).pathname;
 const SCRIPT = join(ROOT, 'crew', 'runner', 'run-orchestrator.sh');
 const NOW = Date.parse('2026-09-28T12:00:00Z');
-const orch = { login: 'holdrim-orchestrator', id: ORCHESTRATOR_ID };
-const owner = { login: 'Garbiati', id: OWNER_ID };
+const orch = { login: 'orchestrator', id: ORCHESTRATOR_ID };
+const owner = { login: 'owner', id: OWNER_ID };
+const reviewer = { login: 'reviewer', id: 333201923 };
 
 const ITEMS = [
   { number: 80, labels: ['handoff'], comments: [], timeline: [] },
@@ -64,6 +65,8 @@ test('a label is removed only where it is, added only where it is not, and never
   assert.deepEqual(reasons([{ type: 'remove_label', number: 80, label: 'working:claude' }]), ['the item does not carry that label']);
   assert.deepEqual(reasons([{ type: 'add_label', number: 185, label: 'working:claude' }]), ['the item already carries that label']);
   assert.deepEqual(reasons([{ type: 'add_label', number: 80, label: 'needs:chatgtp' }]), ['no such label in the repository']);
+  assert.deepEqual(reasons([{ type: 'add_label', number: 80, label: 'needs:chatgpt' }], { known: undefined }), ['no such label in the repository'],
+    'with the repository\'s labels unread, no label is known');
 });
 
 test('a key the orchestrator already posted on the item is not posted again', () => {
@@ -84,6 +87,10 @@ test('one comment per item per pass', () => {
 
 test('a comment carrying a credential is refused, whatever the model was told', () => {
   assert.deepEqual(reasons([comment(80, '80@a', 'here: ghp_SECRETVALUE')], { secrets: ['ghp_SECRETVALUE'] }), ['the body carries a credential']);
+});
+
+test('a comment body may not carry a dedupe marker, which only the publisher writes', () => {
+  assert.deepEqual(reasons([comment(80, '80@a', `ok ${markerFor('185@next')}`)]), ['the body carries a dedupe marker']);
 });
 
 test('a comment needs a key and a bounded body', () => {
@@ -136,11 +143,21 @@ const claimed = (hoursAgo, head_date) => ({
   timeline: [{ event: 'labeled', label: { name: 'working:claude' }, actor: orch, created_at: new Date(NOW - hoursAgo * 3600e3).toISOString() }],
 });
 
+test('a claim on an issue counts the pushes on the open pull request that closes it', () => {
+  const issue = { ...claimed(25), number: 7, head_date: undefined };
+  const pr = (body, hoursAgo) => ({ number: 9, labels: [], body, head_date: new Date(NOW - hoursAgo * 3600e3).toISOString(), timeline: [] });
+  assert.deepEqual(staleClaims([issue, pr('Closes #7', 1)], NOW), []);
+  assert.deepEqual(staleClaims([issue, pr('Closes #7', 30)], NOW), ['7:working:claude'], 'an old push does not restart it');
+  assert.deepEqual(staleClaims([issue, pr('Closes #70', 1)], NOW), ['7:working:claude'], 'another issue\'s pull request does not count');
+});
+
 test('a claim is stale after the limit with no push, and a push restarts the clock', () => {
   assert.equal(STALL_MS, 24 * 3600e3);
   assert.deepEqual(staleClaims([claimed(23)], NOW), []);
   assert.deepEqual(staleClaims([claimed(25)], NOW), ['7:working:claude']);
   assert.deepEqual(staleClaims([claimed(25, new Date(NOW - 3600e3).toISOString())], NOW), []);
+  assert.deepEqual(staleClaims([{ number: 7, labels: ['working:claude'], timeline: [] }], NOW), ['7:working:claude'],
+    'a claim whose start the timeline does not show is reported, not trusted forever');
 });
 
 test('the digest leaves out the orchestrator\'s own writes and takes in everyone else\'s', () => {
@@ -163,16 +180,18 @@ test('the digest changes when a claim crosses the stall limit, with nothing writ
   assert.notEqual(boardDigest(items, NOW + 3600e3), boardDigest(items, NOW));
 });
 
-/** A stand-in for GitHub's API: answers from `routes` by path, and records every request. */
-function fakeGitHub(routes) {
+/**
+ * A stand-in for GitHub's API. `resolve(pathname, url)` answers a request, and a path it does not
+ * know gets a 404, the way GitHub answers one: matched exactly, so a request built with a wrong
+ * number or a stray suffix fails here as it would there. Every request is recorded.
+ */
+function fakeGitHub(resolve = () => ({})) {
   const calls = [];
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
-    const path = u.pathname + u.search;
-    calls.push({ method: init.method ?? 'GET', path, body: init.body && JSON.parse(init.body), auth: init.headers?.authorization });
-    const hit = Object.entries(routes).find(([p]) => path.startsWith(p));
-    const value = hit ? (typeof hit[1] === 'function' ? hit[1](u) : hit[1]) : {};
-    return { ok: true, status: 200, json: async () => value };
+    calls.push({ method: init.method ?? 'GET', path: u.pathname + u.search, body: init.body && JSON.parse(init.body), auth: init.headers?.authorization });
+    const value = resolve(u.pathname, u);
+    return value === undefined ? { ok: false, status: 404, json: async () => ({}) } : { ok: true, status: 200, json: async () => value };
   };
   return { fetch, calls };
 }
@@ -180,14 +199,14 @@ function fakeGitHub(routes) {
 function board(t, extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-board-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'board.json'), JSON.stringify({ items: ITEMS, labels: KNOWN, digest: 'd'.repeat(64), ...extra }));
+  writeFileSync(join(dir, 'board.json'), JSON.stringify({ items: ITEMS, labels: KNOWN, digest: 'd'.repeat(64), read_at: new Date(NOW).toISOString(), ...extra }));
   const answer = (result) => { writeFileSync(join(dir, 'result.json'), JSON.stringify(result)); return join(dir, 'result.json'); };
   return { dir, answer };
 }
 
 test('publish sends each allowed action to its endpoint, and marks every comment with its key', async (t) => {
   const { dir, answer } = board(t);
-  const gh = fakeGitHub({});
+  const gh = fakeGitHub();
   const file = answer({ result: JSON.stringify({ actions: [
     comment(80, 'handoff@abc', 'the state'),
     { type: 'add_label', number: 185, label: 'needs:chatgpt' },
@@ -204,18 +223,60 @@ test('publish sends each allowed action to its endpoint, and marks every comment
 
 test('publish refuses the token it holds, and says on the handoff issue what it refused', async (t) => {
   const { dir, answer } = board(t);
-  const gh = fakeGitHub({});
+  const gh = fakeGitHub();
   const file = answer({ result: JSON.stringify({ actions: [comment(185, '185@x', 'leak t0k'), { type: 'remove_label', number: 185, label: 'needs:owner' }] }) });
-  assert.equal(await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't0k' }), 1);
+  const logged = [];
+  const log = console.error;
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    assert.equal(await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't0k' }), 1);
+  } finally {
+    console.error = log;
+  }
+  assert.ok(logged.some((l) => l.startsWith('refused: comment on #185')), 'the refusal is logged');
+  assert.ok(!logged.join('\n').includes('t0k'), 'the container log does not carry the credential either');
   assert.equal(gh.calls.length, 1);
   assert.equal(gh.calls[0].path, '/repos/o/r/issues/80/comments');
-  assert.match(gh.calls[0].body.body, /refused 2 action\(s\)[\s\S]*the body carries a credential[\s\S]*only the owner removes needs:owner/);
+  assert.match(gh.calls[0].body.body, /refused 2 action\(s\)[\s\S]*comment on #185: the body carries a credential[\s\S]*remove_label on #185: only the owner removes needs:owner/);
   assert.match(gh.calls[0].body.body, new RegExp(markerFor(`refused@${'d'.repeat(16)}`)));
+  assert.ok(!gh.calls[0].body.body.includes('t0k'), 'the credential a comment was refused for is not posted in the note');
+});
+
+test('the refusal note repeats nothing the refused action wrote: no mention, marker or markdown gets out', async (t) => {
+  const { dir, answer } = board(t);
+  const gh = fakeGitHub();
+  const evil = `needs:x\` @someone ${markerFor('handoff@next')}`;
+  const file = answer({ result: JSON.stringify({ actions: [{ type: 'add_label', number: 185, label: evil }, { type: `x\` @someone`, number: '185 @a' }] }) });
+  await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't' });
+  const body = gh.calls[0].body.body.replace(markerFor(`refused@${'d'.repeat(16)}`), '');
+  assert.doesNotMatch(body, /@someone|holdrim-key|`/);
+  assert.match(body, /- add_label on #185: only needs: and working: labels\n- an action: not an open item on the board/);
+});
+
+test('asking for what is already so is left out of the note, and the same note is not posted twice', async (t) => {
+  const { dir, answer } = board(t);
+  const gh = fakeGitHub();
+  const already = answer({ result: JSON.stringify({ actions: [comment(185, '185@abc'), { type: 'add_label', number: 185, label: 'working:claude' }] }) });
+  assert.equal(await publish(already, dir, { repo: 'o/r', fetch: gh.fetch, token: 't' }), 0);
+  assert.equal(gh.calls.length, 0);
+  const { dir: posted, answer: again } = board(t, { items: [{ ...ITEMS[0], comments: [{ id: 3, author: orch, body: markerFor(`refused@${'d'.repeat(16)}`) }] }, ITEMS[1]] });
+  assert.equal(await publish(again({ result: JSON.stringify({ actions: [{ type: 'merge', number: 185 }] }) }), posted, { repo: 'o/r', fetch: gh.fetch, token: 't' }), 0);
+  assert.equal(gh.calls.length, 0);
+});
+
+test('the digest publish leaves is the board as the pass left it, so its own label moves wake no one', async (t) => {
+  const { dir, answer } = board(t);
+  const gh = fakeGitHub();
+  await publish(answer({ result: JSON.stringify({ actions: [
+    { type: 'remove_label', number: 185, label: 'working:claude' }, { type: 'add_label', number: 185, label: 'needs:chatgpt' },
+  ] }) }), dir, { repo: 'o/r', fetch: gh.fetch, token: 't' });
+  const next = [ITEMS[0], { ...ITEMS[1], labels: ['needs:owner', 'needs:chatgpt'], timeline: [ev(orch, 'unlabeled', 'working:claude'), ev(orch, 'labeled', 'needs:chatgpt')] }];
+  assert.equal(readFileSync(join(dir, 'digest'), 'utf8'), boardDigest(next, NOW), 'what the next snapshot will read');
 });
 
 test('publish folds the refusals into the orchestrator\'s own handoff comment when it wrote one', async (t) => {
   const { dir, answer } = board(t);
-  const gh = fakeGitHub({});
+  const gh = fakeGitHub();
   const file = answer({ result: JSON.stringify({ actions: [comment(80, 'handoff@x', 'the state'), { type: 'merge', number: 185 }] }) });
   await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't0k' });
   assert.equal(gh.calls.length, 1);
@@ -224,7 +285,7 @@ test('publish folds the refusals into the orchestrator\'s own handoff comment wh
 
 test('a missing, failed or unreadable answer throws, so the pass is not recorded as done', async (t) => {
   const { dir, answer } = board(t);
-  const gh = fakeGitHub({});
+  const gh = fakeGitHub();
   for (const result of [
     { type: 'result', subtype: 'error_max_turns', is_error: true },
     { type: 'result', subtype: 'error_during_execution', is_error: true, result: '{"actions": []}' },
@@ -242,18 +303,23 @@ test('snapshot follows every page and maps what the rules read: authors, timelin
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const issue = (number, extra = {}) => ({ number, title: `#${number}`, body: '', user: owner, labels: [], assignees: [], ...extra });
   const page = (items) => (u) => (u.searchParams.get('page') === '1' ? items : []);
-  const gh = fakeGitHub({
-    '/repos/o/r/issues?state=open': (u) => (u.searchParams.get('page') === '1'
+  const numbers = new Set([80, 187, ...Array.from({ length: 99 }, (_, n) => 1000 + n)]);
+  const routes = {
+    '/repos/o/r/issues': (u) => (u.searchParams.get('state') !== 'open' ? undefined : u.searchParams.get('page') === '1'
       ? [issue(80, { labels: [{ name: 'handoff' }] }), ...Array.from({ length: 99 }, (_, n) => issue(1000 + n))]
       : [issue(187, { pull_request: {}, user: orch })]),
     '/repos/o/r/issues/80/timeline': page([{ event: 'labeled', label: { name: 'paused' }, actor: owner, created_at: 't' }, { event: 'commented' }]),
     '/repos/o/r/issues/187/comments': page([{ id: 5, user: owner, created_at: 't', body: 'go' }]),
-    '/repos/o/r/pulls/187/reviews': page([{ user: { login: 'holdrim-reviewer', id: 333201923 }, state: 'CHANGES_REQUESTED', commit_id: 'sha1', body: 'x' }]),
-    '/repos/o/r/pulls/187': { head: { sha: 'sha1' }, draft: true },
-    '/repos/o/r/commits/sha1/check-runs': { check_runs: [{ name: 'test', conclusion: 'failure', status: 'completed' }, { name: 'floor', conclusion: null, status: 'in_progress' }] },
-    '/repos/o/r/commits/sha1': { commit: { committer: { date: '2026-09-28T10:00:00Z' } } },
+    '/repos/o/r/pulls/187/reviews': page([{ user: reviewer, state: 'CHANGES_REQUESTED', commit_id: 'sha1', body: 'x' }]),
+    '/repos/o/r/pulls/187': () => ({ head: { sha: 'sha1' }, draft: true }),
+    '/repos/o/r/commits/sha1/check-runs': () => ({ check_runs: [{ name: 'test', conclusion: 'failure', status: 'completed' }, { name: 'floor', conclusion: null, status: 'in_progress' }] }),
+    '/repos/o/r/commits/sha1': () => ({ commit: { committer: { date: '2026-09-28T10:00:00Z' } } }),
     '/repos/o/r/labels': page([{ name: 'needs:owner' }]),
-    '/repos/o/r/issues/': page([]),
+  };
+  const gh = fakeGitHub((path, u) => {
+    if (routes[path]) return routes[path](u);
+    const m = /^\/repos\/o\/r\/issues\/(\d+)\/(comments|timeline)$/.exec(path);
+    return m && numbers.has(Number(m[1])) ? page([])(u) : undefined;
   });
   assert.equal(await snapshot(dir, { repo: 'o/r', fetch: gh.fetch, token: 't', now: NOW }), true, 'the owner paused it');
   const snap = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
@@ -264,11 +330,12 @@ test('snapshot follows every page and maps what the rules read: authors, timelin
   assert.equal(pr.head, 'sha1');
   assert.equal(pr.head_date, '2026-09-28T10:00:00Z');
   assert.equal(pr.checks, 'floor=in_progress,test=failure');
-  assert.deepEqual(pr.reviews, [{ author: { login: 'holdrim-reviewer', id: 333201923 }, state: 'CHANGES_REQUESTED', commit_id: 'sha1', body: 'x' }]);
+  assert.deepEqual(pr.reviews, [{ author: reviewer, state: 'CHANGES_REQUESTED', commit_id: 'sha1', body: 'x' }]);
   assert.deepEqual(snap.items.find((i) => i.number === 80).timeline, [{ event: 'labeled', label: { name: 'paused' }, actor: owner, created_at: 't' }]);
   assert.deepEqual(snap.labels, ['needs:owner']);
   assert.equal(readFileSync(join(dir, 'digest'), 'utf8'), snap.digest);
   assert.equal(snap.digest, boardDigest(snap.items, NOW));
+  assert.ok(gh.calls.every((c) => c.method === 'GET' && c.auth === 'Bearer t'), 'a snapshot only reads, with the token it was given');
 });
 
 /**
@@ -287,9 +354,9 @@ function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 appli
   const log = join(dir, 'calls.log');
   writeFileSync(log, '');
   if (cached !== null) writeFileSync(join(state, 'board-digest'), cached);
-  stub(bin, 'setpriv', `echo "setpriv $1" >> '${log}'; while [ "\${1#--}" != "$1" ]; do shift; done; exec "$@"`);
+  stub(bin, 'setpriv', `echo "setpriv $1" >> '${log}'; echo "argv $*" >> '${log}'; while [ "\${1#--}" != "$1" ]; do shift; done; exec "$@"`);
   stub(bin, 'gh', `echo "gh $*" >> '${log}'; [ "$1 $2" = "api user" ] && echo ${id}`);
-  stub(bin, 'git', `echo "git $*" >> '${log}'; mkdir -p "$4/crew"; echo '${listed ? `| @holdrim-orchestrator | ${ORCHESTRATOR_ID} |` : ''}' > "$4/crew/accounts.md"`);
+  stub(bin, 'git', `echo "git $*" >> '${log}'; mkdir -p "$4/crew"; echo '${listed ? `| @orchestrator | ${ORCHESTRATOR_ID} |` : ''}' > "$4/crew/accounts.md"`);
   stub(bin, 'claude', `echo "claude GH_TOKEN=\${GH_TOKEN:-none} CLAUDE=\${CLAUDE_CODE_OAUTH_TOKEN:-none} HOME=$HOME" >> '${log}'; echo '{"result":"{\\"actions\\":[]}"}'`);
   writeFileSync(join(dir, 'board.js'), [
     `const [cmd, , out] = process.argv.slice(2);`,
@@ -310,10 +377,11 @@ function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 appli
 test('a changed board runs the model as its own user, with the Claude token and not the GitHub one', (t) => {
   const r = pass(t, { cached: 'old' });
   assert.equal(r.status, 0, r.out);
-  assert.match(r.calls, /setpriv --reuid=model\nclaude GH_TOKEN=none CLAUDE=cl-secret HOME=\/home\/model/);
+  assert.match(r.calls, /setpriv --reuid=model\nargv --reuid=model --regid=model --init-groups --no-new-privs env -i [\s\S]*?\nclaude GH_TOKEN=none CLAUDE=cl-secret HOME=\/home\/model/);
+  assert.doesNotMatch(r.calls.replace(/^claude GH_TOKEN=.*$/m, ''), /cl-secret|gh-secret/, 'no token is ever an argument, where any process could read it');
   assert.doesNotMatch(r.calls, /setpriv --reuid=model\n(?:(?!board).)*gh/s, 'nothing but the model runs as model');
-  assert.match(r.calls, /setpriv --reuid=crew\nboard snapshot/);
-  assert.match(r.calls, /setpriv --reuid=crew\nboard publish/);
+  assert.match(r.calls, /setpriv --reuid=crew\nargv [^\n]*board\.js snapshot[^\n]*\nboard snapshot/);
+  assert.match(r.calls, /setpriv --reuid=crew\nargv [^\n]*board\.js publish[^\n]*\nboard publish/);
   assert.equal(r.recorded, 'new', 'a pass that answered records the digest');
 });
 
@@ -354,7 +422,7 @@ test('the pass refuses any account but the orchestrator, and one crew/accounts.m
 
 test('the model runs with file tools only, confined, and with no MCP server', () => {
   const text = readFileSync(SCRIPT, 'utf8');
-  const model = text.slice(text.indexOf('claude -p'));
+  const model = text.slice(text.indexOf('--reuid=model'));
   assert.match(model, /--tools "Read,Grep,Glob" --restricted --strict-mcp-config/);
   assert.doesNotMatch(model, /--allowedTools|Bash\(/);
 });
