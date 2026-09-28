@@ -108,8 +108,18 @@ jobs:
       - name: The image builds and answers
         run: |
           docker build -q -t holdrim:ci .
+          # A store that lasts refuses to start without a signing key (#50): the image must say so,
+          # not come up signing with a key nobody kept.
+          if timeout 30 docker run --rm -v ci-nokey:/data -e HOLDRIM_OWNER=ci@example.org holdrim:ci; then
+            echo "✗ the image started with no signing key"; exit 1
+          fi
+          # The key made the way the README and the Dockerfile tell an adopter to make it.
+          mkdir -p "$RUNNER_TEMP/key"
+          docker run --rm -u "$(id -u)" -v "$RUNNER_TEMP/key:/out" holdrim:ci \
+            /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
           docker run -d --name ci -p 8080:8080 -v ci:/data \
-            -e HOLDRIM_OWNER=ci@example.org holdrim:ci
+            -e HOLDRIM_OWNER=ci@example.org \
+            -e HOLDRIM_SIGNING_KEY="$(cat "$RUNNER_TEMP/key/holdrim-signing.key")" holdrim:ci
           for _ in $(seq 30); do
             [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health || true)" = 200 ] && break
             sleep 1
