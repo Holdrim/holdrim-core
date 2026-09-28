@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stub } from './helpers/stub.js';
 import {
-  boardDigest, markerFor, parseAnswer, pauseState, publish, snapshot, staleClaims, vetActions,
+  boardDigest, lastCheck, markerFor, parseAnswer, pauseState, publish, snapshot, staleClaims, vetActions,
   MAX_ACTIONS, MAX_BODY, ORCHESTRATOR_ID, OWNER_ID, STALL_MS,
 } from '../../crew/runner/board.js';
 
@@ -108,7 +108,7 @@ test('an answer that is not a list of actions, or too long a list, applies nothi
 });
 
 test('an unknown action type is refused', () => {
-  assert.deepEqual(reasons([{ type: 'merge', number: 185 }]), ['unknown action type "merge"']);
+  assert.deepEqual(reasons([{ type: 'merge', number: 185 }]), ['unknown action type'], 'the type is the model\'s text, and is not repeated');
 });
 
 test('bare JSON is read first, even when a comment body in it holds a fenced block', () => {
@@ -145,10 +145,16 @@ const claimed = (hoursAgo, head_date) => ({
 
 test('a claim on an issue counts the pushes on the open pull request that closes it', () => {
   const issue = { ...claimed(25), number: 7, head_date: undefined };
-  const pr = (body, hoursAgo) => ({ number: 9, labels: [], body, head_date: new Date(NOW - hoursAgo * 3600e3).toISOString(), timeline: [] });
-  assert.deepEqual(staleClaims([issue, pr('Closes #7', 1)], NOW), []);
-  assert.deepEqual(staleClaims([issue, pr('Closes #7', 30)], NOW), ['7:working:claude'], 'an old push does not restart it');
-  assert.deepEqual(staleClaims([issue, pr('Closes #70', 1)], NOW), ['7:working:claude'], 'another issue\'s pull request does not count');
+  const listed = [ORCHESTRATOR_ID, reviewer.id];
+  const pr = (body, hoursAgo, author = reviewer) => ({ number: 9, labels: [], body, author, head_date: new Date(NOW - hoursAgo * 3600e3).toISOString(), timeline: [] });
+  const stale = (items) => staleClaims(items, NOW, listed);
+  assert.deepEqual(stale([issue, pr('Closes #7', 1)]), []);
+  assert.deepEqual(stale([issue, pr('Closes #7', 1, { login: 'stranger', id: 42 })]), ['7:working:claude'], 'a stranger\'s pull request does not keep a claim alive');
+  assert.deepEqual(stale([issue, pr('Closes #7', 30)]), ['7:working:claude'], 'an old push does not restart it');
+  assert.deepEqual(stale([issue, pr('Closes #70', 1)]), ['7:working:claude'], 'another issue\'s pull request does not count');
+  for (const body of ['Closes: #7', 'fixes  #7', 'Resolved #7.']) assert.deepEqual(stale([issue, pr(body, 1)]), [], body);
+  assert.deepEqual(stale([issue, pr('Closes other/repo#7', 1)]), ['7:working:claude'], 'another repository\'s #7 is not this item');
+  assert.deepEqual(stale([issue, pr('This encloses #7', 1)]), ['7:working:claude'], 'a keyword inside another word is not one');
 });
 
 test('a claim is stale after the limit with no push, and a push restarts the clock', () => {
@@ -246,11 +252,15 @@ test('the refusal note repeats nothing the refused action wrote: no mention, mar
   const { dir, answer } = board(t);
   const gh = fakeGitHub();
   const evil = `needs:x\` @someone ${markerFor('handoff@next')}`;
-  const file = answer({ result: JSON.stringify({ actions: [{ type: 'add_label', number: 185, label: evil }, { type: `x\` @someone`, number: '185 @a' }] }) });
-  await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't' });
+  const file = answer({ result: JSON.stringify({ actions: [
+    { type: 'add_label', number: 185, label: evil },
+    { type: `x\` @someone t0k ${markerFor('185@next')}`, number: 185 },
+    { type: 'merge', number: '185 @a' },
+  ] }) });
+  await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't0k' });
   const body = gh.calls[0].body.body.replace(markerFor(`refused@${'d'.repeat(16)}`), '');
-  assert.doesNotMatch(body, /@someone|holdrim-key|`/);
-  assert.match(body, /- add_label on #185: only needs: and working: labels\n- an action: not an open item on the board/);
+  assert.doesNotMatch(body, /@someone|holdrim-key|`|t0k/);
+  assert.match(body, /- add_label on #185: only needs: and working: labels\n- an action on #185: unknown action type\n- an action: not an open item on the board/);
 });
 
 test('asking for what is already so is left out of the note, and the same note is not posted twice', async (t) => {
@@ -274,13 +284,44 @@ test('the digest publish leaves is the board as the pass left it, so its own lab
   assert.equal(readFileSync(join(dir, 'digest'), 'utf8'), boardDigest(next, NOW), 'what the next snapshot will read');
 });
 
-test('publish folds the refusals into the orchestrator\'s own handoff comment when it wrote one', async (t) => {
+test('the digest publish leaves judges the stall limit at the time the board was read, not later', async (t) => {
+  const readAt = '2030-01-01T00:00:00.000Z';
+  const claim = { number: 7, labels: ['working:claude'], comments: [], timeline: [ev(orch, 'labeled', 'working:claude')].map((e) => ({ ...e, created_at: '2029-12-30T20:00:00.000Z' })) };
+  const { dir, answer } = board(t, { read_at: readAt, items: [ITEMS[0], claim] });
+  await publish(answer({ result: '{"actions": []}' }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 'tok-SECRET' });
+  const written = readFileSync(join(dir, 'digest'), 'utf8');
+  assert.deepEqual(staleClaims([claim], Date.parse(readAt)), ['7:working:claude']);
+  assert.equal(written, boardDigest([ITEMS[0], claim], Date.parse(readAt)));
+  assert.notEqual(written, boardDigest([ITEMS[0], claim], Date.now()), 'the clock of the run, not of the board, would miss it');
+});
+
+test('a claim the orchestrator adds starts now, as the next snapshot will read it, and is not stale', async (t) => {
+  const { dir, answer } = board(t, { items: [ITEMS[0], { number: 7, labels: [], comments: [], timeline: [] }] });
+  await publish(answer({ result: JSON.stringify({ actions: [{ type: 'add_label', number: 7, label: 'working:claude' }] }) }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 't' });
+  const at = new Date(NOW).toISOString();
+  const next = [ITEMS[0], { number: 7, labels: ['working:claude'], comments: [], timeline: [{ event: 'labeled', label: { name: 'working:claude' }, actor: orch, created_at: at }] }];
+  assert.deepEqual(staleClaims(next, NOW), []);
+  assert.equal(readFileSync(join(dir, 'digest'), 'utf8'), boardDigest(next, NOW));
+});
+
+test('the refusal note is a comment of its own, beside the orchestrator\'s handoff comment, under its own key', async (t) => {
   const { dir, answer } = board(t);
   const gh = fakeGitHub();
   const file = answer({ result: JSON.stringify({ actions: [comment(80, 'handoff@x', 'the state'), { type: 'merge', number: 185 }] }) });
-  await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't0k' });
-  assert.equal(gh.calls.length, 1);
-  assert.match(gh.calls[0].body.body, /^the state\n\nThe runner refused 1 action/);
+  assert.equal(await publish(file, dir, { repo: 'o/r', fetch: gh.fetch, token: 't0k' }), 2);
+  assert.deepEqual(gh.calls.map((c) => c.body.body.split('\n')[0]), ['the state', 'The runner refused 1 action(s) the orchestrator asked for:']);
+  assert.match(gh.calls[1].body.body, new RegExp(markerFor(`refused@${'d'.repeat(16)}`)));
+});
+
+test('the last check stops a comment carrying a credential or a marker, whatever path built it', () => {
+  assert.throws(() => lastCheck([comment(80, '80@a', 'x t0k')], ['t0k']), /failed the last check/);
+  assert.throws(() => lastCheck([comment(80, '80@a', markerFor('185@b'))], []), /failed the last check/);
+  assert.doesNotThrow(() => lastCheck([comment(80, '80@a', 'fine'), { type: 'add_label', number: 80, label: 'needs:x' }], ['t0k']));
+});
+
+test('a board with no reading time is refused, since the stall limit could not be judged', async (t) => {
+  const { dir, answer } = board(t, { read_at: undefined });
+  await assert.rejects(publish(answer({ result: '{"actions": []}' }), dir, { repo: 'o/r', fetch: fakeGitHub().fetch, token: 't' }), /read_at/);
 });
 
 test('a missing, failed or unreadable answer throws, so the pass is not recorded as done', async (t) => {
@@ -293,7 +334,7 @@ test('a missing, failed or unreadable answer throws, so the pass is not recorded
     { result: 'Here is my answer: {"actions": []} and more' },
     { result: '{"not_actions": []}' },
   ]) {
-    await assert.rejects(publish(answer(result), dir, { repo: 'o/r', fetch: gh.fetch, token: 't' }), JSON.stringify(result));
+    await assert.rejects(publish(answer(result), dir, { repo: 'o/r', fetch: gh.fetch, token: 'tok-SECRET' }), /no answer|not a JSON object/, JSON.stringify(result));
   }
   assert.equal(gh.calls.length, 0);
 });
@@ -343,7 +384,7 @@ test('snapshot follows every page and maps what the rules read: authors, timelin
  * with `snap` and writes `digest`, and whose publish prints `published` or fails. `setpriv` logs
  * the user it was asked for and runs the command; `claude` logs its environment and answers.
  */
-function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 applied', listed = true, id = String(ORCHESTRATOR_ID) } = {}) {
+function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 applied', listed = true, id = String(ORCHESTRATOR_ID), env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'holdrim-runner-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin');
@@ -367,7 +408,7 @@ function pass(t, { snap = 0, digest = 'new', cached = null, published = '0 appli
   writeFileSync(join(dir, 'package.json'), '{"type":"commonjs"}');
   const r = spawnSync('bash', [join(dir, 'run-orchestrator.sh')], {
     encoding: 'utf8',
-    env: { PATH: `${bin}:${process.env.PATH}`, WORK_DIR: work, STATE_DIR: state, GH_TOKEN: 'gh-secret', CLAUDE_CODE_OAUTH_TOKEN: 'cl-secret' },
+    env: { PATH: `${bin}:${process.env.PATH}`, WORK_DIR: work, STATE_DIR: state, GH_TOKEN: 'gh-secret', CLAUDE_CODE_OAUTH_TOKEN: 'cl-secret', ...env },
   });
   const calls = readFileSync(log, 'utf8');
   const recorded = existsSync(join(state, 'board-digest')) ? readFileSync(join(state, 'board-digest'), 'utf8') : null;
@@ -385,6 +426,26 @@ test('a changed board runs the model as its own user, with the Claude token and 
   assert.match(r.calls, /setpriv --reuid=crew\nargv [^\n]*board\.js snapshot[^\n]*\nboard snapshot/);
   assert.match(r.calls, /setpriv --reuid=crew\nargv [^\n]*board\.js publish[^\n]*\nboard publish/);
   assert.equal(r.recorded, 'new', 'a pass that answered records the digest');
+});
+
+test('the proxy the host needs reaches the model, and nothing reaches it when there is none', (t) => {
+  const withProxy = pass(t, { env: { HTTPS_PROXY: 'http://proxy:3128', NO_PROXY: 'localhost', NODE_EXTRA_CA_CERTS: '/etc/ca.pem' } });
+  assert.equal(withProxy.status, 0, withProxy.out);
+  assert.match(withProxy.calls, /argv --reuid=model [^\n]* HTTPS_PROXY=http:\/\/proxy:3128 NO_PROXY=localhost NODE_EXTRA_CA_CERTS=\/etc\/ca\.pem bash -c/);
+  const without = pass(t);
+  assert.match(without.calls, /argv --reuid=model [^\n]*PATH=[^ ]* bash -c/, 'no empty argument where no proxy was set');
+});
+
+test('the crew steps are told which accounts crew/accounts.md lists, read from the clone', (t) => {
+  const r = pass(t);
+  assert.match(r.calls, new RegExp(`argv --reuid=crew [^\\n]*LISTED=${ORCHESTRATOR_ID} node [^\\n]*board\\.js snapshot`));
+});
+
+test('a proxy URL carrying credentials is refused rather than shown to every process', (t) => {
+  const r = pass(t, { env: { HTTPS_PROXY: 'http://user:pw@proxy:3128' } });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /a proxy URL carries credentials/);
+  assert.doesNotMatch(r.calls, /^claude /m);
 });
 
 test('an unchanged board calls no model and publishes nothing', (t) => {

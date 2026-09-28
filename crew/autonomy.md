@@ -108,7 +108,8 @@ that will be merged:
   nothing changed since the last one that ran the model, leaving aside the orchestrator's own
   comments and label moves, calls no model and writes nothing; a claim crossing the stall limit
   counts as a change, since time passing writes nothing on the board. A claim's pushes are those
-  on the item or on an open pull request that closes it.
+  on the item or on an open pull request that closes it and that an account listed in
+  `accounts.md` opened.
 - **Whatever runs the code holds no publishing credential.** A reviewer's reproduction runs the
   proofs in a clean clone of the exact head, with no token in its environment, and publishes an
   evidence record — command, SHA, environment, exit code, and what it skipped — through a

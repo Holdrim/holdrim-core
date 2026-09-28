@@ -21,8 +21,9 @@ credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this fo
    and is tried again on the next pass.
 
 Behind a proxy, set `HTTPS_PROXY` (and `NO_PROXY`, `NODE_EXTRA_CA_CERTS` if needed) in the
-environment; the model gets them too. The proxy URL must carry no password: it reaches the model as
-a command-line argument, which any process in the container can read.
+environment; the model gets them too. A proxy URL with a user or password in it is refused, and
+the pass does not start: it would reach the model as a command-line argument, which any process in
+the container can read.
 
 Pause it from GitHub by adding `paused` to the handoff issue from the owner's account; remove the
 label, from the owner's account too, to resume. A `paused` added or removed by any other account is

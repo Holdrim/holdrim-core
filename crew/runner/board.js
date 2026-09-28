@@ -29,7 +29,10 @@ const KEY = /^[\w.:@#/-]{1,100}$/;
 const TYPES = ['comment', 'add_label', 'remove_label'];
 // Asking for what is already so is not a refusal worth the owner's attention: a retry after a
 // partial publish asks for exactly these. They are logged, and left out of the note.
-const ALREADY = ['already posted under this key', 'the item already carries that label', 'the item does not carry that label'];
+const POSTED = 'already posted under this key';
+const HAS = 'the item already carries that label';
+const LACKS = 'the item does not carry that label';
+const ALREADY = [POSTED, HAS, LACKS];
 
 /** The marker a published comment carries, so that no later pass posts it twice. */
 export const markerFor = (key) => `<!-- holdrim-key: ${key} -->`;
@@ -58,10 +61,17 @@ export function pauseState(handoff) {
 
 const time = (at) => (at ? Date.parse(at) : 0);
 
-/** The latest push that counts for an item: its own head, or that of an open PR that closes it. */
-function lastPush(item, items) {
-  const closes = new RegExp(`\\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #${item.number}\\b`, 'i');
-  const linked = items.filter((p) => p.head_date && (p === item || closes.test(p.body ?? '')));
+/**
+ * The latest push that counts for an item: its own head, or that of an open PR that closes it and
+ * that an account in crew/accounts.md opened. Anyone can write "Closes #7" in a pull request of
+ * their own and push to it, and would otherwise keep someone else's stalled claim from ever being
+ * reported.
+ */
+function lastPush(item, items, listed) {
+  // GitHub's closing keywords, with or without a colon, naming the item by its bare number; a
+  // reference into another repository is not this item.
+  const closes = new RegExp(`\\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?\\s+#${item.number}\\b`, 'i');
+  const linked = items.filter((p) => p.head_date && (p === item || (closes.test(p.body ?? '') && listed.includes(p.author?.id))));
   return Math.max(0, ...linked.map((p) => time(p.head_date)));
 }
 
@@ -72,12 +82,12 @@ function lastPush(item, items) {
  * forever. The limit is crossed by time passing, not by anything written, so the digest carries
  * this list: otherwise the pass that should report a stalled claim would be the one skipped.
  */
-export function staleClaims(items, now) {
+export function staleClaims(items, now, listed = []) {
   const out = [];
   for (const i of items) {
     for (const label of i.labels.filter((l) => l.startsWith('working:'))) {
       const at = (i.timeline ?? []).filter((e) => e.event === 'labeled' && e.label?.name === label).at(-1)?.created_at;
-      if (now - Math.max(time(at), lastPush(i, items)) > STALL_MS) out.push(`${i.number}:${label}`);
+      if (now - Math.max(time(at), lastPush(i, items, listed)) > STALL_MS) out.push(`${i.number}:${label}`);
     }
   }
   return out.sort();
@@ -88,14 +98,14 @@ export function staleClaims(items, now) {
  * out what the orchestrator itself wrote, or its own handoff comment would change the board, wake
  * the next pass, and be answered by another one every two hours for as long as work is in flight.
  */
-export function boardDigest(items, now = Date.now()) {
+export function boardDigest(items, now = Date.now(), listed = []) {
   const lines = items.map((i) => {
     const theirs = (i.comments ?? []).filter((c) => c.author?.id !== ORCHESTRATOR_ID).map((c) => c.id);
     const events = (i.timeline ?? []).filter((e) => e.actor?.id !== ORCHESTRATOR_ID).map((e) => `${e.event}:${e.label?.name ?? ''}:${e.created_at}`);
     const reviews = (i.reviews ?? []).map((r) => `${r.state}:${r.commit_id}`);
     return [i.number, [...i.labels].sort(), i.head ?? '', i.checks ?? '', theirs.at(-1) ?? '', events.at(-1) ?? '', reviews.join(',')].join(' ');
   }).sort();
-  return createHash('sha256').update([...lines, ...staleClaims(items, now)].join('\n')).digest('hex');
+  return createHash('sha256').update([...lines, ...staleClaims(items, now, listed)].join('\n')).digest('hex');
 }
 
 /**
@@ -129,7 +139,7 @@ function refusal(a, open, commented, secrets, known) {
     if (commented.has(a.number)) return 'one comment per item per pass';
     // Only the orchestrator's own markers count: anyone can write the marker into a comment, and
     // one written by a stranger would otherwise silence the orchestrator on that item.
-    if ((item.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(a.key)))) return 'already posted under this key';
+    if ((item.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(a.key)))) return POSTED;
     if (secrets.some((s) => s && a.body.includes(s))) return 'the body carries a credential';
     // The marker is this file's to write: one in a body would dedupe a key the orchestrator has
     // not answered yet, and silence its real answer when it comes.
@@ -139,13 +149,14 @@ function refusal(a, open, commented, secrets, known) {
   if (a.type === 'add_label' || a.type === 'remove_label') {
     if (typeof a.label !== 'string' || !LABEL.test(a.label)) return 'only needs: and working: labels';
     if (a.type === 'remove_label' && a.label === 'needs:owner') return 'only the owner removes needs:owner';
-    if (a.type === 'remove_label' && !item.labels.includes(a.label)) return 'the item does not carry that label';
-    if (a.type === 'add_label' && item.labels.includes(a.label)) return 'the item already carries that label';
+    if (a.type === 'remove_label' && !item.labels.includes(a.label)) return LACKS;
+    if (a.type === 'add_label' && item.labels.includes(a.label)) return HAS;
     // Without the repository's labels read, no label is known: the check fails closed, never open.
     if (a.type === 'add_label' && !(known ?? []).includes(a.label)) return 'no such label in the repository';
     return null;
   }
-  return `unknown action type ${JSON.stringify(a?.type)}`;
+  // The type is not repeated: it is the model's text, and a reason is published.
+  return 'unknown action type';
 }
 
 /**
@@ -156,6 +167,17 @@ export function parseAnswer(text) {
   try { return JSON.parse(text.trim()); } catch { /* not bare JSON: look for a fence */ }
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   try { return fenced ? JSON.parse(fenced[1].trim()) : null; } catch { return null; }
+}
+
+/**
+ * The last word before anything is written: whatever path built a comment, it carries no credential
+ * and no marker but the one publish appends. Should one ever do, it throws and nothing is posted.
+ * vetActions already refuses both; this is here for the path nobody has thought of yet.
+ */
+export function lastCheck(actions, secrets) {
+  for (const a of actions.filter((x) => x.type === 'comment')) {
+    if (secrets.some((x) => x && a.body.includes(x)) || a.body.includes('holdrim-key')) throw new Error(`a comment on #${a.number} failed the last check: nothing published`);
+  }
 }
 
 /** The one place a GitHub request is made; `fetch` is a parameter so the tests can stand in for it. */
@@ -182,7 +204,7 @@ function client(repo, fetchImpl, token) {
 const who = (u) => u && { login: u.login, id: u.id };
 
 /** Reads every open issue and pull request into `<dir>/board.json`; true when the crew is paused. */
-export async function snapshot(dir, { repo, fetch: fetchImpl = fetch, token = process.env.GH_TOKEN, now = Date.now() }) {
+export async function snapshot(dir, { repo, listed = [], fetch: fetchImpl = fetch, token = process.env.GH_TOKEN, now = Date.now() }) {
   const { gh, all } = client(repo, fetchImpl, token);
   const items = [];
   for (const i of await all('{repo}/issues?state=open')) {
@@ -211,10 +233,10 @@ export async function snapshot(dir, { repo, fetch: fetchImpl = fetch, token = pr
     items.push(item);
   }
   const known = (await all('{repo}/labels')).map((l) => l.name);
-  const digest = boardDigest(items, now);
-  const stale = staleClaims(items, now);
+  const digest = boardDigest(items, now, listed);
+  const stale = staleClaims(items, now, listed);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'board.json'), JSON.stringify({ repo, read_at: new Date(now).toISOString(), digest, stale_claims: stale, labels: known, items }, null, 1));
+  writeFileSync(join(dir, 'board.json'), JSON.stringify({ repo, read_at: new Date(now).toISOString(), listed, digest, stale_claims: stale, labels: known, items }, null, 1));
   writeFileSync(join(dir, 'digest'), digest);
   const pause = pauseState(items.find((i) => i.labels.includes('handoff')));
   if (pause.ignored) console.log(`paused label changed by ${pause.ignored}, not the owner: ignored`);
@@ -230,12 +252,15 @@ export async function snapshot(dir, { repo, fetch: fetchImpl = fetch, token = pr
  * not only in the container's log.
  */
 export async function publish(resultFile, dir, { repo, fetch: fetchImpl = fetch, token = process.env.GH_TOKEN, secrets = [] }) {
-  const { items, labels, digest, read_at: readAt } = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
+  const { items, labels, digest, read_at: readAt, listed = [] } = JSON.parse(readFileSync(join(dir, 'board.json'), 'utf8'));
   const result = JSON.parse(readFileSync(resultFile, 'utf8'));
   if (result.is_error || typeof result.result !== 'string') throw new Error(`the model gave no answer (${result.subtype ?? 'no result'})`);
   const answer = parseAnswer(result.result);
   if (!Array.isArray(answer?.actions)) throw new Error('the model\'s answer is not a JSON object with an actions list');
-  const { accepted, refused } = vetActions(answer, items, { secrets: [token, ...secrets], known: labels });
+  const now = Date.parse(readAt);
+  if (Number.isNaN(now)) throw new Error('board.json has no read_at: the stall limit cannot be judged');
+  const secretList = [token, ...secrets];
+  const { accepted, refused } = vetActions(answer, items, { secrets: secretList, known: labels });
   // What is said about a refused action, in the log and on GitHub alike, is only what this file
   // wrote or checked: the reason, and the type and item when they are ones it knows. The action's
   // own text never goes in: it may carry the very credential it was refused for, or a mention, a
@@ -244,16 +269,15 @@ export async function publish(resultFile, dir, { repo, fetch: fetchImpl = fetch,
   for (const r of refused) console.error(`refused: ${shown(r.action)}: ${r.reason}`);
   const worth = refused.filter((r) => !ALREADY.includes(r.reason));
   const handoff = items.find((i) => i.labels.includes('handoff'));
+  // Its own comment, under its own key, so that a retry after a partial publish finds it posted.
   if (worth.length && handoff) {
     const note = `The runner refused ${worth.length} action(s) the orchestrator asked for:\n`
       + worth.map((r) => `- ${shown(r.action)}: ${r.reason}`).join('\n');
-    const own = accepted.find((a) => a.type === 'comment' && a.number === handoff.number);
-    const key = `refused@${digest.slice(0, 16)}`;
-    if (own) own.body = `${own.body}\n\n${note}`;
-    else if (!vetActions({ actions: [{ type: 'comment', number: handoff.number, key, body: note }] }, items).refused.length) {
-      accepted.push({ type: 'comment', number: handoff.number, key, body: note });
-    }
+    const own = { type: 'comment', number: handoff.number, key: `refused@${digest.slice(0, 16)}`, body: note };
+    const posted = (handoff.comments ?? []).some((c) => c.author?.id === ORCHESTRATOR_ID && c.body?.includes(markerFor(own.key)));
+    if (!posted) accepted.push(own);
   }
+  lastCheck(accepted, secretList);
   const { gh } = client(repo, fetchImpl, token);
   for (const a of accepted) {
     const base = `{repo}/issues/${a.number}`;
@@ -265,12 +289,14 @@ export async function publish(resultFile, dir, { repo, fetch: fetchImpl = fetch,
   // The labels just moved are the orchestrator's own writes, and the digest leaves those out: the
   // one the script records is taken from the board as this pass left it, or the next pass would
   // wake to its own label and answer it.
+  // A label added is also a claim's start, as the next snapshot will read it from the timeline.
   for (const a of accepted) {
     const item = items.find((i) => i.number === a.number);
-    if (a.type === 'add_label') item.labels.push(a.label);
-    if (a.type === 'remove_label') item.labels = item.labels.filter((l) => l !== a.label);
+    const event = { label: { name: a.label }, actor: { id: ORCHESTRATOR_ID }, created_at: readAt };
+    if (a.type === 'add_label') { item.labels.push(a.label); item.timeline = [...(item.timeline ?? []), { event: 'labeled', ...event }]; }
+    if (a.type === 'remove_label') { item.labels = item.labels.filter((l) => l !== a.label); item.timeline = [...(item.timeline ?? []), { event: 'unlabeled', ...event }]; }
   }
-  writeFileSync(join(dir, 'digest'), boardDigest(items, Date.parse(readAt)));
+  writeFileSync(join(dir, 'digest'), boardDigest(items, now, listed));
   return accepted.length;
 }
 
@@ -280,7 +306,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   const [cmd, a, b] = process.argv.slice(2);
   const repo = process.env.REPO;
   if (!repo) { console.error('REPO is not set'); process.exit(2); }
-  if (cmd === 'snapshot') process.exit((await snapshot(a, { repo })) ? 3 : 0);
+  // The ids crew/accounts.md lists, read by the script from the fresh clone.
+  const listed = (process.env.LISTED ?? '').split(',').filter(Boolean).map(Number);
+  if (cmd === 'snapshot') process.exit((await snapshot(a, { repo, listed })) ? 3 : 0);
   else if (cmd === 'publish') console.log(`${await publish(a, b, { repo, secrets: [process.env.CLAUDE_CODE_OAUTH_TOKEN] })} applied`);
   else { console.error('usage: REPO=<owner/name> board.js snapshot <dir> | publish <result.json> <dir>'); process.exit(2); }
 }

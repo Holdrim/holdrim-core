@@ -16,7 +16,7 @@ ORCHESTRATOR_ID=333497607
 WORK=${WORK_DIR:-/work}
 STATE=${STATE_DIR:-/home/crew/.state}
 HERE=$(cd "$(dirname "$0")" && pwd)
-as_crew() { setpriv --reuid=crew --regid=crew --init-groups env HOME=/home/crew REPO="$REPO" "$@"; }
+as_crew() { setpriv --reuid=crew --regid=crew --init-groups env HOME=/home/crew REPO="$REPO" LISTED="${LISTED:-}" "$@"; }
 
 # Either passed in (docker run --env-file) or left by setup.sh in the container's volumes
 # (docker compose); the checks below apply the same way to both.
@@ -43,6 +43,7 @@ as_crew git clone --quiet "https://github.com/$REPO" "$WORK/holdrim-core"
 # takes effect on the next pass; an id missing from it means the owner withdrew the account.
 grep -q "| $ORCHESTRATOR_ID |" "$WORK/holdrim-core/crew/accounts.md" \
   || { echo "not listed in crew/accounts.md: not starting"; exit 1; }
+LISTED=$(grep -oE '^\| @[^|]+ \| [0-9]+ \|' "$WORK/holdrim-core/crew/accounts.md" | grep -oE '[0-9]+' | paste -sd, -)
 
 code=0; as_crew node "$HERE/board.js" snapshot "$WORK/board" || code=$?
 if [ "$code" = 3 ]; then echo "paused by the owner: nothing done"; exit 0; fi
@@ -62,7 +63,8 @@ fi
 cd "$WORK"
 proxy=()
 for v in HTTPS_PROXY HTTP_PROXY NO_PROXY NODE_EXTRA_CA_CERTS; do [ -n "${!v:-}" ] && proxy+=("$v=${!v}"); done
-setpriv --reuid=model --regid=model --init-groups --no-new-privs env -i HOME=/home/model PATH="$PATH" "${proxy[@]}" \
+case "${proxy[*]:-}" in *://*@*) echo "a proxy URL carries credentials, which would be visible in /proc: not starting"; exit 1 ;; esac
+setpriv --reuid=model --regid=model --init-groups --no-new-privs env -i HOME=/home/model PATH="$PATH" ${proxy[@]+"${proxy[@]}"} \
   bash -c 'IFS= read -r CLAUDE_CODE_OAUTH_TOKEN; export CLAUDE_CODE_OAUTH_TOKEN; exec claude "$@"' model \
   -p "You play the orchestrator role in the Holdrim crew, as one unattended pass.
 Read holdrim-core/crew/README.md, holdrim-core/crew/orchestrator.md, holdrim-core/crew/autonomy.md
@@ -88,8 +90,9 @@ answer {\"actions\": []}." \
 
 applied=$(as_crew node "$HERE/board.js" publish "$WORK/result.json" "$WORK/board")
 echo "$applied"
-# The digest leaves out the orchestrator's own writes, so a pass whose only changes were its own
-# may record it: the next pass then skips the model unless someone else moved. A pass whose answer
+# publish has just rewritten board/digest from the board as this pass left it, and the digest
+# leaves out the orchestrator's own writes, so the next pass skips the model unless someone else
+# moved. A pass whose answer
 # was missing or unreadable stops at the line above (set -e) and never records it, so the next pass
 # asks again.
 cp "$WORK/board/digest" "$STATE/board-digest"
