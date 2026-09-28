@@ -12,9 +12,10 @@ import { log } from './log.ts';
  * The event type a removal is recorded as. Written only by `EventStore.removeText`, which deletes
  * the row and records this event as one step — never by the general POST /events path: that path
  * validates against `EVENT_TYPES` (engine/api/types.ts), and this name is deliberately not in it.
- * The right door for a person to ask for a removal, with its own permission and audit story, is a
- * later issue; a client that could freely claim "this was removed" would only pollute the trail
- * through the API, where nothing but `removeText` can also make the row agree with the claim.
+ * The one door that reaches it is the owner's removal of a person, at their request, from the
+ * settings screen (`removePerson`, engine/api/person-removal.ts); a client that could freely claim
+ * "this was removed" would only pollute the trail through the API, where nothing but `removeText`
+ * can also make the row agree with the claim.
  *
  * ⚠️ That is the API's protection, not the file's. SQLite's guards (`texts_no_update`,
  * `texts_no_replace`, `texts_no_delete` in store-sqlite.ts) refuse an UPDATE, a REPLACE and a bare
@@ -111,9 +112,16 @@ export function saltFields(event: { text?: string | null; snapshot?: string | nu
   return { hashes, rows };
 }
 
+/**
+ * What `noText` throws: its own class, so a caller that removes many texts in a row (removing a
+ * person, `engine/api/person-removal.ts`) tells "this one was already gone" from a store failing by
+ * the class, never by matching the message.
+ */
+export class NoText extends Error {}
+
 /** The one error every store gives for a field with nothing to remove, so a caller matches one text. */
 export function noText(event: string, field: TextField): Error {
-  return new Error(`no ${field} to remove on event ${event}: it was never given, or is already gone`);
+  return new NoText(`no ${field} to remove on event ${event}: it was never given, or is already gone`);
 }
 
 /**

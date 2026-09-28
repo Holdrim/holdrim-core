@@ -23,7 +23,7 @@ import { MemoryEventStore } from '../api/store.ts';
 import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { PERSON_ID } from '../api/people.ts';
 import { createRoles } from '../core/roles.js';
-import { hashText, newSalt, TEXT_REMOVED } from '../api/texts.ts';
+import { hashText, newSalt, TEXT_REMOVED, NoText } from '../api/texts.ts';
 import { openFindings, acknowledgementOf } from '../api/tamper.ts';
 
 const stores = [
@@ -243,6 +243,9 @@ forEachStore('removeText refuses a field already removed: nothing to remove twic
   const answered = await s.append({ type: 'comment', page: 'A01', text: 'once' }, 'r@example.org');
   await s.removeText(answered.id, 'text', 'owner@example.org');
   await assert.rejects(s.removeText(answered.id, 'text', 'owner@example.org'), /no text to remove/);
+  // As its own class, from every store: removing a person (engine/api/person-removal.ts) goes on past
+  // a text already gone, and stops on anything else, by this and never by the message.
+  await assert.rejects(s.removeText(answered.id, 'text', 'owner@example.org'), NoText);
   // The refusal has to mean it: a second, silently recorded removal would be a duplicate fact for
   // one field let go once. `removeText` writes the removal event BEFORE the delete (so the SQLite
   // guard that requires one already sees it — store-sqlite.ts, `texts_no_delete`), so this second

@@ -96,12 +96,14 @@
     "decision_reply",
     "grant_revoked",
     "lock_baseline",
+    "person_removed",
     "request",
     "request_state",
     "role_defined",
     "role_granted",
     "supplement",
-    "tamper_acknowledged"
+    "tamper_acknowledged",
+    "text_removed"
   ],
   "event-fields": [
     "author",

@@ -1,5 +1,5 @@
 import {
-  AddressInUse, UserStoreBase, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
+  AddressInUse, UserStoreBase, type RemovedChange, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
 } from './users.ts';
 
 /**
@@ -73,6 +73,9 @@ export class UsersPostgres extends UserStoreBase {
         created_at  TEXT NOT NULL,
         enabled     BOOLEAN NOT NULL DEFAULT TRUE
       )`);
+    // Added after the table first shipped, so a database an earlier version made is given it here.
+    // TRUE marks an account closed by a person's removal.
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS removed BOOLEAN NOT NULL DEFAULT FALSE');
     // `id` holds the SHA-256 of the cookie's session id, never the id: users-sqlite.ts says why.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sessions (
@@ -155,9 +158,9 @@ export class UsersPostgres extends UserStoreBase {
         throw new AddressInUse(row.email, 'agentToken');
       }
       await q(
-        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled) '
-        + 'VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled]);
+        'INSERT INTO users (email, name, salt, hash, must_change, created_at, enabled, removed) '
+        + 'VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+        [row.email, row.name, row.salt, row.hash, row.mustChangePassword, row.createdAt, row.enabled, row.removed === true]);
     });
   }
 
@@ -179,6 +182,19 @@ export class UsersPostgres extends UserStoreBase {
 
   protected async writeName(email: string, name: string): Promise<void> {
     await this.#query('UPDATE users SET name = $1 WHERE email = $2', [name, email]);
+  }
+
+  protected async writeRemoved(email: string, change: RemovedChange): Promise<boolean> {
+    // In the address's turn, as creating an account is: an account created for the address while this
+    // runs lands before or after it, never half-way through.
+    return this.#inAddressTurn(email, async (q) => {
+      await q('DELETE FROM sessions WHERE email = $1', [email]);
+      const moved = await q(
+        'UPDATE users SET email = $1, name = COALESCE($2::text, name), salt = COALESCE($3::bytea, salt), '
+        + 'hash = COALESCE($4::bytea, hash), enabled = FALSE, removed = TRUE WHERE email = $5 RETURNING email',
+        [change.key, change.name ?? null, change.salt ?? null, change.hash ?? null, email]);
+      return moved.rows.length === 1;
+    });
   }
 
   protected async writeCredential(
@@ -325,7 +341,7 @@ function rowToUser(r: Record<string, unknown>): StoredUser {
     email: r.email as string, name: r.name as string,
     salt: Buffer.from(r.salt as Uint8Array), hash: Buffer.from(r.hash as Uint8Array),
     mustChangePassword: !!r.must_change, createdAt: r.created_at as string,
-    enabled: !!r.enabled,
+    enabled: !!r.enabled, removed: !!r.removed,
   };
 }
 

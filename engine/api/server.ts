@@ -22,7 +22,8 @@ import { renderLoginPage, signInPolicy, screenPolicy } from './login-page.ts';
 import { withPanelNonce, pagePolicy, FILE_POLICY } from './content-policy.ts';
 import { renderHomePage, summarisePages, requestsInProgress, HOME_SECTION, type HomeOutcome } from './home-page.ts';
 import { renderPeoplePage } from './people-page.ts';
-import { renderSettingsPage, composeLock, ROLE_ACTIONS, isRoleAction, type SettingsData } from './settings-page.ts';
+import { renderSettingsPage, composeLock, SETTINGS_ACTIONS, isSettingsAction, type SettingsData } from './settings-page.ts';
+import { removePerson, type RemovalOutcome } from './person-removal.ts';
 import { HOME_SCREEN, PEOPLE_SCREEN, SETTINGS_SCREEN } from '../core/screens.js';
 import { readBlocks, ofProject } from '../cli/pages.ts';
 import { loadRegistry } from '../cli/validation.ts';
@@ -862,8 +863,14 @@ async function recordEvent(
 // before it reads what was sent; what follows is the one set of checks both then share, so the
 // screen cannot accept what the API refuses.
 
-/** What a role operation answered: the event it wrote, or the sentence that says why not. */
-interface RoleOutcome { status: number; event?: Event; key?: string; params?: Record<string, string | number> }
+/**
+ * What a role operation answered: the event it wrote, or the sentence that says why not. `counts`,
+ * numbers only, travel on the redirect back to the screen, for it to say what a write left behind.
+ */
+interface RoleOutcome {
+  status: number; event?: Event; key?: string; params?: Record<string, string | number>;
+  counts?: Record<string, number>;
+}
 
 /**
  * Defines a role, or redefines it in place: the latest `role_defined` is the role, every grant of it
@@ -1719,10 +1726,11 @@ async function servePeople(req: IncomingMessage, res: ServerResponse) {
  * reads the session only, so an agent token never reaches here, whatever it carries.
  *
  * Its forms post back here, and are refused from anywhere but this server's own page, as the home's
- * forms are (`sameOrigin`). Three of them write, each through the same function its API route calls
- * (`defineRole`, `grantRole`, `revokeGrant`), and answer with a redirect back, so a reload posts
+ * forms are (`sameOrigin`). Four of them write — three through the same function their API routes
+ * call (`defineRole`, `grantRole`, `revokeGrant`), and the removal of a person through
+ * `removeFromSettings`, which has no API route — and answer with a redirect back, so a reload posts
  * nothing twice; a refusal draws the screen again with the reason, what was typed, and the status
- * the API would have answered. The fourth, the lock composer, writes nothing: its answer is a line of
+ * the API would have answered. The fifth, the lock composer, writes nothing: its answer is a line of
  * text, and every value it reads is what start already parsed (`project`, `lockScopes`). The site's
  * blocks are read afresh, and only when a scope needs measuring against them — the pages a commit
  * moved since start are what the owner is asking about.
@@ -1740,14 +1748,17 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
   const state = await projectRolesNow();
   let edit: SettingsData['edit'];
   let status = 200;
-  if (form && isRoleAction(action)) {
+  if (form && isSettingsAction(action)) {
     const outcome = action === 'define'
       ? await defineRole(viewer, { role: form.get('role'), capabilities: form.getAll('capability') })
       : action === 'grant'
         ? await grantRole(viewer, { email: form.get('email'), role: form.get('role'), scope: form.get('scope') })
-        : await revokeGrant(viewer, form.get('grant') ?? '', state);
+        : action === 'revoke'
+          ? await revokeGrant(viewer, form.get('grant') ?? '', state)
+          : await removeFromSettings(viewer, form);
     if (outcome.event) {
-      res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}#${ROLE_ACTIONS[action]}` });
+      const counts = Object.entries(outcome.counts ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `&${k}=${n}`).join('');
+      res.writeHead(303, { location: `${SETTINGS_SCREEN}?done=${action}${counts}#${SETTINGS_ACTIONS[action]}` });
       return res.end();
     }
     edit = {
@@ -1758,7 +1769,7 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
     status = outcome.status;
   }
   const roles = await rolesAt(viewer, state);
-  const composing = asked && !isRoleAction(action);
+  const composing = asked && !isSettingsAction(action);
   const email = composing ? form!.get('email') ?? '' : '';
   const scope = composing ? form!.get('scope') ?? '' : '';
   const blockIds = lockScopes.length || composing ? [...(await readBlocks(projectRoot)).keys()] : [];
@@ -1794,10 +1805,41 @@ async function serveSettings(req: IncomingMessage, res: ServerResponse, url: URL
       roles: [...state.roles.values()].map((d) => ({ role: d.role, capabilities: d.capabilities, when: d.when })),
       grants, ended: state.ended.length,
     },
-    edit, done: isRoleAction(done) && !asked ? done : undefined,
+    edit, done: isSettingsAction(done) && !asked ? done : undefined, byPassword: byPassword !== null,
+    // Counts only, read as whole numbers: anything else in the URL is nobody's to show.
+    removedLeft: countParam(url, 'left'), removedLegacy: countParam(url, 'legacy'),
     compose: composing ? { email, scope, result: composeLock(lockScopes, { email, scope }, blockIds, deployment) } : undefined,
     features: project.features, peopleShow: project.peopleShow, namedInFile: project.namedInFile,
   }, projectTheme, nonce));
+}
+
+/**
+ * The settings screen's removal of a person (docs/PRIVACY.md, section 5), for the owner, whom
+ * `serveSettings` has already checked, by session only — an agent token never reaches a screen.
+ *
+ * No API route, on purpose: the one door is this form, posted from this server's own page, with a
+ * box the owner ticks. A route would be a second door to guard for an act that cannot be undone,
+ * and one a script could walk through by mistake. The log line names the person and the owner by id,
+ * never an address: the address is exactly what was just let go of.
+ */
+async function removeFromSettings(viewer: string, form: URLSearchParams): Promise<RoleOutcome> {
+  const outcome: RemovalOutcome = await removePerson(
+    { events, users: byPassword?.users ?? null, deployment, by: viewer, byAgent: deployment.isAgent(viewer) },
+    { email: form.get('email'), confirmed: form.get('confirm') === 'yes' },
+  );
+  if (outcome.status !== 201) return outcome;
+  const { person, texts, textsTampered, textsInline, legacyEvents, grants, account } = outcome.removal;
+  log('INFO', 'person_removed', {
+    id: outcome.event.id, person, texts, textsTampered, textsInline, legacyEvents, grants, account, by: await idForLog(viewer),
+  });
+  // What the removal could not let go of, for the screen to say rather than a bare success.
+  return { status: 201, event: outcome.event, counts: { left: textsTampered + textsInline, legacy: legacyEvents } };
+}
+
+/** A whole number the screen's own redirect put in the URL, or 0 for anything else. */
+function countParam(url: URL, name: string): number {
+  const value = url.searchParams.get(name) ?? '';
+  return /^[1-9][0-9]{0,6}$/.test(value) ? Number(value) : 0;
 }
 
 /**

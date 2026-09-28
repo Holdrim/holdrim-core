@@ -894,9 +894,10 @@ node -e '
   fs.writeFileSync(path, JSON.stringify(config, null, 2));
 ' "$PSHOW_SITE/holdrim.json"
 # sqlite, not the local default of memory: round 1 of this review's finding 1 needs a text actually
-# REMOVED, through `EventStore.removeText` — no route calls it yet (texts.ts's own comment on
-# `TEXT_REMOVED` says why), so this reaches the store directly, on the same file the server has
-# open, the way the CLI already does against a live server (store-sqlite.ts's WAL comment).
+# REMOVED, through `EventStore.removeText` — whose one caller is the owner's removal of a whole
+# person (`removePerson`), more than this needs — so this reaches the store directly, on the same file
+# the server has open, the way the CLI already does against a live server (store-sqlite.ts's WAL
+# comment).
 PSHOW_DATA=$(mktemp -d)
 HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_ADMINS=$LEAD HOLDRIM_DEV_EMAIL= PORT=$PORT \
   HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$PSHOW_DATA/events.db \
@@ -2612,7 +2613,72 @@ ROLES_SCREEN=$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engi
 expect "the screen shows the forgotten person's grant by id, never the address" "0 1" \
   "$(echo "$ROLES_SCREEN" | has -F "<tr><td>$FORGOT_ID</td>"; echo $?) $(echo "$ROLES_SCREEN" | has -F "$FORGOT"; echo $?)"
 expect "and the address, seen again, holds nothing" "false false" "$(may_on $FORGOT A01 A01.1.1)"
+# Removing a person where no account exists (#37): behind an identity proxy — the development
+# identity here — the texts, the grants and the row go all the same, and the screen says the proxy is
+# where the address has to go first.
+expect "removing an address HOLDRIM_AGENTS names → 409, naming the variable" 0 \
+  "$(curl -s -H "X-Dev-Email: $OWNER" -H "Origin: $B" -H 'Accept-Language: en' --data-urlencode action=remove --data-urlencode "email=$LATER" --data-urlencode confirm=yes $B/engine/settings | has -F "$(r_say api.removal.namedByDeployment email=$LATER variable=HOLDRIM_AGENTS)"; echo $?)"
+expect "the screen tells the owner to take the address out of the proxy first" 0 \
+  "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' $B/engine/settings | has -F "$(r_say settings.remove.proxy)"; echo $?)"
+expect "(the person to remove holds grants, and filed a request with a text)" "true from a grant with no scope" \
+  "$(may_on $WIDE A01 A01.1.2 | cut -d' ' -f1) $(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$WIDE_REQUEST" | jfield text)"
+expect "the owner removes them, with no account to empty → 303" 0 \
+  "$(settings_post $OWNER --data-urlencode action=remove --data-urlencode "email=$WIDE" --data-urlencode confirm=yes | has -F 'location: /engine/settings?done=remove#settings-remove'; echo $?)"
+expect "their request stays, without its text" "request " \
+  "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/$WIDE_REQUEST" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s);console.log(e.type+' '+(e.text??''))})")"
+expect "and the event says two grants were revoked, and no account emptied" "2 false" \
+  "$(curl -s -H "X-Dev-Email: $OWNER" "$B/api/events?page=_people" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s).filter(x=>x.type==='person_removed').pop();console.log(e.data.grants+' '+e.data.account)})")"
+expect "and the address, seen again, holds none of them" "false false" "$(may_on $WIDE A01 A01.1.2)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$ROLES_DIR"
+
+# Removing a person from a store an older version wrote (#37): a ✓ and a comment whose author is the
+# address itself, from before authors were ids, the ✓ given by the owner this version first started
+# under, and the comment's text held inside the event. Built the way such a file is: rows first, then
+# this version's first start (which writes the lock baseline), then a handover.
+echo "removing a person from a store an older version wrote (#37):"
+OLDER_DIR=$(mktemp -d); OLOG=$WORK/older.log
+FORMER=former@example.org; ELDER=elder@example.org
+node --no-warnings --input-type=module -e "
+  const { SqliteEventStore } = await import('./engine/api/store-sqlite.ts');
+  const { DatabaseSync } = await import('node:sqlite');
+  await new SqliteEventStore(process.argv[1]).close();
+  const db = new DatabaseSync(process.argv[1]);
+  const insert = db.prepare('INSERT INTO events (id, type, page, block, fingerprint, text, author, happened_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  insert.run('older-approval', 'approval', 'A01', 'A01.1.1', 'f', null, process.argv[2], '2025-01-01T00:00:00.000Z', null);
+  insert.run('older-comment', 'comment', 'A01', 'A01.1.1', null, 'my old phone number', process.argv[3], '2025-01-01T00:00:01.000Z', '{}');
+  db.close();" "$OLDER_DIR/events.db" "$FORMER" "$ELDER"
+start_older() {
+  HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$1 HOLDRIM_DEV_EMAIL= PORT=$PORT HOLDRIM_SITE="$SITE" \
+    HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH=$OLDER_DIR/events.db \
+    node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >>$OLOG 2>&1 & PID=$!
+  for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
+}
+start_older $FORMER
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+start_older $OWNER
+older_lock() { curl -s -H "X-Dev-Email: $OWNER" "$B/api/events/older-approval" | jfield locks; }
+older_post() { curl -s -H "X-Dev-Email: $OWNER" -H "Origin: $B" -H 'Accept-Language: en' --data-urlencode action=remove --data-urlencode confirm=yes "$@" $B/engine/settings; }
+expect "(the former owner's ✓ from before this version is a lock, through the baseline)" true "$(older_lock)"
+expect "removing the former owner while that ✓ names their address → 409, saying why" "409 0" \
+  "$(older_post -o /dev/null -w '%{http_code}' --data-urlencode "email=$FORMER") $(older_post --data-urlencode "email=$FORMER" | has -F "$(r_say api.removal.holdsOldLocks email=$FORMER)"; echo $?)"
+# After a restart: the server reads the baseline once, at start, so only a fresh one would see a
+# row forgotten beneath it.
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+start_older $OWNER
+expect "and their ✓ is still a lock, after a restart" true "$(older_lock)"
+expect "removing somebody only older events name → 409, saying nothing can be let go of" "409 0" \
+  "$(older_post -o /dev/null -w '%{http_code}' --data-urlencode "email=$ELDER") $(older_post --data-urlencode "email=$ELDER" | has -F "$(r_say api.removal.onlyOlderEvents email=$ELDER)"; echo $?)"
+expect "(they comment again, on this version)"  201 "$(post $ELDER '{"type":"comment","page":"A01","block":"A01.1.1","text":"a newer comment"}')"
+expect "removing them now → 303, saying what was left" 0 \
+  "$(older_post -D- -o /dev/null --data-urlencode "email=$ELDER" | tr -d '\r' | has -F 'location: /engine/settings?done=remove&left=1&legacy=1#settings-remove'; echo $?)"
+expect "the screen says a text could not be removed, and an older event still names the address" "0 0" \
+  "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' "$B/engine/settings?done=remove&left=1&legacy=1" | has -F "$(r_say settings.remove.left count=1)"; echo $?) $(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' "$B/engine/settings?done=remove&left=1&legacy=1" | has -F "$(r_say settings.remove.legacy count=1)"; echo $?)"
+# Each shape a number can take that is not a count: negative, a fraction, an exponent, markup.
+for NOT_A_COUNT in '-1' '1.5' '1e9' '%3Cb%3E' '12345678' '01'; do
+  expect "and a count of $NOT_A_COUNT is shown as nothing" 1 \
+    "$(curl -s -H "X-Dev-Email: $OWNER" -H 'Accept-Language: en' "$B/engine/settings?done=remove&left=$NOT_A_COUNT" | has -F 'could not be removed'; echo $?)"
+done
+kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$OLDER_DIR"
 
 # ------------------------------------------------------------------ an agent's token of its own
 # Issue #122, docs/ROLES.md section 4. Its own server, under password sign-in — the only identity
@@ -2910,6 +2976,94 @@ expect "and the log names the revocation and who made it, by id" "$OWNER_LOG_ID"
 expect "revoking again finds nothing → 404"      404 "$(revoke t_owner)"
 expect "and the list is empty of it"             "" "$(t_owner $B/api/agent-tokens | jfield agents.0.email)"
 expect "no secret of either token in the log"    0 "$(grep -Fc -e "$BOT_SECRET" -e "${REISSUED##*_}" $TLOG)"
+
+# Removing a person, at their request (#37, docs/PRIVACY.md section 5), from the settings screen:
+# here, on this server, because only password sign-in has an account to empty, and this one has an
+# admin, a lock-holder and the agent tokens to be refused. Every refusal is proved through the form
+# itself, the one door the removal has.
+echo "removing a person, at their request, from the settings screen (#37):"
+LEAVER=leaver@example.org; LEAVER_COOKIES=$WORK/leaver.txt
+LEAVER_PASSWORD=$(t_owner -d "{\"email\":\"$LEAVER\",\"name\":\"Lea Vermeer\"}" $B/api/users | jfield password)
+require_id "$LEAVER_PASSWORD" LEAVER_PASSWORD
+t_signin $LEAVER_COOKIES $LEAVER "$LEAVER_PASSWORD"
+t_leaver() { curl -s -b $LEAVER_COOKIES -H 'Content-Type: application/json' -H 'Accept-Language: en' "$@"; }
+LEAVER_COMMENT=$(t_leaver -d '{"type":"comment","page":"A01","block":"A01.1.1","text":"call me on 555-0100"}' $B/api/events | jfield id)
+require_id "$LEAVER_COMMENT" LEAVER_COMMENT
+LEAVER_GRANT=$(t_owner -d "{\"email\":\"$LEAVER\",\"role\":\"reviewer\"}" $B/api/grants | jfield id)
+require_id "$LEAVER_GRANT" LEAVER_GRANT
+LEAVER_ID=$(log_field $TLOG role_granted person)
+require_id "$LEAVER_ID" LEAVER_ID
+# `$1` the cookie jar, the rest the form's fields. The status line and the location, or the page.
+remove_as() { curl -s -b "$1" -D- -o /dev/null -H "Origin: $B" -H 'Accept-Language: en' --data-urlencode action=remove "${@:2}" $B/engine/settings | tr -d '\r'; }
+removal_page() { curl -s -b $TOC -w '\n%{http_code}' -H "Origin: $B" -H 'Accept-Language: en' --data-urlencode action=remove "$@" $B/engine/settings; }
+# The status, and whether the page carries the sentence — the sentence names which refusal fired.
+refused_with() { local page; page=$(removal_page "${@:2}"); echo "$(echo "$page" | tail -1) $(echo "$page" | has -F "$1"; echo $?)"; }
+expect "an admin's post is sent home, and removes nothing" 0 \
+  "$(remove_as $TAC --data-urlencode "email=$LEAVER" --data-urlencode confirm=yes | has -i '^location: /engine/home'; echo $?)"
+expect "a post from another site → 403" 403 \
+  "$(curl -s -b $TOC -o /dev/null -w '%{http_code}' -H 'Origin: https://elsewhere.example' --data-urlencode action=remove --data-urlencode "email=$LEAVER" --data-urlencode confirm=yes $B/engine/settings)"
+expect "and one that names no origin → 403" 403 \
+  "$(curl -s -b $TOC -o /dev/null -w '%{http_code}' --data-urlencode action=remove --data-urlencode "email=$LEAVER" --data-urlencode confirm=yes $B/engine/settings)"
+expect "without the box ticked → 400, saying why" "400 0" \
+  "$(refused_with "$(r_say api.removal.unconfirmed)" --data-urlencode "email=$LEAVER")"
+expect "with the box sent as anything but yes → 400" "400 0" \
+  "$(refused_with "$(r_say api.removal.unconfirmed)" --data-urlencode "email=$LEAVER" --data-urlencode confirm=on)"
+expect "the owner cannot remove themselves → 409, as the owner" "409 0" \
+  "$(refused_with "$(r_say api.removal.notTheOwner)" --data-urlencode "email=$OWNER" --data-urlencode confirm=yes)"
+expect "nor an admin HOLDRIM_ADMINS names → 409, naming the variable" "409 0" \
+  "$(refused_with "$(r_say api.removal.namedByDeployment email=$T_ADMIN variable=HOLDRIM_ADMINS)" --data-urlencode "email=$T_ADMIN" --data-urlencode confirm=yes)"
+expect "and the refused form has the address back in it, and its box unticked" "1 0" \
+  "$(removal_page --data-urlencode "email=$T_ADMIN" --data-urlencode confirm=yes | sed -n '/<form[^>]*settings-remove/,/<\/form>/p' | grep -c -e "name=\"email\" type=\"email\" required autocomplete=\"off\" value=\"$T_ADMIN\"") $(removal_page --data-urlencode "email=$T_ADMIN" --data-urlencode confirm=yes | sed -n '/<form[^>]*settings-remove/,/<\/form>/p' | grep -c ' checked')"
+expect "nor a lock-holder HOLDRIM_LOCKS names → 409, naming it" "409 0" \
+  "$(refused_with "$(r_say api.removal.namedByDeployment email=$T_LOCKED variable=HOLDRIM_LOCKS)" --data-urlencode "email=$T_LOCKED" --data-urlencode confirm=yes)"
+LEAVING_BOT=leaving-bot@example.org
+expect "(the owner issues an agent a token)"     201 "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$LEAVING_BOT\"}" $B/api/agent-tokens)"
+expect "nor an address holding an agent token → 409, until it is revoked" "409 0" \
+  "$(refused_with "$(r_say api.removal.holdsAgentToken email=$LEAVING_BOT)" --data-urlencode "email=$LEAVING_BOT" --data-urlencode confirm=yes)"
+expect "(the token is revoked)"                  200 "$(t_owner -o /dev/null -w '%{http_code}' -X POST $B/api/agent-tokens/$LEAVING_BOT/revoke)"
+expect "so far nothing went: they are signed in, and their comment reads" "200 call me on 555-0100" \
+  "$(t_leaver -o /dev/null -w '%{http_code}' $B/api/me) $(t_owner $B/api/events/$LEAVER_COMMENT | jfield text)"
+# A removal a failure stopped after its first step leaves the account closed, keyed by its address:
+# staged by closing it the way that step does, on the file the server has open.
+STOPPED=stopped@example.org
+expect "(an account whose removal stopped after its first step)" 201 \
+  "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$STOPPED\",\"name\":\"Stopped Half-way\"}" $B/api/users)"
+node --no-warnings --input-type=module -e "
+  const { UsersSqlite } = await import('./engine/api/users-sqlite.ts');
+  const users = new UsersSqlite(process.argv[1]); await users.closeAccount(process.argv[2]); await users.close();" \
+  "$TOKEN_DIR/users.db" "$STOPPED"
+expect "an admin cannot create an account on its address meanwhile → 400, as taken" "400 $(say_en api.users.emailTaken $STOPPED)" \
+  "$(t_admin -w '\n%{http_code}' -d "{\"email\":\"$STOPPED\",\"name\":\"Somebody Else\"}" $B/api/users | { read -r body; read -r code; echo "$code $(echo "$body" | jfield error)"; })"
+expect "nor reset or re-enable what is left of it → 404, 404" "404 404" \
+  "$(t_admin -o /dev/null -w '%{http_code}' -X POST $B/api/users/$STOPPED/password) $(t_admin -o /dev/null -w '%{http_code}' -d '{"enabled":true}' $B/api/users/$STOPPED/enabled)"
+expect "under password sign-in, the screen draws no note about a proxy" 1 \
+  "$(t_owner $B/engine/settings | has -F "$(r_say settings.remove.proxy)"; echo $?)"
+expect "the owner removes them → 303, back to the screen, saying so" 0 \
+  "$(remove_as $TOC --data-urlencode "email=$LEAVER" --data-urlencode confirm=yes | has -F 'location: /engine/settings?done=remove#settings-remove'; echo $?)"
+expect "and the screen says it was done" 0 \
+  "$(t_owner "$B/engine/settings?done=remove" | has -F "$(r_say settings.remove.done)"; echo $?)"
+expect "their open session is gone → 401"        401 "$(t_leaver -o /dev/null -w '%{http_code}' $B/api/me)"
+expect "their password opens nothing → 401"      401 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"email\":\"$LEAVER\",\"password\":\"$LEAVER_PASSWORD\"}" $B/api/sign-in)"
+expect "the people list names them no more, by address or by name" 0 "$(t_owner $B/api/users | grep -Fc -e "$LEAVER" -e 'Lea Vermeer')"
+expect "nor does the people screen"              0 "$(t_owner $B/engine/people | grep -Fc -e "$LEAVER" -e 'Lea Vermeer')"
+# `Owner`: the owner's account's name, as the owner is always shown people (docs/ROLES.md, section 6).
+expect "their comment stays, without its text, which the owner let go of" "comment  Owner" \
+  "$(t_owner $B/api/events/$LEAVER_COMMENT | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const e=JSON.parse(s);console.log([e.type,e.text??'',e.textRemoved?.by].join(' '))})")"
+expect "and it names them by their id, never the address" "$LEAVER_ID" "$(t_owner $B/api/events/$LEAVER_COMMENT | jfield author)"
+expect "their grant is revoked, by a later event" 1 \
+  "$(t_owner "$B/api/events?page=_roles" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(e=>e.type==='grant_revoked'&&e.data.grant===process.argv[1]).length))" "$LEAVER_GRANT")"
+expect "one person_removed on _people, by the owner, with ids and counts only" "$LEAVER_ID 1 0 0 0 1 true false true false" \
+  "$(t_owner "$B/api/events?page=_people" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s).filter(e=>e.type==='person_removed');const e=r[0]||{data:{}};console.log([e.data.person,e.data.texts,e.data.textsTampered,e.data.textsInline,e.data.legacyEvents,e.data.grants,e.data.account,e.data.asAgent,e.own,JSON.stringify(e.data).includes('@')].join(' ')+(r.length===1?'':' x'+r.length))})")"
+expect "and the log says so by ids, the owner's and theirs" "$LEAVER_ID $OWNER_LOG_ID" \
+  "$(log_field $TLOG person_removed person) $(log_field $TLOG person_removed by)"
+expect "never by the address"                    0 "$(grep '"event":"person_removed"' $TLOG | grep -Fc "$LEAVER")"
+expect "a second run finds nobody → 404"         "404 0" \
+  "$(refused_with "$(r_say api.removal.nobody email=$LEAVER)" --data-urlencode "email=$LEAVER" --data-urlencode confirm=yes)"
+expect "POST /events will not write a person_removed, even from the owner → 400" "400 $(say_en api.event.unknownType)" \
+  "$(t_owner -w '\n%{http_code}' -d "{\"type\":\"person_removed\",\"page\":\"A01\",\"data\":{\"person\":\"$LEAVER_ID\"}}" $B/api/events | { read -r body; read -r code; echo "$code $(echo "$body" | jfield error)"; })"
+expect "the address is free again: an account made for it is somebody new" 201 \
+  "$(t_owner -o /dev/null -w '%{http_code}' -d "{\"email\":\"$LEAVER\",\"name\":\"Somebody new\"}" $B/api/users)"
 
 # A token's address can come to hold a grant after the token was issued, by a restart with a new
 # HOLDRIM_ADMINS or HOLDRIM_OWNER — the one path issuance itself cannot refuse. The token has to

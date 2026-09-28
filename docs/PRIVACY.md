@@ -114,52 +114,64 @@ commit, with its own history.
 
 ### 5. Removing a person: anonymised, never deleted
 
-"People are disabled, never deleted" stays. Once there is a screen for it ("Removing a person, from
-the people screen" below), the owner gains one step, at the person's request:
+"People are disabled, never deleted" stays. The owner has one more step, at the person's request, on
+the settings screen — "Remove a person" (`engine/api/person-removal.ts`): the person's address, a
+box ticked to confirm they asked, and one button.
 
 - the person's row in the people table keeps its id and loses its e-mail;
 - their account, under password sign-in, loses its e-mail and name, its password and its open
-  sessions;
+  sessions. The row stays, closed — disabled, and found by nothing — under a random key that is not
+  an address, so the address is free: an account made for it later is a new person, with a new id;
 - every `text` they wrote is removed, as above — the snapshots on their events stay;
-- an event records that a person was removed, by whom and when — with ids only.
+- every grant of the project's roles in force for them is revoked, by a later `grant_revoked` — the
+  grant itself stays in the trail;
+- a `person_removed` event, on the page `_people`, records that a person was removed, by whom and
+  when — with ids and counts only: the texts removed, those that could not be, the older events
+  that still name the address, the grants revoked, and whether there was an account.
 
 Nothing an approval stands on is touched: the event, its fingerprint, its snapshot and the role it
 was given with all stay, so a lock stays a lock and says what it locked.
 
-The owner cannot remove themselves: the owner comes from `HOLDRIM_OWNER`, and has to hand over
-before leaving. An admin can ask the owner; only the owner acts, for the same reason only the owner
-resets the owner's account.
+The owner alone does it, from their own session: the owner comes from `HOLDRIM_OWNER`, and an admin
+can ask the owner but not act, for the same reason only the owner resets the owner's account. It is
+refused, with nothing touched:
 
-**Until then**, the owner reaches bullets 1 and 3 above in full, by hand, with what already exists.
-Of bullet 2 the owner reaches only the sign-in/session half — disabling; erasing the account's own
-e-mail, name and password, like the `person_removed` event of bullet 4, is a capability only the
-people screen adds:
+- without the box ticked — it cannot be undone;
+- for the owner, who has to hand over before leaving;
+- for an address `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` or `HOLDRIM_AGENTS` still names: the deployment
+  would go on naming it after the row was emptied. Out of the variable and restarted, first;
+- for an address holding an agent token, which would go on writing, as a new person: revoked first;
+- for the person this version first started under as owner, when a ✓ they gave before that start
+  still names their address. Such a ✓ is a lock only through the lock baseline (section 2), whose
+  author is their id, and only while their row ties that id to the address: forgetting the row would
+  un-lock it. Nothing rewrites that ✓, so on this store they stay; their account can still be
+  disabled. A former owner with no such ✓ is removed like anybody else;
+- for an address with no account and no row in the people table — nobody to remove, which is also
+  what a second run answers. When only events from before authors were ids name it, the refusal says
+  so: nothing rewrites them, and there is nothing else to let go of.
 
-1. **Find the person's id.** Look them up by e-mail in the people table next to the events —
-   `SELECT id FROM people WHERE email = ?` in SQLite, or the `people_by_email/{encoded e-mail}`
-   pointer document in Firestore (`engine/api/people.ts`, `FIRESTORE_PEOPLE`).
-2. **Cut off access first**, before whichever of the two ways in is theirs finds out and makes the
-   row fresh again:
-   - **Password sign-in:** `POST /api/users/<e-mail>/enabled` with `{"enabled": false}`, in the
-     owner's own session — the same route an admin already has, and everything disabling does today
-     (`docs/GLOSSARY.md`, **disabled**).
-   - **IAP sign-in:** remove the address from the IAP, or whatever Cloud access policy, in front of
-     Holdrim — outside Holdrim, since it holds no list of who that policy admits. Do this before the
-     forget step below, not after.
+A text is left where it is, and counted, when it reads as tampered with — a removal beside it would
+read as the reason its row is gone, and silence the finding — or when it is held inside its event,
+from before texts moved out of events. The screen says how many were left.
 
-   Either way, first: any identity that can still reach `POST /api/events` makes a new person the
-   moment it next acts — `recordEvent`'s call to `personFor` re-creates exactly the row this
-   procedure is about to empty — so nothing they do between this step and the next two, sign in,
-   write another comment, has to be removed all over again.
-3. **Remove every `text` they wrote.** For each of the person's events that still holds one, call
-   `EventStore.removeText(event, 'text', by)` — `by` is the owner's own e-mail, the same call
-   section 4 describes, reached directly instead of through a route. Snapshots are left alone: they
-   are the documentation's own text, not the person's.
-4. **Forget the person.** `EventStore.forget(id)` empties their row. The id stays on every event
-   they ever touched, so a lock they were given keeps saying whose it was.
-5. **Write down that it happened.** There is no `person_removed` event type yet — recording one,
-   with ids only, is the people screen's own step. Until then, the owner's own comment naming the
-   id and the date is the trail.
+**Events from before authors were ids** name the address itself, and nothing rewrites an event. Their
+texts are removed where they have a row of their own, and the address stays taken: under password
+sign-in the closed account keeps it, emptied, so nobody new becomes the author of those events. The
+screen says how many such events there are.
+
+**In what order, and if it stops.** The account is closed first, keyed by its address, so no session
+of theirs acts while the rest runs and the address stays taken — under password sign-in, a person
+with no account of their own has a closed row written in its place, for the same reason; the grants go before the texts; the
+account is emptied before the row is forgotten; and the address is freed only after that. At no point
+is the address free while the row still leads to the person. A removal a failure stopped is finished
+by running it again, and writes `person_removed` once. If the very last step — freeing the address —
+fails, the address stays taken by the emptied account, as it does for older events.
+
+**Behind an identity proxy** there is no account to empty, and Holdrim holds no list of who the proxy
+admits: take the address out of the IAP, or whatever Cloud access policy is in front of Holdrim,
+before removing the person, not after. Until then their next visit makes them a new person — any
+identity that can still reach `POST /api/events` makes a new row the moment it next acts — and the
+screen says so. The rest of the removal is the same.
 
 What none of this reaches is listed once, in "What Holdrim cannot remove" below — not repeated here
 so the two lists cannot drift apart.
@@ -205,6 +217,12 @@ Said here so nobody promises it:
 - an exported copy of the documentation, once published;
 - log lines already shipped to a collector, and backups of the database — the operator's retention;
 - anything in the documentation text itself, which is the project's content.
+- events written before authors were ids: they name the address itself, and keep it. Under password
+  sign-in the address stays taken, by the removed person's emptied account;
+- a text held inside its event, from before texts moved out of events: it has no row of its own to
+  remove;
+- the ✓s the owner this version first started under gave before that start, and so that owner's row
+  in the people table: those ✓s are locks through it (section 5).
 
 ## What exists today
 
@@ -215,9 +233,9 @@ Said here so nobody promises it:
 | `author` as an opaque id, a people table in every mode, one resolver | ✅ built — a person gets their row the first time they act |
 | On a ✓ whether it is a lock, and on a request whether its author could triage it, written on the event, never recomputed | ✅ built — `data.locks` and `data.authorCouldTriage`, read by `isLocked` and `authorCouldTriage` (`engine/api/types.ts`) |
 | The author's role written on the event | ⬜ 0.1.0 |
-| Free text and snapshot outside the event, salted hash inside, removals as events | ✅ built — `EventStore.removeText`, not reachable through `POST /events` yet |
+| Free text and snapshot outside the event, salted hash inside, removals as events | ✅ built — `EventStore.removeText`, reached by removing a person (section 5), never through `POST /events` |
 | Commits without `Requested-by:`, ids in logs | ✅ built |
-| Removing a person, documented procedure | ✅ built — section 5, run by hand |
-| Removing a person, from the people screen | ⬜ 0.1.0 |
+| Removing a person, documented procedure | ✅ built — section 5 |
+| Removing a person, from a screen | ✅ built (#37) — the settings screen, the owner's alone (`engine/api/person-removal.ts`); section 5 |
 | Events signed by the server, and readers that trust only signed roles | ⬜ 0.1.0 (phase E) |
 | The agent writing through the API with its own credential, and no direct write to the cloud | ✅ built (#122) — `docs/ROLES.md` §4 |

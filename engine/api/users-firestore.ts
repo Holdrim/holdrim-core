@@ -1,6 +1,6 @@
 import { Firestore, type DocumentData, type WhereFilterOp } from '@google-cloud/firestore';
 import {
-  AddressInUse, UserStoreBase, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
+  AddressInUse, UserStoreBase, type RemovedChange, type SignInFailures, type StoredAgentToken, type StoredSession, type StoredUser,
 } from './users.ts';
 
 /**
@@ -44,7 +44,7 @@ export class UsersFirestore extends UserStoreBase {
       tx.create(this.#db.collection('users').doc(row.email), {
         email: row.email, name: row.name, salt: row.salt, hash: row.hash,
         must_change: row.mustChangePassword, created_at: row.createdAt,
-        enabled: row.enabled,
+        enabled: row.enabled, removed: row.removed === true,
       });
     });
   }
@@ -68,6 +68,37 @@ export class UsersFirestore extends UserStoreBase {
 
   protected async writeName(email: string, name: string): Promise<void> {
     await this.#db.collection('users').doc(email).update({ name });
+  }
+
+  /**
+   * A document's id cannot change, so a row given a new key moves: the closed copy created under it
+   * and the address's document deleted, with every session naming the address, in one transaction.
+   * `create`, so a key already taken refuses rather than overwrites. A row keeping its key is updated
+   * in place.
+   */
+  protected async writeRemoved(email: string, change: RemovedChange): Promise<boolean> {
+    const users = this.#db.collection('users');
+    const account = users.doc(email);
+    const sessions = this.#db.collection('sessions').where('email', '==', email);
+    return this.#db.runTransaction(async (tx) => {
+      const row = await tx.get(account);
+      if (!row.exists) return false;
+      const open = await tx.get(sessions);
+      const fields = {
+        enabled: false, removed: true,
+        ...(change.name !== undefined ? { name: change.name } : {}),
+        ...(change.salt ? { salt: change.salt } : {}),
+        ...(change.hash ? { hash: change.hash } : {}),
+      };
+      if (change.key === email) {
+        tx.update(account, fields);
+      } else {
+        tx.create(users.doc(change.key), { ...row.data(), ...fields, email: change.key });
+        tx.delete(account);
+      }
+      for (const session of open.docs) tx.delete(session.ref);
+      return true;
+    });
   }
 
   protected async writeCredential(
@@ -292,5 +323,7 @@ function docToUser(d: DocumentData): StoredUser {
     salt: Buffer.from(d.salt), hash: Buffer.from(d.hash),
     mustChangePassword: !!d.must_change, createdAt: d.created_at,
     enabled: d.enabled !== false,
+    // Absent on every document written before removal existed, and on every account never removed.
+    removed: d.removed === true,
   };
 }

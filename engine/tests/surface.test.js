@@ -28,6 +28,8 @@ import { EVENT_TYPES, stored, LOCK_BASELINE_TYPE, LOCKS_FIELD, AUTHOR_COULD_TRIA
 import { AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED } from '../api/agent-tokens.ts';
 import { ROLE_DEFINED, ROLE_GRANTED, GRANT_REVOKED } from '../api/role-grants.ts';
 import { TAMPER_ACKNOWLEDGED } from '../api/tamper.ts';
+import { PERSON_REMOVED } from '../api/person-removal.ts';
+import { TEXT_REMOVED } from '../api/texts.ts';
 import { queue } from '../cli/requests.ts';
 import * as screens from '../core/screens.js';
 import * as language from '../api/language.ts';
@@ -148,10 +150,12 @@ test('the event types are the ones engine/surface.json lists', () => {
   // them (agent-tokens.ts), and the guard that keeps them out of `POST /events` is the contract test's.
   // `TAMPER_ACKNOWLEDGED` the same way too: only its own route writes it (tamper.ts), and the guard
   // that keeps it out of `POST /events` is the contract test's, not this one. And the three events of
-  // the project's roles (role-grants.ts), written only by the owner's own routes.
+  // the project's roles (role-grants.ts), written only by the owner's own routes. And the two a
+  // person's removal writes (person-removal.ts): `person_removed`, and a `text_removed` for each text
+  // it lets go of — written by `EventStore.removeText` alone, never accepted from a client.
   sameAs('event types',
     [...EVENT_TYPES, LOCK_BASELINE_TYPE, AGENT_TOKEN_ISSUED, AGENT_TOKEN_REVOKED, TAMPER_ACKNOWLEDGED,
-      ROLE_DEFINED, ROLE_GRANTED, GRANT_REVOKED],
+      ROLE_DEFINED, ROLE_GRANTED, GRANT_REVOKED, PERSON_REMOVED, TEXT_REMOVED],
     SURFACE['event-types']);
 });
 

@@ -117,10 +117,10 @@ who ran the engine from `main` before it.
   on a fresh row and the value in the new `texts` table (SQLite) or collection (Firestore), joined
   by event id and field; a row from before this change keeps its own plain value and reads as it. A
   text is removed with `EventStore.removeText(event, field, by)`, which also records a `text_removed`
-  event — not reachable through `POST /events` yet, since the door for a person to ask for one, with
-  its own permission, is a later issue. A removal is only credited if it is later, in time and in
-  the list, than the event it names, so one dated ahead of a real text does not read as though that
-  text never existed. `FirestoreEventStore.list` and the CLI's cloud reader read events, people and
+  event — never through `POST /events`: its one door is the owner's removal of a person, below
+  ("Removing a person, at their request, from the settings screen"). A removal is only credited if
+  it is later, in time and in the list, than the event it names, so one dated ahead of a real text
+  does not read as though that text never existed. `FirestoreEventStore.list` and the CLI's cloud reader read events, people and
   texts as ordinary, unbounded reads, not inside one Firestore transaction — a read-only transaction
   aborts after 270 seconds, and both collections only grow — and correct a field that looks tampered
   by asking once more, later, for the removal it could not have seen yet.
@@ -157,8 +157,8 @@ who ran the engine from `main` before it.
   `password_changed`, `user_created`, `user_renamed`, `user_password_reset` and
   `user_enabled_changed` name a `person` (and a `by`, where the line also says who acted). A refused
   sign-in (`sign_in_refused`) still logs the address exactly as typed: it never became a person.
-  `docs/PRIVACY.md`, section 5, documents the manual procedure for removing a person, until there is
-  a screen for it.
+  `docs/PRIVACY.md`, section 5, describes removing a person, now a form on the settings screen
+  ("Removing a person, at their request, from the settings screen", below).
 - **A SQLite events file refuses a row whose rowid skips past the next one or falls below 1,
   names a file whose rowid its guards cannot see, and a file made before this reads, once, as
   missing those guards.** Four new guards
@@ -281,6 +281,29 @@ who ran the engine from `main` before it.
   name an agent — an address `HOLDRIM_AGENTS` marks, or one holding an agent token — is ignored,
   with a `role_grant_ignored` line in the log on the agent's first request, and the service still
   starts.
+- **Removing a person, at their request, from the settings screen** (#37, `docs/PRIVACY.md` section
+  5). The owner types the address, ticks a box saying the person asked, and removes them: their
+  account loses its e-mail, name, password and every open session (the row stays, closed, under a
+  key that is no address, and the address is free for a new person); every text they wrote is
+  removed, each with a `text_removed` event; every grant of a project role they held is revoked by a
+  later `grant_revoked`; and their row in the people table loses its e-mail and keeps its id. Their
+  events, snapshots and locks stay exactly as they were. A new event, `person_removed`, on the
+  reserved page `_people`, records it once per person with ids and counts only (`data.person`,
+  `texts`, `textsTampered`, `textsInline`, `legacyEvents`, `grants`, `account`), listable by anyone
+  signed in and refused by `POST /api/events`. The owner's alone, from the screen's own form, with no
+  API route. Refused, touching nothing: without the box ticked; for the owner; for an address
+  `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` or `HOLDRIM_AGENTS` still names (take it out and restart first);
+  for an address holding an agent token (revoke it first); for the owner this version first started
+  under, while a ✓ they gave before that start names their address (those ✓s are locks through
+  their row); for an address only events from before authors were ids name; and for an address
+  nobody here goes by, which is also what a second run answers. A text that reads as tampered, or is
+  held inside its event, is left, and the screen says how many; events from before authors were ids
+  keep the address, which then stays taken by the closed account, and the screen says that too. A
+  removal a failure stopped finishes when run again, and the address is never free while anything
+  still leads from it to the person. Behind an identity proxy there is no account to empty, and the
+  screen says to take the address out of the proxy first. The users table gains a `removed` column
+  (SQLite, Postgres) or field (Firestore), added on start. `text_removed` and `person_removed` join
+  the event types on `engine/surface.json`: from this version on, the engine writes both.
 - **Ask for a new page, in plain words**, from the home (a form that needs no script) or from any
   block (the new `page` category). `holdrim apply` tells the agent to write one new page shaped like
   the one it was asked near, and to mark nothing as validated.

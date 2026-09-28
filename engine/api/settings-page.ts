@@ -24,6 +24,12 @@ import { PEOPLE_SHOW_VALUES } from '../core/people-show.js';
  * each form writes one event on `_roles`, through the function its API route calls, and none of
  * them can reach `lock` or `people` (`PROJECT_CAPABILITIES`).
  *
+ * And one form removes a person, at their request (docs/PRIVACY.md, section 5,
+ * `engine/api/person-removal.ts`): here, and not on the people screen, because it is the owner's
+ * alone and this screen is too — the people screen is an admin's as well — and because behind an
+ * identity proxy, where there is no people screen, there are still texts and a row to let go of.
+ * Its checkbox is asked by the server too: `required` on it is only the browser's courtesy.
+ *
  * ## No script
  *
  * Every form is a plain form posted back to this address, and the page carries no script at all:
@@ -73,6 +79,11 @@ export const SETTINGS_KEYS = [
   'api.grants.scopeReachesNothing',
   'api.grants.notForTheOwner', 'api.grants.notForAnAdmin', 'api.grants.notForAnAgent', 'api.grants.roleUnknown',
   'api.grants.present', 'api.grants.notFound', 'api.grants.alreadyRevoked',
+  'settings.remove.heading', 'settings.remove.lede', 'settings.remove.proxy', 'settings.remove.email',
+  'settings.remove.confirm', 'settings.remove.submit', 'settings.remove.done', 'settings.remove.left',
+  'settings.remove.legacy',
+  'api.removal.unconfirmed', 'api.removal.notTheOwner', 'api.removal.namedByDeployment',
+  'api.removal.holdsAgentToken', 'api.removal.holdsOldLocks', 'api.removal.onlyOlderEvents', 'api.removal.nobody',
 ];
 
 /** `HOLDRIM_LOCKS`'s value for these entries: `;`-separated, as `parseLocks` splits it. */
@@ -159,11 +170,11 @@ export function composeLock(
  * section it sits in — which is also where the redirect after it lands. One table, read by the
  * template and by the server (`serveSettings`), so a form and its landing place cannot drift apart.
  */
-export const ROLE_ACTIONS = Object.freeze({
-  define: 'settings-project-roles', grant: 'settings-grants', revoke: 'settings-grants',
+export const SETTINGS_ACTIONS = Object.freeze({
+  define: 'settings-project-roles', grant: 'settings-grants', revoke: 'settings-grants', remove: 'settings-remove',
 } as const);
-export type RoleAction = keyof typeof ROLE_ACTIONS;
-export const isRoleAction = (action: string): action is RoleAction => Object.hasOwn(ROLE_ACTIONS, action);
+export type SettingsAction = keyof typeof SETTINGS_ACTIONS;
+export const isSettingsAction = (action: string): action is SettingsAction => Object.hasOwn(SETTINGS_ACTIONS, action);
 
 /** Everything the screen shows, resolved by the server; nothing here reads the environment. */
 export interface SettingsData {
@@ -188,13 +199,18 @@ export interface SettingsData {
     grants: { id: string; who: string; role: string; scope: string | null; when: string; ignored: boolean }[];
     ended: number;
   };
+  /** Whether the people who sign in here come from the user store (password sign-in) or a proxy. */
+  byPassword: boolean;
   /** A write that was refused: which form, the sentence's key, and what was typed, to put back. */
   edit?: {
-    action: RoleAction; key: string; params?: Record<string, string | number>;
+    action: SettingsAction; key: string; params?: Record<string, string | number>;
     values: { role: string; email: string; scope: string; capabilities: string[] };
   };
   /** A write that went through, on the redirect after it. */
-  done?: RoleAction;
+  done?: SettingsAction;
+  /** After a removal: texts it could not let go of, and events that still name the address. */
+  removedLeft?: number;
+  removedLegacy?: number;
   features: Record<string, boolean>;
   peopleShow: string;
   /** Which of the two the project's `holdrim.json` names (`namedInFile`, engine/core/config.js). */
@@ -250,10 +266,10 @@ ${lockRows}
 
   // The project's own roles. What was typed goes back into a refused form, as the composer's does.
   const edit = data.edit;
-  const typed = (action: RoleAction) => (edit?.action === action ? edit.values : undefined);
-  const refusal = (action: RoleAction) => (edit?.action === action
+  const typed = (action: SettingsAction) => (edit?.action === action ? edit.values : undefined);
+  const refusal = (action: SettingsAction) => (edit?.action === action
     ? `<p class="holdrim-alert holdrim-alert--danger" role="alert">${t(edit.key, edit.params)}</p>` : '');
-  const confirmed = (actions: RoleAction[], key: string) => (data.done && actions.includes(data.done)
+  const confirmed = (actions: SettingsAction[], key: string) => (data.done && actions.includes(data.done)
     ? `<p class="holdrim-alert holdrim-alert--ok" role="status">${t(key)}</p>` : '');
   const { roles: defined, grants, ended } = data.projectRoles;
   const definedRows = defined.map((d) => `<tr><td>${code(d.role)}</td>`
@@ -274,7 +290,7 @@ ${definedRows}
     + (g.ignored ? ` <span class="holdrim-alert holdrim-alert--warn settings-ignored">${t('settings.grants.ignored')}</span>` : '')
     + `</td><td>${code(g.role)}</td><td>${g.scope ? code(g.scope) : t('settings.grants.everywhere')}</td>`
     + `<td>${forHtml(g.when)}</td><td>`
-    + `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#${ROLE_ACTIONS.revoke}">`
+    + `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#${SETTINGS_ACTIONS.revoke}">`
     + `<input type="hidden" name="action" value="revoke"><input type="hidden" name="grant" value="${forHtml(g.id)}">`
     + `<button class="holdrim-button" type="submit">${t('settings.grants.revoke')}</button></form></td></tr>`).join('\n');
   const grantTable = grants.length ? `<table class="holdrim-table holdrim-table--stack">
@@ -288,7 +304,7 @@ ${grantRows}
   const granting = typed('grant');
   const roleOptions = defined.filter((d) => d.capabilities.length).map((d) => `<option value="${forHtml(d.role)}"`
     + `${granting?.role === d.role ? ' selected' : ''}>${forHtml(d.role)}</option>`).join('');
-  const grantForm = roleOptions ? `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#${ROLE_ACTIONS.grant}" class="settings-compose settings-grant">
+  const grantForm = roleOptions ? `<form method="post" action="${forHtml(SETTINGS_SCREEN)}#${SETTINGS_ACTIONS.grant}" class="settings-compose settings-grant">
       <input type="hidden" name="action" value="grant">
       <label class="holdrim-field"><span class="holdrim-label">${t('settings.grants.email')}</span>
         <input class="holdrim-input" name="email" type="email" required autocomplete="off" value="${forHtml(granting?.email ?? '')}"></label>
@@ -370,13 +386,13 @@ ${roleRows}
     <p class="holdrim-alert holdrim-alert--warn">${t('settings.holders.lockNotRead')}</p>
   </section>
 
-  <section aria-labelledby="${ROLE_ACTIONS.define}">
-    <h2 id="${ROLE_ACTIONS.define}">${t('settings.projectRoles.heading')}</h2>
+  <section aria-labelledby="${SETTINGS_ACTIONS.define}">
+    <h2 id="${SETTINGS_ACTIONS.define}">${t('settings.projectRoles.heading')}</h2>
     <p class="holdrim-muted">${t('settings.projectRoles.lede')}</p>
     ${confirmed(['define'], 'settings.projectRoles.done')}
     ${definedTable}
     ${refusal('define')}
-    <form method="post" action="${forHtml(SETTINGS_SCREEN)}#${ROLE_ACTIONS.define}" class="settings-define">
+    <form method="post" action="${forHtml(SETTINGS_SCREEN)}#${SETTINGS_ACTIONS.define}" class="settings-define">
       <input type="hidden" name="action" value="define">
       <label class="holdrim-field"><span class="holdrim-label">${t('settings.projectRoles.name')}</span>
         <input class="holdrim-input" name="role" required maxlength="${MAX_ROLE_NAME}" autocomplete="off" spellcheck="false" aria-describedby="settings-role-name" value="${forHtml(defining?.role ?? '')}"></label>
@@ -389,14 +405,31 @@ ${capabilityBoxes}
     <p class="holdrim-muted">${t('settings.projectRoles.never')}</p>
   </section>
 
-  <section aria-labelledby="${ROLE_ACTIONS.grant}">
-    <h2 id="${ROLE_ACTIONS.grant}">${t('settings.grants.heading')}</h2>
+  <section aria-labelledby="${SETTINGS_ACTIONS.grant}">
+    <h2 id="${SETTINGS_ACTIONS.grant}">${t('settings.grants.heading')}</h2>
     <p class="holdrim-muted">${t('settings.grants.lede')}</p>
     ${confirmed(['grant'], 'settings.grants.granted')}${confirmed(['revoke'], 'settings.grants.revoked')}
     ${grantTable}
     ${ended ? `<p class="holdrim-muted">${t('settings.grants.ended', { count: ended })}</p>` : ''}
     ${refusal('grant')}${refusal('revoke')}
     ${grantForm}
+  </section>
+
+  <section aria-labelledby="${SETTINGS_ACTIONS.remove}">
+    <h2 id="${SETTINGS_ACTIONS.remove}">${t('settings.remove.heading')}</h2>
+    <p class="holdrim-muted">${t('settings.remove.lede')}</p>
+    ${data.byPassword ? '' : `<p class="holdrim-alert holdrim-alert--warn">${t('settings.remove.proxy')}</p>`}
+    ${confirmed(['remove'], 'settings.remove.done')}
+    ${data.done === 'remove' && data.removedLeft ? `<p class="holdrim-alert holdrim-alert--warn" role="status">${t('settings.remove.left', { count: data.removedLeft })}</p>` : ''}
+    ${data.done === 'remove' && data.removedLegacy ? `<p class="holdrim-alert holdrim-alert--warn" role="status">${t('settings.remove.legacy', { count: data.removedLegacy })}</p>` : ''}
+    ${refusal('remove')}
+    <form method="post" action="${forHtml(SETTINGS_SCREEN)}#${SETTINGS_ACTIONS.remove}" class="settings-remove">
+      <input type="hidden" name="action" value="remove">
+      <label class="holdrim-field"><span class="holdrim-label">${t('settings.remove.email')}</span>
+        <input class="holdrim-input" name="email" type="email" required autocomplete="off" value="${forHtml(typed('remove')?.email ?? '')}"></label>
+      <label class="settings-check"><input type="checkbox" name="confirm" value="yes" required> ${t('settings.remove.confirm')}</label>
+      <p><button class="holdrim-button" type="submit">${t('settings.remove.submit')}</button></p>
+    </form>
   </section>
 
   <section aria-labelledby="settings-compose">

@@ -1112,3 +1112,159 @@ forEachDurableStore('the failure key comes back the same after the store is clos
     await after.close();
   }
 });
+
+// --------------------------------------------------------------------- removing a person (#37)
+// docs/PRIVACY.md, section 5: the account is closed first, keyed by its address, and emptied last —
+// its e-mail, name, password and every open session gone — with the row itself kept
+// (`closeAccount`, `emptyAccount`, users.ts).
+
+/** Removes an account the way a removal does, end to end. */
+async function removeAccount(s, email, keepAddress = false) {
+  assert.equal(await s.closeAccount(email), true);
+  assert.equal(await s.emptyAccount(email, keepAddress), true);
+}
+
+forEachStore('removing an account empties it of the person: no e-mail, no name, no password, no session', async (s) => {
+  const password = await s.create('ana@example.org', 'Ana Lima', 'a password of her own');
+  const one = await s.openSession('ana@example.org');
+  const two = await s.openSession('ana@example.org');
+  await s.create('bea@example.org', 'Bea');
+  const kept = await s.openSession('bea@example.org');
+  const [before] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  await removeAccount(s, '  Ana@Example.ORG ');
+  assert.equal(await s.find('ana@example.org'), null, 'the address finds nothing');
+  assert.equal(await s.check('ana@example.org', password), null, 'the password opens nothing');
+  assert.equal(await s.fromSession(one), null, 'no session of theirs survives');
+  assert.equal(await s.fromSession(two), null, 'not one');
+  assert.equal((await s.fromSession(kept))?.email, 'bea@example.org', 'and nobody else\'s is touched');
+  assert.deepEqual((await s.list()).map((u) => u.email), ['bea@example.org'], 'the list leaves it out');
+  // Read beneath the list: the row is still there, and nothing in it names the person.
+  const rows = await s.readAllUsers();
+  assert.equal(rows.length, 2, 'the row is kept, never deleted');
+  const emptied = rows.find((r) => r.email !== 'bea@example.org');
+  assert.match(emptied.email, /^removed:[0-9a-f]{24}$/, 'its key is random, and never an address');
+  assert.equal(emptied.name, '', 'its name is gone');
+  assert.equal(emptied.enabled, false, 'it is disabled');
+  assert.equal(emptied.removed, true, 'it is marked removed');
+  assert.notDeepEqual([emptied.salt, emptied.hash], [before.salt, before.hash], 'its credential is replaced, not kept');
+  assert.doesNotMatch(JSON.stringify(emptied), /ana|Lima/i, 'nothing in the row names them');
+});
+
+forEachStore('a closed account keeps its address taken, and is found by nothing', async (s) => {
+  const password = await s.create('ana@example.org', 'Ana Lima', 'a password of her own');
+  const session = await s.openSession('ana@example.org');
+  assert.equal(await s.closeAccount('ana@example.org'), true);
+  assert.equal(await s.fromSession(session), null, 'its sessions went with the closing');
+  assert.equal(await s.find('ana@example.org'), null);
+  assert.deepEqual(await s.list(), []);
+  // While a removal runs, the row in the people table still leads to the person: an account made
+  // for the address then would act under their id.
+  await assert.rejects(s.create('ana@example.org', 'Somebody else'), 'the address is still taken');
+  // Enabled again beneath the routes, with its password intact: the mark alone keeps it shut.
+  await s.writeEnabled('ana@example.org', true);
+  assert.equal(await s.check('ana@example.org', password), null, 'the right password opens a closed account nowhere');
+  assert.equal(await s.find('ana@example.org'), null, 'and nothing finds it');
+});
+
+forEachStore('an account emptied with its address kept stays keyed by it, taken, and empty', async (s) => {
+  await s.create('ana@example.org', 'Ana Lima');
+  const [before] = await s.readAllUsers();
+  await removeAccount(s, 'ana@example.org', true);
+  const [row] = await s.readAllUsers();
+  assert.deepEqual([row.email, row.name, row.enabled, row.removed], ['ana@example.org', '', false, true]);
+  assert.notDeepEqual([row.salt, row.hash], [before.salt, before.hash], 'its credential is replaced, not kept');
+  await assert.rejects(s.create('ana@example.org', 'Somebody new'), 'nobody new takes the address');
+  assert.equal(await s.find('ana@example.org'), null);
+});
+
+forEachStore('the address is free again once removed: an account made for it is a new one', async (s) => {
+  await s.create('ana@example.org', 'Ana Lima');
+  const old = await s.openSession('ana@example.org');
+  await removeAccount(s, 'ana@example.org');
+  await s.create('ana@example.org', 'Ana, again');
+  assert.equal((await s.find('ana@example.org'))?.name, 'Ana, again');
+  // The sessions went with the account: left behind, one would name the address in the clear, and
+  // open the new account for whoever still holds the removed person's cookie.
+  assert.equal(await s.fromSession(old), null, 'no session of the removed person opens the new account');
+  assert.equal((await s.readAllUsers()).length, 2, 'beside the emptied one, which stays');
+});
+
+forEachStore('emptying an account nobody has answers false, and writes nothing', async (s) => {
+  // Closing one is another matter: it takes the address (the test below).
+  await s.create('bea@example.org', 'Bea');
+  assert.equal(await s.emptyAccount('nobody@example.org', false), false);
+  assert.deepEqual((await s.readAllUsers()).map((r) => [r.email, r.removed]), [['bea@example.org', false]]);
+});
+
+forEachStore('a removal\'s row change is one transaction: when it cannot land, the sessions stay too', async (s) => {
+  // Moving the row onto a key already taken fails after the sessions were deleted inside the same
+  // transaction; nothing of it may land, or the account would lose its sessions and keep its address.
+  await s.create('ana@example.org', 'Ana Lima');
+  await s.create('bea@example.org', 'Bea');
+  const session = await s.openSession('ana@example.org');
+  await assert.rejects(s.writeRemoved('ana@example.org', { key: 'bea@example.org', name: '' }));
+  assert.equal((await s.fromSession(session))?.email, 'ana@example.org', 'the session is still there');
+  assert.equal((await s.find('ana@example.org'))?.name, 'Ana Lima', 'and so is the account, as it was');
+});
+
+forEachStore('closing an address with no account takes it with a closed row, and emptying frees it', async (s) => {
+  // A person can have a row in the people table and no account: granted a role before anyone
+  // invited them. The address is taken from the first step of their removal all the same.
+  await s.create('bea@example.org', 'Bea');
+  assert.equal(await s.closeAccount('ana@example.org'), false, 'there was no account of theirs');
+  const [written] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  assert.deepEqual([written.name, written.enabled, written.removed], ['', false, true], 'the row written is closed, nameless');
+  await assert.rejects(s.create('ana@example.org', 'Somebody else'), 'the address is taken meanwhile');
+  assert.equal(await s.find('ana@example.org'), null, 'by a row nothing finds');
+  assert.deepEqual((await s.list()).map((u) => u.email), ['bea@example.org'], 'and nothing lists');
+  assert.equal(await s.closeAccount('ana@example.org'), false, 'closed again, on a resumed run, it is still not theirs');
+  assert.equal(await s.emptyAccount('ana@example.org', false), true);
+  await s.create('ana@example.org', 'Ana, invited later');
+  assert.equal((await s.find('ana@example.org'))?.name, 'Ana, invited later', 'freed at the end like any closed account');
+});
+
+// Postgres alone: its `removed` column is added on start to a table an earlier version made
+// (`ADD COLUMN IF NOT EXISTS`), as SQLite's is in users.test.js. Firestore has no columns to add.
+const postgres = stores.find((s) => s.name === 'postgres');
+test('[postgres] a users table from before removal existed gains the removed column, and its accounts read as not removed',
+  { skip: postgres ? false : skipped.find((s) => s.name === 'postgres')?.why }, async () => {
+    const first = await postgres.open();
+    await first.create('ana@example.org', 'Ana', 'a password of her own');
+    await first.close();
+    const pg = await import('pg');
+    const { Client } = pg.default ?? pg;
+    const client = new Client({ connectionString: PG_URL });
+    await client.connect();
+    try {
+      await client.query('ALTER TABLE users DROP COLUMN removed');
+    } finally {
+      await client.end();
+    }
+    const { UsersPostgres } = await import('../api/users-postgres.ts');
+    const reopened = new UsersPostgres(PG_URL);
+    try {
+      assert.equal((await reopened.check('ana@example.org', 'a password of her own'))?.email, 'ana@example.org');
+      await reopened.create('bea@example.org', 'Bea');
+      assert.equal(await reopened.closeAccount('ana@example.org'), true);
+      assert.equal(await reopened.find('ana@example.org'), null);
+      assert.equal((await reopened.find('bea@example.org'))?.name, 'Bea');
+    } finally {
+      await reopened.close();
+    }
+  });
+
+forEachStore('an account created while the address is being taken is the one closed, and it was theirs', async (s) => {
+  // Staged between closeAccount's read, which found no account, and its own insert: the account
+  // appears in that gap, the insert then finds the address taken, and the account is closed instead.
+  const insert = s.insertUser.bind(s);
+  let raced = false;
+  s.insertUser = async (row) => {
+    if (row.removed && !raced) { raced = true; await s.create('ana@example.org', 'Ana Lima'); }
+    return insert(row);
+  };
+  assert.equal(await s.closeAccount('ana@example.org'), true, 'there was an account of theirs to close');
+  assert.ok(raced, '(the account did appear in the gap)');
+  assert.equal(await s.find('ana@example.org'), null, 'and nothing finds it now');
+  const [row] = (await s.readAllUsers()).filter((r) => r.email === 'ana@example.org');
+  assert.deepEqual([row.name, row.enabled, row.removed], ['Ana Lima', false, true], 'closed, not left open');
+});
