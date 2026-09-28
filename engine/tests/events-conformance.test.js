@@ -365,6 +365,32 @@ forEachStore('a removal is claimed by one holder at a time, renewed by it, and t
   assert.equal(await s.claimRemoval(P, 'a', at(5), at(7)), false, 'and the holder it lapsed from has lost it');
 });
 
+forEachStore('a claim ending further off than any run asks for is set aside, and said; one a clock ahead wrote is not', async (s) => {
+  // Written by nothing that honours the claim's length: kept, it would refuse this person's removal
+  // for as long as it says.
+  assert.equal(await s.claimRemoval(P, 'x', at(0), '9999-12-31T00:00:00.000Z'), true);
+  const logged = [];
+  const info = console.log;
+  console.log = (line) => logged.push(line);
+  let given;
+  try {
+    given = await s.claimRemoval(P, 'b', at(1), at(3));
+  } finally {
+    console.log = info;
+  }
+  assert.equal(given, true, 'set aside');
+  const said = logged.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((l) => l?.event === 'removal_claim_void');
+  assert.ok(said.length >= 1 && said.every((l) => l.person === P && l.severity === 'WARNING'), 'and said, by person id');
+  // Another instance whose clock runs a minute ahead: its genuine claim ends a minute past the end
+  // this one would ask for, inside the slack, and holds. Exactly one claim's length past it holds too.
+  const Q = `p_${'c'.repeat(24)}`;
+  assert.equal(await s.claimRemoval(Q, 'ahead', at(1), at(3)), true);
+  assert.equal(await s.claimRemoval(Q, 'here', at(0), at(2)), false, 'a clock ahead is not a forgery');
+  const R = `p_${'d'.repeat(24)}`;
+  assert.equal(await s.claimRemoval(R, 'far', at(0), at(4)), true);
+  assert.equal(await s.claimRemoval(R, 'here', at(0), at(2)), false, 'one whole claim past the end asked for still holds');
+});
+
 forEachStore('a claim is let go of by its holder alone', async (s) => {
   assert.equal(await s.claimRemoval(P, 'a', at(0), at(2)), true);
   await s.releaseRemoval(P, 'b');

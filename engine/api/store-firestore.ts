@@ -1,6 +1,6 @@
 import { Firestore, FieldValue } from '@google-cloud/firestore';
 import { byServerTime } from './firestore-order.ts';
-import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
+import { claimGiven, stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors, FIRESTORE_PEOPLE as LAYOUT } from './people.ts';
 import { noText, saltFields, textKey, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent, type TextField, type TamperReport } from './texts.ts';
@@ -192,9 +192,9 @@ export class FirestoreEventStore implements EventStore {
   async claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean> {
     const claim = this.#db.collection('removal_claims').doc(person);
     return this.#db.runTransaction(async (tx) => {
-      const held = await tx.get(claim);
-      const h = held.data();
-      if (h && h.holder !== holder && (h.expires as string) > now) return false;
+      const h = (await tx.get(claim)).data();
+      const held = h ? { holder: h.holder as string, expires: h.expires as string } : null;
+      if (!claimGiven(held, person, holder, now, until)) return false;
       tx.set(claim, { holder, expires: until });
       return true;
     });

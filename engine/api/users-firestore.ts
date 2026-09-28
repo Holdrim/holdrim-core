@@ -82,7 +82,7 @@ export class UsersFirestore extends UserStoreBase {
     const sessions = this.#db.collection('sessions').where('email', '==', email);
     return this.#db.runTransaction(async (tx) => {
       const row = await tx.get(account);
-      if (!row.exists) return false;
+      if (!row.exists || (change.onlyClosed && row.data()!.removed !== true)) return false;
       const open = await tx.get(sessions);
       const fields = {
         enabled: false, removed: true,

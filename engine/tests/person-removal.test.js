@@ -465,27 +465,30 @@ test('a run whose claim another run took over stops where it is, and writes no p
   await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
   const second = await events.append({ type: 'comment', page: 'A01', text: 'two' }, ANA);
   events.person = await events.personOf(ANA);
-  // Past the end of any claim this run takes, and a clock that moves on enough between two texts for
-  // the run to renew its claim before the next: it finds the claim gone.
+  // A clock that moves on half a claim at each reading: this run's claim, renewed before the first
+  // text, ends two and a half claims in, and the other run takes it over exactly then, as it would a
+  // lapsed one. Before the next text this run renews, and finds the claim gone.
   let now = Date.parse('2026-09-28T10:00:00.000Z');
-  events.at = now + 10 * REMOVAL_CLAIM_MS;
+  events.at = now + 5 * REMOVAL_CLAIM_MS / 2;
   const clock = () => (now += REMOVAL_CLAIM_MS / 2);
   const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false, clock }, { email: ANA, confirmed: true });
   assert.equal(events.rival, true, '(the other run did take it over)');
   assert.deepEqual(outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
   assert.equal((await removedOnce(events)).length, 0, 'the run that holds the claim writes the event');
   assert.equal((await byId(events, second.id)).text, 'two', 'and the next text is left for it');
-  assert.equal(await events.claimRemoval(events.person, 'third', new Date(events.at).toISOString(), 'z'), false,
+  assert.equal(await events.claimRemoval(events.person, 'third', new Date(events.at).toISOString(),
+    new Date(events.at + REMOVAL_CLAIM_MS).toISOString()), false,
     'the claim the other run holds is not let go of by this one');
 });
 
 test('a run renews its claim right before writing person_removed, and stops if it was taken over', async () => {
-  // A clock that never moves: no renewal on the way, only the one before the event.
+  // A clock that never moves: no renewal on the way, only the one before the event. The other run
+  // takes the claim over at the moment it ends, as it would a lapsed one.
   const events = new TakenOverAt();
   await events.append({ type: 'comment', page: 'A01', text: 'the only one' }, ANA);
   events.person = await events.personOf(ANA);
   const now = Date.parse('2026-09-28T10:00:00.000Z');
-  events.at = now + 10 * REMOVAL_CLAIM_MS;
+  events.at = now + REMOVAL_CLAIM_MS;
   const outcome = await removePerson({ events, users: null, deployment, by: OWNER, byAgent: false, clock: () => now },
     { email: ANA, confirmed: true });
   assert.equal(events.rival, true, '(the other run did take it over)');
@@ -501,7 +504,8 @@ test('a long run keeps its claim: another run is refused long after the first cl
   const events = new (class extends MemoryEventStore {
     async rival() {
       now += REMOVAL_CLAIM_MS / 2;
-      rivals.push(await this.claimRemoval(this.person, 'rival', new Date(now).toISOString(), new Date(now + 1).toISOString()));
+      rivals.push(await this.claimRemoval(this.person, 'rival', new Date(now).toISOString(),
+        new Date(now + REMOVAL_CLAIM_MS).toISOString()));
     }
     async append(event, author) { if (event.type === GRANT_REVOKED) await this.rival(); return super.append(event, author); }
     async removeText(event, field, by) { await this.rival(); return super.removeText(event, field, by); }
@@ -517,6 +521,83 @@ test('a long run keeps its claim: another run is refused long after the first cl
   assert.deepEqual(rivals, [false, false, false, false], 'refused at every grant and every text');
   assert.equal(outcome.status, 201);
   assert.deepEqual([outcome.removal.grants, outcome.removal.texts], [2, 2]);
+});
+
+/**
+ * A removal of Ana stopped at `where` in its last steps — `event`, right after `person_removed` is
+ * written, or `forget`, right after the row is forgotten — while `meanwhile` runs, with the clock moved
+ * past the end of the claim, as a run that stalled there would find it. Answers what the stalled
+ * run answered, and the `person_removal_stopped` lines it logged.
+ */
+async function stalledIn(where, meanwhile) {
+  let now = Date.parse('2026-09-28T10:00:00.000Z');
+  const clock = () => now;
+  let armed = true;
+  const pause = async () => {
+    if (!armed) return;
+    armed = false;
+    now += 2 * REMOVAL_CLAIM_MS;
+    await meanwhile(ctx);
+  };
+  const events = new (class extends MemoryEventStore {
+    async append(event, author) {
+      const e = await super.append(event, author);
+      if (where === 'event' && event.type === PERSON_REMOVED) await pause();
+      return e;
+    }
+    async forget(id) { await super.forget(id); if (where === 'forget') await pause(); }
+  })();
+  const users = new UsersSqlite(':memory:');
+  await users.create(ANA, 'Ana Lima');
+  await events.append({ type: 'comment', page: 'A01', text: 'one' }, ANA);
+  const ctx = { events, users, deployment, by: OWNER, byAgent: false, clock };
+  const logged = [];
+  const info = console.log;
+  console.log = (line) => logged.push(line);
+  let outcome;
+  try {
+    outcome = await removePerson(ctx, { email: ANA, confirmed: true });
+  } finally {
+    console.log = info;
+  }
+  const stopped = logged.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((l) => l?.event === 'person_removal_stopped');
+  return { outcome, stopped, events, users };
+}
+
+test('a run stalled after its event, while another finished and somebody new took the address: the new account is untouched', async () => {
+  let dana;
+  const run = await stalledIn('event', async (ctx) => {
+    assert.equal((await removePerson(ctx, { email: ANA, confirmed: true })).status, 201, '(the other run finished it)');
+    dana = await ctx.users.create(ANA, 'Dana');
+  });
+  assert.deepEqual(run.outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
+  assert.equal(run.stopped.length, 1, 'and it says it stopped');
+  assert.equal((await run.users.check(ANA, dana))?.name, 'Dana', 'Dana\'s account opens with her password, as it was');
+  assert.equal((await removedOnce(run.events)).length, 1);
+});
+
+test('a run stalled after its event, while another run took the claim over, leaves the rest to it', async () => {
+  const run = await stalledIn('event', async (ctx) => {
+    const person = await ctx.events.personOf(ANA);
+    const at = new Date(ctx.clock()).toISOString();
+    assert.equal(await ctx.events.claimRemoval(person, 'rival', at, new Date(ctx.clock() + REMOVAL_CLAIM_MS).toISOString()), true);
+  });
+  assert.deepEqual(run.outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
+  assert.equal(run.stopped.length, 1);
+  const [row] = await run.users.readAllUsers();
+  assert.deepEqual([row.email, row.name], [ANA, 'Ana Lima'], 'closed, and not emptied: the run holding the claim does that');
+});
+
+test('a run stalled after forgetting the row, while another run took the claim over, does not free the address', async () => {
+  const run = await stalledIn('forget', async (ctx) => {
+    const person = (await removedOnce(ctx.events))[0].data.person;
+    const at = new Date(ctx.clock()).toISOString();
+    assert.equal(await ctx.events.claimRemoval(person, 'rival', at, new Date(ctx.clock() + REMOVAL_CLAIM_MS).toISOString()), true);
+  });
+  assert.deepEqual(run.outcome, { status: 409, key: 'api.removal.inProgress', params: { email: ANA } });
+  const [row] = await run.users.readAllUsers();
+  assert.equal(row.email, ANA, 'still keyed by the address');
 });
 
 // ---------------------------------------------------------------- stores from before ids and texts moved

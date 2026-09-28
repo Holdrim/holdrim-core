@@ -1302,3 +1302,13 @@ forEachStore('two closings of an address with no account at once: neither calls 
 
 forEachStore('two removals of one person at once: the second is refused while the first runs, and one person_removed says what it did',
   async (s) => { await assertOneRemoval(await removedTwiceAtOnce(new MemoryEventStore(), s)); });
+
+forEachStore('emptying an address whose account is open leaves it as it is: only a closed account is emptied', async (s) => {
+  // A removal's run that reaches its last steps late, after the address was freed and somebody new
+  // made an account on it, must not empty that account.
+  const password = await s.create('dana@example.org', 'Dana', 'a password of her own');
+  const session = await s.openSession('dana@example.org');
+  for (const keep of [true, false]) assert.equal(await s.emptyAccount('dana@example.org', keep), false);
+  assert.equal((await s.check('dana@example.org', password))?.name, 'Dana', 'her account opens, as it was');
+  assert.equal((await s.fromSession(session))?.email, 'dana@example.org', 'and her session is still there');
+});

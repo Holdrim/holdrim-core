@@ -239,7 +239,8 @@ export interface UserStore {
    * `keepAddress` is for an address that events from before authors were ids still name: those
    * events cannot be rewritten, and an account on their address would read as their author (an
    * own request, details added to it). The address then stays taken by this closed row. Answers
-   * whether there was an account.
+   * whether there was a closed account to empty: an account still open at the address is left as it
+   * is, never emptied, since only `closeAccount` makes a row this may touch.
    */
   emptyAccount(email: string, keepAddress: boolean): Promise<boolean>;
   /** True when nobody has been created yet: the first-access condition. */
@@ -333,8 +334,11 @@ export const AGENT_TOKEN_FORMAT = /^holdrim_agent_([0-9a-f]{24})_([0-9a-f]{64})$
  */
 const REMOVED_ACCOUNT_PREFIX = 'removed:';
 
-/** What `writeRemoved` changes on a row besides closing it: its key, and optionally its name and credential. */
-export interface RemovedChange { key: string; name?: string; salt?: Buffer; hash?: Buffer }
+/**
+ * What `writeRemoved` changes on a row besides closing it: its key, and optionally its name and credential.
+ * `onlyClosed` leaves any row a removal did not already close as it is, and answers false for it.
+ */
+export interface RemovedChange { key: string; name?: string; salt?: Buffer; hash?: Buffer; onlyClosed?: boolean }
 
 /** A row as a database keeps it: the profile plus the two things that must never leave this file. */
 export interface StoredUser extends User {
@@ -624,7 +628,10 @@ export abstract class UserStoreBase implements UserStore {
     // a credential derived from anything could be derived again. `check` compares a derivation of
     // whatever is typed with `hash`, and nothing typed derives to 64 random bytes.
     const key = keepAddress ? address : `${REMOVED_ACCOUNT_PREFIX}${randomBytes(12).toString('hex')}`;
-    return this.writeRemoved(address, { key, name: '', salt: randomBytes(SALT_LENGTH), hash: randomBytes(KEY_LENGTH) });
+    // Only a row a removal already closed: an account open at the address now is somebody's, made
+    // after a removal freed the address, and a removal's run that reaches this late must not empty it.
+    return this.writeRemoved(address,
+      { key, name: '', salt: randomBytes(SALT_LENGTH), hash: randomBytes(KEY_LENGTH), onlyClosed: true });
   }
 
   async setEnabled(email: string, enabled: boolean): Promise<{ sessionsDropped: boolean }> {

@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
+import { claimGiven, stored, type Event, type NewEvent, type EventStore, type Person } from './types.ts';
 import { newPersonId, personEmail, noPerson, ONLY_LOSES, withAuthors } from './people.ts';
 import { noText, notBefore, saltFields, textKey, withTexts, reportTampered, TEXT_REMOVED,
   type TextField, type TamperReport } from './texts.ts';
@@ -390,10 +390,9 @@ export function guardMismatches(db: DatabaseSync, guards: Record<string, string>
   const flat = (sql: string) => sql.replace(/[ \t\n\f\r]+/g, ' ');
   // A Map, not `name in guards`: a trigger named `constructor` would be "in" any plain object.
   const want = new Map(Object.entries(guards).map(([name, body]) => [name, `CREATE TRIGGER ${name} ${body}`]));
-  // Table names ignore case in SQLite: a trigger declared `ON EVENTS` is on this table too.
-  const rows = db.prepare(
-    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND lower(tbl_name) IN ('events', 'people', 'texts')"
-  ).all() as { name: string; sql: string }[];
+  // Every trigger in the file, whatever table it is on: the server writes more tables than the three
+  // the guards are on, and a list of tables goes stale the day one is added.
+  const rows = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'").all() as { name: string; sql: string }[];
   const held = new Map(rows.map((r) => [r.name, r.sql]));
   const out: GuardMismatch[] = rows.filter((r) => !want.has(r.name)).map((r) => ({ name: r.name, kind: 'foreign' }));
   for (const [name, sql] of want) {
@@ -626,15 +625,25 @@ export class SqliteEventStore implements EventStore {
   }
 
   async claimRemoval(person: string, holder: string, now: string, until: string): Promise<boolean> {
-    // One statement, so no other connection's claim lands between its read and its write: the row
-    // is written when there is none, and overwritten only when its holder is this one or its claim
-    // has ended. A row left as it is changes nothing, and `changes` says so.
-    const r = this.#db.prepare(
-      `INSERT INTO removal_claims (person, holder, expires) VALUES (?, ?, ?)
-       ON CONFLICT (person) DO UPDATE SET holder = excluded.holder, expires = excluded.expires
-       WHERE removal_claims.holder = excluded.holder OR removal_claims.expires <= ?`,
-    ).run(person, holder, until, now);
-    return r.changes === 1;
+    // IMMEDIATE, so no other connection's claim lands between the read and the write: the write lock
+    // is taken before the read, and another process claiming at once waits for this one to commit.
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const held = this.#db.prepare('SELECT holder, expires FROM removal_claims WHERE person = ?').get(person) as
+        { holder: string; expires: string } | undefined;
+      const given = claimGiven(held ?? null, person, holder, now, until);
+      if (given) {
+        this.#db.prepare(
+          'INSERT INTO removal_claims (person, holder, expires) VALUES (?, ?, ?) '
+          + 'ON CONFLICT (person) DO UPDATE SET holder = excluded.holder, expires = excluded.expires',
+        ).run(person, holder, until);
+      }
+      this.#db.exec('COMMIT');
+      return given;
+    } catch (err) {
+      rollbackQuietly(this.#db);
+      throw err;
+    }
   }
 
   async releaseRemoval(person: string, holder: string): Promise<void> {

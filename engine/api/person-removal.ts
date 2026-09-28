@@ -191,9 +191,10 @@ async function nobodyLeft(events: EventStore, address: string): Promise<RemovalO
  * never acted, the row both runs make for it. The claim is let go of when the run ends, however it
  * ends, so a removal a failure stopped is run again at once. A run whose process died cannot let go
  * of it: the claim lapses `REMOVAL_CLAIM_MS` later, and the removal is run again then. A run renews
- * it as it goes, and once more just before writing `person_removed`, and stops if another run has
- * taken it over. What it cannot cover is a run that stalls between that last renewal and its write
- * for longer than the whole claim: then another run may be finishing beside it.
+ * it as it goes, and again before each of its last writes, and stops if another run has taken it
+ * over. What it cannot cover is a run that stalls between a renewal and the write right after it for
+ * longer than the whole claim: that one write can land beside another run's — at worst a second
+ * `person_removed` — and never empties an account a removal did not close (`emptyAccount`).
  */
 export async function removePerson(
   context: RemovalContext, asked: { email: unknown; confirmed: boolean },
@@ -232,7 +233,12 @@ export async function removePerson(
   try {
     return await removeClaimed(context, address, person, known !== null, claim);
   } catch (error) {
-    if (error instanceof ClaimLost) return inProgress(address);
+    if (error instanceof ClaimLost) {
+      // Said, by id: a run that stops here may already have written its part, and the log is where
+      // the operator sees that another run went on with it.
+      log('WARNING', 'person_removal_stopped', { person });
+      return inProgress(address);
+    }
     throw error;
   } finally {
     // A claim that cannot be let go of lapses on its own, `REMOVAL_CLAIM_MS` later: the run's own
@@ -298,9 +304,25 @@ async function removeClaimed(
     await claim.keep(true);
     event = (await recordAuthored(events, removedPersonEvent(removal, context.byAgent), by)).event;
   }
-  if (users) await users.emptyAccount(address, true);
+  // The last three steps, each only while this run still holds the claim, and the first two only
+  // while the address still leads to this person: a run that stalled here long enough for another to
+  // take the claim over and finish would otherwise go on after it, on an address somebody new may
+  // have taken since. `emptyAccount` itself touches only a row a removal closed, never an account
+  // open at the address, whatever reaches it.
+  const stillMine = async () => {
+    await claim.keep(true);
+    if ((await events.personOf(address)) !== person) throw new ClaimLost();
+  };
+  if (users) {
+    await stillMine();
+    await users.emptyAccount(address, true);
+  }
+  await stillMine();
   await events.forget(person);
   // Freed last, once nothing leads from the address to the id; kept while an older event names it.
-  if (users && legacyEvents === 0) await users.emptyAccount(address, false);
+  if (users && legacyEvents === 0) {
+    await claim.keep(true);
+    await users.emptyAccount(address, false);
+  }
   return { status: 201, event, removal };
 }
