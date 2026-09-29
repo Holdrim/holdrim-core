@@ -176,3 +176,20 @@ test('every test file that runs against the Firestore emulator is run by the job
   const missing = needing.filter((f) => !run.includes(`engine/tests/${f}`));
   assert.deepEqual(missing, [], `run against the emulator by nobody: ${missing.join(', ')}`);
 });
+
+test('the reviewer signal runs only on a review by a listed reviewer, and touches nothing', () => {
+  const w = WORKFLOWS.find((x) => x.name === 'reviewer-signal.yml');
+  assert.ok(w, 'reviewer-signal.yml was read');
+  const on = w.text.slice(w.text.indexOf('\non:'), w.text.indexOf('\npermissions:'));
+  assert.deepEqual([...on.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]), ['pull_request_review', 'pull_request_review_comment']);
+  // The job wakes a session that spends a subscription: anyone else's review must not run it. The
+  // id is the reviewer's row in crew/accounts.md, so withdrawing that row fails here until the
+  // workflow follows.
+  const id = /if: \$\{\{ github\.event\.sender\.id == (\d+) \}\}/.exec(w.text)?.[1];
+  assert.ok(id, 'the job is filtered by the sender\'s numeric id');
+  const accounts = readFileSync(join(ROOT, 'crew', 'accounts.md'), 'utf8');
+  assert.match(accounts, new RegExp(`^\\| @[^|]+ \\| ${id} \\|[^\\n]*\\| reviewer`, 'm'), 'the id is a reviewer crew/accounts.md lists');
+  // It only has to exist as a check suite: no checkout, no secret, and nothing from the event,
+  // which is the reviewer's text, in a command line.
+  assert.doesNotMatch(w.text, /actions\/checkout|secrets\.|run:[^\n]*\$\{\{/);
+});

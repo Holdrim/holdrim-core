@@ -1,0 +1,31 @@
+# Turns a review by the crew's other-vendor reviewer into something the Claude session hears.
+#
+# The Claude session that works this repository is woken by its pull request subscription, and on
+# 2026-09-29 that subscription delivered every CI check suite and nothing the reviewer wrote: not
+# a comment, not a review, not a comment on a line (#186, C-012 and C-013). A run of this workflow
+# is a check suite on the pull request's head, so a review by that account now arrives as one. It
+# reads nothing, writes nothing, checks nothing out and runs for a second; what the review says is
+# read by the session from GitHub, never passed through here.
+#
+# Only the reviewer's own events run the job: anyone else's review would wake the session for
+# nothing. The id is the one crew/accounts.md lists, compared as a number because a login can be
+# renamed. Comments on the conversation cannot be heard this way: GitHub runs them on the default
+# branch, not on the pull request, so the reviewer speaks through a review.
+name: Reviewer signal
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  signal:
+    if: ${{ github.event.sender.id == 333201923 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "a review by the listed reviewer; the session reads it from GitHub"
