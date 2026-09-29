@@ -181,7 +181,8 @@ test('the reviewer signal runs only on a review by a listed reviewer, and touche
   const w = WORKFLOWS.find((x) => x.name === 'reviewer-signal.yml');
   assert.ok(w, 'reviewer-signal.yml was read');
   const on = w.text.slice(w.text.indexOf('\non:'), w.text.indexOf('\npermissions:'));
-  assert.deepEqual([...on.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]), ['pull_request_review', 'pull_request_review_comment']);
+  assert.deepEqual([...on.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]), ['pull_request_review'], 'one review, one signal');
+  assert.match(on, /types: \[submitted\]\n/);
   // The job wakes a session that spends a subscription: anyone else's review must not run it. The
   // id is the reviewer's row in crew/accounts.md, so withdrawing that row fails here until the
   // workflow follows.

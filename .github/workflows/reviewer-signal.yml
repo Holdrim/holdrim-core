@@ -3,7 +3,7 @@
 # The Claude session that works this repository is woken by its pull request subscription, and on
 # 2026-09-29 that subscription delivered every CI check suite and nothing the reviewer wrote: not
 # a comment, not a review, not a comment on a line (#186, C-012 and C-013). A run of this workflow
-# is a check suite on the pull request's head, so a review by that account now arrives as one. It
+# is a check suite on the pull request's head, so a review that account submits arrives as one. It
 # reads nothing, writes nothing, checks nothing out and runs for a second; what the review says is
 # read by the session from GitHub, never passed through here.
 #
@@ -13,11 +13,12 @@
 # branch, not on the pull request, so the reviewer speaks through a review.
 name: Reviewer signal
 
+# One trigger, the submitted review, on purpose: a review holding comments on lines is also one
+# `pull_request_review_comment` event per comment, and listening to both would wake the session
+# once per comment for what is one review.
 on:
   pull_request_review:
     types: [submitted]
-  pull_request_review_comment:
-    types: [created]
 
 permissions:
   contents: read
