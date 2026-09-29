@@ -1905,10 +1905,21 @@ HOLDRIM_MODE=local HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_
   HOLDRIM_EVENTS=sqlite HOLDRIM_EVENTS_PATH="$BIG/events.db" HOLDRIM_SITE="$SITE" \
   node engine/api/server.ts >$WORK/big.log 2>&1 & PID=$!
 for i in $(seq 40); do curl -s $B/api/health >/dev/null 2>&1 && break; sleep 0.5; done
-under() { node -e "process.exit(+process.argv[1] < +process.argv[2] ? 0 : 1)" "$(curl -s -o /dev/null -w '%{time_total}' -H "X-Dev-Email: $OWNER" "$2")" "$1"; echo $?; }
-expect "every event, each request with its state → under 2 s"  0 "$(under 2 $B/api/events)"
-expect "how many wait for triage → under 2 s"                  0 "$(under 2 $B/api/requests/open)"
-expect "the project home, listing them → under 2 s"            0 "$(under 2 $B/engine/home)"
+# The fixture first: the server read and verified all 40 000 events at start, so the timings below
+# measure a long history and not an empty one. Without this, a server that started on an empty or
+# unreadable store answers fast and the bound is met for the wrong reason.
+expect "the server verified all 40 000 events at start" 0 \
+  "$(grep '"event":"events_verified"' $WORK/big.log | has -F '"events":40000,'; echo $?)"
+# Fails unless the answer is a 200: an error page comes back in milliseconds, and a bound on time
+# alone would call it fast. The bound is a linearity check, not a benchmark, so it is loose: a
+# quadratic read costs tens of seconds at this size, and a slow CI disk stays well under 8.
+under() {
+  local out; out=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' -H "X-Dev-Email: $OWNER" "$2")
+  node -e "process.exit(process.argv[1] === '200' && +process.argv[2] < +process.argv[3] ? 0 : 1)" "${out% *}" "${out#* }" "$1"; echo $?
+}
+expect "every event, each request with its state → 200, under 8 s" 0 "$(under 8 $B/api/events)"
+expect "how many wait for triage → 200, under 8 s"                 0 "$(under 8 $B/api/requests/open)"
+expect "the project home, listing them → 200, under 8 s"           0 "$(under 8 $B/engine/home)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null; rm -rf "$BIG"
 
 echo "with no configuration, it won't come up:"
@@ -3242,6 +3253,20 @@ for STORE_AT in "Production password" "Development dev"; do
     "$(has '^invalid configuration: .*no signing key is set.*holdrim key new <file>.*HOLDRIM_SIGNING_KEY_FILE' "$WORK/no-key.log"; echo $?)"
   expect "and opened no store"                                     1 "$([ -e "$NOKEY" ]; echo $?)"
 done
+# Firestore is the other store that keeps what it writes, and it reaches the refusal through the
+# other half of `lasting` (`eventsKind === 'firestore'`, not `eventsFile !== null`). Without its own
+# case, dropping that half leaves the SQLite loop above green while a Firestore deployment boots on
+# a key made up for the process: every event signed by a key that dies at the next restart. Under
+# forbid-optional the mutant fails with a different sentence (it goes on to load the Firestore
+# package), so the assertion has to be the sentence, not only exit 1.
+HOLDRIM_ENVIRONMENT=Production HOLDRIM_IDENTITY=password HOLDRIM_OWNER=$OWNER HOLDRIM_MODE=local HOLDRIM_EVENTS=firestore \
+  HOLDRIM_PROJECT=x HOLDRIM_USERS_PATH="$NOKEY/users.db" HOLDRIM_SITE="$SITE" PORT=$PORT \
+  run_for 15 env -u HOLDRIM_SIGNING_KEY_FILE -u HOLDRIM_SIGNING_KEY \
+    node --import ./engine/tests/hooks/forbid-optional.js engine/api/server.ts >"$WORK/no-key-firestore.log" 2>&1
+expect "a Firestore store with no signing key → exits 1"           1 "$?"
+expect "and names the variable and the command that makes one" 0 \
+  "$(has '^invalid configuration: .*no signing key is set.*holdrim key new <file>.*HOLDRIM_SIGNING_KEY_FILE' "$WORK/no-key-firestore.log"; echo $?)"
+expect "and opened no store"                                     1 "$([ -e "$NOKEY" ]; echo $?)"
 HOLDRIM_ENVIRONMENT=Development HOLDRIM_OWNER=$OWNER HOLDRIM_IDENTITY=dev HOLDRIM_MODE=local HOLDRIM_EVENTS=sqlite \
   HOLDRIM_EVENTS_PATH="$NOKEY/events.db" HOLDRIM_SITE="$SITE" PORT=$PORT HOLDRIM_SIGNING_KEY="$(cat "$WORK/signing.key")" \
   run_for 15 node engine/api/server.ts >"$WORK/two-keys.log" 2>&1

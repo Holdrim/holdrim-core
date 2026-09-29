@@ -12,7 +12,7 @@
  * emulator. Without `FIRESTORE_EMULATOR_HOST` its tests SKIP, with a message saying so. CI's
  * `stores` job starts it and promises it with HOLDRIM_TEST_REQUIRE — see the test that reads it.
  */
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -695,6 +695,24 @@ if (process.env.FIRESTORE_EMULATOR_HOST) {
       assert.equal(read.textRemoved?.by, 'owner@example.org');
       assert.equal(read.textTampered, false);
     } finally { await first.close(); await second.close(); }
+  });
+
+  test('[firestore] one instance with a frozen clock keeps the order events were written in', async () => {
+    // The clock does not move between appends, so only the store's own "never the same as the last"
+    // rule tells the events apart: without it every `when` is one millisecond and the list falls back
+    // to the document id, which is random, so the order read is not the order written. Ten events,
+    // because two would come back right by chance half the time.
+    const project = freshFirestoreProject('holdrim-order');
+    const s = new FirestoreEventStore(project, signing);
+    const frozen = mock.method(Date, 'now', () => Date.parse('2026-09-28T10:00:00.000Z'));
+    try {
+      const written = [];
+      for (let i = 0; i < 10; i++) {
+        written.push((await s.append({ type: 'comment', page: 'A01', text: `remark ${i}` }, 'r@example.org')).id);
+      }
+      assert.deepEqual((await s.list('A01')).map((e) => e.id), written);
+      assert.equal(new Set((await s.list('A01')).map((e) => +new Date(e.when))).size, 10, 'each was dated apart');
+    } finally { frozen.mock.restore(); await s.close(); }
   });
 
   test('[firestore] a document written without the key is shown, not signed, and reported', async () => {

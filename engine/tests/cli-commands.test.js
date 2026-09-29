@@ -840,6 +840,25 @@ test('reading with no HOLDRIM_PUBLIC_KEYS warns once, reads nothing as approved,
 });
 
 /**
+ * `list` is one of four readers, and each calls the warning on its own line: a reader that forgets
+ * it says nothing, and the owner takes a page of "not signed" events for an empty store. Only a run
+ * of each command shows which one lost it.
+ */
+test('show, summary and impact with no HOLDRIM_PUBLIC_KEYS warn too, and still read', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  for (const args of [['show', id.slice(0, 8)], ['summary'], ['impact', id.slice(0, 8)]]) {
+    const r = runApart([...args, '--db', db], dir, { HOLDRIM_PUBLIC_KEYS: '' });
+    assert.equal(r.code, 0, `${args[0]}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /WARNING — no HOLDRIM_PUBLIC_KEYS/, args[0]);
+    // With the key the same command says nothing of the kind: the warning is the missing variable.
+    const trusted = runApart([...args, '--db', db], dir);
+    assert.equal(trusted.code, 0, `${args[0]} with the key: ${trusted.stdout}${trusted.stderr}`);
+    assert.doesNotMatch(trusted.stderr, /no HOLDRIM_PUBLIC_KEYS/, args[0]);
+  }
+});
+
+/**
  * A file holding a request the server did not sign, beside a signed decision on it. What is asked:
  * nothing that acts treats a request the server did not sign as a request at all, whatever is
  * decided on it.

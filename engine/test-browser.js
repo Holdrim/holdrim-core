@@ -1157,6 +1157,19 @@ try {
     expect('and the block is not painted as locked', 0, await owner.page.locator('.rv-panel .rv-badge--ok').count());
     await owner.page.keyboard.press('Escape');
     await must('and the banner names it', () => owner.page.locator('.rv-tamper-line', { hasText: 'forged-lock' }).waitFor());
+
+    // The same mark on a request: it is drawn from a second place in the panel (`Request`, not the
+    // history's row), so a change that drops `<Unsigned>` from one leaves the ✓ check above green.
+    directly("INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, text, data) VALUES " +
+      "('forged-request', 'request', 'A01', 'A01.1.2', ?, ?, ?, ?, ?)",
+    (await readBlocks(site)).get('A01.1.2').fingerprint, READER, new Date().toISOString(), 'a request nobody signed',
+    JSON.stringify({ category: 'term' }));
+    await owner.page.reload();
+    await settled(owner.page);
+    await block(owner.page, 'A01.1.2').click();
+    await must('a request nobody signed is listed in the panel, marked',
+      () => owner.page.locator('.rv-request[data-request="forged-request"] .rv-unsigned', { hasText: en['panel.unsigned'] }).waitFor());
+    await owner.page.keyboard.press('Escape');
   }
 
   console.log('the sign-in screen, under its own policy:');
