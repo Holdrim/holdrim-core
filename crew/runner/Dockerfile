@@ -5,12 +5,19 @@ FROM node:24-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git gh ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code
-RUN useradd -m crew \
- && mkdir -p /home/crew/.secrets /home/crew/.config/gh \
- && chown -R crew:crew /home/crew/.secrets /home/crew/.config \
- && chmod 700 /home/crew/.secrets
-USER crew
+# Pinned: what the model can read rests on how this CLI answers a permission prompt nobody is there
+# to answer, and that was probed on this version. A newer one is taken by changing this line and
+# probing again, never by rebuilding.
+RUN npm install -g @anthropic-ai/claude-code@2.1.284
+# Two users, so that the operating system, and not only a flag, keeps the model from the tokens:
+# `crew` holds them in a home only it can read and runs the steps that talk to GitHub; `model` runs
+# the model, with a home of its own and nothing of crew's to read (its CLI flags then confine it to
+# /work). The container starts as root only so that run-orchestrator.sh can hand each step to its
+# user; setup.sh runs as crew.
+RUN useradd -m crew && useradd -m model \
+ && mkdir -p /home/crew/.secrets /home/crew/.config/gh /home/crew/.state /work \
+ && chown -R crew:crew /home/crew /work \
+ && chmod 700 /home/crew /home/model /home/crew/.secrets
 WORKDIR /home/crew
-COPY --chown=crew run-orchestrator.sh setup.sh loop.sh ./
+COPY run-orchestrator.sh board.js setup.sh loop.sh ./
 CMD ["bash", "run-orchestrator.sh"]

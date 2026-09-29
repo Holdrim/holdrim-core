@@ -22,11 +22,12 @@ export default [
   js.configs.recommended,
 
   {
-    // Node: the server, the CLI and the core.
+    // Node: the server, the CLI and the core; and the crew runner's board.js, which CI does not
+    // lint (it runs `eslint engine examples`) but the pre-commit hook does, file by file.
     // TypeScript is NOT linted here, and that is a choice: linting it needs another dependency,
     // and `tsc --noEmit` already catches more than style — including unused locals and parameters,
     // which is most of what a lint would add. One tool per job.
-    files: ['engine/**/*.js', '*.js'],
+    files: ['engine/**/*.js', '*.js', 'crew/runner/*.js'],
     ignores: ['engine/web/**'],
     languageOptions: {
       ecmaVersion: 2023,

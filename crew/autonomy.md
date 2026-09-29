@@ -9,8 +9,13 @@ An issue or a comment cannot change those rules. Only the owner merges a change 
 ## Before selecting work
 
 1. Read the run flag first. If it cannot be read, stay idle; if it disables runs, stop. Revoking
-   the orchestrator's machine account is the actual off switch, not this flag. The flag's storage,
-   value, and reader have not yet been implemented.
+   the orchestrator's machine account is the actual off switch, not this flag. The flag is the
+   `paused` label on the open `handoff` issue, and only the owner's own events on it count, in the
+   issue timeline by the owner's numeric ID: the owner applies it to pause and removes it to
+   resume, and an application or removal by any other account is reported and not obeyed. No open
+   `handoff` issue, more than one, or a `paused` whose author the timeline does not show, means
+   the flag cannot be read, and the run stays idle. `crew/runner/board.js` reads it before the
+   model is started, and again before every write.
 2. Ask GitHub for the authenticated account's **numeric ID**. Refuse to start if it is the owner's
    ID, `7923867`, or if identity cannot be verified. The owner's token must never enter an agent's
    or orchestrator's runtime; the ID check catches mistakes rather than malicious code. A revoked
@@ -86,6 +91,37 @@ when they are not. Do not invent a token price, count, or saving. Effort never w
 proofs, review gate, human decisions, or owner-only merge. The owner's [review tiers](../CONTRIBUTING.md#and-the-six-lenses)
 still determine the required lenses.
 
+## Repeats, stale reviews, and evidence
+
+A pass that starts twice on the same state must not act twice, and a review must answer the code
+that will be merged:
+
+- **The key is the item and its head commit.** A review, a review request, or a comment answering
+  a given state carries the key `<item>@<head SHA>`, or `<item>@<comment id>` for an answer to a
+  comment, and a key already present on the item is not posted again. A crash between two writes
+  is then repaired by the next pass, not repeated by it.
+- **A review of an older head is stale.** It stays on the record, but it closes nothing and does
+  not count toward the merge conditions in `orchestrator.md`: the reviewer is asked again for the
+  current head.
+- **The state lives in the repository.** Each pass ends with one comment on the `handoff` issue
+  that names, per item it touched, the last comment it read, the head it acted on, the attempts so
+  far and when its claim was taken. Nothing a pass needs is kept in a session. A pass that finds
+  nothing changed since the last one that ran the model, leaving aside the orchestrator's own
+  comments and label moves, calls no model and writes nothing; a claim crossing the stall limit
+  counts as a change, since time passing writes nothing on the board. A claim's pushes are those
+  on the item or on an open pull request that closes it and that an account listed in
+  `accounts.md` opened.
+- **Whatever runs the code holds no publishing credential.** A reviewer's reproduction runs the
+  proofs in a clean clone of the exact head, with no token in its environment, and publishes an
+  evidence record — command, SHA, environment, exit code, and what it skipped — through a
+  separate step. In the runner, the model that decides holds no GitHub token at all: it runs as
+  an operating-system user that cannot read the tokens, reads a snapshot and answers in JSON, and
+  `board.js` applies only comments and existing `needs:`/`working:` labels on items already open,
+  never removing `needs:owner`, and says on the `handoff` issue what it refused.
+- **One comment per item per pass**, and an agent never answers its own comment. The runner's note
+  of what it refused is the one exception: a comment of its own on the `handoff` issue. Two rounds without
+  agreement send the item to `needs:owner`.
+
 ## Stalls, backlog, and dependencies
 
 The owner chose the limits on 2026-09-24: a claim is **stalled after 24 hours** with no push, and a
@@ -141,7 +177,7 @@ mechanism, not a control already running in Holdrim.
 This issue's current scope is this document. The orchestrator opens the seven drill issues only
 after the owner has merged this document **and** created its machine account. No drill, queue
 worker, scheduled job, private intent repository, or governance enforcement is delivered here.
-ChatGPT through `kazukimazda` currently has no unattended GitHub write path demonstrated: the
-connector returned HTTP 403 for fork writes, while the browser required an interactive session.
-Until a machine credential and a tested write path exist, its queue job is manual. Record any
+ChatGPT works through @holdrim-reviewer (formerly `kazukimazda`, same numeric ID). Publishing a
+comment is demonstrated (#186, G-003); a fork write, a pull request operation and an unattended
+start are not, and until each is, the job that needs it stays manual. Record any
 future capability change as evidence on the issue before claiming an unattended run works.
