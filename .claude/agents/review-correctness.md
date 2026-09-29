@@ -41,6 +41,24 @@ yours is whether it works.
   only says no runtime is installed. A check that a tool is on the `PATH` is not a check that it
   works; ask it to do something (`java -version`) and read the exit code.
 - **The boundary values**: empty, one, missing, `null`, a duplicate key, a name with a quote in it.
+- **One decision, every path to it.** When a change adds or fixes a check that decides something,
+  find every path that reaches the same decision — the API route, the home's form, the buttons the
+  panel is sent — and check that each asks the same question of the same value. A value built for
+  display is the wrong one to ask: a request row whose author has already been swapped for the name
+  the viewer is shown no longer answers "is this theirs?". The home offered a triager limited to some
+  pages the decision on their own request, which the API then refused, because the home asked of the
+  display row and the API of the stored request.
+- **Every state between the steps.** An operation of several writes that cannot be undone is read
+  one step boundary at a time: if it stops there, what do the stores hold, and does every guarantee
+  the change claims still hold in that state? The steps are ordered so that they do, and so that
+  running it again finishes the job. A person's removal first freed their address before forgetting
+  the row that leads from the address to them, so for as long as a failure held it there, "the
+  address is never free while anything still leads to the person" was false.
+- **What an older version wrote.** The stores still hold what earlier versions of the engine wrote:
+  events whose author is an address, from before authors were ids; texts held inside the event,
+  from before they moved out. A new operation that reads by today's shape names each older one and
+  says what it does with it. A removal that found a person's texts by author id alone left every
+  older text in place and reported the job done.
 
 ## Severity
 

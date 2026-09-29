@@ -36,8 +36,10 @@ these hold: CI green on the current head; the review for the pull request's tier
 it or by the owner — a developer's reply is not a close, and a review with an empty summary still
 holds every finding left on the diff's lines; no merge conflict; the pull request names
 its kind, tier and the agent that made it. Then label it `needs:owner`, say it is ready and what the
-review found, and ask for a squash merge. After the merge, close the issue and record on it what the
-work cost if the agents told you.
+review found, and ask for a squash merge. When the owner wants it merged while a lens is still
+running, say which lens and which commit it reads, so the merge is their decision made knowingly;
+whatever that lens then finds becomes a follow-up pull request at once, never a note on the merged
+one. After the merge, close the issue and record on it what the work cost if the agents told you.
 
 ## What you never do
 
