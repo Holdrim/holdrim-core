@@ -714,6 +714,8 @@ test('the pass refuses any account but the orchestrator, and one crew/accounts.m
 test('the model runs with file tools only, confined, and with no MCP server', () => {
   const text = readFileSync(SCRIPT, 'utf8');
   const model = text.slice(text.indexOf('--reuid=model'));
-  assert.match(model, /--tools "Read,Grep,Glob" --restricted --strict-mcp-config/);
+  assert.match(model, /--tools "Read,Grep,Glob" --restricted --strict-mcp-config --permission-prompts none /);
+  // The boundary was probed on one version of the CLI; a floating install would change it unseen.
+  assert.match(readFileSync(join(ROOT, 'crew', 'runner', 'Dockerfile'), 'utf8'), /npm install -g @anthropic-ai\/claude-code@\d+\.\d+\.\d+\n/);
   assert.doesNotMatch(model, /--allowedTools|Bash\(/);
 });

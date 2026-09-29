@@ -5,7 +5,10 @@ FROM node:24-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git gh ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code
+# Pinned: what the model can read rests on how this CLI answers a permission prompt nobody is there
+# to answer, and that was probed on this version. A newer one is taken by changing this line and
+# probing again, never by rebuilding.
+RUN npm install -g @anthropic-ai/claude-code@2.1.284
 # Two users, so that the operating system, and not only a flag, keeps the model from the tokens:
 # `crew` holds them in a home only it can read and runs the steps that talk to GitHub; `model` runs
 # the model, with a home of its own and nothing of crew's to read (its CLI flags then confine it to

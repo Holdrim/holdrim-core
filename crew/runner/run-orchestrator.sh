@@ -7,8 +7,8 @@
 # answer after checking it against the orchestrator's rules. The model runs as a user of its own,
 # `model`, which the operating system keeps out of `crew`'s home, where both tokens are stored, and
 # out of `crew`'s processes, whose environment holds the GitHub token. The flags it starts with
-# (file tools only, no MCP server; reads outside /work refused, as print mode approves none) are a
-# second wall, not the only one. This script starts as root only to hand each step to its user.
+# (file tools only, no MCP server, and every permission prompt denied, so a read outside /work is
+# refused) are a second wall, not the only one. This script starts as root only to hand each step to its user.
 set -euo pipefail
 
 REPO=Holdrim/holdrim-core
@@ -93,7 +93,7 @@ One comment per item at most; a key already present in that item's comments is n
 If the state changed, end with one comment on the issue labelled handoff, keyed handoff@<digest>,
 saying what is in flight, what waits on the owner and what comes next. If nothing needs you,
 answer {\"actions\": []}." \
-  --tools "Read,Grep,Glob" --restricted --strict-mcp-config --output-format json --max-turns 40 \
+  --tools "Read,Grep,Glob" --restricted --strict-mcp-config --permission-prompts none --output-format json --max-turns 40 \
   <<< "$CLAUDE_CODE_OAUTH_TOKEN" > "$WORK/result.json"
 
 # Exit 3 is the owner's pause, read again before every write: nothing more was published, and the

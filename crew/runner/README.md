@@ -14,9 +14,11 @@ credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this fo
    `model`, which the operating system keeps out of `crew`'s home, where both tokens are stored,
    and out of `crew`'s processes. Its environment carries only the Claude token it needs, and it
    runs with `Read`, `Grep` and `Glob` only and no MCP server: `--restricted` takes away every
-   tool that runs a command, and in print mode Claude Code refuses a read outside the directory it
-   starts in, `/work`, since nobody is there to approve one. It cannot run a command, reach the
-   network, read the GitHub token, or read its own environment in `/proc`.
+   tool that runs a command, and `--permission-prompts none` denies anything that would ask for
+   approval, which includes a read outside the directory it starts in, `/work`. It cannot run a
+   command, reach the network or read the GitHub token. That boundary was probed on Claude Code
+   2.1.284, the version the image pins: a read inside `/work` went through and one outside it was
+   refused.
 4. `board.js publish` applies the answer, and only the part the orchestrator may do: comments and
    existing `needs:`/`working:` labels on items already open, one comment per item (bar the note of
    what it refused), never twice
