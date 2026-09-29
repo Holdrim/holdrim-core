@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import { join, extname, normalize, relative, sep } from 'node:path';
+import { dirname, join, extname, normalize, relative, resolve, sep } from 'node:path';
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createCycle } from '../core/cycle.js';
@@ -35,7 +35,7 @@ import { PasswordIdentity } from './identity-password.ts';
 import { provisionFirstAccess, retireFirstAccessFile } from './first-access.ts';
 import { IapIdentity } from './identity-iap.ts';
 import {
-  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, AS_AGENT_FIELD, ensureLockBaseline, isLocked, authorCouldTriage,
+  EVENT_TYPES, LOCKS_FIELD, AUTHOR_COULD_TRIAGE_FIELD, AS_AGENT_FIELD, authoritative, isLocked, authorCouldTriage,
   type Event, type NewEvent, type EventStore,
 } from './types.ts';
 import { idForLog as peopleIdForLog, actedOn as peopleActedOn, recordAuthored } from './people.ts';
@@ -47,6 +47,7 @@ import {
 } from './role-grants.ts';
 import { openFindings, mayAcknowledge, acknowledgementRefusal, acknowledgementOf } from './tamper.ts';
 import { mayMove, mayAddDetails, statusFor, hereOf, blocksAsked, MAX_BLOCKS_ASKED, mayActOn, isOwnRequest } from './here.ts';
+import { loadSigner, loadKeyring, publicKeyText, type Signing } from './signing.ts';
 
 /**
  * The Holdrim service: serves the site and records review events.
@@ -259,10 +260,71 @@ for (const { what, variable, file } of fileStores) {
   }
 }
 
+/**
+ * Refuses a signing key file that sits where it is read by others: inside the site, which serves
+ * every file in it to whoever is signed in, or inside the folder a SQLite store keeps its files in,
+ * which is what gets copied, backed up and handed over as "the data". Whoever reads the key signs
+ * locks, so it lives apart from both. Judged by where each REALLY is, links followed, with the same
+ * `realContainment` the served-store check reads (engine/cli/fs.ts). A key given inline, or no key,
+ * has no file to check.
+ */
+const keyFile = process.env.HOLDRIM_SIGNING_KEY_FILE;
+if (keyFile !== undefined && keyFile.trim() !== '') {
+  const keep = 'keep HOLDRIM_SIGNING_KEY_FILE outside the site and outside every store\'s folder: whoever can read it can sign locks';
+  try {
+    refuseServedStore(cfg.site, keyFile, 'the signing key (HOLDRIM_SIGNING_KEY_FILE)');
+  } catch (error) {
+    refuseToStart(new Error(`${error instanceof Error ? error.message : String(error)}. The key is not read; ${keep}.`));
+  }
+  for (const { what, variable, file } of fileStores) {
+    const folder = dirname(resolve(file));
+    let inside = false;
+    try {
+      inside = realContainment(folder, resolve(keyFile)).inside;
+    } catch (error) {
+      // A store folder that does not exist yet holds nothing, the key included; anything else is
+      // a filesystem that cannot answer, and a key nobody can place is not read.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') refuseToStart(error);
+    }
+    if (inside) {
+      refuseToStart(new Error(`the signing key (HOLDRIM_SIGNING_KEY_FILE), ${keyFile}, is in the folder of ${what} `
+        + `(${variable}), ${folder}. The key is not read; ${keep}.`));
+    }
+  }
+}
+
+/**
+ * The key every event is signed with, and the keys events are verified with (engine/api/signing.ts;
+ * SECURITY.md, "The signing key"). Loaded before the store opens, so a store that keeps what it
+ * writes never opens without one: a SQLite file or Firestore with no key refuses to start, naming
+ * the variable and the command that makes one. Only a store that dies with this process — memory,
+ * or SQLite at `:memory:` — gets a key made up here and thrown away with it, so `run-local.sh` and
+ * a contract server start with no setup. The keyring trusts this server's own key and whatever
+ * `HOLDRIM_PUBLIC_KEYS` adds: the keys retired by a rotation, whose events stay verifiable.
+ *
+ * Logged: the key's id and its public half, which are no secret and are what every reader copies
+ * into its own `HOLDRIM_PUBLIC_KEYS`. Never the private key, nor anything read from its variable.
+ */
+const signing: Signing = (() => {
+  const lasting = eventsKind === 'firestore' || eventsFile !== null;
+  try {
+    const { signer, ephemeral } = loadSigner(process.env, (path) => readFileSync(path, 'utf8'), lasting);
+    const keyring = loadKeyring(process.env, signer);
+    if (ephemeral) {
+      log('WARNING', 'signing_key_ephemeral', { kid: signer.kid, reason: 'no HOLDRIM_SIGNING_KEY: a key made up for this '
+        + 'process, and gone with it, as are the events it signs — the events store keeps nothing past it' });
+    }
+    log('INFO', 'signing_key', { kid: signer.kid, publicKey: signer.publicKey, trusted: [...keyring.keys()] });
+    return { signer, keyring };
+  } catch (error) {
+    return refuseToStart(error);
+  }
+})();
+
 const events: EventStore = await (async () => {
   switch (eventsKind) {
-    case 'memory': return new MemoryEventStore();
-    case 'sqlite': return new SqliteEventStore(eventsFile?.file ?? ':memory:');
+    case 'memory': return new MemoryEventStore(signing);
+    case 'sqlite': return new SqliteEventStore(eventsFile?.file ?? ':memory:', signing);
     case 'firestore': {
       if (!cfg.project) { console.error('invalid configuration: firestore needs HOLDRIM_PROJECT'); process.exit(1); }
       // Imported here and only here — see the note at the top of store.ts. If the optional package
@@ -272,7 +334,7 @@ const events: EventStore = await (async () => {
           + `@google-cloud/firestore, which is not installed (${error.message})`);
         process.exit(1);
       });
-      return new FirestoreEventStore(cfg.project);
+      return new FirestoreEventStore(cfg.project, signing);
     }
     default:
       console.error(`invalid configuration: HOLDRIM_EVENTS="${eventsKind}" (use memory, sqlite or firestore)`);
@@ -281,19 +343,33 @@ const events: EventStore = await (async () => {
 })();
 
 /**
- * The fact an unwritten ✓ is measured against (decision B, round 1's review): who HOLDRIM_OWNER was
- * the moment THIS server first read this store. Resolved once, at boot, before anything is served —
- * "on the first start of this version" means whatever the store already holds, checked here, never a
- * flag this process could lose track of. See `ensureLockBaseline`'s own comment (types.ts) for the
- * write it makes, and why it is never reachable from a client POST.
- *
- * It also decides which events' WRITTEN fields are trusted at all (round 2's review): `isLocked` and
- * `authorCouldTriage` (types.ts) read `data.locks`/`data.authorCouldTriage` only for an event dated
- * after this one — anything this server itself recorded, this boot or an earlier one of this
- * version — never for one that predates it, which is a store from before this mechanism existed and
- * could hold whatever a client's own POST body once put in `data`.
+ * Every event read once, before the server answers anything: each one's seal is checked here, so an
+ * event not signed is named in the log at every start (CRITICAL, `event_unsigned`), and the checks
+ * are remembered (`verifyRow`, signing.ts) — without this, the first request after a start would pay
+ * for verifying the whole history, seconds for a long one, and could time out doing it.
  */
-const LOCK_BASELINE = await ensureLockBaseline(events, deployment.owner);
+{
+  const started = Date.now();
+  const all = await events.list(null);
+  log('INFO', 'events_verified', { events: all.length, signed: all.filter((e) => e.signed).length, ms: Date.now() - started });
+}
+
+/**
+ * Each request's own events, for the cycle — only those this server signed (`authoritative`,
+ * types.ts; #50): a `request_state` written into the store directly would otherwise move a request
+ * nobody moved, and an "approved" one would queue work for the agent. The one door every state the
+ * server computes goes through, so the panel, the home, the open count and `recordEvent`'s own guard
+ * cannot come to disagree about which transitions count.
+ */
+const threadsOf = (all: Event[]) => cycle.threadsOf(authoritative(all));
+
+/**
+ * The owner's row in the people table, made at the first start if it is not there yet, so every log
+ * line about the owner names them by id from their first sign-in on (docs/PRIVACY.md, section 6):
+ * without it, the owner has no id until their first event, and the lines before it name nobody.
+ * The owner is configuration, named by `HOLDRIM_OWNER`, and the one person a removal refuses.
+ */
+await events.personFor(deployment.owner);
 
 /** Wraps `idForLog`/`actedOn` (engine/api/people.ts) around this server's own store. */
 const idForLog = (email: string) => peopleIdForLog(events, email);
@@ -639,33 +715,30 @@ function refusalOf(
 
 /**
  * A request plus the state the server computed. The front end does not reimplement the cycle.
- * `thread` is the request's own events (`cycle.threadsOf`), not the whole list: see there why.
- * `authorCouldTriage` (types.ts) is what reads what `recordEvent` wrote onto the request when it was
- * FILED — the one implementation this file and requests.ts (the agent's CLI) both call, so there is
- * no second copy of the fallback to drift from it (round 1's review, finding 2). It trusts that
- * written field only when the request itself is dated after `LOCK_BASELINE` (round 2's review): a
- * request from before this whole mechanism existed could hold a client-forged `authorCouldTriage`
- * `recordEvent` never wrote, back when it stored whatever `data` a client sent.
+ * `thread` is the request's own signed events (`threadsOf`, above), not the whole list: see there
+ * why. `authorCouldTriage` (types.ts) is what reads what `recordEvent` wrote onto the request when it
+ * was FILED, on a request this server signed — the one implementation this file and requests.ts (the
+ * agent's CLI) both call, so there is no second copy of the rule to drift from it.
  */
-const withStatus = (e: Event, thread: Event[], viewer: Who | null, roles: Roles) => ({
-  ...e,
+const withStatus = (e: Event, thread: Event[], viewer: Who | null, roles: Roles) => {
   // Triage destinations only for a viewer who may triage THIS request, where it was filed (`statusFor`):
   // the panel draws its triage buttons from this list alone.
-  status: statusFor(roles, viewer, e, cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e, LOCK_BASELINE)))),
-});
+  const status = statusFor(roles, viewer, e, cycle.status(cycle.currentState(e.id, thread, authorCouldTriage(e))));
+  // Nor details to add, on a request this server did not sign: `recordEvent` refuses both.
+  return { ...e, status: e.signed === true ? status : { ...status, acceptsSupplement: false } };
+};
 
 /**
  * An event as a reader gets it: a request with its state, and an approval saying whether it is the
  * lock. Only the owner's ✓ is — `holdrim sync` and the home count theirs alone — and a panel that
  * painted any ✓ green, an admin's included, would show an opinion as if it were the lock. `isLocked`
- * (types.ts) reads what `recordEvent` wrote onto the ✓ when it was GIVEN — but only when the ✓ is
- * dated after `LOCK_BASELINE`, for the same reason `withStatus`, above, gates `authorCouldTriage` the
- * same way — falling back to `legacyLock` against `LOCK_BASELINE` for one that predates it, or holds
- * nothing at all. The one implementation this file and validation.ts (`holdrim sync`) both call.
+ * (types.ts) reads what `recordEvent` wrote onto the ✓ when it was GIVEN, and only on a ✓ this server
+ * signed: one written into the store directly paints nothing green. The one implementation this file
+ * and validation.ts (`holdrim sync`) both call.
  */
 const asRead = (e: Event, threads: Map<string, Event[]>, viewer: Who | null, roles: Roles) => {
   if (e.type === 'request') return withStatus(e, threads.get(e.id) ?? [], viewer, roles);
-  if (e.type === 'approval') return { ...e, locks: isLocked(e, LOCK_BASELINE) };
+  if (e.type === 'approval') return { ...e, locks: isLocked(e) };
   return e;
 };
 
@@ -757,7 +830,10 @@ async function recordEvent(
     const requestId = incoming.data?.request;
     if (!requestId) return { status: 400, body: { error: say('api.request.needsRequestId') } };
     const ofPage = await events.list(incoming.page);
-    const request = ofPage.find((e) => e.id === requestId && e.type === 'request');
+    // A request this server did not sign is no request to decide or add to: its author, its place and
+    // its words are whatever was written into the store, and a triager's ✓ on it would put words
+    // nobody filed into the agent's queue. The same answer as no request at all — there is none.
+    const request = ofPage.find((e) => e.id === requestId && e.type === 'request' && e.signed === true);
     if (!request) return { status: 404, body: { error: say('api.request.notFound') } };
     // Overwritten with the STORED request's own place — never trusted from what this event claims,
     // and never merely refused either (holdrim#152, orchestrator decision): `mayAddDetails` and
@@ -774,7 +850,7 @@ async function recordEvent(
     // so neither can drift from the other the next time one of them changes shape.
     incoming.page = request.page;
     incoming.block = request.block;
-    const current = cycle.currentState(requestId, ofPage, authorCouldTriage(request, LOCK_BASELINE));
+    const current = cycle.currentState(requestId, authoritative(ofPage), authorCouldTriage(request));
 
     if (incoming.type === 'supplement') {
       // Judged on the STORED request's place, never on the page and block this event claims.
@@ -933,6 +1009,11 @@ async function grantRole(who: Who, asked: { email: unknown; role: unknown; scope
   // The row made here, before the event, so the grant names an id the person will be found by when
   // they next ask — the same order `recordAuthored` keeps for an event's author.
   const person = await events.personFor(address);
+  // A row this server did not seal is nobody, and `rolesAt` never finds a grant naming it: a grant
+  // written anyway would sit on the screen reaching nobody. Refused, saying how to free the address.
+  if ((await events.personOf(address)) !== person) {
+    return { status: 409, key: 'api.grants.personUnsealed', params: { email: address } };
+  }
   const { author, event } = await recordAuthored(events, grantedEvent(role, person, scope, deployment.isAgent(who)), addressOf(who));
   log('INFO', 'role_granted', { id: event.id, role, scope, person, by: author });
   return { status: 201, event };
@@ -1079,7 +1160,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // ALL events of a request live on its own page (triage and the agent write with the request's
     // page), so the filtered query is enough — no need to scan the whole collection.
     const all = await events.list(page);
-    const threads = cycle.threadsOf(all);
+    const threads = threadsOf(all);
     const lang = languageOf(req);
     const displays = await authorDisplaysFor(all, who, roles, lang);
     // `own`, never a raw address the panel could compare `me` against: `author` below is already
@@ -1106,7 +1187,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
     // remover entirely: `removalSubjectsOf` adds them, by the same event `Removed.by` came from.
     const displays = await authorDisplaysFor([found, ...removalSubjectsOf(found, all)], who, roles, lang);
     return json(res, 200, {
-      ...asRead(found, cycle.threadsOf(all), who, roles), author: displays.get(found.author) ?? found.author,
+      ...asRead(found, threadsOf(all), who, roles), author: displays.get(found.author) ?? found.author,
       textRemoved: resolveRemovedBy(found.textRemoved, displays), snapshotRemoved: resolveRemovedBy(found.snapshotRemoved, displays),
       own: found.author === email,
     });
@@ -1185,9 +1266,10 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL, who: Who
 
   if (req.method === 'GET' && route === '/requests/open') {
     const all = await events.list(null);
-    const threads = cycle.threadsOf(all);
-    const toTriage = all.filter((e) => e.type === 'request')
-      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)) === 'open').length;
+    const threads = threadsOf(all);
+    // Signed only: an unsigned request is shown, marked, and nobody can triage it (`recordEvent`).
+    const toTriage = authoritative(all).filter((e) => e.type === 'request')
+      .filter((r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r)) === 'open').length;
     return json(res, 200, { toTriage });
   }
 
@@ -1912,17 +1994,17 @@ async function serveHome(req: IncomingMessage, res: ServerResponse, ask: HomeOut
   const all = await events.list(null);
   // Only a ✓ from someone who holds `lock` can become one, so only those are worth counting as
   // waiting for one.
-  const ownerApprovals = all.filter((e) => e.type === 'approval' && isLocked(e, LOCK_BASELINE));
+  const ownerApprovals = all.filter((e) => e.type === 'approval' && isLocked(e));
   const pages = summarisePages(await readBlocks(projectRoot), loadRegistry(projectRoot), cfg.site, ownerApprovals,
     (path) => readFileSync(path, 'utf8'));
-  const threads = cycle.threadsOf(all);
+  const threads = threadsOf(all);
   const viewer = await viewerOf(req);
   const roles = known ?? await rolesFor(viewer);
   // Resolved once for every request on the home, not once per row: `requestsInProgress` only reads
   // this for `type: "request"` events, so those are all `authorDisplaysFor` ever needs to look at.
   const displays = await authorDisplaysFor(all.filter((e) => e.type === 'request'), viewer, roles, lang);
   const requests = requestsInProgress(all,
-    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r, LOCK_BASELINE)),
+    (r) => cycle.currentState(r.id, threads.get(r.id) ?? [], authorCouldTriage(r)),
     new Map(pages.map((p) => [p.page, p.href])),
     (email) => displays.get(email) ?? email);
   // The decisions each request can take, for whoever may take them — the cycle's own list, the
@@ -2105,6 +2187,16 @@ const server = createServer(async (req, res) => {
   }
   try {
     if (url.pathname === '/api/health') return json(res, 200, { ok: true });
+    // The public keys, to anyone, before any sign-in: they are no secret, and they are what an
+    // operator copies into `HOLDRIM_PUBLIC_KEYS` wherever `holdrim sync` runs. Copied, never fetched
+    // and trusted by the CLI (owner decision 2 on #50): an answer over the network is whoever
+    // answers, and the keys a reader trusts are set where it runs.
+    if (url.pathname === '/api/signing-keys' && req.method === 'GET') {
+      return json(res, 200, {
+        signing: { kid: signing.signer.kid, publicKey: signing.signer.publicKey },
+        trusted: [...signing.keyring].map(([kid, key]) => ({ kid, publicKey: publicKeyText(key) })),
+      });
+    }
 
     // Before the authentication guard on purpose: the login screen is where most people change
     // language, and it is the one page they can reach without a session.

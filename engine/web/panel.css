@@ -127,6 +127,8 @@ body.rv-on main [data-code]::after { content: none !important; }
 .rv-snapshot { margin-top: .35rem; font-size: .8rem; color: var(--holdrim-ink-muted); }
 .rv-snapshot summary { cursor: pointer; }
 .rv-snapshot p { margin: .3rem 0 0; padding: .5rem .6rem; background: var(--holdrim-surface-sunken); border-radius: 8px; }
+/* An event this server did not sign: marked in the danger colour, since it may be a forgery. */
+.rv-unsigned { color: #A3231F; font-weight: 600; font-size: .78rem; }
 .rv-notice { font-size: .82rem; color: #8A5A12; background: #FFFBF3; border-radius: 8px; padding: .5rem .6rem; }
 .rv-state--approved, .rv-state--applying, .rv-state--waiting { background: #EEF6FC; color: #0A6FA6; }
 .rv-state--question { background: #FDF2E3; color: #8A5A12; }

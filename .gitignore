@@ -10,4 +10,7 @@ node_modules
 .env.*
 !.env.example
 secrets.json
+# The signing key `holdrim key new` makes (README, "In two minutes"): a private key, never committed.
+holdrim-signing.key
+*.key
 .DS_Store

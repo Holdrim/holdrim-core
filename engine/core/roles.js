@@ -30,8 +30,8 @@
  * writes a definition and the reader that trusts one ask the same question.
  *
  * `HOLDRIM_LOCKS` (below, `parseLocks`) is different: who holds `lock` besides the owner is read from
- * the environment, same as `owner` and `admins`, because a forged lock is the one thing signed events
- * (phase E) have not closed yet. `can('lock', …)` does not consult it in this change — see `can`'s own
+ * the environment, same as `owner` and `admins`, because who may lock is the one authority no event —
+ * signed or not — may grant. `can('lock', …)` does not consult it in this change — see `can`'s own
  * comment for why.
  *
  * `HOLDRIM_AGENTS` (`parseAgents`) marks who is an agent, also from the environment. It grants

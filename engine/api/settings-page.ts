@@ -83,7 +83,7 @@ export const SETTINGS_KEYS = [
   'settings.remove.confirm', 'settings.remove.submit', 'settings.remove.done', 'settings.remove.left',
   'settings.remove.legacy',
   'api.removal.unconfirmed', 'api.removal.notTheOwner', 'api.removal.namedByDeployment',
-  'api.removal.holdsAgentToken', 'api.removal.holdsOldLocks', 'api.removal.onlyOlderEvents', 'api.removal.nobody',
+  'api.removal.holdsAgentToken', 'api.removal.onlyOlderEvents', 'api.removal.nobody',
   'api.removal.inProgress',
 ];
 

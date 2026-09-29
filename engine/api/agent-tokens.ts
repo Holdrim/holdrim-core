@@ -6,7 +6,7 @@ import { AS_AGENT_FIELD, type NewEvent } from './types.ts';
  *
  * Written only by the server's own routes (`userRoutes`, server.ts), never accepted from `POST
  * /events`: neither name is in `EVENT_TYPES` (types.ts), so that route refuses both as unknown before
- * anything else runs — the guard `lock_baseline` and `text_removed` already rely on. A client able
+ * anything else runs — the guard `text_removed` and the role events already rely on. A client able
  * to post one could write "the owner issued a token to X" with nobody having issued anything, or
  * hide a real revocation behind a forged issue.
  *
@@ -19,9 +19,8 @@ export const AGENT_TOKEN_ISSUED = 'agent_token_issued';
 export const AGENT_TOKEN_REVOKED = 'agent_token_revoked';
 
 /**
- * Where both events live. Never a real content page — no kind numbers a page `_…` — for the reason
- * `LOCK_BASELINE_PAGE` (types.ts) gives: no page's own list ever shows them, and a page a project adds
- * later cannot collide with it.
+ * Where both events live. Never a real content page — `PAGE_FORMAT` refuses a leading `_` — so no
+ * page's own list ever shows them, and a page a project adds later cannot collide with it.
  */
 export const AGENT_TOKEN_PAGE = '_agent_tokens';
 

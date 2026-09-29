@@ -9,6 +9,7 @@ import * as validation from './validation.ts';
 import * as graph from './graph.ts';
 import * as agent from './agent.ts';
 import * as propose from './propose.ts';
+import { keyCommand } from './keys.ts';
 
 /**
  * The agent's tool for the Holdrim method.
@@ -52,6 +53,10 @@ holdrim — the agent's tool for the Holdrim method
                                   and do not depend on each other yet — a request, not a write;
                                   --dry-run only prints what would be proposed
 
+  The signing key (the server signs every event; readers trust only what it signed)
+    key new <file>              writes a new signing key to <file>, readable by you alone, and
+                                  prints the public half for HOLDRIM_PUBLIC_KEYS
+
   Publishing
     export <folder>             the documentation as static pages, without the panel, for anyone
                                   to read — a new or empty folder; nothing is ever deleted
@@ -76,6 +81,9 @@ holdrim — the agent's tool for the Holdrim method
     HOLDRIM_ACCOUNT             pins the gcloud account the cloud is read with (default: the first
                                   one to issue a token)
     HOLDRIM_EVENTS_PATH         the SQLite events file, when there is no cloud
+    HOLDRIM_PUBLIC_KEYS         the server's public signing key(s), ";" separated: read from the file
+                                  or the cloud, an event counts only if one of them signed it, and
+                                  sync, apply and state refuse without any (--local does not need it)
     HOLDRIM_LOCAL_URL           the local server (default: http://localhost:8095)
 `;
 
@@ -103,6 +111,12 @@ async function main() {
 
   const [command, arg] = positionals;
   if (values.help || !command) { console.log(HELP.trim()); return 0; }
+
+  // Before the project is read: a key is made for a deployment, often on a machine or in a folder
+  // with no holdrim.json at all, and nothing about the project decides it.
+  switch (command) {
+    case 'key':        return keyCommand(arg, positionals[2]);
+  }
 
   const root = values.root ?? process.cwd();
   // Without this, a mistyped --root reads as an empty documentation: "0 block(s)", exit 0, and

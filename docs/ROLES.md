@@ -113,8 +113,8 @@ The invariant "only the owner's ✓ becomes a lock" becomes:
   `ana@example.org:P0*; bea@example.org:F12`. It is read at start, by the same hands that set
   `HOLDRIM_OWNER`: whoever configures the server. A committer to the repository cannot grant a lock,
   and an agent applying an approved request cannot. A direct writer to the store cannot grant one
-  either, though until signed events they can forge a ✓ that claims to be a lock (the attack table
-  below). Changing it
+  either, nor forge a ✓ that claims to be a lock: without the server's signing key it counts for
+  nothing (the attack table below). Changing it
   means restarting the service, which is the point. The addresses stay out of git and out of the
   store; the store sees only ids (`docs/PRIVACY.md`, section 1).
 - **Their accounts are guarded like the owner's.** Resetting, creating, disabling and re-enabling the
@@ -218,8 +218,9 @@ way arrives as whoever it borrowed from. So:
   `HOLDRIM_AGENTS` does not name, is still that person to the server — the token marks an agent that
   uses it, not one that avoids it. And an agent running on a person's machine that reuses that
   person's signed-in browser session is, to the server, that person. Nothing in 0.1.0 tells them
-  apart, and the method's answer until signed events and a second factor exist (phase E) is the one
-  it has always had: the ✓ is the person's, given with their session, and they are answerable for it.
+  apart — signed events prove the server recorded a ✓, not who sat at the keyboard — and the
+  method's answer until a second factor exists is the one it has always had: the ✓ is the person's,
+  given with their session, and they are answerable for it.
 
 ### 5. Where everything lives
 
@@ -271,11 +272,10 @@ the settings screen's forms, which call the same functions — and by nothing el
 - **Listable by anyone signed in**, through `GET /api/events?page=_roles`, as the agent tokens'
   events are on `_agent_tokens`: who may do what is not a secret from the people it applies to.
 
-They carry `docs/PRIVACY.md` section 3's caveat: a direct writer to the store can forge one. What
-that buys is bounded — a role or grant without `lock` or `people`, since the reader checks every
-definition again and a forged one holding either reads as holding nothing; so a recorded, attributed
-decision that is never a lock, and never `people` over anyone's account. Signed events (phase E)
-close it.
+A direct writer to the store can insert one, and it counts for nothing: `projectRolesOf` reads only
+events the server signed (`docs/PRIVACY.md` section 3; SECURITY.md, "The signing key"), revocations
+included. And whatever is read is checked again: a definition holding `lock` or `people` reads as
+holding nothing, so even a signed one is never a lock, and never `people` over anyone's account.
 
 ### 6. How a person appears
 
@@ -334,7 +334,7 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | Granting someone triage decides their open requests after the fact | A request's starting state is written when it is filed and never recomputed |
 | An admin resets an unguarded account, then changes its password through the self-service route | The test reads the whole history: the latest issuance or reset by anyone but the person must be the owner's |
 | An admin keeps a session open across the owner's re-issue of a lock-holder's password | A lock needs a session opened with a credential the person set after the owner's latest issuance; each issuance drops every session |
-| A direct writer to the store writes a ✓ with the lock bit set | Nothing stops it before signed events, exactly as for the owner's ✓ today (`docs/PRIVACY.md` §3); phase E closes it |
+| A direct writer to the store writes a ✓ with the lock bit set | Closed (#50): not signed by the server, it is shown, marked and raised as CRITICAL, and no reader — `holdrim sync` included — reads it as a lock (`docs/PRIVACY.md` §3) |
 | A commit renumbers a page into a lock-holder's scope | Not closed by design: the repository decides what a code means. Start logs each scope's coverage and refuses a scope that matches no page; the renumbering itself is a reviewed change |
 | An admin resets a lock-holder's password and signs in as them | Their accounts are the owner's to reset, create, disable and re-enable, on all four routes |
 | An admin disables a lock-holder to silence their ✓ right when it would matter | The same four routes: disabling one is the owner's alone too |
@@ -342,7 +342,9 @@ a toggle misspelled is a toggle that silently did nothing. First candidates: `co
 | Someone with `people` makes themselves or an accomplice an approver | Only the owner grants roles |
 | The owner grants a project role holding `people`, and its holder hands out approvers' accounts | A project role cannot hold `people`: refused when it is defined, and read as holding nothing if one is stored anyway |
 | A client posts a `role_granted` naming itself | `POST /api/events` refuses the three event types of roles, as it refuses `text_removed` |
-| A direct writer to the store forges a grant | Buys a role without `lock` or `people`; closed by signed events |
+| A direct writer to the store forges a grant | Closed (#50): not signed, it grants nothing; and a signed one could never hold `lock` or `people` |
+| A direct writer re-points a person's row at another address | Not closed: the people table is not signed, so the address gets the project grants the id holds — never `lock` or `people`, which the deployment decides by address (SECURITY.md, "Known limits") |
+| A direct writer deletes a revocation or a rejection | Not closed: a signature proves an event genuine, not that none is missing; a signed sequence is planned for 0.2 |
 | A direct writer stores a grant naming an agent, to stop the service at its next start | The grant is ignored and logged, and the service starts; `can` refuses the agent `AGENT_NEVER` before any grant is read |
 | A grant is revoked, and a server goes on answering it | Grants are read from the store on every request, never cached; a store that cannot be read fails the request |
 | A grant limited to some pages is used to skip triage | A request skips or passes triage only by someone who may triage everywhere; a scoped triager's own requests start at triage and are decided by someone else |
@@ -390,6 +392,7 @@ loses the file fallback for the owner and the admins, and the templates, which s
 | Roles and grants as events, from the settings screen, by the owner | built (#36) — section 5: `role_defined`, `role_granted` and `grant_revoked` on `_roles` (`engine/api/role-grants.ts`), the owner's routes and the screen's forms, `PROJECT_CAPABILITIES` and `isValidRoleName` (`engine/core/roles.js`), and `rolesAt` handing `withProjectGrants` the grants in force on every request. Lock grants from the screen are not part of it (#54) |
 | Scopes actually consulted by `can`, with a page or block in hand | built (#33) — `can(capability, who, where)` refuses to answer without `where` (a page, a block, or `EVERYWHERE`), and reads grants through `scopeCovers` (`engine/core/roles.js`): a page covers its blocks by each block's own page, a family `P0*` the prefix and exactly one character more, a block id that block alone, and a scoped grant never answers `EVERYWHERE`. Every check in `engine/api/server.ts` asks with the place (`engine/api/here.ts`): a ✓ by its block, triage and adding details by the stored request's. `POST /api/here` answers per page and for each block the panel names on it (`blocksAsked`), and the panel draws its ✓, its triage and its "Add details" from it. The shipped roles are unscoped — owner, admins and members name no pages — and a project's own grant carries its scope (section 5); `HOLDRIM_LOCKS` scopes are logged at start and refused when they match no page, and `lock` stays owner-only |
 | The lock written on the event, never recomputed | built — `data.locks`, written by `recordEvent` and read by `isLocked` (`engine/api/types.ts`); the author's role is not written yet (`docs/PRIVACY.md` section 2) |
+| The lock, and every other written authority, trusted only on a signed event | built (#50) — `engine/api/signing.ts`, and `authoritative`, `isLocked` and `authorCouldTriage` (`engine/api/types.ts`); `projectRolesOf` reads signed events only |
 | Agents marked by the deployment (`HOLDRIM_AGENTS`), refused `triage`, `approve`, `lock` and `people` before any grant is read | built (#30) — `engine/core/roles.js`'s `parseAgents`, `isAgent`, `AGENT_NEVER` and `can` |
 | A grant naming an agent refusing to start, on the server and in the CLI | built (#30) — `refuseGrantsToAgents`, called by `rolesOf`; `holdrim.json` refuses `agents` too |
 | Every event marked with whether its author was an agent | built (#30) — `data.asAgent`, written by `recordEvent` (`engine/api/server.ts`), on every event, the CLI's included since it writes through the server (#122) |

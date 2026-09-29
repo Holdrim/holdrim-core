@@ -2,13 +2,39 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import type { Event } from '../api/types.ts';
-import { withAuthors, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
+import { withAuthors, trustedPeople, FIRESTORE_PEOPLE as LAYOUT } from '../api/people.ts';
 import { textKey, withTexts, withTextsRetrying, reportTampered, TEXT_REMOVED,
   type RawEvent as Raw, type TextField, type TextRow, type TamperReport } from '../api/texts.ts';
 import { log } from '../api/log.ts';
+import { loadKeyring, withSignatures, type Keyring } from '../api/signing.ts';
 
 /** `Event`, as this file's own reads carry the two fields `withTexts` needs and then strips. */
 type RawEvent = Raw<Event>;
+
+/** A document's event, before its seal is checked: the seal still beside it. */
+type SealedRaw = Omit<RawEvent, 'signed' | 'unverified'> & { envelope: unknown; sig: unknown; kid: unknown };
+
+/**
+ * One Firestore REST value, as the JavaScript value the server's own client wrote it from. Every
+ * kind, not only strings: `data` is compared with the signed envelope (engine/api/signing.ts), and a
+ * reader that dropped a number or a nested map would read every genuine event carrying one as
+ * forged. A kind this does not know reads as `undefined`, which no signed value equals.
+ */
+export function firestoreValue(v: Record<string, any> | undefined): unknown {
+  if (!v || typeof v !== 'object') return undefined;
+  if ('stringValue' in v) return v.stringValue;
+  if ('nullValue' in v) return null;
+  if ('booleanValue' in v) return v.booleanValue;
+  if ('integerValue' in v) return Number(v.integerValue);
+  if ('doubleValue' in v) return Number(v.doubleValue);
+  if ('timestampValue' in v) return normalizeWhen(v.timestampValue);
+  if ('arrayValue' in v) return ((v.arrayValue?.values ?? []) as Record<string, any>[]).map(firestoreValue);
+  if ('mapValue' in v) {
+    return Object.fromEntries(Object.entries((v.mapValue?.fields ?? {}) as Record<string, any>)
+      .map(([k, x]) => [k, firestoreValue(x)]));
+  }
+  return undefined;
+}
 
 const exec = promisify(execFile);
 
@@ -36,8 +62,9 @@ const emulator = (): string | undefined => process.env.FIRESTORE_EMULATOR_HOST |
  * A Firestore `timestampValue`, normalized to the plain ms ISO string the server itself writes and
  * compares (round 2's review, MINOR). Firestore's own JSON mapping for a timestamp
  * (`google.protobuf.Timestamp`) emits 0, 3, 6 or 9 fractional digits depending on the value, while
- * every comparison of `when` in this codebase (`legacyLock`, `earliestLockBaseline`, this file's own
- * history sort) is a plain `<`/`localeCompare` on the raw string. Left un-normalized, a whole-second
+ * every comparison of `when` in this codebase (the cycle's own ordering, `removalsOf`, this file's
+ * own history sort) is a plain `<`/`localeCompare` on the raw string, and the `when` a signed
+ * envelope carries is compared with this one character for character. Left un-normalized, a whole-second
  * timestamp sorts AFTER a fractional one from the same second — `'…10:00:00Z' > '…10:00:00.5Z'`
  * lexically, because `Z` (0x5A) sorts after `.` (0x2E) — even though the first is the LATER instant.
  * `Date` accepts any of the four shapes and always answers back with exactly three digits, matching
@@ -54,13 +81,10 @@ export function normalizeWhen(timestampValue: string | null | undefined): string
  * behind it (round 2's review, MINOR: nothing pinned that this reader calls `normalizeWhen` at all,
  * so reverting `when` back to the raw `timestampValue` string survived every test in the suite).
  */
-export function firestoreEventOf(d: Record<string, any>): RawEvent {
+export function firestoreEventOf(d: Record<string, any>): SealedRaw {
   const f = d.fields ?? {};
   const s = (k: string) => f[k]?.stringValue ?? null;
-  const data: Record<string, string> = {};
-  for (const [k, v] of Object.entries(f.data?.mapValue?.fields ?? {})) {
-    data[k] = (v as any).stringValue;
-  }
+  const data = firestoreValue(f.data);
   return {
     id: String(d.name).split('/').pop()!,
     type: s('type')!, page: s('page')!, block: s('block'), fingerprint: s('fingerprint'),
@@ -70,8 +94,12 @@ export function firestoreEventOf(d: Record<string, any>): RawEvent {
     text: s('text'), snapshot: s('snapshot'), textHash: s('textHash'), snapshotHash: s('snapshotHash'),
     author: s('author')!,
     when: normalizeWhen(f.when?.timestampValue),
-    data: Object.keys(data).length ? data : null,
+    // A map, or nothing: any other kind in `data` is no event's data, and a signed event whose
+    // `data` the document changed that way reads as forged beside its envelope.
+    data: data !== null && typeof data === 'object' && !Array.isArray(data) ? data as Record<string, unknown> : null,
     textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
+    // Raw, of whatever kind the document holds: `verifyRow` takes only strings.
+    envelope: firestoreValue(f.envelope), sig: firestoreValue(f.sig), kid: firestoreValue(f.kid),
   };
 }
 
@@ -86,9 +114,17 @@ export class Source {
   #preferredAccount?: string;
   #pageSize: number;
   #guardsTampered = false;
+  #keyring: Keyring;
 
   constructor(options: { local?: boolean; project?: string; localUrl?: string; url?: string; account?: string;
-                        db?: string; pageSize?: number } = {}) {
+                        db?: string; pageSize?: number; keyring?: Keyring } = {}) {
+    // The keys this reader trusts, from `HOLDRIM_PUBLIC_KEYS` where it runs, and from nowhere else:
+    // not `holdrim.json` (refused there), not the store, and not the server's own
+    // `GET /api/signing-keys` (engine/api/signing.ts says why). With none, every event read
+    // straight from the file or the cloud is not signed, and none is a lock; `sync`, `apply` and
+    // `state` refuse to act on that (`refuseToActUnverified`, requests.ts). `--local` reads the
+    // local server, which verified every event itself.
+    this.#keyring = options.keyring ?? loadKeyring(process.env);
     this.#local = options.local ?? false;
     // The events file, when the project runs without a cloud. This is what closes the loop
     // offline: without it, `sync` only works against the cloud store or against a server in
@@ -242,6 +278,18 @@ export class Source {
   }
 
   /**
+   * Whether what this source reads is checked against keys the deployment named: `--local` reads the
+   * local runner, which verified each event with its own key and says so in `signed`; a direct read
+   * of the file or the cloud needs `HOLDRIM_PUBLIC_KEYS`. `sync`, `apply` and `state` refuse without
+   * it, and the reading commands warn (requests.ts).
+   */
+  get verifies(): boolean {
+    // The same order `events()` reads in: a file named and present is read first, even with --local.
+    const fromFile = Boolean(this.#db && existsSync(this.#db));
+    return (this.#local && !fromFile) || this.#keyring.size > 0;
+  }
+
+  /**
    * Reads events straight from the SQLite file. READ ONLY — never writes: writing through here
    * would bypass the cycle, the roles and the limits.
    *
@@ -255,7 +303,7 @@ export class Source {
    */
   async #fromFile(path: string): Promise<Event[]> {
     const { DatabaseSync } = await import('node:sqlite');
-    const { extractionBoundary, rollbackQuietly, guardMismatches, guardMismatchSaid, repairable } =
+    const { extractionBoundary, rollbackQuietly, guardMismatches, guardMismatchSaid, repairable, rowOf } =
       await import('../api/store-sqlite.ts');
     const db = new DatabaseSync(path, { readOnly: true });
     let mismatches: ReturnType<typeof guardMismatches>;
@@ -294,10 +342,12 @@ export class Source {
         // still the table the server reads, and a case-sensitive lookup here would read it as absent,
         // no author resolved, where the server resolves them all.
         const hasPeople = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people' COLLATE NOCASE").get();
-        people = new Map(hasPeople
-          ? (db.prepare('SELECT id, email FROM people').all() as { id: string; email: string | null }[])
-            .map((p) => [p.id, p.email ?? null])
-          : []);
+        // `*`, not the seal by name: a file from before rows were sealed has no such column, and its
+        // rows read as unsealed — nobody's — rather than failing the read.
+        people = trustedPeople(hasPeople
+          ? (db.prepare('SELECT * FROM people').all() as Record<string, unknown>[])
+            .map((p) => ({ id: String(p.id), email: (p.email ?? null) as string | null, seal: p.seal }))
+          : [], this.#keyring, console.error);
         // A file written before texts were extracted has no `texts` table either, and every row's
         // `text`/`snapshot` already holds its own plain value with no hash to check — the same rule
         // an empty people map gives an author (docs/PRIVACY.md, section 4).
@@ -345,20 +395,16 @@ export class Source {
         // the one event name still has to tell a foreign trigger from a guard that is not there.
         log('WARNING', 'sqlite_guard_missing', { guard: m.name, kind: m.kind }, console.error);
       }
-      const events = withAuthors(rows.map((row) => ({
-        id: String(row.id), type: String(row.type), page: String(row.page),
-        block: row.block ?? null, fingerprint: row.fingerprint ?? null, text: row.text ?? null,
-        snapshot: row.snapshot ?? null, textHash: row.text_hash ?? null, snapshotHash: row.snapshot_hash ?? null,
-        author: String(row.author), when: String(row.happened_at),
-        data: row.data ? JSON.parse(String(row.data)) : null,
-        textRemoved: null, snapshotRemoved: null, textTampered: false, snapshotTampered: false,
-        afterExtraction: boundary != null && (row.rowid as number) >= boundary,
-      })), people);
       // Read straight from the file, so this is one of the two CLI readers issue #91 names: the
       // server, reading through the API, already raises this alert on its own; a person pointing
       // `--db` at the file directly gets no such server in between, so this is the only place left
-      // for the alert to come from.
+      // for the alert to come from — for a text that fails its hash, and for an event not signed.
+      // `rowOf` is the server store's own reading of a row, so the two readers of one file compare
+      // the same columns with the seal.
       const reports: TamperReport[] = [];
+      const events = withAuthors(withSignatures(rows.map((row) => ({
+        ...rowOf(row), afterExtraction: boundary != null && (row.rowid as number) >= boundary,
+      })), this.#keyring, reports, console.error), people);
       const out = withTexts(events, texts, reports);
       // console.error, not `log()`'s default stdout (issue #129): this reader feeds `list --json`,
       // whose stdout a caller `JSON.parse`s as the queue — the same reason `sqlite_guard_missing`
@@ -386,9 +432,12 @@ export class Source {
     const out = (await this.#collection(headers, 'events')).map((d) => firestoreEventOf(d));
     // The people after the events, as the server's Firestore store reads them and for its reason:
     // a person is made before their first event, so every author read above is in this read.
-    const people = new Map((await this.#collection(headers, LAYOUT.rows)).map((d) =>
-      [String(d.name).split('/').pop()!, (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null]));
-    const events = withAuthors(out, people).sort((a, b) => a.when.localeCompare(b.when));
+    const people = trustedPeople((await this.#collection(headers, LAYOUT.rows)).map((d) => ({
+      id: String(d.name).split('/').pop()!, email: (d.fields?.[LAYOUT.email]?.stringValue as string | undefined) ?? null,
+      seal: d.fields?.[LAYOUT.seal]?.stringValue })), this.#keyring, console.error);
+    const reports: TamperReport[] = [];
+    const events = withAuthors(withSignatures(out, this.#keyring, reports, console.error), people)
+      .sort((a, b) => a.when.localeCompare(b.when));
     // The texts after the events, as the server's Firestore store reads them, for the same reason.
     const texts = new Map((await this.#collection(headers, 'texts')).map((d) => {
       const f = d.fields ?? {};
@@ -403,12 +452,13 @@ export class Source {
     // tampered, ask once more, later, for the removal events that first pass could not have seen.
     // The other CLI reader issue #91 names: reading the cloud directly, bypassing the server and
     // therefore the alert it would otherwise have raised on this same event.
-    const reports: TamperReport[] = [];
     const resolved = await withTextsRetrying(events, texts, async () => {
       // Ignores `suspects`: see withTextsRetrying's own doc comment (engine/api/texts.ts) for why.
+      // Verified like the first read, and for the reason the server's Firestore store gives: a
+      // re-read that skipped it would let an unsigned removal back in.
       const removed = await this.#collection(headers, 'events',
         { fieldFilter: { field: { fieldPath: 'type' }, op: 'EQUAL', value: { stringValue: TEXT_REMOVED } } });
-      return withAuthors(removed.map((d) => firestoreEventOf(d)), people);
+      return withAuthors(withSignatures(removed.map((d) => firestoreEventOf(d)), this.#keyring, undefined, console.error), people);
     }, reports);
     // console.error, for the same reason as the file reader above: this is the CLI's answer, not
     // the server's log, and `list --json` must stay parseable JSON on stdout.

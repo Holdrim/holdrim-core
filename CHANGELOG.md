@@ -15,6 +15,49 @@ who ran the engine from `main` before it.
 
 ### Breaking
 
+- **A signing key is now required: every event is signed by the server, and a store that keeps what
+  it writes refuses to start without the key (#50).** The server signs each event it records —
+  its id, type, page, block, fingerprint, the salted hashes of its texts, its author's person id, its
+  time and its `data` — with an Ed25519 key only it holds, and every reader checks the signature
+  before an event counts for anything. **What to change:** make a key once, with
+  `holdrim key new <file>` (it writes the private key readable by its owner alone, never over an
+  existing file, and prints the public half; `openssl genpkey -algorithm ed25519 -out <file>` makes an
+  equivalent PEM), and give it to the server as `HOLDRIM_SIGNING_KEY_FILE=<file>` or
+  `HOLDRIM_SIGNING_KEY` holding its contents — never both (an empty `HOLDRIM_SIGNING_KEY` beside the
+  file, as `compose.yaml` passes it, counts as unset). Keep it out of the repository and off the
+  store's own volume: whoever holds it can sign a lock. A `HOLDRIM_SIGNING_KEY_FILE` inside the site,
+  or inside the folder of a SQLite store, refuses to start. A SQLite file or Firestore store with no key
+  now refuses to start, in Development too, naming both variables; an events store in memory
+  (`bash engine/run-local.sh`, the default of `HOLDRIM_MODE=local`) gets a throwaway key and says so
+  (`signing_key_ephemeral`, WARNING). `docker compose up` needs the key too (README, "In two minutes").
+  Wherever `holdrim` reads the events file or the cloud directly, export
+  `HOLDRIM_PUBLIC_KEYS` with the public key — printed by `holdrim key new`, logged at every start
+  (`signing_key`) and answered by `GET /api/signing-keys` — `;` separated when a rotation keeps an
+  old key trusted (SECURITY.md, "Rotating the signing key"). An event signed by a key the reader
+  was not given is `unverified`: it counts for nothing, and the missing key is said once, as a
+  WARNING naming it (`events_unverified`) — never as tampering. Without the variable, `holdrim list`
+  warns and exits 0 with nothing approved, and `sync`, `apply` and `state` refuse. A public key given
+  as a private one is refused, and named as leaked. A `holdrim.json` naming `signing`, `signingKey` or `publicKeys` refuses to load, as one
+  naming `owner` does. New on the surface: the variables `HOLDRIM_SIGNING_KEY`,
+  `HOLDRIM_SIGNING_KEY_FILE` and `HOLDRIM_PUBLIC_KEYS`, the command `holdrim key new`, the route
+  `GET /api/signing-keys` (public: the keys are no secret), and the fields `signed` and `unverified`
+  on every event the API answers. Three columns join `events` in SQLite (`envelope`, `sig`, `kid`), added on start, and
+  three fields each Firestore event document. An event with no valid signature is shown, marked, and
+  raised as CRITICAL (`event_unsigned`, `event_forged`) on the banner, beside tampered texts. A
+  request the server did not sign cannot be triaged, added to or applied: it is shown, marked, and
+  stays where every request starts. Each row of the people table is sealed with the same key, over
+  its id and address (the column `seal` in SQLite, beside a guard that refuses writing one afterwards;
+  the field `seal` on the Firestore row and its pointer): a row with no seal, or one that does not
+  hold, is nobody — no grant reaches it, and its events read as its id — and is said once, by id
+  (`person_unsealed`, WARNING; `person_forged`, CRITICAL). **Every row made before this version has
+  no seal**, and no row is sealed afterwards, since that would vouch for whatever was written into
+  it: a grant to such a person is refused until the owner removes them on the settings screen, after
+  which their address is a new, sealed person (docs/PRIVACY.md, section 3). On
+  Firestore, an event's `when` now comes from the clock of the server that signs it, not
+  `serverTimestamp()`, since it has to be known before it is signed; one instance never dates two
+  events alike, and two instances writing inside one millisecond fall back to the document id. Every
+  event is read once at start, before the server answers (`events_verified`), so the first request
+  does not pay for checking the whole history.
 - **A server whose SQLite store would be served by the site now refuses to start, and so does one
   it cannot check.** Before either store is opened, the folder of the SQLite users store and of the
   SQLite events store is checked against the site (see **Security**). Four configurations that used
@@ -131,25 +174,29 @@ who ran the engine from `main` before it.
   requests back to triage with no event recording either change. The server writes `locks` (an
   approval) and `authorCouldTriage` (a request) at the moment it records the event; every reader —
   the panel, the home, `holdrim sync` and `holdrim list`/`show`/`summary`/`state` — reads what was
-  written. A request with nothing written reads as "at triage" (the safe direction: the owner
-  triages it again, once). A ✓ with nothing written needs a **baseline**: on its first boot against a
-  store, a server of this version writes one `lock_baseline` event, recording who `HOLDRIM_OWNER` was
-  at that exact moment; an unwritten ✓ then locks only if its author matches the baseline's and it
-  predates the baseline, and a store with no baseline at all trusts no unwritten ✓ from anyone. A
-  field written before this version existed is trusted the same way — only when it is dated after
-  the store's own baseline — since a client's own POST body could shape `data` freely before this
-  change; one that predates the baseline is decided by the baseline rule instead, whatever it claims.
-  One exception: a ✓ written `locks:"false"` is trusted even before the baseline, since a forged field
-  can only ever help an attacker by claiming `"true"`, never `"false"` — guarding a former owner's own
-  ✓ from misreading as a lock should this server's clock ever run behind the baseline's.
-  **What to change, before anyone uses this version against a real store:** move ALL traffic to the
-  new revision first — an old revision left serving alongside it can still record events with
-  client-forged `locks`/`authorCouldTriage`, dated after the new baseline, which the new version would
-  then trust as if it had written them itself. **And boot this version once under the `HOLDRIM_OWNER`
-  who gave the existing ✓s** (Cloud Run: a revision serving 100% of traffic; anywhere else, once at
-  startup): the baseline freezes whoever `HOLDRIM_OWNER` is at that first boot, **permanently** — a
-  later handover does not move it, and there is no second chance to set it once a store already holds
-  one. `SECURITY.md` has the same two steps, in the place an operator reads before upgrading.
+  written, and only on an event the server signed (the first entry above). A request with nothing
+  written reads as "at triage" (the safe direction: the owner triages it again, once); a ✓ with
+  nothing written is no lock.
+- **An event not signed by the server now counts for nothing, and the lock baseline is gone (#50).**
+  Before signing, a ✓ with nothing written was a lock when a `lock_baseline` event — written at a
+  server's first start, naming `HOLDRIM_OWNER` then — said so by author and date. Whoever writes the
+  store also writes dates, so that rule trusted exactly what signing now refuses: the
+  `lock_baseline` event type is no longer written or read, and what a store already holds of it is
+  shown as any other event. Not only locks: a request's author could triage it, a request moves
+  through its states, a text removal accounts for a missing text, an acknowledgement quiets the
+  banner, a role is defined, granted or revoked, and a `person_removed` stands for a removal only on
+  a signed event. One that is not signed — a row written into the file or the project, or signed by a
+  key `HOLDRIM_PUBLIC_KEYS` no longer names — is still shown, marked "not signed by this server" in
+  the panel, on the home and in `holdrim list`/`show` (and `signed: false` in `list --json`), and is
+  raised as CRITICAL; `holdrim list` and `holdrim sync` exit non-zero while one is there. **What to
+  change:** nothing on a store this version started: every event it writes is signed. A store kept
+  from before it reads every older event as not signed — run `holdrim sync` on it before upgrading,
+  and give again, after, any ✓ still waiting for the repository. Removing a person is no longer
+  refused because older ✓s name them (`api.removal.holdsOldLocks` is gone): no row makes a ✓ a lock
+  any more. `sync`, `apply` and `state` reading the file or the cloud directly refuse to act without
+  `HOLDRIM_PUBLIC_KEYS`, and the reading commands warn; `--local` reads the local runner, which
+  verifies each event itself. New on the surface: `requests[].signed` and
+  `requests[].history[].signed` in `list --json`; gone: the `lock_baseline` event type.
 - **`holdrim apply`'s commit no longer carries `Requested-by:`.** Only `Request: <full id>` is
   written; who asked is found from the request, through the people table, the one place it can be
   removed. What to change: anything reading a commit for who asked now reads the request instead.
@@ -293,9 +340,8 @@ who ran the engine from `main` before it.
   signed in and refused by `POST /api/events`. The owner's alone, from the screen's own form, with no
   API route. Refused, touching nothing: without the box ticked; for the owner; for an address
   `HOLDRIM_ADMINS`, `HOLDRIM_LOCKS` or `HOLDRIM_AGENTS` still names (take it out and restart first);
-  for an address holding an agent token (revoke it first); for the owner this version first started
-  under, while a ✓ they gave before that start names their address (those ✓s are locks through
-  their row); for an address only events from before authors were ids name; and for an address
+  for an address holding an agent token (revoke it first); for an address only events from before
+  authors were ids name; and for an address
   nobody here goes by, which is also what a second run answers. A text that reads as tampered, or is
   held inside its event, is left, and the screen says how many; events from before authors were ids
   keep the address, which then stays taken by the closed account, and the screen says that too. A

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createCycle } from '../core/cycle.js';
 import { readBlocks, ofProject, projectRoles } from './pages.ts';
 import { Source } from './remote.ts';
-import { authorCouldTriage, earliestLockBaseline, type Event } from '../api/types.ts';
+import { authorCouldTriage, authoritative, type Event } from '../api/types.ts';
 import { suspectsOf } from '../api/texts.ts';
 import { personAs } from '../core/people-show.js';
 
@@ -56,12 +56,21 @@ function notTheAgents(cycle: ReturnType<typeof createCycle>, state: string) {
     : `${now}: nothing is left to do on it.`);
 }
 
+/** The refusal for a request this server did not sign: `state` and `apply` alike. */
+function notSigned() {
+  return new Error('no: this request was not signed by the server, so nobody filed it through Holdrim and '
+    + 'nobody can have approved it. It is left as it is, marked, for the owner to see.');
+}
+
 /**
  * Refuses a request outside the agent's queue. Without it, `apply` would brief the agent on any
  * request, saying "the request was approved by the owner" about one still open, or rejected — and
- * the agent, told so, would edit content nobody agreed to change.
+ * the agent, told so, would edit content nobody agreed to change. A request this server did not
+ * sign is refused whatever state it reads as: its words, its author and its place are whatever was
+ * written into the store, and nobody filed them.
  */
-export function mustBeQueued(r: { state: string }) {
+export function mustBeQueued(r: { state: string; signed?: boolean }) {
+  if (r.signed !== true) throw notSigned();
   const cycle = loadCycle();
   if (!cycle.table.agent_queue.includes(r.state)) throw notTheAgents(cycle, r.state);
 }
@@ -94,22 +103,22 @@ function checkAuthority(root: string): void {
  * own process, and a request granted `triage` afterwards must not read as pre-approved here with no
  * triage event to show for it.
  *
- * `authorCouldTriage` trusts what was written only for a request dated after the events' OWN
- * `lock_baseline` (round 2's review, CRITICAL "fields written before this version are trusted"): the
- * same store this reads from can hold a pre-version request with a client-forged `authorCouldTriage`,
- * from back when `recordEvent` stored whatever `data` a client sent — and this file has no server
- * process's `LOCK_BASELINE` to ask, only whatever `events` itself carries, which is exactly why the
- * baseline is a written EVENT (`ensureLockBaseline`, types.ts) and not a value kept in memory.
+ * The state moves only on transitions this server signed (`authoritative`, types.ts; #50): a
+ * `request_state` written into the store directly, "approved" say, would otherwise put a request
+ * nobody approved into the agent's queue. The history shows every event of the thread, signed or not,
+ * each with its own `signed`: what a direct writer inserted is shown for what it is, never hidden.
+ * A request this server did not sign moves on nothing at all: it stays where every request starts,
+ * outside the agent's queue, whatever transitions name it — the server refuses to record one on it.
  */
 export function requests(events: Event[]): Request[] {
   const cycle = loadCycle();
   const threads = cycle.threadsOf(events);
-  const baseline = earliestLockBaseline(events);
+  const decided = cycle.threadsOf(authoritative(events));
   return events.filter((e) => e.type === 'request').map((r) => {
     const thread = threads.get(r.id) ?? [];
     return {
       ...r,
-      state: cycle.currentState(r.id, thread, authorCouldTriage(r, baseline)),
+      state: cycle.currentState(r.id, r.signed === true ? decided.get(r.id) ?? [] : [], authorCouldTriage(r)),
       history: thread.filter((e) => e.type !== 'request').sort((a, b) => a.when.localeCompare(b.when)),
     };
   });
@@ -165,10 +174,11 @@ export function personLabel(show: ReturnType<typeof ofProject>['peopleShow'], ro
  * The agent's queue: what the owner approved and nobody applied yet, with everything an agent
  * needs to act — as data. `--json` is the contract other tools read; the table is for a person.
  */
-export async function queue(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'guardsTampered'>>,
-                            all: boolean) {
+export async function queue(root: string,
+                            source: Pick<Source, 'events'> & Partial<Pick<Source, 'guardsTampered' | 'verifies'>>, all: boolean) {
   checkAuthority(root);
   const cycle = loadCycle();
+  warnUnverified(source);
   const events = await source.events();
   const found = requests(events);
   const agentQueue = cycle.table.agent_queue ?? ['approved', 'applying', 'waiting'];
@@ -176,10 +186,10 @@ export async function queue(root: string, source: Pick<Source, 'events'> & Parti
   const blocks = await readBlocks(root);
   return {
     toTriage: found.filter((r) => r.state === 'open').length,
-    // Which of the three cases it was already went out through `reportTampered`, wherever `events`
-    // was actually resolved (the server, or one of `Source`'s two direct readers) — this is only
-    // the flag `list` warns from and exits non-zero on (issue #91's "same warning").
-    tampered: suspectsOf(events).length > 0,
+    // Which case it was already went out through `reportTampered`, wherever `events` was actually
+    // resolved (the server, or one of `Source`'s two direct readers) — this is only the flag `list`
+    // warns from and exits non-zero on (issue #91's "same warning").
+    tampered: readsAsTampered(events),
     // Read after `events()`, which is what sets it. A key of its own rather than folded into
     // `tampered`: a guard dropped says the file COULD hold a forgery, a text that fails its hash
     // says it DOES, and an agent reading this queue acts differently on the two (holdrim#108).
@@ -187,7 +197,7 @@ export async function queue(root: string, source: Pick<Source, 'events'> & Parti
     requests: showing.map((r) => {
       const block = r.block ? blocks.get(r.block) : undefined;
       return {
-        id: r.id, state: r.state, page: r.page, block: r.block ?? null, author: r.author, when: r.when,
+        id: r.id, state: r.state, page: r.page, block: r.block ?? null, author: r.author, when: r.when, signed: r.signed,
         category: typeof r.data?.category === 'string' ? r.data.category : null,
         text: r.text ?? '', snapshot: r.snapshot ?? null,
         file: block?.file ?? null,
@@ -195,23 +205,38 @@ export async function queue(root: string, source: Pick<Source, 'events'> & Parti
         blockChanged: Boolean(block && r.fingerprint && block.fingerprint !== r.fingerprint),
         validated: block?.validated ?? null,
         history: r.history.map((e) => ({ when: e.when, author: e.author, type: e.type,
-          state: typeof e.data?.state === 'string' ? e.data.state : null, text: e.text ?? null })),
+          state: typeof e.data?.state === 'string' ? e.data.state : null, text: e.text ?? null, signed: e.signed })),
       };
     }),
   };
 }
 
 /**
- * The one line `list` and `sync` (validation.ts) both print when a field they read comes back
- * tampered — issue #91's "the CLI prints the same warning". `reportTampered` (engine/api/texts.ts)
- * has already put the specifics — the event, the field, which of the three cases it was — through the
- * CRITICAL log, wherever the read actually happened; this is the terminal's own notice that a person
- * running the command is looking at data it does not trust, not a second copy of that alert.
+ * Whether what was read holds something written outside the product: a text that fails its hash, or
+ * an event with no seal, or one whose seal does not hold (engine/api/signing.ts). In a store where
+ * every genuine event is signed, such an event is a forgery, and the exit code says so. An event
+ * sealed by a key this reader was not given (`unverified`) is not: it may be genuine, it counts for
+ * nothing all the same, and the missing key is said once, as a WARNING. So `holdrim list` with no
+ * HOLDRIM_PUBLIC_KEYS warns and exits 0 — reading never refuses, and nothing it read is approved —
+ * while `sync`, `apply` and `state` refuse outright (`refuseToActUnverified`).
+ */
+export function readsAsTampered(
+  events: Pick<Event, 'id' | 'signed' | 'unverified' | 'textTampered' | 'snapshotTampered'>[],
+): boolean {
+  return suspectsOf(events).length > 0 || events.some((e) => e.signed !== true && e.unverified !== true);
+}
+
+/**
+ * The one line `list` and `sync` (validation.ts) both print when what they read comes back tampered —
+ * issue #91's "the CLI prints the same warning". `reportTampered` (engine/api/texts.ts) has already
+ * put the specifics — the event, the field or the signature, which case it was — through the CRITICAL
+ * log, wherever the read actually happened; this is the terminal's own notice that a person running
+ * the command is looking at data it does not trust, not a second copy of that alert.
  */
 export function warnOfTampering() {
-  console.error('⚠ CRITICAL: a text read back does not match its own hash. The store was written to '
-    + 'outside the product — this almost always means a credential leaked. Rotate it, and see the '
-    + 'server log (or run this again where the log is written) for which event and field.');
+  console.error('⚠ CRITICAL: what was read back does not hold — a text that does not match its own hash, or an '
+    + 'event not signed by the server. The store was written to outside the product — this almost always means a '
+    + 'credential leaked. Rotate it, and see the lines above (or the server log) for which event, and why.');
 }
 
 /**
@@ -231,6 +256,37 @@ export function refuseToActOnBrokenGuards(source: Partial<Pick<Source, 'guardsTa
     + '  Start the server against the file once — it puts the guards back and names them in its log — '
     + 'check what was written while they were gone, then run this again. A column hiding the rowid, a row '
     + 'below rowid 1 or a row at the largest rowid, no boot repairs: a person does (SECURITY.md).');
+}
+
+/**
+ * Whether this source checks what it reads against keys the deployment named: the local server, which
+ * verified every event itself, or a direct reader of the file or the cloud with `HOLDRIM_PUBLIC_KEYS`
+ * set. `undefined` — a caller that is not a `Source`, such as a test's stub — is not asked.
+ */
+const unverified = (source: Partial<Pick<Source, 'verifies'>>) => source.verifies === false;
+
+/** The one sentence both helpers below say, naming the variable and where the key is found. */
+const NO_KEYS = 'no HOLDRIM_PUBLIC_KEYS: nothing read from this store can be checked against the server\'s signing key, '
+  + 'so no event counts — no ✓ is a lock and no request is approved. Export HOLDRIM_PUBLIC_KEYS with the public key '
+  + 'the server prints at start (and answers at GET /api/signing-keys), or use --local against the local runner.';
+
+/**
+ * Reading with no key to check against warns and reads on (`list`, `show`, `summary`, `impact`): the
+ * owner has to be able to look at what the store holds, and what it prints marks every event as not
+ * signed. On stderr, so `list --json` stays parseable.
+ */
+export function warnUnverified(source: Partial<Pick<Source, 'verifies'>>): void {
+  if (unverified(source)) console.error(`holdrim: WARNING — ${NO_KEYS}`);
+}
+
+/**
+ * Acting with no key to check against refuses (`sync`, `apply`, `state`; owner decision 10 on #50):
+ * every event would read as not signed, and a sync that locked nothing would read as "nothing to do"
+ * while the owner's ✓s sat in the store. The same line as a broken guard: reading warns, acting
+ * refuses.
+ */
+export function refuseToActUnverified(source: Partial<Pick<Source, 'verifies'>>): void {
+  if (unverified(source)) throw new Error(`refusing to act: ${NO_KEYS}`);
 }
 
 export async function list(root: string, source: Parameters<typeof queue>[1], options: { all?: boolean; json?: boolean } = {}) {
@@ -260,7 +316,8 @@ export async function list(root: string, source: Parameters<typeof queue>[1], op
   const { peopleShow } = ofProject(root);
   const roles = projectRoles(root);
   for (const r of q.requests) {
-    const changed = r.blockChanged ? ' · ⚠ the block changed since the request' : '';
+    const changed = (r.blockChanged ? ' · ⚠ the block changed since the request' : '')
+      + (r.signed ? '' : ' · ⚠ not signed by the server');
     const label = cycle.table.states[r.state]?.short ?? r.state;
     console.log(`${r.id.slice(0, 8)}  ${label.padEnd(10)} ${(r.block ?? r.page).padEnd(10)} ` +
       `${formatWhen(r.when)}  ${personLabel(peopleShow, roles, r.author)}${changed}`);
@@ -269,9 +326,10 @@ export async function list(root: string, source: Parameters<typeof queue>[1], op
   return alarmed;
 }
 
-export async function show(root: string, source: Pick<Source, 'events'>, prefix: string) {
+export async function show(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'verifies'>>, prefix: string) {
   checkAuthority(root);
   const cycle = loadCycle();
+  warnUnverified(source);
   const events = await source.events();
   const roles = projectRoles(root);
   const r = find(requests(events), prefix);
@@ -279,7 +337,7 @@ export async function show(root: string, source: Pick<Source, 'events'>, prefix:
   const block = r.block ? blocks.get(r.block) : undefined;
   const { peopleShow } = ofProject(root);
 
-  console.log(`Request  ${r.id}`);
+  console.log(`Request  ${r.id}${r.signed ? '' : '  ⚠ not signed by the server: it counts for nothing'}`);
   console.log(`State    ${labelOf(cycle, r.state)}`);
   console.log(`Who      ${personLabel(peopleShow, roles, r.author)}  ·  ${formatWhen(r.when)}`);
   console.log(`Where    ${r.block ?? r.page}${block ? `  (${block.file})` : ''}`);
@@ -297,14 +355,16 @@ export async function show(root: string, source: Pick<Source, 'events'>, prefix:
     for (const e of r.history) {
       const what = e.type === 'supplement' ? 'added more'
         : (labelOf(cycle, String(e.data?.state ?? '')) || e.type);
-      console.log(`  ${formatWhen(e.when)}  ${personLabel(peopleShow, roles, e.author)}  ${what}`);
+      console.log(`  ${formatWhen(e.when)}  ${personLabel(peopleShow, roles, e.author)}  ${what}`
+        + (e.signed ? '' : '  ⚠ not signed by the server: it counts for nothing'));
       if (e.text) console.log(`      ${e.text.replace(/\n/g, ' ')}`);
     }
   }
 }
 
 /** Where else the subject shows up — the impact analysis you run before editing. As data. */
-export async function impactOf(root: string, source: Pick<Source, 'events'>, prefix: string, terms: string[]) {
+export async function impactOf(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'verifies'>>,
+                               prefix: string, terms: string[]) {
   checkAuthority(root);
   const events = await source.events();
   const r = find(requests(events), prefix);
@@ -320,7 +380,9 @@ export async function impactOf(root: string, source: Pick<Source, 'events'>, pre
   };
 }
 
-export async function impact(root: string, source: Pick<Source, 'events'>, prefix: string, terms: string[]) {
+export async function impact(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'verifies'>>,
+                             prefix: string, terms: string[]) {
+  warnUnverified(source);
   const { request: r, terms: found } = await impactOf(root, source, prefix, terms);
   console.log(`Impact of request ${r.id.slice(0, 8)} — ${r.block ?? r.page}\n`);
   for (const { term, hits } of found) {
@@ -335,8 +397,9 @@ export async function impact(root: string, source: Pick<Source, 'events'>, prefi
   }
 }
 
-export async function summary(root: string, source: Pick<Source, 'events'>) {
+export async function summary(root: string, source: Pick<Source, 'events'> & Partial<Pick<Source, 'verifies'>>) {
   checkAuthority(root);
+  warnUnverified(source);
   const events = await source.events();
   const all = requests(events);
   const perPage = new Map<string, { approvals: number; requests: number; open: number }>();
@@ -364,14 +427,17 @@ export async function summary(root: string, source: Pick<Source, 'events'>) {
  * The agent only uses ITS OWN states: approving, rejecting and asking is the owner's triage, on
  * the site.
  */
-export async function setState(root: string, source: Pick<Source, 'events' | 'add'> & Partial<Pick<Source, 'guardsTampered'>>,
+export async function setState(root: string,
+                               source: Pick<Source, 'events' | 'add'> & Partial<Pick<Source, 'guardsTampered' | 'verifies'>>,
                                prefix: string, target: string,
                                message: string, extra: { commit?: string; blocks?: string } = {}) {
   checkAuthority(root);
+  refuseToActUnverified(source);
   const cycle = loadCycle();
   const events = await source.events();
   refuseToActOnBrokenGuards(source);
   const r = find(requests(events), prefix);
+  if (r.signed !== true) throw notSigned();
 
   if (!cycle.agentStates.includes(target)) {
     throw new Error(`the agent only uses: ${cycle.agentStates.join(', ')} ` +

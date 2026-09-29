@@ -26,13 +26,8 @@ import { SqliteEventStore } from '../api/store-sqlite.ts';
 import { ofProject, readBlocks } from '../cli/pages.ts';
 import { rolesOf, createRoles } from '../core/roles.js';
 import { createCycle } from '../core/cycle.js';
-import { authorCouldTriage, earliestLockBaseline } from '../api/types.ts';
-
-/** Order within one millisecond is not part of the contract (events-conformance.test.js): the
- *  baseline `project` seeds has to land strictly BEFORE the events that follow it, or `authorCouldTriage`
- *  and `isLocked` would read their written fields as predating the baseline and ignore them (round 2's
- *  review) — the exact thing this file means to seed past, not test. */
-const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+import { authorCouldTriage } from '../api/types.ts';
+import { signing } from './helpers/signing.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -63,10 +58,8 @@ const HOME_OF = {
 const VARIABLES = { owner: 'HOLDRIM_OWNER', admins: 'HOLDRIM_ADMINS', locks: 'HOLDRIM_LOCKS', agents: 'HOLDRIM_AGENTS' };
 
 /**
- * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding a
- * `lock_baseline` (round 2's review: without one, every written field below predates it — there is
- * none — and both `authorCouldTriage` and `isLocked` ignore what was written entirely), then, for
- * each person, one request they made and one ✓ they gave — written exactly as `recordEvent` would,
+ * A copy of the hello world with `extra` merged into its holdrim.json, and an events file holding,
+ * signed by the test key, for each person, one request they made and one ✓ they gave — written exactly as `recordEvent` would,
  * from `variables`: `authorCouldTriage` and `locks` are baked in at creation, never left for a reader
  * to recompute (docs/ROLES.md §3). `variables` defaults to plain `{ owner: OWNER }` for the callers
  * that never read either field (the file/owner refusal cases, which refuse before reaching them) —
@@ -80,10 +73,8 @@ async function project(t, extra = {}, variables = { owner: OWNER }) {
   // Read before `extra` is written: a file claiming authority refuses to load, even for this.
   const blocks = await readBlocks(dir);
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const roles = createRoles(variables.owner, variables.admins);
-  await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, variables.owner ?? OWNER);
-  await tick();
   const ids = {};
   for (const [who, block] of Object.entries(BLOCK_OF)) {
     const request = await store.append({ type: 'request', page: 'A01', block, fingerprint: 'x',
@@ -99,9 +90,12 @@ async function project(t, extra = {}, variables = { owner: OWNER }) {
   return { dir, db, ids, events };
 }
 
-/** The environment with the authority variables exactly as the case says: set, or absent. */
+/**
+ * The environment with the authority variables exactly as the case says: set, or absent — and the
+ * test key's public half in `HOLDRIM_PUBLIC_KEYS`, as a machine that reads the store is told it.
+ */
 function environment(variables) {
-  const env = { ...process.env };
+  const env = { ...process.env, HOLDRIM_PUBLIC_KEYS: signing.signer.publicKey };
   for (const [key, name] of Object.entries(VARIABLES)) {
     delete env[name];
     if (variables[key] !== undefined) env[name] = variables[key];
@@ -135,9 +129,8 @@ function serverView({ dir, ids, events }, variables) {
   try {
     const roles = rolesOf(ofProject(dir));
     const threads = cycle.threadsOf(events);
-    const baseline = earliestLockBaseline(events);
     const states = Object.fromEntries(Object.entries(ids).map(([who, id]) =>
-      [who, cycle.currentState(id, threads.get(id) ?? [], authorCouldTriage(events.find((e) => e.id === id), baseline))]));
+      [who, cycle.currentState(id, threads.get(id) ?? [], authorCouldTriage(events.find((e) => e.id === id)))]));
     return { owner: roles.owner, states };
   } catch (e) {
     return { refused: e.message };

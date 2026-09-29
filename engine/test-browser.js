@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { chromium } from 'playwright-core';
 import { hashText, newSalt } from './api/texts.ts';
+import { newKeyPair, parsePrivateKey, signerOf, sealEvent } from './api/signing.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const PORT = Number(process.env.PORT ?? 18096);
@@ -314,12 +315,17 @@ const toggleServer = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
 
 const tamperedData = mkdtempSync(join(tmpdir(), 'holdrim-browser-tampered-'));
 const tamperedEvents = join(tamperedData, 'events.db');
+// Its signing key, held here too: a store kept on disk refuses to start without one, and the rows
+// this run writes into the file to tamper with a TEXT are sealed with it, so that what the banner
+// shows is the text's finding and not also the event's (engine/api/signing.ts).
+const tamperedKey = newKeyPair();
+const tamperedSigner = signerOf(parsePrivateKey(tamperedKey.privatePem));
 // echoStderr false: every read of a tampered text logs a CRITICAL line there, on purpose, and this
 // run reads one many times — still captured, for a failure, just never printed live.
 const tamperedServer = spawnServer([join(ROOT, 'engine', 'api', 'server.ts')], {
   ...process.env, PORT: String(PORT + 3), HOLDRIM_MODE: 'local', HOLDRIM_ENVIRONMENT: 'Development',
   HOLDRIM_OWNER: OWNER, HOLDRIM_ADMINS: LEAD, HOLDRIM_DEV_EMAIL: '', HOLDRIM_EVENTS: 'sqlite',
-  HOLDRIM_EVENTS_PATH: tamperedEvents, HOLDRIM_SITE: site,
+  HOLDRIM_EVENTS_PATH: tamperedEvents, HOLDRIM_SITE: site, HOLDRIM_SIGNING_KEY: tamperedKey.privatePem,
 }, false);
 
 let browser;
@@ -1062,9 +1068,13 @@ try {
     await settled(reader.page);
     expect('nothing tampered: no banner', 0, await reader.page.locator('.rv-tamper').count());
 
-    // A hash with no row, and nothing that says it was let go.
-    directly("INSERT INTO events (id, type, page, block, author, happened_at, text_hash) VALUES " +
-      "('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?)", new Date().toISOString(), hashText('the real text', newSalt()));
+    // A hash with no row, and nothing that says it was let go: a signed event whose text row is gone.
+    const forged = { id: 'forged1', type: 'comment', page: 'A01', block: 'A01.1.1', author: 'r@example.org',
+      when: new Date().toISOString(), data: null };
+    const textHash = hashText('the real text', newSalt());
+    const seal = sealEvent(forged, { text: textHash, snapshot: null }, tamperedSigner);
+    directly("INSERT INTO events (id, type, page, block, author, happened_at, text_hash, envelope, sig, kid) VALUES " +
+      "('forged1', 'comment', 'A01', 'A01.1.1', 'r@example.org', ?, ?, ?, ?, ?)", forged.when, textHash, seal.envelope, seal.sig, seal.kid);
     await reader.page.reload();
     await must('a tampered text puts a banner on the page', () => reader.page.locator('.rv-tamper .rv-tamper-line').waitFor());
     expect('one line, naming the page and the event', true,
@@ -1133,6 +1143,33 @@ try {
     await stranded.page.goto(url);
     await must('a page whose events cannot load says so', () => stranded.page.locator('.rv-alert').waitFor());
     expect('and the banner stays up while the rest of the panel switches off', 1, await stranded.page.locator('.rv-tamper').count());
+
+    // #50: an event written into the file by someone without the key — a ✓ by the owner, with
+    // `locks:"true"` — is shown in the block's history, marked as not signed, and paints nothing green.
+    directly("INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data) VALUES " +
+      "('forged-lock', 'approval', 'A01', 'A01.1.2', ?, ?, ?, ?)",
+    (await readBlocks(site)).get('A01.1.2').fingerprint, OWNER, new Date().toISOString(), JSON.stringify({ locks: 'true', asAgent: 'false' }));
+    await owner.page.reload();
+    await settled(owner.page);
+    await block(owner.page, 'A01.1.2').click();
+    await must('the block\'s history shows the ✓ nobody signed, marked',
+      () => owner.page.locator('.rv-history .rv-unsigned', { hasText: en['panel.unsigned'] }).waitFor());
+    expect('and the block is not painted as locked', 0, await owner.page.locator('.rv-panel .rv-badge--ok').count());
+    await owner.page.keyboard.press('Escape');
+    await must('and the banner names it', () => owner.page.locator('.rv-tamper-line', { hasText: 'forged-lock' }).waitFor());
+
+    // The same mark on a request: it is drawn from a second place in the panel (`Request`, not the
+    // history's row), so a change that drops `<Unsigned>` from one leaves the ✓ check above green.
+    directly("INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, text, data) VALUES " +
+      "('forged-request', 'request', 'A01', 'A01.1.2', ?, ?, ?, ?, ?)",
+    (await readBlocks(site)).get('A01.1.2').fingerprint, READER, new Date().toISOString(), 'a request nobody signed',
+    JSON.stringify({ category: 'term' }));
+    await owner.page.reload();
+    await settled(owner.page);
+    await block(owner.page, 'A01.1.2').click();
+    await must('a request nobody signed is listed in the panel, marked',
+      () => owner.page.locator('.rv-request[data-request="forged-request"] .rv-unsigned', { hasText: en['panel.unsigned'] }).waitFor());
+    await owner.page.keyboard.press('Escape');
   }
 
   console.log('the sign-in screen, under its own policy:');

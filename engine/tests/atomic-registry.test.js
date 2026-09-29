@@ -249,9 +249,8 @@ test('a dangling registry link makes sync refuse before it writes a single page'
   const blocks = await readBlocks(tmp);
   const block = blocks.get('X01.1');
   const events = [
-    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER, when: '2026-01-01T09:00:00Z', data: null },
     { id: 'a1', type: 'approval', page: 'X01', block: block.id, fingerprint: block.fingerprint, author: OWNER,
-      when: '2026-09-09T10:00:00Z', data: { locks: 'true' } },
+      when: '2026-09-09T10:00:00Z', data: { locks: 'true' }, signed: true },
   ];
 
   await assert.rejects(() => sync(tmp, { events: async () => events }, { owner: OWNER }), /it is a link/);
@@ -270,9 +269,8 @@ test('sync on a WORKING registry link also writes no page — the save would ref
   const blocks = await readBlocks(tmp);
   const block = blocks.get('X01.1');
   const events = [
-    { id: 'b1', type: 'lock_baseline', page: '_lock_baseline', author: OWNER, when: '2026-01-01T09:00:00Z', data: null },
     { id: 'a1', type: 'approval', page: 'X01', block: block.id, fingerprint: block.fingerprint, author: OWNER,
-      when: '2026-09-09T10:00:00Z', data: { locks: 'true' } },
+      when: '2026-09-09T10:00:00Z', data: { locks: 'true' }, signed: true },
   ];
 
   // If `loadRegistry` read through this link instead of refusing it, `sync` would go on to stamp

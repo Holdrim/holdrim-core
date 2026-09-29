@@ -85,7 +85,7 @@ test('a pair already proposed before is not proposed again — idempotent across
   const first = proposalsOf(blocks, ['lock'], new Set());
   assert.equal(first.length, 1);
   const already = existingProposalMarkers([
-    { type: 'request', data: { category: 'dependency' }, text: first[0].text },
+    { type: 'request', signed: true, data: { category: 'dependency' }, text: first[0].text },
   ]);
   assert.equal(proposalsOf(blocks, ['lock'], already).length, 0, 'the same pair does not come back a second run');
 });
@@ -98,7 +98,7 @@ test('a marker naming the pair in the OTHER order still counts — idempotence m
   // `proposalsOf` always builds A.1.1 ⇄ A.1.2 (sorted); a marker naming them the other way round
   // still has to be read as the SAME pair, not as a pair never proposed before.
   const already = existingProposalMarkers([
-    { type: 'request', data: { category: 'dependency' }, text: 'Proposed dependency: A.1.2 ⇄ A.1.1 — reversed by hand' },
+    { type: 'request', signed: true, data: { category: 'dependency' }, text: 'Proposed dependency: A.1.2 ⇄ A.1.1 — reversed by hand' },
   ]);
   assert.equal(proposalsOf(blocks, ['fingerprint'], already).length, 0);
 });
@@ -108,8 +108,17 @@ test('a rejected or applied proposal is still not proposed again — the DECISIO
   // proposal the owner already rejected must not come back just because nobody approved it.
   const blocks = new Map([block('A.1.1', 'A', 'a fingerprint'), block('A.1.2', 'A', 'another fingerprint')]);
   const marker = 'Proposed dependency: A.1.1 ⇄ A.1.2';
-  const already = existingProposalMarkers([{ type: 'request', data: { category: 'dependency' }, text: `${marker} — rejected already` }]);
+  const already = existingProposalMarkers([{ type: 'request', signed: true, data: { category: 'dependency' }, text: `${marker} — rejected already` }]);
   assert.equal(proposalsOf(blocks, ['fingerprint'], already).length, 0);
+});
+
+test('an unsigned proposal marker does not stop a proposal — only a request this server signed was ever made', () => {
+  const blocks = new Map([block('A.1.1', 'A', 'a fingerprint'), block('A.1.2', 'A', 'another fingerprint')]);
+  const text = 'Proposed dependency: A.1.1 ⇄ A.1.2';
+  const unsigned = existingProposalMarkers([{ type: 'request', signed: false, data: { category: 'dependency' }, text }]);
+  assert.equal(proposalsOf(blocks, ['fingerprint'], unsigned).length, 1, 'an unsigned row silences nothing');
+  const signed = existingProposalMarkers([{ type: 'request', signed: true, data: { category: 'dependency' }, text }]);
+  assert.equal(proposalsOf(blocks, ['fingerprint'], signed).length, 0);
 });
 
 test('sharing more than one term produces ONE proposal, naming every shared term, not one per term', () => {
@@ -255,7 +264,7 @@ test('proposeDeps proposes nothing new the second time it runs against the same 
   const written = [];
   const source = {
     events: async () => written,
-    add: async (e) => { written.push({ type: 'request', page: e.page, block: e.block, text: e.text, data: e.data, author: 'agent@local', when: new Date().toISOString(), id: `req-${written.length}` }); return `req-${written.length}`; },
+    add: async (e) => { written.push({ type: 'request', signed: true, page: e.page, block: e.block, text: e.text, data: e.data, author: 'agent@local', when: new Date().toISOString(), id: `req-${written.length}` }); return `req-${written.length}`; },
   };
   await proposeDeps(root, source);
   const afterFirst = written.length;

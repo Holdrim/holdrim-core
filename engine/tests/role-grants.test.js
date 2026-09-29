@@ -137,14 +137,17 @@ test('who someone is does not move with a grant', () => {
 // ---------------------------------------------------------------- the `_roles` events
 let clock = 0;
 const at = () => new Date(Date.UTC(2026, 8, 27, 10, 0, clock++)).toISOString();
-const ev = (made, id, author = OWNER) => stored(made, id, author, at());
+/** An event as a store answers one it signed: what the owner's routes write. */
+const ev = (made, id, author = OWNER) => ({ ...stored(made, id, author, at()), signed: true });
+/** The same event, as a reader finds one written into the store by someone without the key. */
+const unsigned = (made, id, author = OWNER) => ({ ...ev(made, id, author), signed: false });
 
 test('the three events live on _roles, carry strings only, and name a person by id', () => {
   const made = [definedEvent('clinical lead', ['triage', 'approve'], false), grantedEvent('clinical lead', BEA_ID, 'A0*', false),
     grantedEvent('clinical lead', BEA_ID, null, false), revokedGrantEvent('g1', false)];
   assert.deepEqual(made.map((e) => e.type), [ROLE_DEFINED, ROLE_GRANTED, ROLE_GRANTED, GRANT_REVOKED]);
   assert.ok(made.every((e) => e.page === ROLES_PAGE && e.block === null));
-  assert.ok(made.every((e) => Object.values(e.data).every((v) => typeof v === 'string')), 'strings, for the CLI\'s Firestore reader');
+  assert.ok(made.every((e) => Object.values(e.data).every((v) => typeof v === 'string')), 'strings, one type every store and reader agrees on');
   assert.equal(made[0].data.capabilities, 'triage,approve');
   assert.equal(made[2].data.scope, '', 'everywhere, written as an empty scope');
   assert.ok(made.every((e) => !JSON.stringify(e).includes('@')), 'no address in any of them');
@@ -233,6 +236,27 @@ test('a grant of a role nobody defined holds nothing', () => {
   const state = projectRolesOf([ev(grantedEvent('lead', BEA_ID, null, false), 'g1')]);
   assert.equal(state.grants.length, 1, 'in force as a record');
   assert.deepEqual(grantsOfPerson(state, BEA_ID, BEA), [], 'and in effect, nothing');
+});
+
+/**
+ * #50: a definition, a grant and a revocation count only when this server signed them. Each alone,
+ * beside a signed event that shows the same shape does count, so what refuses is the signature.
+ */
+test('a definition, a grant or a revocation not signed by the server counts for nothing', () => {
+  const defined = ev(definedEvent('lead', ['approve'], false), 'd1');
+  const granted = ev(grantedEvent('lead', BEA_ID, null, false), 'g1');
+  assert.deepEqual(grantsOfPerson(projectRolesOf([defined, granted]), BEA_ID, BEA).length, 1, 'setup: signed, it holds');
+  assert.equal(projectRolesOf([unsigned(definedEvent('lead', ['approve'], false), 'd1'), granted]).roles.size, 0,
+    'a definition nobody signed defines nothing');
+  assert.deepEqual(projectRolesOf([defined, unsigned(grantedEvent('lead', BEA_ID, null, false), 'g1')]).grants, [],
+    'a grant nobody signed grants nothing');
+  const revokedUnsigned = projectRolesOf([defined, granted, unsigned(revokedGrantEvent('g1', false), 'r1')]);
+  assert.deepEqual(revokedUnsigned.grants.map((g) => g.id), ['g1'], 'a revocation nobody signed takes nothing away');
+  assert.deepEqual(revokedUnsigned.ended, []);
+  // `signed` exactly true: an event read by something that set no answer at all is not signed.
+  const noAnswer = { ...granted };
+  delete noAnswer.signed;
+  assert.deepEqual(projectRolesOf([defined, noAnswer]).grants, []);
 });
 
 test('events of any other type on the page change nothing', () => {

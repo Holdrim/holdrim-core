@@ -37,6 +37,7 @@ import { join } from 'node:path';
 import { freshFirestoreProject } from './helpers/firestore.js';
 import { removedTwiceAtOnce, assertOneRemoval } from './helpers/removal.js';
 import { MemoryEventStore } from '../api/store.ts';
+import { signing } from './helpers/signing.js';
 
 const PG_URL = process.env.HOLDRIM_TEST_POSTGRES
   ?? 'postgres://postgres:test@127.0.0.1:55432/postgres';
@@ -1301,7 +1302,7 @@ forEachStore('two closings of an address with no account at once: neither calls 
 });
 
 forEachStore('two removals of one person at once: the second is refused while the first runs, and one person_removed says what it did',
-  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(new MemoryEventStore(), s)); });
+  async (s) => { await assertOneRemoval(await removedTwiceAtOnce(new MemoryEventStore(signing), s)); });
 
 forEachStore('emptying an address whose account is open leaves it as it is: only a closed account is emptied', async (s) => {
   // A removal's run that reaches its last steps late, after the address was freed and somebody new

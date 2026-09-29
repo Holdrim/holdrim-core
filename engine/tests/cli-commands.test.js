@@ -18,6 +18,7 @@ import { TEXT_REMOVED } from '../api/texts.ts';
 import { readBlocks } from '../cli/pages.ts';
 import { outside } from './helpers/sqlite.js';
 import { stub } from './helpers/stub.js';
+import { signing } from './helpers/signing.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
@@ -25,7 +26,9 @@ const CLI = join(ROOT, 'engine', 'cli', 'holdrim.ts');
 /**
  * Runs the CLI and returns what the user would see plus the exit code. The owner is set the way a
  * deployment sets it, in HOLDRIM_OWNER: holdrim.json cannot name one. Set here rather than inherited,
- * so an owner exported in the shell running the suite does not decide whose triage counts.
+ * so an owner exported in the shell running the suite does not decide whose triage counts. And the
+ * test key's public half in HOLDRIM_PUBLIC_KEYS, as a machine that reads the store is told it: the
+ * files these tests write are signed with it (helpers/signing.js).
  */
 function run(args, cwd, env = {}) {
   const r = runApart(args, cwd, env);
@@ -39,7 +42,8 @@ function run(args, cwd, env = {}) {
 function runApart(args, cwd, env = {}) {
   const r = spawnSync(process.execPath, [CLI, ...args],
     { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '', ...env } });
+      env: { ...process.env, HOLDRIM_OWNER: 'you@example.org', HOLDRIM_ADMINS: '',
+        HOLDRIM_PUBLIC_KEYS: signing.signer.publicKey, ...env } });
   return { stdout: r.stdout, stderr: r.stderr, code: r.status };
 }
 
@@ -214,7 +218,7 @@ test('list, show, impact, summary and apply --dry-run read the events file with 
   const blocks = await readBlocks(dir);
   const block = blocks.get('A01.1.2');
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const request = await store.append({ type: 'request', page: 'A01', block: 'A01.1.2', fingerprint: block.fingerprint,
     text: 'say header, not menu', snapshot: block.text, data: { category: 'term' } }, 'reviewer@example.org');
   await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.2', text: 'yes',
@@ -268,7 +272,7 @@ test('list, show, impact, summary and apply --dry-run read the events file with 
 test('propose-deps\'s --dry-run really reaches proposeDeps as dryRun: true; without it, a write is really attempted', async (t) => {
   const dir = project(t); // hello-world's own holdrim.json names a content.glossary
   const db = join(dir, 'events.db');
-  await new SqliteEventStore(db).close(); // an empty, real events file — enough for --db to read from, no network
+  await new SqliteEventStore(db, signing).close(); // an empty, real events file — enough for --db to read from, no network
 
   const dry = run(['propose-deps', '--dry-run', '--db', db], dir);
   assert.equal(dry.code, 0, dry.out);
@@ -289,7 +293,7 @@ test('propose-deps\'s --dry-run really reaches proposeDeps as dryRun: true; with
 // only proof that sees that line.
 async function tamperedDb(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const kept = await store.append({ type: 'comment', page: 'A01', text: 'redact me' }, 'r@example.org');
   await store.removeText(kept.id, 'text', 'owner@example.org');
   // A duplicate, forged removal — `removeText` itself can never produce a second one — reads as
@@ -308,7 +312,7 @@ async function tamperedDb(dir) {
  */
 async function tamperedApprovedRequest(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const request = await store.append({ type: 'request', page: 'A01', block: 'A01.1.1', fingerprint: 'x',
     text: 'redact me', data: { category: 'text' } }, 'reviewer@example.org');
   await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.1',
@@ -372,7 +376,7 @@ test('list --json prints parseable JSON on stdout and the CRITICAL line on stder
 test('list exits 0 and carries `tampered: false` when nothing is tampered, on both paths', async (t) => {
   const dir = project(t);
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   await store.append({ type: 'comment', page: 'A01', text: 'an ordinary remark' }, 'r@example.org');
   await store.close();
   const table = run(['list', '--all', '--db', db], dir);
@@ -405,14 +409,10 @@ function duplicateA0111(dir) {
   writeFileSync(page, html.replace(tag, '<p data-id="A01.1.1" hidden>copy</p>' + tag));
 }
 
-/** An events file holding the owner's ✓ on A01.1.1's current text, after the store's baseline. */
+/** An events file holding the owner's ✓ on A01.1.1's current text, signed with the test key. */
 async function approvedA0111(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
-  await store.append({ type: 'lock_baseline', page: '_lock_baseline', data: null }, 'you@example.org');
-  // `append` stamps its own time: without a gap, the ✓ could share the baseline's millisecond and
-  // read as predating it, which is a different rule (`legacyLock`) than the one this is about.
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  const store = new SqliteEventStore(db, signing);
   const fingerprint = (await readBlocks(dir)).get('A01.1.1').fingerprint;
   await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint, data: { locks: 'true' } },
     'you@example.org');
@@ -460,7 +460,7 @@ test('restamp exits 0 when every entry is stamped, and non-zero when it has to r
 /** A file the store made — every guard in place — holding one approved request, and its id. */
 async function guardedDb(dir) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   const request = await store.append({ type: 'request', page: 'A01', block: 'A01.1.2', fingerprint: 'x',
     text: 'say header, not menu', data: { category: 'term' } }, 'reviewer@example.org');
   await store.append({ type: 'request_state', page: 'A01', block: 'A01.1.2', text: 'yes',
@@ -578,7 +578,7 @@ test('the locks lens\'s reproduction: a request forged below every hashed row, e
   async (t) => {
     const dir = project(t);
     const db = join(dir, 'events.db');
-    const store = new SqliteEventStore(db);
+    const store = new SqliteEventStore(db, signing);
     await store.append({ type: 'comment', page: 'A01', text: 'a real, hashed remark' }, 'r@example.org');
     await store.close();
     // Negative rowids, no hash, the text inline: below `extractionBoundary`, so it reads as a row
@@ -592,16 +592,19 @@ test('the locks lens\'s reproduction: a request forged below every hashed row, e
          '2026-01-01T00:00:01.000Z', '{"request":"forged","state":"approved","from":"open"}');`);
     const r = runApart(['list', '--db', db, '--json'], dir);
     const q = JSON.parse(r.stdout);
-    // The forgery reads as approved (the text check alone cannot see it) — but `--json` no longer
-    // hands it to an agent at all: `guardsTampered` empties `requests` (holdrim#108, decision 4).
+    // The text check alone cannot see the forgery, and `--json` hands an agent nothing anyway:
+    // `guardsTampered` empties `requests` (holdrim#108, decision 4). Neither row is signed (#50), so
+    // the "approved" decides nothing and both are raised as not signed.
     assert.deepEqual(q.requests, []);
-    assert.equal(q.tampered, false);
-    assert.equal(q.guardsTampered, true, 'the dropped guard is what gives it away');
+    assert.equal(q.tampered, true, 'rows not signed by the server read as tampering');
+    assert.equal(q.guardsTampered, true, 'the dropped guard gives it away too');
     assert.equal(r.code, 1);
     assert.match(r.stderr, /the database's guard "events_no_low_rowid" is missing/);
-    // The table (no --json) is where the owner still gets to see it and judge for themselves.
-    const table = runApart(['list', '--db', db], dir);
-    assert.match(table.stdout, /forged\s+Approved/);
+    assert.match(r.stderr, /"event":"event_unsigned".*"eventId":"forged-ok"/);
+    // The table (no --json) is where the owner still gets to see it and judge for themselves: at
+    // triage, since an "approved" nobody signed moves nothing, and marked as not signed.
+    const table = runApart(['list', '--db', db, '--all'], dir);
+    assert.match(table.stdout, /forged\s+To triage.*not signed by the server/);
   });
 
 test('plain list --db (the table) exits non-zero on a dropped guard, with approved requests to show', async (t) => {
@@ -617,7 +620,7 @@ test('plain list --db (the table) exits non-zero on a dropped guard, with approv
 test('plain list --db exits non-zero on a dropped guard with nothing in the queue, on the "no requests" path', async (t) => {
   const dir = project(t);
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
+  const store = new SqliteEventStore(db, signing);
   await store.append({ type: 'comment', page: 'A01', text: 'an ordinary remark' }, 'r@example.org');
   await store.close();
   outside(db, 'DROP TRIGGER events_no_delete');
@@ -740,14 +743,10 @@ function projectFiles(dir) {
     .map((f) => { const file = join(f.parentPath, f.name); return [file, readFileSync(file)]; }));
 }
 
-/** A store holding the lock baseline and one owner's ✓ on A01.1.1, at `fingerprint`, and its id. */
+/** A store holding one owner's ✓ on A01.1.1, at `fingerprint`, signed with the test key, and its id. */
 async function approvedDb(dir, fingerprint) {
   const db = join(dir, 'events.db');
-  const store = new SqliteEventStore(db);
-  await store.append({ type: 'lock_baseline', page: '_lock_baseline' }, 'you@example.org');
-  // `isLocked` trusts a written `locks` only on a ✓ dated AFTER the baseline, and two appends can
-  // share one millisecond.
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  const store = new SqliteEventStore(db, signing);
   const approval = await store.append({ type: 'approval', page: 'A01', block: 'A01.1.1', fingerprint,
     data: { locks: 'true' } }, 'you@example.org');
   await store.close();
@@ -775,6 +774,149 @@ test('sync --db refuses on a dropped guard, and writes neither approvals.json no
   assert.notEqual(r.code, 0, r.stdout + r.stderr);
   assert.match(r.stderr, REFUSED);
   assert.deepEqual(projectFiles(dir), files, 'approvals.json and every page byte for byte as they were');
+});
+
+// ---------------------------------------------------------------- signed events (#50), through the CLI
+/** The owner's person id in `db`, for a row written straight into the file. */
+const personIdIn = (db, address) => {
+  const d = new DatabaseSync(db, { readOnly: true });
+  try { return d.prepare('SELECT id FROM people WHERE email = ?').get(address).id; } finally { d.close(); }
+};
+
+test('sync --db brings in the owner\'s signed ✓ and never one written into the file beside it', async (t) => {
+  const dir = project(t);
+  const blocks = await readBlocks(dir);
+  const { db } = await approvedDb(dir, blocks.get('A01.1.1').fingerprint);
+  // Everything a lock needs but the signature: the owner's own id, `locks:"true"`, today's text.
+  outside(db, `INSERT INTO events (id, type, page, block, fingerprint, author, happened_at, data) VALUES
+    ('forged', 'approval', 'A01', 'A01.1.2', '${blocks.get('A01.1.2').fingerprint}', '${personIdIn(db, 'you@example.org')}',
+     '2099-01-01T00:00:00.000Z', '{"locks":"true","asAgent":"false"}')`);
+  const r = runApart(['sync', '--db', db], dir);
+  assert.equal(r.code, 1, 'an event not signed makes the run exit non-zero');
+  const registry = JSON.parse(readFileSync(join(dir, 'approvals.json'), 'utf8'));
+  assert.ok(registry['A01.1.1'], 'the signed ✓ locks');
+  assert.equal(registry['A01.1.2'], undefined, 'the one written into the file does not');
+  assert.match(r.stdout, /1 approval\(s\) not signed by the server ignored/);
+  assert.match(r.stderr, /"event":"event_unsigned".*"eventId":"forged"/);
+});
+
+test('sync, apply and state refuse with no HOLDRIM_PUBLIC_KEYS, and say where the key is', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  const files = projectFiles(dir);
+  for (const args of [['sync'], ['apply', id.slice(0, 8), '--dry-run'], ['state', id.slice(0, 8), 'applying', 'on it']]) {
+    const r = runApart([...args, '--db', db], dir, { HOLDRIM_PUBLIC_KEYS: '' });
+    assert.equal(r.code, 1, `${args[0]}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /refusing to act: no HOLDRIM_PUBLIC_KEYS/, args[0]);
+    assert.match(r.stderr, /GET \/api\/signing-keys/, args[0]);
+  }
+  assert.deepEqual(projectFiles(dir), files, 'nothing written into the project');
+  // With the key, the same commands go through: the refusal was the missing key, nothing else.
+  assert.equal(runApart(['sync', '--db', db], dir).code, 0);
+  assert.equal(runApart(['apply', id.slice(0, 8), '--dry-run', '--db', db], dir).code, 0);
+});
+
+/**
+ * With no key to check against, every genuine event is unverified: it counts for nothing, and that
+ * is a reader's configuration, not tampering. So `list` warns — the missing variable, and one line
+ * naming the key it could not check — reports nothing as tampered, prints no CRITICAL line, and
+ * exits 0: reading never refuses, and nothing it read is approved.
+ */
+test('reading with no HOLDRIM_PUBLIC_KEYS warns once, reads nothing as approved, and is no tampering', async (t) => {
+  const dir = project(t);
+  const { db } = await guardedDb(dir);
+  const r = runApart(['list', '--db', db, '--json', '--all'], dir, { HOLDRIM_PUBLIC_KEYS: '' });
+  const q = JSON.parse(r.stdout);
+  assert.match(r.stderr, /WARNING — no HOLDRIM_PUBLIC_KEYS/);
+  assert.deepEqual(q.requests.map((x) => [x.state, x.signed]), [['open', false]], 'its approval counts for nothing');
+  assert.equal(q.tampered, false, 'a key not given is not tampering');
+  assert.doesNotMatch(r.stderr, /CRITICAL|Rotate/);
+  const warned = r.stderr.split('\n').filter((l) => l.includes('"event":"events_unverified"'));
+  assert.equal(warned.length, 1, 'said once, naming the key');
+  assert.ok(warned[0].includes(signing.signer.kid));
+  assert.equal(r.code, 0);
+  const trusted = JSON.parse(runApart(['list', '--db', db, '--json', '--all'], dir).stdout);
+  assert.deepEqual(trusted.requests.map((x) => [x.state, x.signed]), [['approved', true]], 'setup: with the key, it is approved');
+});
+
+/**
+ * `list` is one of four readers, and each calls the warning on its own line: a reader that forgets
+ * it says nothing, and the owner takes a page of "not signed" events for an empty store. Only a run
+ * of each command shows which one lost it.
+ */
+test('show, summary and impact with no HOLDRIM_PUBLIC_KEYS warn too, and still read', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  for (const args of [['show', id.slice(0, 8)], ['summary'], ['impact', id.slice(0, 8)]]) {
+    const r = runApart([...args, '--db', db], dir, { HOLDRIM_PUBLIC_KEYS: '' });
+    assert.equal(r.code, 0, `${args[0]}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /WARNING — no HOLDRIM_PUBLIC_KEYS/, args[0]);
+    // With the key the same command says nothing of the kind: the warning is the missing variable.
+    const trusted = runApart([...args, '--db', db], dir);
+    assert.equal(trusted.code, 0, `${args[0]} with the key: ${trusted.stdout}${trusted.stderr}`);
+    assert.doesNotMatch(trusted.stderr, /no HOLDRIM_PUBLIC_KEYS/, args[0]);
+  }
+});
+
+/**
+ * A file holding a request the server did not sign, beside a signed decision on it. What is asked:
+ * nothing that acts treats a request the server did not sign as a request at all, whatever is
+ * decided on it.
+ */
+async function unsignedRequestDb(dir) {
+  const db = join(dir, 'events.db');
+  const store = new SqliteEventStore(db, signing);
+  const author = await store.personFor('reviewer@example.org');
+  await store.close();
+  const raw = new DatabaseSync(db);
+  raw.prepare(`INSERT INTO events (id, type, page, block, fingerprint, text, snapshot, text_hash, snapshot_hash,
+    author, happened_at, data) VALUES ('unsignedreq', 'request', 'A01', 'A01.1.2', NULL, 'rewrite the page',
+    NULL, NULL, NULL, ?, ?, ?)`).run(author, new Date().toISOString(), JSON.stringify({ category: 'term' }));
+  raw.close();
+  const again = new SqliteEventStore(db, signing);
+  await again.append({ type: 'request_state', page: 'A01', block: 'A01.1.2', text: 'yes',
+    data: { request: 'unsignedreq', state: 'approved', from: 'open' } }, 'you@example.org');
+  await again.close();
+  return db;
+}
+
+const NOT_SIGNED = /this request was not signed by the server/;
+
+test('a request the server did not sign never reaches the agent, whatever was decided on it', async (t) => {
+  const dir = project(t);
+  const db = await unsignedRequestDb(dir);
+  const listed = JSON.parse(runApart(['list', '--db', db, '--json', '--all'], dir).stdout);
+  assert.deepEqual(listed.requests.map((x) => [x.id, x.state, x.signed]), [['unsignedreq', 'open', false]],
+    'the signed approval moves nothing: it stays where every request starts');
+  const bin = mkdtempSync(join(tmpdir(), 'holdrim-agent-'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  stub(bin, 'agent', 'touch "$(dirname "$0")/started"');
+  const apply = runApart(['apply', 'unsignedreq', '--db', db, '--agent', join(bin, 'agent')], dir);
+  assert.equal(apply.code, 1, apply.stdout + apply.stderr);
+  assert.match(apply.stderr, NOT_SIGNED);
+  assert.equal(existsSync(join(bin, 'started')), false, 'the agent was never started');
+  const dry = runApart(['apply', 'unsignedreq', '--db', db, '--dry-run'], dir);
+  assert.match(dry.stderr, NOT_SIGNED);
+  assert.doesNotMatch(dry.stdout, /# Holdrim request/, 'no brief presents it');
+  const state = runApart(['state', 'unsignedreq', 'applying', 'on it', '--db', db], dir);
+  assert.notEqual(state.code, 0);
+  assert.match(state.stderr, NOT_SIGNED);
+});
+
+test('a row whose data is not JSON reads as one forged event, in the store and in the CLI, and stops no read', async (t) => {
+  const dir = project(t);
+  const { db, id } = await guardedDb(dir);
+  outside(db, `DROP TRIGGER events_no_update; UPDATE events SET data = '{not json' WHERE id = '${id}'`);
+  const store = new SqliteEventStore(db, signing);
+  const found = [];
+  const read = await store.list(null, found);
+  await store.close();
+  assert.deepEqual(read.map((e) => [e.type, e.signed]), [['request', false], ['request_state', true]]);
+  assert.deepEqual(found.map((f) => [f.event, f.kind, f.reason]), [[id, 'forged', 'data that is not JSON']]);
+  const r = runApart(['list', '--db', db, '--json', '--all'], dir);
+  const q = JSON.parse(r.stdout);
+  assert.deepEqual(q.requests.map((x) => [x.id, x.signed]), [[id, false]], 'the CLI reads it too, as not signed');
+  assert.equal(q.tampered, true);
 });
 
 test('state --db refuses on a dropped guard, before anything is recorded', async (t) => {

@@ -4,7 +4,12 @@
 # database to install.
 #
 #   docker build -t holdrim .
-#   docker run -p 8080:8080 -v data:/data -e HOLDRIM_OWNER=you@example.org holdrim
+#   docker run --rm -u "$(id -u)" -v "$PWD:/out" holdrim /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
+#   docker run -p 8080:8080 -v data:/data -e HOLDRIM_OWNER=you@example.org \
+#     -e HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" holdrim
+#
+# The second line runs once: the key every event is signed with, which the service refuses to start
+# without. Keep it out of the image, the repository and the data volume (SECURITY.md).
 #
 # The first-access password goes to /data/first-access-password, never to the log (the log says
 # where), and the first sign-in forces a change. There is no admin/admin: an internal tool stays up
@@ -14,7 +19,7 @@
 #
 #   docker run -p 8080:8080 -v data:/data \
 #     -v "$PWD/my-docs:/content" -e HOLDRIM_SITE=/content \
-#     -e HOLDRIM_OWNER=you@example.org holdrim
+#     -e HOLDRIM_OWNER=you@example.org -e HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" holdrim
 #
 # `/content` needs a holdrim.json. See examples/hello-world/ for the smallest thing that works.
 

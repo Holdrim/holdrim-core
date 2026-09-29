@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { AS_AGENT_FIELD, LOCK_BASELINE_PAGE, earliestLockBaseline, type Event, type EventStore, type NewEvent } from './types.ts';
+import { AS_AGENT_FIELD, authoritative, type Event, type EventStore, type NewEvent } from './types.ts';
 import { normalizeEmail, isEmailAddress, type UserStore } from './users.ts';
 import { recordAuthored } from './people.ts';
 import { NoText } from './texts.ts';
@@ -168,9 +168,6 @@ async function nobodyLeft(events: EventStore, address: string): Promise<RemovalO
  *   Out of the variable and restarted first, then removed;
  * - an address holding an agent token: the token would go on writing, as a new person, the moment
  *   the row was emptied. Revoked first;
- * - the person whose row makes their oldest ✓s locks: the author of the lock baseline, when a ✓ from
- *   before it still names their address (`legacyLock`, types.ts). Such a ✓ is a lock only because
- *   the baseline's author id reads as that address, and forgetting the row would un-lock it;
  * - an address with no account and no row in the people table: nobody to remove. This is also what
  *   a second run answers, since the first emptied both — or, when events from before authors were
  *   ids name it, nothing that can be let go of, and it says so;
@@ -198,6 +195,13 @@ async function nobodyLeft(events: EventStore, address: string): Promise<RemovalO
  * closed that late can be one somebody new opened at the freed address, closed and never emptied;
  * and an address freed that late can be one a third removal, of the person who took it next, has
  * closed and is still running on, left free before that person's row is forgotten.
+ *
+ * The claim is not signed, and needs no signature (#50): it is not an event and grants nothing — it
+ * only makes a second run wait. A claim written into the store directly can make a removal wait, at
+ * most one claim's length (`claimGiven`, types.ts, voids one that ends further off), which anyone
+ * able to write the store could do by far simpler means. What a removal leaves behind that does
+ * count — its `grant_revoked`, `text_removed` and `person_removed` events — is signed like every
+ * event, and a resumed run finishes only from a `person_removed` this server signed.
  */
 export async function removePerson(
   context: RemovalContext, asked: { email: unknown; confirmed: boolean },
@@ -214,17 +218,12 @@ export async function removePerson(
   if (users && (await users.listAgentTokens()).some((t) => t.email === address)) {
     return { status: 409, key: 'api.removal.holdsAgentToken', params: { email: address } };
   }
-  const known = await events.personOf(address);
+  // No ✓ ties a lock to this person's row: a lock is the signed `locks` on the event, whoever its
+  // author's id leads to, so forgetting the row un-locks nothing, and nothing here refuses for it.
+  // `heldBy`, not `personOf`: a row whose seal does not hold is nobody, but it still holds the
+  // address, and forgetting it is what frees the address to be a new, sealed person.
+  const known = await events.heldBy(address);
   const account = users ? await users.find(address) : null;
-  if (known) {
-    const baseline = earliestLockBaseline(await events.listBare(LOCK_BASELINE_PAGE));
-    // Any ✓ naming the address, not only those dated before the baseline: one dated after it is no
-    // lock anyway, and refusing for it costs a removal nothing that the rule does not already cost.
-    if (baseline && (baseline.authorId ?? baseline.author) === known
-      && (await events.list(null)).some((e) => e.type === 'approval' && namesAddress(e, address))) {
-      return { status: 409, key: 'api.removal.holdsOldLocks', params: { email: address } };
-    }
-  }
   if (!known && !account) return nobodyLeft(events, address);
   // An account whose person never acted has no row yet: one is made, to be emptied at once, so the
   // event has an id to name — the id nothing else in the trail names. Before the claim, which is
@@ -259,7 +258,7 @@ async function removeClaimed(
   // A run that finished meanwhile forgot the row, and this one answers as a second run does. Nor is
   // an account whose row this run just made still there, if a removal took it meanwhile: the row
   // names nothing, and is forgotten again rather than removed as a person.
-  if ((await events.personOf(address)) !== person) return nobodyLeft(events, address);
+  if ((await events.heldBy(address)) !== person) return nobodyLeft(events, address);
   if (!hadRow && users && !(await users.find(address))) {
     await events.forget(person);
     return nobodyLeft(events, address);
@@ -271,7 +270,7 @@ async function removeClaimed(
   // otherwise act after it, on an address somebody new may have taken since.
   const stillMine = async () => {
     await claim.keep(true);
-    if ((await events.personOf(address)) !== person) throw new ClaimLost();
+    if ((await events.heldBy(address)) !== person) throw new ClaimLost();
   };
 
   let hadAccount = false;
@@ -311,8 +310,10 @@ async function removeClaimed(
 
   const removal: Removal = { person, texts, textsTampered, textsInline, legacyEvents, grants: mine.length, account: hadAccount };
   // Once per person: a run that a failure stopped after the event was written finishes without a
-  // second one, and answers with the first.
-  const earlier = (await events.list(PEOPLE_PAGE)).find((e) => e.type === PERSON_REMOVED && e.data?.person === person);
+  // second one, and answers with the first. Only one this server signed: a `person_removed` inserted
+  // by a direct writer would otherwise stop every later removal of that person from being recorded.
+  const earlier = authoritative(await events.list(PEOPLE_PAGE))
+    .find((e) => e.type === PERSON_REMOVED && e.data?.person === person);
   let event = earlier;
   if (!event) {
     // Renewed now, whenever it last was: the write is what a run that took the claim over meanwhile

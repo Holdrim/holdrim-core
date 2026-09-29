@@ -89,9 +89,22 @@ Each has a test. If you change the code around one, run the contract test and re
 - **Exactly one owner**, and it comes from `HOLDRIM_OWNER`, never from a database column and never
   from `holdrim.json`: the admins likewise, from `HOLDRIM_ADMINS`. Zero or two owners and the service
   refuses to start; a `holdrim.json` naming any key in `AUTHORITY_KEYS` (`owner`, `admins`, `locks`,
-  `agents`, `roles`, `grants`) refuses too, on the server and in the CLI, because whoever commits to
-  the file is not whoever deploys.
+  `agents`, `roles`, `grants`, `signing`, `signingKey`, `publicKeys`) refuses too, on the server and
+  in the CLI, because whoever commits to the file is not whoever deploys.
   (`engine/core/roles.js`, `engine/core/config.js`)
+- **Every event is signed by the server, with a key that comes from the deployment alone.** The key
+  is `HOLDRIM_SIGNING_KEY` or `HOLDRIM_SIGNING_KEY_FILE`, never both; it is never written to the
+  store, the log or the repository, and a store that keeps what it writes refuses to start without
+  it (only an events store in memory gets a throwaway key). The keys a reader trusts are its own and
+  those `HOLDRIM_PUBLIC_KEYS` names where it runs — never the store, never `holdrim.json`, never a
+  key fetched from a server. Each store seals every event it writes and verifies every event it
+  reads, against the envelope as stored; a column that disagrees with it reads as forged. An event
+  not signed — no seal, a seal that does not verify, a key not trusted — is shown, marked, raised as
+  CRITICAL, and **counts for nothing**: no lock, no triage decision, no request state, no text
+  removal, no acknowledgement, no role, grant or revocation, no finished removal of a person.
+  `holdrim sync`, `apply` and `state` reading the store directly refuse to act without
+  `HOLDRIM_PUBLIC_KEYS`. (`engine/api/signing.ts`, `engine/api/types.ts` `authoritative`,
+  `isLocked`, `authorCouldTriage`; `SECURITY.md`, "The signing key")
 - **Nobody but the owner resets or creates the owner's account.** Both routes are guarded, because
   guarding only one leaves the other open — an admin could create the owner's account during a
   handover and read the generated password out of the response.
@@ -101,22 +114,29 @@ Each has a test. If you change the code around one, run the contract test and re
   together with a `text_removed` event recording who and when (`texts_no_update`, `texts_no_replace`,
   `texts_no_delete`, `engine/api/store-sqlite.ts`). Only the owner's removal of a person writes a
   `text_removed` event, through `removeText` itself — `POST /events` refuses the type. A hash with
-  no row that matches it, and no valid removal (later than its target) naming it, or with two
-  removals, reads as tampered, not as erased. A person's row in
+  no row that matches it, and no valid removal (signed by the server, and later than its target)
+  naming it, or with two removals, reads as tampered, not as erased. A person's row in
   the people table takes the same shape: `people_only_lose_email`, `people_no_delete` and
   `people_no_replace` (`engine/api/store-sqlite.ts`) let `EventStore.forget` empty its e-mail and
   never its id or the row itself, so a forgotten person's id still names every event and lock they
-  ever gave. Both are reached together, by the owner alone, from the settings screen: removing a
+  ever gave. Each row's binding of id to address is sealed with the signing key when the row is made
+  (`sealPerson`, `engine/api/signing.ts`), `people_seal_only_goes` refuses writing a seal onto a row
+  afterwards, and forgetting empties the seal with the address. A row whose seal does not hold, or
+  that has none — every row from before seals included — is nobody to every reader (`trustedEmail`,
+  `engine/api/people.ts`): no grant, no own request, and its events read as the id. Both are reached together, by the owner alone, from the settings screen: removing a
   person (`docs/PRIVACY.md`, section 5, `engine/api/person-removal.ts`) empties their account and
   their row, removes their texts and revokes their grants, and leaves every event, snapshot and lock
-  as it was — which is why it refuses the person whose row is what makes their oldest ✓s locks
-  (`legacyLock`, `engine/api/types.ts`): forgetting that row would un-lock them.
+  as it was: a lock is the signed `locks` on its event, so no row makes a ✓ a lock and forgetting one
+  un-locks nothing.
 - **A ✓ is a lock only when its author held `lock` at the moment they gave it, and it stays one.**
   Who holds `lock` is set by the deployment alone — never by the repository, the store or a screen.
   Today that is the owner only (`docs/ROLES.md` §3 names who else will, once `LOCKS` exists — not
   built yet); whoever holds it, the server writes the decision onto the event when the ✓ is given
   and every reader uses what was written, never a recomputation from who holds `lock` now — an owner
-  who hands over must not silently un-lock every ✓ they gave before. An agent may *close* an impact
+  who hands over must not silently un-lock every ✓ they gave before — and only on an event the
+  server signed: every reader, `holdrim sync` included, trusts `data.locks` only where the signature
+  verifies against a key the deployment names. There is no date before which an unsigned ✓ counts,
+  and a request the server did not sign is never triaged, added to or applied. An agent may *close* an impact
   — "this change did not reach here" — and never *approve* — "this text is correct", and never gives
   a ✓ at all. An address in `HOLDRIM_AGENTS`, and anyone who comes in with an agent token the owner
   issued, is refused `triage`, `approve`, `lock` and `people` by `can` before any grant is read.
@@ -141,7 +161,10 @@ Each has a test. If you change the code around one, run the contract test and re
 
 ```bash
 bash engine/run-local.sh                              # straight in, no login, events in memory
-HOLDRIM_OWNER=you@example.org docker compose up       # the real sign-in screen, data in a volume
+export HOLDRIM_OWNER=you@example.org                  # then, once, the key events are signed with:
+docker compose run --rm --no-deps -u "$(id -u)" -v "$PWD:/out" holdrim \
+  /usr/local/bin/node engine/cli/holdrim.ts key new /out/holdrim-signing.key
+HOLDRIM_SIGNING_KEY="$(cat holdrim-signing.key)" docker compose up   # the real sign-in screen, data in a volume
 ```
 Working on the engine cannot touch anybody's real approvals: the local runner keeps events in
 memory. The first-access password is written to a file beside the store, never to the log; the log
@@ -164,7 +187,9 @@ their machine — Claude Code, Codex, Gemini — running with their own account.
 is the queue as data, `holdrim apply <id>` writes the brief and hands it to that CLI
 (`engine/cli/agent.ts`), and `holdrim state <id> applied --commit` closes the loop — through the
 server's API, with the token the owner issued the agent on the people screen
-(`HOLDRIM_AGENT_TOKEN`); the CLI never writes to a store directly. The plugin in
+(`HOLDRIM_AGENT_TOKEN`); the CLI never writes to a store directly. Reading the store directly, it
+trusts only what the server signed, against the public key in `HOLDRIM_PUBLIC_KEYS`, and `apply`,
+`state` and `sync` refuse without one. The plugin in
 `plugins/holdrim/` teaches Claude Code the method; `examples/hello-world/AGENTS.md` teaches any other
 agent. Nothing here runs unattended on somebody's subscription: it is always a person, at their own
 computer, starting their own tool.

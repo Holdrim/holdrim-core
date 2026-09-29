@@ -8,6 +8,9 @@ data
 *.db-shm
 .env
 .env.*
+# The signing key: it goes to the service in the environment, never into the build context.
+holdrim-signing.key
+*.key
 *.md
 # Test-only code. `Dockerfile`'s `COPY engine ./engine` ships everything under `engine/` unless a
 # line here excludes it, and `engine/`'s root holds three things nothing in a running container
