@@ -7,8 +7,8 @@
 # answer after checking it against the orchestrator's rules. The model runs as a user of its own,
 # `model`, which the operating system keeps out of `crew`'s home, where both tokens are stored, and
 # out of `crew`'s processes, whose environment holds the GitHub token. The flags it starts with
-# (file tools only, confined to /work, no MCP server) are a second wall, not the only one. This
-# script starts as root only to hand each step to its user.
+# (file tools only, no MCP server; reads outside /work refused, as print mode approves none) are a
+# second wall, not the only one. This script starts as root only to hand each step to its user.
 set -euo pipefail
 
 REPO=Holdrim/holdrim-core

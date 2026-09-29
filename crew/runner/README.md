@@ -13,8 +13,10 @@ credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this fo
 3. The model reads those files and the crew rules and answers in JSON. It runs as its own user,
    `model`, which the operating system keeps out of `crew`'s home, where both tokens are stored,
    and out of `crew`'s processes. Its environment carries only the Claude token it needs, and it
-   runs with `Read`, `Grep` and `Glob` only, confined to `/work` by `--restricted`, with no MCP
-   server: it cannot run a command, reach the network, or read the GitHub token.
+   runs with `Read`, `Grep` and `Glob` only and no MCP server: `--restricted` takes away every
+   tool that runs a command, and in print mode Claude Code refuses a read outside the directory it
+   starts in, `/work`, since nobody is there to approve one. It cannot run a command, reach the
+   network, read the GitHub token, or read its own environment in `/proc`.
 4. `board.js publish` applies the answer, and only the part the orchestrator may do: comments and
    existing `needs:`/`working:` labels on items already open, one comment per item (bar the note of
    what it refused), never twice
