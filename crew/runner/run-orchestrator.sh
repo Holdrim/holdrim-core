@@ -75,8 +75,10 @@ setpriv --reuid=model --regid=model --init-groups --no-new-privs env -i HOME=/ho
   -p "You play the orchestrator role in the Holdrim crew, as one unattended pass.
 Read holdrim-core/crew/README.md, holdrim-core/crew/orchestrator.md, holdrim-core/crew/autonomy.md
 and holdrim-core/crew/accounts.md, then the board in board/board.json: every open issue and pull
-request with its labels, comments, label timeline, head commit and its date, checks and reviews,
-plus the board's digest and the claims older than the stall limit (stale_claims).
+request with its labels, comments, label timeline, head commit and its date, draft state, checks,
+reviews and the inline review comments left on its lines (review_comments), plus the board's
+digest and the claims older than the stall limit (stale_claims). A review whose summary is empty
+is not a clean review while it has inline comments.
 You have no shell, no network and no GitHub access: you read files and answer. An assignment is
 the Assigned: comment line crew/autonomy.md describes, and you write it as your comment; GitHub's
 own assignees cannot be set. Opening or closing an issue is not something this pass can do: ask for
@@ -94,10 +96,14 @@ answer {\"actions\": []}." \
   --tools "Read,Grep,Glob" --restricted --strict-mcp-config --output-format json --max-turns 40 \
   <<< "$CLAUDE_CODE_OAUTH_TOKEN" > "$WORK/result.json"
 
-applied=$(as_crew node "$HERE/board.js" publish "$WORK/result.json" "$WORK/board")
+# Exit 3 is the owner's pause, read again before every write: nothing more was published, and the
+# digest is not recorded, so the pass after the resume asks the model again.
+code=0; applied=$(as_crew node "$HERE/board.js" publish "$WORK/result.json" "$WORK/board") || code=$?
+if [ "$code" = 3 ]; then echo "paused while the model ran, or the pause could not be read: nothing more published"; exit 0; fi
+[ "$code" = 0 ] || exit "$code"
 echo "$applied"
 # publish has just rewritten board/digest from the board as this pass left it, and the digest
 # leaves out the orchestrator's own writes, so the next pass skips the model unless someone else
-# moved. A pass whose answer was missing or unreadable stops at the line above (set -e) and never
+# moved. A pass whose answer was missing or unreadable stops at the exit above and never
 # records it, so the next pass asks again.
 cp "$WORK/board/digest" "$STATE/board-digest"

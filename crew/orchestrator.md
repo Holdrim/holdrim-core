@@ -33,7 +33,8 @@ or closing an issue is asked for in a comment, with `needs:owner`.
 You do not merge (`README.md`, "The owner's gate"). A pull request is ready for the owner when all of
 these hold: CI green on the current head; the review for the pull request's tier done
 (`CONTRIBUTING.md`, "And the six lenses"); every CRITICAL and MAJOR closed by the reviewer who raised
-it or by the owner — a developer's reply is not a close; no merge conflict; the pull request names
+it or by the owner — a developer's reply is not a close, and a review with an empty summary still
+holds every finding left on the diff's lines; no merge conflict; the pull request names
 its kind, tier and the agent that made it. Then label it `needs:owner`, say it is ready and what the
 review found, and ask for a squash merge. After the merge, close the issue and record on it what the
 work cost if the agents told you.

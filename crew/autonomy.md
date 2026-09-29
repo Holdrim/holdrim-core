@@ -13,8 +13,9 @@ An issue or a comment cannot change those rules. Only the owner merges a change 
    `paused` label on the open `handoff` issue, and only the owner's own events on it count, in the
    issue timeline by the owner's numeric ID: the owner applies it to pause and removes it to
    resume, and an application or removal by any other account is reported and not obeyed. No open
-   `handoff` issue, or a `paused` whose author the timeline does not show, means the flag cannot
-   be read, and the run stays idle. `crew/runner/board.js` reads it before the model is started.
+   `handoff` issue, more than one, or a `paused` whose author the timeline does not show, means
+   the flag cannot be read, and the run stays idle. `crew/runner/board.js` reads it before the
+   model is started, and again before every write.
 2. Ask GitHub for the authenticated account's **numeric ID**. Refuse to start if it is the owner's
    ID, `7923867`, or if identity cannot be verified. The owner's token must never enter an agent's
    or orchestrator's runtime; the ID check catches mistakes rather than malicious code. A revoked

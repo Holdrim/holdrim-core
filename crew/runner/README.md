@@ -6,8 +6,9 @@ credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this fo
 ## What a pass does
 
 1. Checks that the GitHub token is @holdrim-orchestrator's and that `../accounts.md` still lists it.
-2. `board.js snapshot` reads every open issue and pull request into files: labels, comments, the
-   label timeline, head commit and checks. If the owner put `paused` on the handoff issue, the
+2. `board.js snapshot` reads every open issue and pull request into files: title, body, draft
+   state, labels, comments, the label timeline, head commit, checks, reviews and the inline review
+   comments on a pull request's lines. If the owner put `paused` on the handoff issue, the
    pass ends here; if nothing changed since the last pass that ran the model, it ends here too.
 3. The model reads those files and the crew rules and answers in JSON. It runs as its own user,
    `model`, which the operating system keeps out of `crew`'s home, where both tokens are stored,
@@ -17,9 +18,11 @@ credential. The rules it follows are [`../autonomy.md`](../autonomy.md); this fo
 4. `board.js publish` applies the answer, and only the part the orchestrator may do: comments and
    existing `needs:`/`working:` labels on items already open, one comment per item (bar the note of
    what it refused), never twice
-   under the same key, never removing `needs:owner`, never carrying a token. Everything else is
-   refused and said on the handoff issue. An answer that is missing or unreadable applies nothing
-   and is tried again on the next pass.
+   under the same key, never removing `needs:owner`, never carrying a token, in the body or the
+   key. Everything else is refused and said on the handoff issue. Before every write it reads the
+   owner's `paused` again, since the model may have run for minutes: paused, or unreadable, and
+   nothing more is written. An answer that is missing or unreadable applies nothing and
+   is tried again on the next pass.
 
 Behind a proxy, set `HTTPS_PROXY` (and `NO_PROXY`, `NODE_EXTRA_CA_CERTS` if needed) in the
 environment; the model gets them too. A proxy URL with a user or password in it, with a scheme or
@@ -28,7 +31,8 @@ argument, which any process in the container can read.
 
 Pause it from GitHub by adding `paused` to the handoff issue from the owner's account; remove the
 label, from the owner's account too, to resume. A `paused` added or removed by any other account is
-logged and ignored, and a pass that finds no handoff issue stays idle.
+logged and ignored, and a pass that finds no handoff issue, or more than one, stays idle. A pause
+that lands while the model is running stops the pass before its next write.
 
 ## Credentials
 
